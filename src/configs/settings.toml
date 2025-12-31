@@ -1,0 +1,109 @@
+[default]
+[default.data_source_url]
+# data
+realtime_data="http://{host}:{port}/algorithm/integration/realtime" # 实时数据接口
+history_data="http://{host}:{port}/algorithm/integration/history" #历史数据接口
+history_data1 = "http://{host}/service/monitor/device/insight/history/monitor"#历史数据查询——苏浩浩提供接口
+history_cal_bak="http://{host}:9277/calculate/history/query/sensitive"#基于tdengine封装的历史数据查询接口
+history_cal="http://{host}/scada-service/calculate/history/query/sensitive"#基于tdengine封装的历史数据查询接口
+real_time_batch="http://{host}:9277/edge/real/query/batch"
+write_cmd="http://{}:9277/edge/device/point/cmd/private" # 发送指令
+llama_completions="http://{host}:{port}/chat/completions"
+
+[development]
+[development.host]
+host="10.77.77.39"
+port=7063
+[development.pgsql]
+database_type = "postgresql"
+driver = "psycopg2"
+host = "10.77.77.39"
+port = 5432
+database_name = "mushroom_algorithm"
+
+[development.mysql]
+database_type = "mysql"
+driver = "pymysql"
+host = "10.77.77.39"
+port = 3306
+database_name = "lenovo_algorithm_db"
+[development.redis]
+host="10.66.66.33"
+port=6379
+
+[development.minio]
+endpoint = "10.77.77.39:9000"
+bucket = "mogu"
+region = "us-east-1"
+mlflow_s3_endpoint_url = "10.77.77.39:9000"
+mlflow_default_artifact_root = "s3://mogu"
+minio_bucket_name = "mogu"
+
+
+[development.llama]
+llama_host = "10.66.66.33"
+llama_port = "7002"
+model = "llama-4bvl-Q4KM-instruct.service"
+api_key = "your-api-key-here"
+llama_completions = "http://{0}:{1}/chat/completions"
+enabled = true  # 是否启用LLaMA描述生成
+timeout = 600   # API调用超时时间（秒）
+mushroom_descripe_prompt = """Analyze this mushroom farming image. Focus strictly on objective visual features. Do not include subjective evaluations like 'good', 'bad', 'healthy', or 'diseased'.
+
+Describe the following details in English:
+1. Growth Stage: Identify the specific phase (e.g., Spawn running, Pinning, Button stage, Veil opening, Maturation).
+2. Cap Morphology: Describe the color (e.g., milky white, light brown, yellowing), texture (smooth, scaly, wrinkled), and size (small, medium, large).
+3. Stipe (Stem) Condition: Describe thickness, curvature, and any color changes.
+4. Mycelium: Coverage density and color (e.g., dense white mycelium, brown spots).
+5. Physical Status: Look for specific physical signs (e.g., glistening condensation on surface, wilting, shriveling, dried edges, physical damage).
+
+Output format: A concise paragraph. Use specific adjectives."""
+
+
+[production]
+[production.host]
+host="172.17.0.1"
+port=7063
+[production.pgsql]
+database_type = "postgresql"
+driver = "psycopg2"
+host = "postgres_db"
+port = 5432
+database_name = "mushroom_algorithm"
+
+[production.mysql]
+database_type = "mysql"
+driver = "pymysql"
+host = "mysql_db"
+port = 3306
+database_name = "lenovo_algorithm_db"
+[production.redis]
+host="172.17.0.1"
+port = 26379
+
+[production.minio]
+endpoint = "172.17.0.1:9000"
+bucket = "mogu"
+region = "us-east-1"
+mlflow_s3_endpoint_url = "172.17.0.1:9000"
+mlflow_default_artifact_root = "s3://mogu"
+minio_bucket_name = "mogu"
+[production.llama]
+llama_host = "172.17.0.1"
+llama_port = "7001"
+model = "llam-mushroom-q4km-vl.service"
+api_key = "your-api-key-here"
+llama_completions = "http://{0}:{1}/chat/completions"
+enabled = true  # 是否启用LLaMA描述生成
+timeout = 600   # API调用超时时间（秒）
+mushroom_descripe_prompt = """Analyze this mushroom farming image. Focus strictly on objective visual features. Do not include subjective evaluations like 'good', 'bad', 'healthy', or 'diseased'.
+
+Describe the following details in English:
+1. Growth Stage: Identify the specific phase (e.g., Spawn running, Pinning, Button stage, Veil opening, Maturation).
+2. Cap Morphology: Describe the color (e.g., milky white, light brown, yellowing), texture (smooth, scaly, wrinkled), and size (small, medium, large).
+3. Stipe (Stem) Condition: Describe thickness, curvature, and any color changes.
+4. Mycelium: Coverage density and color (e.g., dense white mycelium, brown spots).
+5. Physical Status: Look for specific physical signs (e.g., glistening condensation on surface, wilting, shriveling, dried edges, physical damage).
+
+Output format: A concise paragraph. Use specific adjectives."""
+

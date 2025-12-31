@@ -1,0 +1,470 @@
+{
+  "mushroom": {
+    "rooms": {
+      "607": {
+        "devices": [
+          "air_cooler_607",
+          "fresh_air_fan_607",
+          "left_humidifier_607",
+          "right_humidifier_612",
+          "grow_light_607",
+          "mushroom_info_607",
+          "env_status_607"
+        ]
+      },
+      "608": {
+        "devices": [
+          "air_cooler_608",
+          "fresh_air_fan_608",
+          "left_humidifier_608",
+          "right_humidifier_608",
+          "grow_light_608",
+          "mushroom_info_608",
+          "env_status_608"
+        ]
+      },
+      "611": {
+        "devices": [
+          "air_cooler_611",
+          "fresh_air_fan_611",
+          "left_humidifier_611",
+          "right_humidifier_611",
+          "grow_light_611",
+          "mushroom_info_611",
+          "env_status_611"
+        ]
+      },
+      "612": {
+        "devices": [
+          "air_cooler_612",
+          "fresh_air_fan_612",
+          "left_humidifier_612",
+          "right_humidifier_612",
+          "grow_light_612",
+          "mushroom_info_612",
+          "env_status_612"
+        ]
+      }
+    },
+    "datapoint": {
+      "remark": "蘑菇房静态配置",
+      "air_cooler": {
+        "remark": "冷风机",
+        "device_list": [
+          {
+            "remark": "611库-冷风机",
+            "device_name": "TD1_Q1MDCH01",
+            "device_alias": "air_cooler_611"
+          },
+          {
+            "remark": "612库-冷风机",
+            "device_name": "TD1_Q2MDCH01",
+            "device_alias": "air_cooler_612"
+          },
+          {
+            "remark": "607库-冷风机",
+            "device_name": "TD1_Q3MDCH01",
+            "device_alias": "air_cooler_607"
+          },
+          {
+            "remark": "608库-冷风机",
+            "device_name": "TD1_Q4MDCH01",
+            "device_alias": "air_cooler_608"
+          }
+        ],
+        "device_type": "air_cooler",
+        "point_list": [
+          {
+            "remark": "冷风机开关",
+            "point_name": "OnOff",
+            "point_alias": "on_off",
+            "enum": {
+              "0": "关闭",
+              "1": "开启"
+            }
+          },
+          {
+            "remark": "0=风机制冷运行 1=风机制热运行 2=风机正常运行 3=风机停止 4=风机关闭",
+            "point_name": "Running",
+            "point_alias": "status",
+            "enum": {
+              "0": "制冷运行",
+              "1": "制热运行",
+              "2": "正常运行",
+              "3": "停止",
+              "4": "关闭"
+            }
+          },
+          {
+            "remark": "温度设定(分辨率0.1)",
+            "point_name": "TemSet",
+            "point_alias": "temp_set"
+          },
+          {
+            "remark": "库内温度(分辨率0.1)",
+            "point_name": "Tem",
+            "point_alias": "temp"
+          },
+          {
+            "remark": "温差设定(分辨率0.1)",
+            "point_name": "TemDiffSet",
+            "point_alias": "temp_diffset"
+          }
+        ]
+      },
+      "fresh_air_fan": {
+        "remark": "新风机",
+        "device_list": [
+          {
+            "remark": "607库-新风机",
+            "device_name": "TD1_Q3MDAR01",
+            "device_alias": "fresh_air_fan_607"
+          },
+          {
+            "remark": "608库-新风机",
+            "device_name": "TD1_Q4MDAR01",
+            "device_alias": "fresh_air_fan_608"
+          },
+          {
+            "remark": "611库-新风机",
+            "device_name": "TD1_Q1MDAR01",
+            "device_alias": "fresh_air_fan_611"
+          },
+          {
+            "remark": "612库-新风机",
+            "device_name": "TD1_Q2MDAR01",
+            "device_alias": "fresh_air_fan_612"
+          }
+        ],
+        "device_type": "fresh_air_fan",
+        "point_list": [
+          {
+            "remark": "新风模式 0=关闭模式\n1=自动模式\n2=手动模式",
+            "point_name": "Model",
+            "point_alias": "mode",
+            "enum": {
+              "0": "关闭模式",
+              "1": "自动模式",
+              "2": "手动模式"
+            }
+          },
+          {
+            "remark": "新风控制方式 \n0=时控\n1=CO2控制",
+            "point_name": "Control",
+            "point_alias": "control",
+            "enum": {
+              "0": "时控",
+              "1": "CO2控制"
+            }
+          },
+          {
+            "remark": "CO2启动新风",
+            "point_name": "Co2On",
+            "point_alias": "co2_on"
+          },
+          {
+            "remark": "CO2停止新风",
+            "point_name": "Co2Off",
+            "point_alias": "co2_off"
+          },
+          {
+            "remark": "新风开启设定",
+            "point_name": "On",
+            "point_alias": "on"
+          },
+          {
+            "remark": "新风停止设定",
+            "point_name": "Off",
+            "point_alias": "off"
+          },
+          {
+            "remark": "新风状态",
+            "point_name": "Running",
+            "point_alias": "status",
+            "enum": {
+              "0": "自动",
+              "1": "手动",
+              "2": "停止",
+              "3": "关闭"
+            }
+          }
+        ]
+      },
+      "humidifier": {
+        "remark": "蘑菇加湿器",
+        "device_list": [
+          {
+            "remark": "611库-左加湿器",
+            "device_name": "TD1_Q1MDHUM01",
+            "device_alias": "left_humidifier_611"
+          },
+          {
+            "remark": "611库-右加湿器",
+            "device_name": "TD1_Q1MDHUM02",
+            "device_alias": "right_humidifier_611"
+          },
+          {
+            "remark": "612库-左加湿器",
+            "device_name": "TD1_Q2MDHUM01",
+            "device_alias": "left_humidifier_612"
+          },
+          {
+            "remark": "612库-右加湿器",
+            "device_name": "TD1_Q2MDHUM02",
+            "device_alias": "right_humidifier_612"
+          },
+          {
+            "remark": "607库-左加湿器",
+            "device_name": "TD1_Q3MDHUM01",
+            "device_alias": "left_humidifier_607"
+          },
+          {
+            "remark": "607库-右加湿器器",
+            "device_name": "TD1_Q3MDHUM02",
+            "device_alias": "right_humidifier_607"
+          },
+          {
+            "remark": "608库-左加湿器",
+            "device_name": "TD1_Q4MDHUM01",
+            "device_alias": "left_humidifier_608"
+          },
+          {
+            "remark": "608库-右加湿器",
+            "device_name": "TD1_Q4MDHUM02",
+            "device_alias": "right_humidifier_608"
+          }
+        ],
+        "device_type": "humidifier",
+        "point_list": [
+          {
+            "remark": "加湿状态,0=左加湿自动运行\n1=左加湿手动运行\n2=左加湿停止\n3=左加湿关闭",
+            "point_name": "Running",
+            "point_alias": "status",
+            "enum": {
+              "0": "加湿自动运行",
+              "1": "加湿手动运行",
+              "2": "加湿停止",
+              "3": "加湿关闭"
+            }
+          },
+          {
+            "remark": "加湿停止设定",
+            "point_name": "Off",
+            "point_alias": "off"
+          },
+          {
+            "remark": "加湿模式,0=关闭模式\n1=自动模式\n2=手动模式",
+            "point_name": "Model",
+            "point_alias": "mode",
+            "enum": {
+              "0": "关闭",
+              "1": "自动",
+              "2": "手动"
+            }
+          },
+          {
+            "remark": "加湿开启设定",
+            "point_name": "On",
+            "point_alias": "on"
+          }
+        ]
+      },
+      "grow_light": {
+        "remark": "补光灯",
+        "device_list": [
+          {
+            "remark": "611库-补光器",
+            "device_name": "TD1_Q1MDLIGHT01",
+            "device_alias": "grow_light_611"
+          },
+          {
+            "remark": "612库-补光器",
+            "device_name": "TD1_Q2MDLIGHT01",
+            "device_alias": "grow_light_612"
+          },
+          {
+            "remark": "607库-补光器",
+            "device_name": "TD1_Q3MDLIGHT01",
+            "device_alias": "grow_light_607"
+          },
+          {
+            "remark": "608库-补光器",
+            "device_name": "TD1_Q4MDLIGHT01",
+            "device_alias": "grow_light_608"
+          }
+        ],
+        "device_type": "grow_light",
+        "point_list": [
+          {
+            "remark": "补光模式 0=关闭模式\n1=自动模式\n2=手动模式",
+            "point_name": "Model",
+            "point_alias": "model",
+            "enum": {
+              "0": "关闭",
+              "1": "自动",
+              "2": "手动"
+            }
+          },
+          {
+            "remark": "补光状态",
+            "point_name": "Running",
+            "point_alias": "mode",
+            "enmum": {
+              "0": "自动",
+              "1": "手动",
+              "2": "停止",
+              "3": "关闭"
+            }
+          },
+          {
+            "remark": "补光停止分钟设定",
+            "point_name": "OffMSet",
+            "point_alias": "off_mset"
+          },
+          {
+            "remark": "补光开启分钟设定",
+            "point_name": "OnMSet",
+            "point_alias": "on_mset"
+          },
+          {
+            "remark": "1#补光开关",
+            "point_name": "OnOff1",
+            "point_alias": "on_off1",
+            "enum": {
+              "0": "关闭",
+              "1": "自动"
+            }
+          },
+          {
+            "remark": "2#补光开关",
+            "point_name": "OnOff2",
+            "point_alias": "on_off2",
+            "enum": {
+              "0": "关闭",
+              "1": "自动"
+            }
+          },
+          {
+            "remark": "3#补光开关",
+            "point_name": "OnOff3",
+            "point_alias": "on_off3",
+            "enum": {
+              "0": "关闭",
+              "1": "自动"
+            }
+          },
+          {
+            "remark": "4#补光开关",
+            "point_name": "OnOff4",
+            "point_alias": "on_off4",
+            "enum": {
+              "0": "关闭",
+              "1": "自动"
+            }
+          }
+        ]
+      },
+      "mushroom_info": {
+        "remark": "育菇房信息",
+        "device_list": [
+          {
+            "remark": " 611库-育菇房信息",
+            "device_name": "TD1_Q1MDINFO01",
+            "device_alias": "mushroom_info_611"
+          },
+          {
+            "remark": " 612库-育菇房信息",
+            "device_name": "TD1_Q2MDINFO01",
+            "device_alias": "mushroom_info_612"
+          },
+          {
+            "remark": " 607库-育菇房信息",
+            "device_name": "TD1_Q3MDINFO01",
+            "device_alias": "mushroom_info_607"
+          },
+          {
+            "remark": " 608库-育菇房信息",
+            "device_name": "TD1_Q4MDINFO01",
+            "device_alias": "mushroom_info_608"
+          }
+        ],
+        "device_type": "mushroom_info",
+        "point_list": [
+          {
+            "remark": "进库月",
+            "point_name": "InMonth",
+            "point_alias": "in_month"
+          },
+          {
+            "remark": "进库日",
+            "point_name": "InDay",
+            "point_alias": "in_day"
+          },
+          {
+            "remark": "进库年",
+            "point_name": "InYear",
+            "point_alias": "in_year"
+          },
+          {
+            "remark": "育菇房（库号）",
+            "point_name": "Number",
+            "point_alias": "in_time"
+          },
+          {
+            "remark": "进库包数",
+            "point_name": "InNum",
+            "point_alias": "in_num"
+          },
+          {
+            "remark": "进库天数",
+            "point_name": "InDayNum",
+            "point_alias": "in_day_num"
+          }
+        ]
+      },
+      "mushroom_env_status": {
+        "remark": "育菇房环境状态",
+        "device_list": [
+          {
+            "remark": "611库-温湿度传感器",
+            "device_name": "TD1_Q1MDTM01",
+            "device_alias": "env_status_611"
+          },
+          {
+            "remark": "612库-温湿度传感器",
+            "device_name": "TD1_Q2MDTM01",
+            "device_alias": "env_status_612"
+          },
+          {
+            "remark": "607库-温湿度传感器",
+            "device_name": "TD1_Q3MDTM01",
+            "device_alias": "env_status_607"
+          },
+          {
+            "remark": "608库-温湿度传感器",
+            "device_name": "TD1_Q4MDTM01",
+            "device_alias": "env_status_608"
+          }
+        ],
+        "device_type": "mushroom_env_status",
+        "point_list": [
+          {
+            "remark": "库内温度/分辨率0.1",
+            "point_name": "Tatmosp",
+            "point_alias": "temperature"
+          },
+          {
+            "remark": "库内湿度",
+            "point_name": "Hatmosp",
+            "point_alias": "humidity"
+          },
+          {
+            "remark": "库内CO2",
+            "point_name": "Co2",
+            "point_alias": "co2"
+          }
+        ]
+      }
+    }
+  }
+}

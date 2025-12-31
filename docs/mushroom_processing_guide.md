@@ -1,0 +1,495 @@
+# 蘑菇图像处理系统使用指南
+
+本文档详细介绍蘑菇图像处理系统的使用方法，包括数据结构、处理流程和API接口。
+
+## 数据结构规范
+
+### 文件路径格式
+```
+mogu/{蘑菇库号}/{日期}/{蘑菇库号}_{采集IP}_{采集日期}_{详细时间}.jpg
+```
+
+### 示例路径
+```
+mogu/612/20251224/612_1921681235_20251218_20251224160000.jpg
+```
+
+### 字段说明
+- **蘑菇库号**: 612（标识不同的蘑菇库）
+- **采集IP**: 1921681235（采集设备的IP地址，格式化后的数字）
+- **采集日期**: 20251218（图像采集的日期，格式：YYYYMMDD）
+- **详细时间**: 20251224160000（具体采集时间，格式：YYYYMMDDHHMMSS）
+- **日期文件夹**: 20251224（用于组织文件的日期文件夹）
+
+## 系统架构
+
+### 核心组件
+
+1. **MushroomImagePathParser**: 路径解析器
+   - 解析文件路径和文件名
+   - 提取蘑菇库号、时间等信息
+   - 验证路径格式
+
+2. **MushroomImageProcessor**: 图像处理器
+   - 图像发现和过滤
+   - 向量化处理
+   - 数据库存储
+   - 相似度搜索
+
+3. **MinIOService**: 存储服务
+   - 图像文件管理
+   - 批量操作
+   - 统计分析
+
+4. **CLIP向量化**: 图像向量化
+   - 使用CLIP模型进行图像向量化
+   - 512维向量表示
+   - 支持相似度搜索
+
+## 快速开始
+
+### 1. 环境准备
+
+```bash
+# 安装依赖
+uv sync
+
+# 设置环境变量
+export prod=false  # 开发环境
+# export prod=true  # 生产环境
+```
+
+### 2. 系统测试
+
+```bash
+# 运行系统测试
+python test_mushroom_system.py
+```
+
+### 3. 基础使用
+
+```python
+from src.utils.mushroom_image_processor import create_mushroom_processor
+
+# 创建处理器
+processor = create_mushroom_processor()
+
+# 获取所有蘑菇图像
+images = processor.get_mushroom_images()
+print(f"发现 {len(images)} 个图像文件")
+
+# 处理图像
+for image_info in images[:5]:  # 处理前5个
+    success = processor.process_single_image(image_info)
+    if success:
+        print(f"✅ 处理成功: {image_info.file_name}")
+```
+
+## 详细使用方法
+
+### 路径解析
+
+```python
+from src.utils.mushroom_image_processor import MushroomImagePathParser
+
+parser = MushroomImagePathParser()
+
+# 解析完整路径
+path = "mogu/612/20251224/612_1921681235_20251218_20251224160000.jpg"
+image_info = parser.parse_path(path)
+
+if image_info:
+    print(f"蘑菇库号: {image_info.mushroom_id}")
+    print(f"采集时间: {image_info.collection_datetime}")
+    print(f"采集IP: {image_info.collection_ip}")
+
+# 解析文件名
+filename = "612_1921681235_20251218_20251224160000.jpg"
+image_info = parser.parse_filename(filename)
+```
+
+### 图像发现和过滤
+
+```python
+processor = create_mushroom_processor()
+
+# 获取所有图像
+all_images = processor.get_mushroom_images()
+
+# 按蘑菇库号过滤
+mushroom_612_images = processor.get_mushroom_images(mushroom_id="612")
+
+# 按日期过滤
+today_images = processor.get_mushroom_images(date_filter="20251224")
+
+# 组合过滤
+specific_images = processor.get_mushroom_images(
+    mushroom_id="612", 
+    date_filter="20251224"
+)
+```
+
+### 图像处理
+
+```python
+# 处理单个图像
+image_info = images[0]
+success = processor.process_single_image(
+    image_info,
+    description="蘑菇库612的生长记录图像"
+)
+
+# 批量处理
+results = processor.batch_process_images(
+    mushroom_id="612",
+    batch_size=10
+)
+
+print(f"处理结果: {results}")
+# 输出: {'total': 20, 'success': 18, 'failed': 2, 'skipped': 0}
+```
+
+### 相似度搜索
+
+```python
+# 搜索相似图像
+query_path = "mogu/612/20251224/612_1921681235_20251218_20251224160000.jpg"
+similar_images = processor.search_similar_images(query_path, top_k=5)
+
+for result in similar_images:
+    image_info = result['image_info']
+    similarity = result['similarity']
+    print(f"{image_info.file_name}: {similarity:.3f}")
+```
+
+### 统计信息
+
+```python
+# 获取处理统计
+stats = processor.get_processing_statistics()
+print(f"已处理图像: {stats['total_processed']}")
+print(f"蘑菇库号分布: {stats['mushroom_distribution']}")
+
+# MinIO存储统计
+from src.utils.minio_service import create_minio_service
+service = create_minio_service()
+minio_stats = service.get_image_statistics()
+print(f"存储图像总数: {minio_stats['total_images']}")
+```
+
+## 命令行工具
+
+### 安装和使用
+
+```bash
+# 查看帮助
+python scripts/mushroom_cli.py --help
+
+# 列出所有图像
+python scripts/mushroom_cli.py list
+
+# 按条件过滤
+python scripts/mushroom_cli.py list -m 612 -d 20251224
+
+# 处理图像
+python scripts/mushroom_cli.py process -m 612
+
+# 处理单个文件
+python scripts/mushroom_cli.py process -f "mogu/612/20251224/612_1921681235_20251218_20251224160000.jpg"
+
+# 查看统计
+python scripts/mushroom_cli.py stats
+
+# 搜索相似图像
+python scripts/mushroom_cli.py search "mogu/612/20251224/612_1921681235_20251218_20251224160000.jpg" -k 5
+
+# 验证路径格式
+python scripts/mushroom_cli.py validate -p "mogu/612/20251224/612_1921681235_20251218_20251224160000.jpg"
+
+# 健康检查
+python scripts/mushroom_cli.py health
+```
+
+### 常用命令示例
+
+```bash
+# 处理特定蘑菇库的图像
+python scripts/mushroom_cli.py process -m 612 -b 5
+
+# 查看详细列表
+python scripts/mushroom_cli.py list -v
+
+# 验证所有路径格式
+python scripts/mushroom_cli.py validate -v
+```
+
+## API参考
+
+### MushroomImageInfo 数据类
+
+```python
+@dataclass
+class MushroomImageInfo:
+    mushroom_id: str          # 蘑菇库号
+    collection_ip: str        # 采集IP
+    collection_date: str      # 采集日期 (YYYYMMDD)
+    detailed_time: str        # 详细时间 (YYYYMMDDHHMMSS)
+    file_name: str           # 文件名
+    file_path: str           # 完整文件路径
+    date_folder: str         # 日期文件夹
+    
+    @property
+    def collection_datetime(self) -> datetime:
+        """获取采集时间的datetime对象"""
+    
+    @property
+    def collection_date_obj(self) -> datetime:
+        """获取采集日期的datetime对象"""
+```
+
+### MushroomImagePathParser 类
+
+```python
+class MushroomImagePathParser:
+    def parse_path(self, file_path: str) -> Optional[MushroomImageInfo]:
+        """解析完整文件路径"""
+    
+    def parse_filename(self, filename: str, mushroom_id: str = None, 
+                      date_folder: str = None) -> Optional[MushroomImageInfo]:
+        """解析文件名"""
+    
+    def validate_path_structure(self, file_path: str) -> bool:
+        """验证路径结构是否符合规范"""
+```
+
+### MushroomImageProcessor 类
+
+```python
+class MushroomImageProcessor:
+    def get_mushroom_images(self, mushroom_id: str = None, 
+                           date_filter: str = None) -> List[MushroomImageInfo]:
+        """获取蘑菇图像列表"""
+    
+    def process_single_image(self, image_info: MushroomImageInfo, 
+                           description: str = None) -> bool:
+        """处理单个图像文件"""
+    
+    def batch_process_images(self, mushroom_id: str = None, 
+                           date_filter: str = None, 
+                           batch_size: int = 10) -> Dict[str, int]:
+        """批量处理图像"""
+    
+    def search_similar_images(self, query_image_path: str, 
+                            top_k: int = 5) -> List[Dict[str, Any]]:
+        """搜索相似图像"""
+    
+    def get_processing_statistics(self) -> Dict[str, Any]:
+        """获取处理统计信息"""
+```
+
+## 数据库结构
+
+### mushroom_embeddings 表
+
+```sql
+CREATE TABLE mushroom_embeddings (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    image_path TEXT NOT NULL UNIQUE,
+    file_name VARCHAR(255) NOT NULL,
+    description TEXT NOT NULL,
+    embedding JSON NOT NULL,
+    growth_day INTEGER,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### 字段说明
+
+- `id`: 主键，UUID格式
+- `image_path`: 图像在MinIO中的完整路径
+- `file_name`: 文件名
+- `description`: 图像描述
+- `embedding`: CLIP向量化结果（512维）
+- `growth_day`: 生长天数（可选）
+- `created_at`: 创建时间
+
+## 配置说明
+
+### MinIO配置
+
+配置文件：`src/configs/settings.toml`
+
+```toml
+[development.minio]
+endpoint = "http://10.77.77.39:9000"
+access_key = "admin"
+secret_key = "admin"
+bucket = "mogu"
+
+[production.minio]
+endpoint = "http://172.17.0.1:9000"
+access_key = "admin"
+secret_key = "admin"
+bucket = "mogu"
+```
+
+### 环境切换
+
+```bash
+# 开发环境
+export prod=false
+
+# 生产环境
+export prod=true
+```
+
+## 最佳实践
+
+### 1. 文件命名规范
+
+- 严格按照格式命名：`{蘑菇库号}_{采集IP}_{采集日期}_{详细时间}.jpg`
+- 确保时间格式正确：YYYYMMDDHHMMSS
+- 使用一致的蘑菇库号
+
+### 2. 批量处理
+
+```python
+# 推荐的批量处理方式
+results = processor.batch_process_images(
+    mushroom_id="612",
+    batch_size=10  # 适中的批量大小
+)
+
+# 检查处理结果
+if results['failed'] > 0:
+    print(f"有 {results['failed']} 个文件处理失败")
+```
+
+### 3. 错误处理
+
+```python
+try:
+    success = processor.process_single_image(image_info)
+    if not success:
+        logger.error(f"处理失败: {image_info.file_name}")
+except Exception as e:
+    logger.error(f"处理异常: {e}")
+```
+
+### 4. 性能优化
+
+- 使用适当的批量大小（推荐10-20）
+- 定期清理临时文件
+- 监控内存使用情况
+- 使用过滤条件减少处理量
+
+## 故障排除
+
+### 常见问题
+
+1. **路径解析失败**
+   ```python
+   # 检查路径格式
+   parser = MushroomImagePathParser()
+   is_valid = parser.validate_path_structure(path)
+   ```
+
+2. **MinIO连接失败**
+   ```python
+   # 健康检查
+   service = create_minio_service()
+   health = service.health_check()
+   print(health['errors'])
+   ```
+
+3. **向量化失败**
+   - 检查图像文件是否损坏
+   - 确认CLIP模型加载正常
+   - 查看临时文件权限
+
+4. **数据库连接问题**
+   - 检查PostgreSQL服务状态
+   - 验证连接配置
+   - 确认pgvector扩展已安装
+
+### 调试技巧
+
+```python
+# 启用详细日志
+from loguru import logger
+logger.remove()
+logger.add(sys.stderr, level="DEBUG")
+
+# 单步调试
+image_info = parser.parse_path(path)
+print(f"解析结果: {image_info}")
+
+image = minio_service.client.get_image(path)
+print(f"图像加载: {image is not None}")
+```
+
+## 扩展功能
+
+### 自定义描述生成
+
+```python
+def custom_description_generator(image_info):
+    return f"自定义描述 - 库号{image_info.mushroom_id}"
+
+# 使用自定义描述
+processor.process_single_image(image_info, description=custom_description_generator(image_info))
+```
+
+### 批量回调处理
+
+```python
+def custom_callback(image, image_info):
+    # 自定义处理逻辑
+    return {"processed": True, "size": image.size}
+
+# 使用MinIO服务的回调功能
+minio_service = create_minio_service()
+results = minio_service.process_images_with_callback(custom_callback)
+```
+
+## 监控和维护
+
+### 定期检查
+
+```bash
+# 每日健康检查
+python scripts/mushroom_cli.py health
+
+# 每周统计报告
+python scripts/mushroom_cli.py stats
+
+# 路径格式验证
+python scripts/mushroom_cli.py validate
+```
+
+### 性能监控
+
+```python
+# 获取处理统计
+stats = processor.get_processing_statistics()
+print(f"处理效率: {stats['total_processed']} 张图片")
+
+# MinIO存储监控
+minio_stats = minio_service.get_image_statistics()
+print(f"存储使用: {minio_stats['total_size_mb']} MB")
+```
+
+## 支持和反馈
+
+如遇到问题，请：
+
+1. 查看日志输出
+2. 运行健康检查
+3. 验证配置文件
+4. 检查网络连接
+5. 确认服务状态
+
+更多信息请参考：
+- [MinIO配置指南](minio_setup_guide.md)
+- [系统测试脚本](../test_mushroom_system.py)
+- [示例代码](../examples/mushroom_processing_example.py)

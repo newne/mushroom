@@ -1,0 +1,51 @@
+services:
+  postgres_db:
+    image: pgvector/pgvector:pg18
+    container_name: postgres_db
+    restart: unless-stopped
+    environment:
+      # 使用标准变量以便与 Secrets 和健康检查兼容
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      POSTGRES_DB: ${POSTGRES_DB:-mushroom_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      TZ: Asia/Shanghai
+    secrets:
+      - postgres_password
+    volumes:
+      - postgre_data:/var/lib/postgresql/data
+      - postgre_log:/var/log/postgresql
+    # 🔒 生产环境安全建议：注释掉端口映射，禁止外部直接访问
+    #    业务服务通过内部网络 'backend' 使用容器名 'postgres_db' 访问
+    # ports:
+    #   - "5432:5432"
+    networks:
+      - plant_backend # 🌱 使用项目相关网络名
+    healthcheck:
+      # 健康检查使用双 $$ 转义，确保在容器内读取到正确的环境变量
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-mushroom_db}"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 256M
+        reservations:
+          cpus: "0.2"
+          memory: 256M
+
+volumes:
+  postgre_data:
+    driver: local
+  postgre_log:
+    driver: local
+
+networks:
+  plant_backend: # 🌱 使用项目相关网络名
+    driver: bridge
+    name: plant_backend
+secrets:
+  postgres_password:
+    file: ./secrets/postgres_password.txt
