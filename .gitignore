@@ -140,8 +140,7 @@ Icon?
 *.pth
 *.ckpt
 *.model
-models/
-data/
+models/.cache/
 *.h5
 *.joblib
 *.pickle

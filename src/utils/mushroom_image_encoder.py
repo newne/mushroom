@@ -76,9 +76,19 @@ class MushroomImageEncoder:
     def _init_clip_model(self):
         """初始化CLIP模型"""
         # 检查本地模型路径
+        # 在容器中，src目录内容被复制到/app，models挂载到/models
+        # 在开发环境中，保持原有的相对路径计算
+        
+        # 首先检查容器环境的路径
+        container_model_path = Path('/models/clip-vit-base-patch32')
+        
+        # 然后检查开发环境的路径
         local_model_path = Path(__file__).parent.parent.parent / 'models' / 'clip-vit-base-patch32'
         
-        if local_model_path.exists():
+        if container_model_path.exists():
+            model_name = str(container_model_path)
+            logger.info(f"Loading model from container path: {model_name}")
+        elif local_model_path.exists():
             model_name = str(local_model_path)
             logger.info(f"Loading model from local path: {model_name}")
         else:

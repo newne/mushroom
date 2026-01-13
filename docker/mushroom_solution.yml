@@ -73,10 +73,19 @@ services:
       OPENBLAS_NUM_THREADS: 4
       MKL_NUM_THREADS: 4
       NUMEXPR_NUM_THREADS: 4
+      # AI模型相关配置
+      TRANSFORMERS_CACHE: /models/.cache
+      HF_HOME: /models/.cache
+      TORCH_HOME: /models/.cache
+      # CLIP模型配置
+      CLIP_MODEL_PATH: /models/clip-vit-base-patch32
+      # 禁用HuggingFace遥测
+      HF_HUB_DISABLE_TELEMETRY: 1
+      TRANSFORMERS_OFFLINE: 0
     volumes:
       - ./configs:/app/configs:ro
       - ./Logs:/app/Logs:rw
-      - ./models:/app/models:rw
+      - ./models:/models:rw
       - ./data:/app/data:ro
     ports:
       - "${STREAMLIT_PORT:-7002}:7002"
