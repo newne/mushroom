@@ -1,7 +1,7 @@
 # Stage 1: UV installation
-FROM ghcr.io/astral-sh/uv:0.9.16 AS uv
+FROM ghcr.io/astral-sh/uv:0.9.24 AS uv
 # Stage 2: Build stage
-FROM python:3.13.2-slim AS builder
+FROM python:3.12.12-slim AS builder
 
 WORKDIR /app
 # Create and activate virtual environment
@@ -25,7 +25,7 @@ RUN --mount=type=cache,target=~/.cache/uv  \
       --index-url https://mirrors.aliyun.com/pypi/simple && \
     ./uv clean
 # Stage 3: Runtime stage
-FROM python:3.13.2-slim AS runtime
+FROM python:3.12.12-slim AS runtime
 RUN apt-get update && apt-get install -y net-tools && rm -rf /var/lib/apt/lists/*
 
 # Set runtime environment variables

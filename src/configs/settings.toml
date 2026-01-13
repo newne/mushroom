@@ -16,7 +16,7 @@ host="10.77.77.39"
 port=7063
 [development.pgsql]
 database_type = "postgresql"
-driver = "psycopg2"
+driver = "psycopg"
 host = "10.77.77.39"
 port = 5432
 database_name = "mushroom_algorithm"
@@ -65,7 +65,7 @@ host="172.17.0.1"
 port=7063
 [production.pgsql]
 database_type = "postgresql"
-driver = "psycopg2"
+driver = "psycopg"
 host = "postgres_db"
 port = 5432
 database_name = "mushroom_algorithm"

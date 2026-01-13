@@ -7,6 +7,12 @@
 2. 统一的任务管理和配置
 3. 完善的错误处理和自动恢复
 4. 优雅的退出机制
+
+定时任务：
+1. 建表任务：启动时立即执行
+2. 每日环境统计：每天 01:03:20 执行
+3. 每小时设定点监控：每小时第5分钟执行
+4. 每日CLIP推理：每天 03:02:25 执行前一天图像数据
 """
 import os
 import signal
@@ -114,6 +120,68 @@ def safe_hourly_setpoint_monitoring() -> None:
         raise
 
 
+def safe_daily_clip_inference() -> None:
+    """每日CLIP推理任务 - 处理前一天的所有图像"""
+    try:
+        logger.info("[CLIP_TASK] 开始执行每日CLIP推理任务")
+        start_time = datetime.now()
+        
+        # 计算前一天的日期
+        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+        
+        logger.info(f"[CLIP_TASK] 处理日期: {yesterday}")
+        
+        # 延迟导入避免循环依赖和启动时的依赖问题
+        from utils.mushroom_image_encoder import create_mushroom_encoder
+        
+        # 创建编码器
+        logger.info("[CLIP_TASK] 初始化蘑菇图像编码器...")
+        encoder = create_mushroom_encoder()
+        
+        # 执行批量处理前一天的图像
+        logger.info(f"[CLIP_TASK] 开始批量处理 {yesterday} 的图像数据...")
+        stats = encoder.batch_process_images(
+            mushroom_id=None,  # 处理所有库房
+            date_filter=yesterday,
+            batch_size=20  # 增大批处理大小以提高效率
+        )
+        
+        # 记录处理结果
+        duration = (datetime.now() - start_time).total_seconds()
+        success_rate = (stats['success'] / stats['total']) * 100 if stats['total'] > 0 else 0
+        
+        logger.info(f"[CLIP_TASK] 每日CLIP推理任务完成，耗时: {duration:.2f}秒")
+        logger.info(f"[CLIP_TASK] 处理统计: 总计={stats['total']}, 成功={stats['success']}, "
+                   f"失败={stats['failed']}, 跳过={stats['skipped']}, 成功率={success_rate:.1f}%")
+        
+        # 获取详细统计信息
+        try:
+            processing_stats = encoder.get_processing_statistics()
+            if processing_stats:
+                logger.info(f"[CLIP_TASK] 数据库总记录: {processing_stats.get('total_processed', 0)}")
+                logger.info(f"[CLIP_TASK] 有环境控制的记录: {processing_stats.get('with_environmental_control', 0)}")
+                
+                room_dist = processing_stats.get('room_distribution', {})
+                if room_dist:
+                    logger.info("[CLIP_TASK] 库房分布:")
+                    for room_id, count in sorted(room_dist.items()):
+                        logger.info(f"[CLIP_TASK]   库房{room_id}: {count}张")
+        except Exception as e:
+            logger.warning(f"[CLIP_TASK] 获取处理统计失败: {e}")
+        
+        # 如果处理失败率过高，记录警告
+        if stats['total'] > 0 and (stats['failed'] / stats['total']) > 0.1:
+            logger.warning(f"[CLIP_TASK] 处理失败率较高: {stats['failed']}/{stats['total']} = {(stats['failed']/stats['total']*100):.1f}%")
+        
+        # 如果没有找到图像，记录信息
+        if stats['total'] == 0:
+            logger.info(f"[CLIP_TASK] 未找到 {yesterday} 的图像数据，可能该日期没有图像或已全部处理")
+        
+    except Exception as e:
+        logger.error(f"[CLIP_TASK] 每日CLIP推理任务失败: {e}", exc_info=True)
+        raise
+
+
 class OptimizedScheduler:
     """优化版调度器类"""
     
@@ -217,6 +285,15 @@ class OptimizedScheduler:
             replace_existing=True,  # 明确指定替换已存在的任务
         )
         logger.info("[SCHEDULER] 每小时设定点监控任务已添加")
+        
+        # 每日CLIP推理任务（03:02:25执行）
+        self.scheduler.add_job(
+            func=safe_daily_clip_inference,  # 使用独立函数
+            trigger=CronTrigger(hour=3, minute=2, second=25, timezone=self.timezone),
+            id="daily_clip_inference",
+            replace_existing=True,  # 明确指定替换已存在的任务
+        )
+        logger.info("[SCHEDULER] 每日CLIP推理任务已添加 (每天 03:02:25 执行)")
     
     def _setup_jobs(self) -> None:
         """设置所有任务"""

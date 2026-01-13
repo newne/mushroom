@@ -1,174 +1,226 @@
-# 调度器模块说明
+# 调度系统
 
-## 概述
+本目录包含蘑菇图像处理系统的定时任务调度功能。
 
-优化版调度器模块 `src/scheduling/optimized_scheduler.py` 提供基于APScheduler和Redis的定时任务管理功能。采用面向对象设计，提供更好的可维护性和扩展性。
+## 文件说明
 
-## 主要功能
+### optimized_scheduler.py
+优化版调度器，系统的核心调度组件，基于APScheduler + Redis持久化。
 
-1. **Redis持久化调度器** - 使用Redis存储任务状态，支持重启恢复
-2. **面向对象设计** - 使用类封装，便于扩展和测试
-3. **定时任务管理** - 支持建表任务和每日环境统计任务
-4. **优雅退出** - 响应系统信号，确保任务完成后退出
-5. **自动恢复** - 调度器异常时自动重启
-6. **健康检查集成** - 与系统健康检查模块集成
+### add_scheduler_job_legacy.py
+原始调度器实现，作为备份保留。
 
-## 文件结构
+## 定时任务
 
-```
-src/scheduling/
-├── optimized_scheduler.py        # 优化版调度器（主要使用）
-├── add_scheduler_job_legacy.py   # 原版调度器（备份）
-└── README.md                     # 本说明文档
-```
+### 1. 建表任务
+- **执行时间**: 启动时立即执行
+- **功能**: 创建和验证数据库表结构
+- **任务ID**: `create_tables`
 
-## 调度器类设计
+### 2. 每日环境统计任务
+- **执行时间**: 每天 01:03:20
+- **功能**: 计算前一天的环境数据统计
+- **任务ID**: `daily_env_stats`
+- **处理内容**: 温度、湿度、CO₂等环境参数的日统计
 
-### OptimizedScheduler 类
+### 3. 每小时设定点监控任务
+- **执行时间**: 每小时第5分钟
+- **功能**: 监控设备设定点变更
+- **任务ID**: `hourly_setpoint_monitoring`
+- **处理内容**: 所有库房设备的设定值和开关状态变化
 
-```python
-class OptimizedScheduler:
-    """优化版调度器类"""
-    
-    def __init__(self):
-        # 初始化配置参数
-        
-    def run(self) -> NoReturn:
-        # 主运行方法
-        
-    def _init_scheduler(self) -> BackgroundScheduler:
-        # 初始化APScheduler
-        
-    def _setup_jobs(self) -> None:
-        # 设置所有任务
-        
-    def _run_main_loop(self) -> None:
-        # 运行主循环
-```
+### 4. 每日CLIP推理任务 ⭐ 新增
+- **执行时间**: 每天 03:02:25
+- **功能**: 处理前一天的所有图像数据进行CLIP编码
+- **任务ID**: `daily_clip_inference`
+- **处理内容**: 
+  - 自动识别前一天的图像数据
+  - 使用CLIP模型进行图像向量化
+  - 集成LLaMA模型生成图像描述
+  - 多模态特征融合和存储
+  - 支持所有库房的批量处理
 
-## 任务配置
+## 使用方法
 
-### 当前任务
-- **建表任务** (`create_tables`) - 启动时执行一次，确保数据库表存在
-- **每日环境统计** (`daily_env_stats`) - 每天01:03:20执行，计算前一日环境数据统计
-- **每小时设定点监控** (`hourly_setpoint_monitoring`) - 每小时第5分钟执行，监控所有库房关键参数变化
-
-### 添加新任务
-在 `_add_business_jobs()` 方法中添加新的定时任务：
-
-```python
-def _add_business_jobs(self) -> None:
-    # 现有任务...
-    
-    # 添加新任务
-    self.scheduler.add_job(
-        func=self._your_new_task,
-        trigger=CronTrigger(hour=2, minute=0, timezone=self.timezone),
-        id="your_task_id",
-    )
-    logger.info("[SCHEDULER] 新任务已添加")
-```
-
-## 配置参数
-
-调度器类的配置参数：
-- `timezone` - 调度器时区（自动检测本地时区）
-- `misfire_grace_time` - 任务错过执行的宽限时间（300秒）
-- `max_job_instances` - 单个任务最大并发实例数（1）
-- `create_tables_delay` - 建表任务等待时间（5秒）
-- `main_loop_interval` - 主循环检查间隔（5秒）
-- `max_failures` - 最大连续失败次数（3次）
-
-## 使用方式
-
-### 直接运行
+### 启动调度器
 ```bash
+# 从项目根目录启动
 python src/main.py
+
+# 或直接运行调度器
+python src/scheduling/optimized_scheduler.py
 ```
 
-### 作为模块导入
+### 查看任务状态
+调度器启动后会显示所有已添加的任务信息，包括：
+- 任务ID和名称
+- 下次执行时间
+- 触发器配置
+
+### 手动执行图像处理
+如需手动处理图像，可使用主程序：
+```bash
+# 处理最近1小时的图片
+python main.py recent --hours 1
+
+# 批量处理指定日期的图片
+python main.py batch-all --date-filter 20251231
+
+# 系统验证
+python main.py validate
+```
+
+## 调度器特性
+
+### Redis持久化
+- **任务存储**: 使用Redis作为任务存储后端
+- **重启恢复**: 支持调度器重启后任务恢复
+- **配置**: 使用项目配置中的Redis连接信息
+
+### 错误处理
+- **任务级错误处理**: 单个任务失败不影响其他任务
+- **自动重试**: 支持任务失败后的自动重试
+- **详细日志**: 完整的执行日志和错误信息
+- **优雅退出**: 支持信号处理和优雅关闭
+
+### 性能优化
+- **批处理**: CLIP推理任务使用批处理提高效率
+- **延迟导入**: 避免启动时的依赖问题
+- **资源管理**: 合理的资源使用和释放
+- **状态监控**: 实时任务状态监控
+
+## CLIP推理任务详情
+
+### 处理流程
+1. **日期计算**: 自动计算前一天的日期
+2. **编码器初始化**: 创建蘑菇图像编码器实例
+3. **批量处理**: 处理指定日期的所有图像
+4. **多模态编码**: 
+   - CLIP图像特征提取
+   - LLaMA文本描述生成
+   - 特征融合和向量化
+5. **数据存储**: 存储到PostgreSQL数据库
+6. **统计报告**: 生成详细的处理统计
+
+### 处理配置
+- **批处理大小**: 20张图片/批次
+- **处理范围**: 所有库房
+- **数据源**: MinIO对象存储
+- **存储目标**: PostgreSQL + pgvector
+
+### 监控指标
+- **处理统计**: 总计/成功/失败/跳过数量
+- **成功率**: 图像处理成功率
+- **库房分布**: 各库房的处理分布
+- **执行时间**: 任务执行耗时
+- **错误率**: 失败率监控和告警
+
+## 技术架构
+
+### 调度器组件
+- **APScheduler**: 任务调度引擎
+- **Redis**: 任务持久化存储
+- **CronTrigger**: 定时触发器
+- **事件监听**: 任务执行状态监听
+
+### 图像处理组件
+- **CLIP编码器**: 图像向量化
+- **LLaMA模型**: 图像描述生成
+- **多模态融合**: 特征融合处理
+- **MinIO客户端**: 图像文件访问
+
+### 数据管理
+- **PostgreSQL**: 向量和元数据存储
+- **pgvector**: 向量相似度搜索
+- **批量处理**: 高效数据处理
+- **事务管理**: 数据一致性保证
+
+## 监控和维护
+
+### 日志监控
+- **任务执行日志**: `[CLIP_TASK]` 标签
+- **调度器日志**: `[SCHEDULER]` 标签
+- **错误日志**: 详细的异常信息
+- **性能日志**: 执行时间统计
+
+### 告警机制
+- **失败率告警**: 处理失败率超过10%时告警
+- **无数据告警**: 未找到图像数据时记录
+- **连续失败**: 调度器连续失败监控
+
+### 维护建议
+1. **定期检查**: 监控任务执行状态
+2. **日志分析**: 分析处理统计和错误信息
+3. **性能调优**: 根据实际情况调整批处理大小
+4. **存储管理**: 定期清理Redis任务数据
+5. **系统监控**: 监控PostgreSQL和MinIO状态
+
+## 配置说明
+
+### 时区配置
+- **默认时区**: 系统时区或UTC
+- **环境变量**: 支持TZ环境变量
+- **时间格式**: 24小时制
+
+### 任务配置
+- **容错时间**: 300秒
+- **最大实例**: 1个/任务
+- **任务合并**: 启用
+- **替换策略**: 替换已存在任务
+
+### Redis配置
+- **连接配置**: 使用项目settings配置
+- **超时设置**: 连接和socket超时
+- **密码认证**: 支持Redis密码认证
+
+## 故障排除
+
+### 常见问题
+1. **CLIP任务失败**: 检查torch依赖和模型文件
+2. **Redis连接失败**: 检查Redis服务状态
+3. **图像处理失败**: 检查MinIO连接
+4. **数据库错误**: 检查PostgreSQL连接
+
+### 解决方案
+1. **重启调度器**: 停止后重新启动
+2. **检查依赖**: 验证所有Python依赖
+3. **查看日志**: 分析详细错误信息
+4. **手动测试**: 使用main.py手动执行任务
+
+## 添加新任务
+
+### 步骤说明
+1. **创建任务函数**: 在独立任务函数区域添加新函数
+2. **添加到调度器**: 在`_add_business_jobs()`方法中添加任务
+3. **配置触发器**: 使用CronTrigger设置执行时间
+4. **测试验证**: 确保任务正常执行
+
+### 示例代码
 ```python
-from scheduling.optimized_scheduler import OptimizedScheduler
+def safe_your_new_task() -> None:
+    """新任务函数"""
+    try:
+        logger.info("[YOUR_TASK] 开始执行新任务")
+        start_time = datetime.now()
+        
+        # 任务逻辑
+        
+        duration = (datetime.now() - start_time).total_seconds()
+        logger.info(f"[YOUR_TASK] 新任务完成，耗时: {duration:.2f}秒")
+        
+    except Exception as e:
+        logger.error(f"[YOUR_TASK] 新任务失败: {e}", exc_info=True)
+        raise
 
-scheduler = OptimizedScheduler()
-scheduler.run()
+# 在_add_business_jobs()中添加
+self.scheduler.add_job(
+    func=safe_your_new_task,
+    trigger=CronTrigger(hour=4, minute=0, timezone=self.timezone),
+    id="your_new_task",
+    replace_existing=True,
+)
 ```
 
-### 作为函数调用
-```python
-from scheduling.optimized_scheduler import main
-main()
-```
+---
 
-## 优势特性
-
-### 1. 面向对象设计
-- **封装性** - 所有配置和状态都封装在类中
-- **可扩展性** - 易于继承和扩展功能
-- **可测试性** - 便于单元测试和模拟
-
-### 2. 改进的错误处理
-- **连续失败保护** - 限制最大连续失败次数
-- **自动恢复** - 调度器异常时自动重启
-- **详细日志** - 完整的错误信息和执行状态
-
-### 3. 资源管理
-- **优雅关闭** - 响应系统信号，等待任务完成
-- **状态跟踪** - 实时监控调度器和任务状态
-- **内存管理** - 避免资源泄漏
-
-## 日志格式
-
-调度器使用统一的日志标签：
-- `[SCHEDULER]` - 调度器相关日志
-- `[TASK]` - 任务执行日志
-
-## 错误处理
-
-- **连续失败保护** - 最多允许3次连续失败，超过后退出
-- **异常捕获** - 所有任务函数都有异常捕获和日志记录
-- **优雅关闭** - 响应SIGINT/SIGTERM信号，等待任务完成后退出
-
-## 依赖要求
-
-- APScheduler >= 3.11.2
-- Redis服务器
-- 项目配置文件（settings.redis.*）
-
-## 健康检查
-
-调度器自动注册到健康检查系统，可通过以下接口监控状态：
-- `/health/` - 详细健康状态
-- `/health/status` - 简化健康状态
-
-## 故障排查
-
-1. **调度器启动失败** - 检查Redis连接配置
-2. **任务执行失败** - 查看任务函数日志
-3. **调度器意外停止** - 检查系统资源和网络连接
-4. **任务重复执行** - 检查时区配置和任务ID唯一性
-
-## 迁移指南
-
-### 从原版调度器迁移
-
-如果你之前使用 `add_scheduler_job_legacy.py`，迁移到优化版很简单：
-
-1. **更新导入**：
-   ```python
-   # 旧版
-   from scheduling.add_scheduler_job import main
-   
-   # 新版
-   from scheduling.optimized_scheduler import main
-   ```
-
-2. **功能保持一致** - 所有原有功能都保持不变
-3. **配置兼容** - 使用相同的配置文件和环境变量
-
-## 注意事项
-
-- 确保Redis服务正常运行
-- 任务函数应该是幂等的（可重复执行）
-- 长时间运行的任务可能影响调度器性能
-- 生产环境建议使用进程管理工具（如systemd）
+调度系统为蘑菇图像处理提供了可靠的自动化处理能力，确保图像数据的及时处理和向量化存储。
