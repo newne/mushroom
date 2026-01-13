@@ -84,7 +84,7 @@
             }
           },
           {
-            "remark": "0=风机制冷运行 1=风机制热运行 2=风机正常运行 3=风机停止 4=风机关闭",
+            "remark": "冷风机状态",
             "point_name": "Running",
             "point_alias": "status",
             "enum": {
@@ -109,6 +109,43 @@
             "remark": "温差设定(分辨率0.1)",
             "point_name": "TemDiffSet",
             "point_alias": "temp_diffset"
+          },
+          {
+            "remark": "冷风机循环开启时间设定",
+            "point_name": "CycOnTime",
+            "point_alias": "cyc_on_time"
+          },
+          {
+            "remark": "冷风机循环关闭时间设定",
+            "point_name": "CycOffTime",
+            "point_alias": "cyc_off_time"
+          },
+            {
+            "remark": "新风联动冷风机开关",
+            "point_name": "ArOnOff",
+            "point_alias": "air_on_off",
+            "enum": {
+              "0": "关闭",
+              "1": "开启"
+            }
+          },
+          {
+            "remark": "加湿联动冷风机开关",
+            "point_name": "HumOnOff",
+            "point_alias": "hum_on_off",
+            "enum": {
+              "0": "关闭",
+              "1": "开启"
+            }
+          },
+           {
+            "remark": "冷风机循环开关",
+            "point_name": "CycOnOff",
+            "point_alias": "cyc_on_off",
+            "enum": {
+              "0": "关闭",
+              "1": "开启"
+            }
           }
         ]
       },
@@ -139,7 +176,7 @@
         "device_type": "fresh_air_fan",
         "point_list": [
           {
-            "remark": "新风模式 0=关闭模式\n1=自动模式\n2=手动模式",
+            "remark": "新风模式",
             "point_name": "Model",
             "point_alias": "mode",
             "enum": {
@@ -149,7 +186,7 @@
             }
           },
           {
-            "remark": "新风控制方式 \n0=时控\n1=CO2控制",
+            "remark": "新风控制方式",
             "point_name": "Control",
             "point_alias": "control",
             "enum": {
@@ -237,7 +274,7 @@
         "device_type": "humidifier",
         "point_list": [
           {
-            "remark": "加湿状态,0=左加湿自动运行\n1=左加湿手动运行\n2=左加湿停止\n3=左加湿关闭",
+            "remark": "加湿状态",
             "point_name": "Running",
             "point_alias": "status",
             "enum": {
@@ -253,7 +290,7 @@
             "point_alias": "off"
           },
           {
-            "remark": "加湿模式,0=关闭模式\n1=自动模式\n2=手动模式",
+            "remark": "加湿模式",
             "point_name": "Model",
             "point_alias": "mode",
             "enum": {
@@ -360,6 +397,42 @@
             "enum": {
               "0": "关闭",
               "1": "自动"
+            }
+          },
+          {
+            "remark": "1#光源选择",
+            "point_name": "Choose1",
+            "point_alias": "choose1",
+            "enum": {
+              "0": "白光",
+              "1": "蓝光"
+            }
+          },
+          {
+            "remark": "2#光源选择",
+            "point_name": "Choose2",
+            "point_alias": "choose2",
+            "enum": {
+              "0": "白光",
+              "1": "蓝光"
+            }
+          },
+          {
+            "remark": "3#光源选择",
+            "point_name": "Choose3",
+            "point_alias": "choose3",
+            "enum": {
+              "0": "白光",
+              "1": "蓝光"
+            }
+          },
+          {
+            "remark": "4#光源选择",
+            "point_name": "Choose4",
+            "point_alias": "choose4",
+            "enum": {
+              "0": "白光",
+              "1": "蓝光"
             }
           }
         ]

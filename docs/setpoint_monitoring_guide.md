@@ -1,0 +1,327 @@
+# 设备设定点变更监控系统使用指南
+
+## 概述
+
+设备设定点变更监控系统是一个专门用于监控蘑菇库房中各种设备设定点变化的功能模块。该系统能够实时检测设备参数的变更，分析变更模式，并提供异常检测和统计分析功能。
+
+## 系统架构
+
+### 核心组件
+
+1. **设定点监控器** (`SetpointChangeMonitor`)
+   - 从静态配置自动加载设备和测点信息
+   - 支持多种变更类型检测
+   - 提供数据存储功能
+
+2. **数据分析器** (`SetpointAnalytics`)
+   - 提供统计分析功能
+   - 支持趋势分析和模式识别
+   - 异常检测和报告生成
+
+3. **数据库表** (`DeviceSetpointChange`)
+   - 存储设定点变更记录
+   - 支持高效查询和索引
+   - 提供完整的变更历史
+
+### 配置管理
+
+系统使用集中化的静态配置管理，所有设备类型、测点定义和监控规则都从 `src/configs/static_config.json` 中读取，确保配置的一致性和集中管理。
+
+## 监控的设备类型和测点
+
+系统会自动从静态配置中读取以下设备类型的关键设定点：
+
+### 1. 冷风机 (air_cooler)
+- **OnOff**: 开关状态 (数字量)
+- **TemSet**: 温度设定值 (模拟量，阈值: 0.5°C)
+- **TemDiffSet**: 温差设定值 (模拟量，阈值: 0.2°C)
+
+### 2. 新风机 (fresh_air_fan)
+- **Model**: 新风模式 (枚举: 0=关闭, 1=自动, 2=手动)
+- **Control**: 控制方式 (枚举: 0=时控, 1=CO2控制)
+- **Co2On**: CO2启动阈值 (模拟量，阈值: 50ppm)
+- **Co2Off**: CO2停止阈值 (模拟量，阈值: 50ppm)
+- **On**: 开启时间设定 (模拟量，阈值: 1分钟)
+- **Off**: 停止时间设定 (模拟量，阈值: 1分钟)
+
+### 3. 补光灯 (grow_light)
+- **Model**: 补光模式 (枚举: 0=关闭, 1=自动, 2=手动)
+- **OnMSet**: 开启分钟设定 (模拟量，阈值: 5分钟)
+- **OffMSet**: 停止分钟设定 (模拟量，阈值: 5分钟)
+
+### 4. 加湿器 (humidifier)
+- **Model**: 加湿模式 (枚举: 0=关闭, 1=自动, 2=手动)
+- **On**: 开启设定 (模拟量，阈值: 2%)
+- **Off**: 停止设定 (模拟量，阈值: 2%)
+
+**注意**: 系统会自动从静态配置中读取枚举映射和设备列表，无需手动配置。
+
+## 变更检测类型
+
+### 1. 数字量开关变化 (DIGITAL_ON_OFF)
+检测 0/1 状态的切换，如设备开关状态变化。
+
+### 2. 模拟量数值变化 (ANALOG_VALUE)
+检测数值变化超过预设阈值的情况，如温度设定值变化超过0.5°C。
+
+### 3. 枚举状态变化 (ENUM_STATE)
+检测枚举值的变化，如运行模式从自动切换到手动。
+
+### 4. 阈值穿越 (THRESHOLD_CROSS)
+检测数值穿越特定阈值的情况（预留功能）。
+
+## 使用方法
+
+### 1. 基础监控
+
+#### 监控单个库房
+```bash
+# 监控库房611过去1小时的设定点变更
+python scripts/monitor_setpoint_changes.py --room-id 611 --hours 1
+
+# 监控库房612过去2小时的设定点变更
+python scripts/monitor_setpoint_changes.py --room-id 612 --hours 2
+```
+
+#### 监控所有库房
+```bash
+# 监控所有库房过去1小时的设定点变更
+python scripts/monitor_setpoint_changes.py --all-rooms --hours 1
+```
+
+### 2. 配置管理
+
+#### 查看监控配置
+```bash
+# 显示所有设定点监控配置
+python scripts/monitor_setpoint_changes.py --show-config
+```
+
+#### 创建数据库表
+```bash
+# 创建设定点监控相关的数据库表
+python scripts/monitor_setpoint_changes.py --create-table
+```
+
+### 3. 测试模式
+
+```bash
+# 监控但不存储到数据库（测试模式）
+python scripts/monitor_setpoint_changes.py --room-id 611 --no-store
+```
+
+### 4. 完整演示
+
+```bash
+# 运行完整的功能演示
+python scripts/setpoint_demo.py
+```
+
+## 编程接口
+
+### 基础监控
+
+```python
+from utils.setpoint_change_monitor import create_setpoint_monitor
+
+# 创建监控器
+monitor = create_setpoint_monitor()
+
+# 监控单个库房
+changes = monitor.monitor_room_setpoint_changes("611", hours_back=1)
+
+# 监控所有库房
+all_changes = monitor.monitor_all_rooms_setpoint_changes(hours_back=1)
+
+# 存储变更记录
+success = monitor.store_setpoint_changes(changes)
+```
+
+### 数据分析
+
+```python
+from utils.setpoint_analytics import create_setpoint_analytics
+
+# 创建分析器
+analytics = create_setpoint_analytics()
+
+# 获取统计信息
+stats = analytics.get_change_statistics(room_id="611")
+
+# 获取小时模式分析
+hourly_pattern = analytics.get_hourly_change_pattern(room_id="611", days_back=7)
+
+# 检测异常变更
+abnormal_changes = analytics.detect_abnormal_changes(room_id="611", days_back=7)
+
+# 生成摘要报告
+report = analytics.generate_summary_report(room_id="611", days_back=7)
+```
+
+## 数据库表结构
+
+### device_setpoint_changes 表
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| id | UUID | 主键ID |
+| room_id | String(10) | 库房编号 |
+| device_type | String(50) | 设备类型 |
+| device_name | String(100) | 设备名称 |
+| point_name | String(100) | 测点名称 |
+| point_description | String(200) | 测点描述 |
+| change_time | DateTime | 变更发生时间 |
+| previous_value | Float | 变更前值 |
+| current_value | Float | 变更后值 |
+| change_type | String(50) | 变更类型 |
+| change_detail | String(200) | 变更详情 |
+| change_magnitude | Float | 变更幅度 |
+| detection_time | DateTime | 检测时间 |
+| created_at | DateTime | 创建时间 |
+
+### 索引设计
+
+- `idx_room_change_time`: (room_id, change_time) - 支持按库房和时间查询
+- `idx_device_point`: (device_name, point_name) - 支持按设备和测点查询
+- `idx_change_time`: (change_time) - 支持时间范围查询
+- `idx_device_type`: (device_type) - 支持按设备类型查询
+
+## 分析功能
+
+### 1. 基础统计
+- 总变更次数
+- 涉及设备数量
+- 涉及测点数量
+- 平均变更幅度
+- 最大变更幅度
+- 时间范围统计
+
+### 2. 分组统计
+- 按设备类型统计
+- 按库房统计
+- 按测点统计
+
+### 3. 时间模式分析
+- 24小时变更模式
+- 设备变更频率分析
+- 变更时间线
+
+### 4. 异常检测
+- 高频变更设备检测
+- 大幅度变更检测
+- 异常模式识别
+
+### 5. 摘要报告
+- 活跃时段识别
+- 最活跃设备统计
+- 异常情况汇总
+- 趋势分析
+
+## 配置说明
+
+### 阈值配置
+
+不同类型的测点有不同的变更检测阈值：
+
+- **温度相关**: 0.2-0.5°C
+- **湿度相关**: 2%
+- **CO2相关**: 50ppm
+- **时间相关**: 1-5分钟
+
+### 监控频率建议
+
+- **实时监控**: 每5-10分钟执行一次
+- **日常分析**: 每小时执行一次
+- **深度分析**: 每天执行一次
+
+## 最佳实践
+
+### 1. 监控策略
+- 设置定时任务定期执行监控
+- 根据业务需求调整监控频率
+- 关注异常变更模式
+
+### 2. 数据管理
+- 定期清理历史数据
+- 建立数据备份机制
+- 监控数据库性能
+
+### 3. 告警机制
+- 设置异常变更告警
+- 建立变更通知机制
+- 定期生成分析报告
+
+### 4. 性能优化
+- 合理设置查询时间范围
+- 使用索引优化查询性能
+- 批量处理变更记录
+
+## 故障排除
+
+### 常见问题
+
+1. **无法获取设备数据**
+   - 检查设备配置是否正确
+   - 确认网络连接正常
+   - 验证数据源可用性
+
+2. **变更检测不准确**
+   - 调整检测阈值
+   - 检查数据质量
+   - 验证时间同步
+
+3. **数据库连接问题**
+   - 检查数据库配置
+   - 确认连接权限
+   - 验证表结构
+
+4. **性能问题**
+   - 优化查询条件
+   - 检查索引使用
+   - 调整批处理大小
+
+### 日志分析
+
+系统使用loguru进行日志记录，主要日志级别：
+
+- **INFO**: 正常操作信息
+- **WARNING**: 警告信息
+- **ERROR**: 错误信息
+- **DEBUG**: 调试信息
+
+## 扩展开发
+
+### 添加新的设备类型
+
+1. 在 `static_config.json` 中添加新的设备类型配置
+2. 在 `setpoint_change_monitor.py` 的 `setpoint_definitions` 中添加对应的监控规则
+3. 测试新设备类型的监控功能
+
+### 自定义变更检测逻辑
+
+1. 扩展 `ChangeType` 枚举
+2. 在 `detect_setpoint_changes` 中添加检测逻辑
+3. 更新相关文档
+
+### 修改监控阈值
+
+1. 在 `setpoint_change_monitor.py` 的 `setpoint_definitions` 中调整阈值
+2. 重新部署监控系统
+3. 验证新阈值的效果
+
+### 集成外部系统
+
+1. 实现数据源适配器
+2. 添加数据格式转换
+3. 建立通信接口
+
+**注意**: 所有设备和测点的基础配置都应在 `static_config.json` 中维护，监控规则在代码中定义。
+
+## 版本历史
+
+- **v1.0.0**: 初始版本，支持基础监控和分析功能
+- 后续版本将根据实际使用情况进行功能扩展和优化
+
+## 技术支持
+
+如有问题或建议，请联系开发团队或查看相关技术文档。

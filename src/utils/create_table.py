@@ -4,6 +4,9 @@ from loguru import logger
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import declarative_base
 from sqlalchemy_utils import database_exists, create_database
+from sqlalchemy import (
+    Column, BigInteger, Integer, String, DateTime, func, Index, Date, Float, Boolean
+)
 
 from global_const.global_const import pgsql_engine, settings
 
@@ -129,6 +132,99 @@ class MushroomImageEmbedding(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
 
 
+class MushroomEnvDailyStats(Base):
+    __tablename__ = "mushroom_env_daily_stats"
+
+    __table_args__ = (
+        Index('idx_room_date', 'room_id', 'stat_date'),
+        Index('idx_stat_date', 'stat_date'),
+        Index('idx_growth_phase', 'is_growth_phase'),
+        Index('idx_in_day_num', 'in_day_num'),
+        {"comment": "蘑菇库房每日环境统计宽表（用于可视化）"}
+    )
+
+    # ✅ 改为 BIGINT 自增主键
+    id = Column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+        comment="自增主键 (BIGINT)"
+    )
+
+    room_id = Column(String(10), nullable=False, comment="库房编号，如 '611'")
+    stat_date = Column(Date, nullable=False, comment="统计日期 (YYYY-MM-DD)")
+
+    in_day_num = Column(Integer, nullable=True, comment="当日典型入库天数")
+    is_growth_phase = Column(Boolean, nullable=False, comment="是否为生长阶段")
+
+    # 环境统计字段（保持不变）
+    temp_median = Column(Float, nullable=True)
+    temp_min = Column(Float, nullable=True)
+    temp_max = Column(Float, nullable=True)
+    # 上下分位数（25% / 75%）
+    temp_q25 = Column(Float, nullable=True, comment="温度25分位")
+    temp_q75 = Column(Float, nullable=True, comment="温度75分位")
+    temp_count = Column(Integer, nullable=False, default=0)
+
+    humidity_median = Column(Float, nullable=True)
+    humidity_min = Column(Float, nullable=True)
+    humidity_max = Column(Float, nullable=True)
+    humidity_q25 = Column(Float, nullable=True, comment="湿度25分位")
+    humidity_q75 = Column(Float, nullable=True, comment="湿度75分位")
+    humidity_count = Column(Integer, nullable=False, default=0)
+
+    co2_median = Column(Float, nullable=True)
+    co2_min = Column(Float, nullable=True)
+    co2_max = Column(Float, nullable=True)
+    co2_q25 = Column(Float, nullable=True, comment="CO2 25分位")
+    co2_q75 = Column(Float, nullable=True, comment="CO2 75分位")
+    co2_count = Column(Integer, nullable=False, default=0)
+
+    # light_hours_est = Column(Float, nullable=False, default=0.0)
+    batch_date = Column(Date, nullable=True, comment="关联批次日期")
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(),
+                        onupdate=func.now())
+
+
+class DeviceSetpointChange(Base):
+    """设备设定点变更记录表"""
+    __tablename__ = "device_setpoint_changes"
+    
+    __table_args__ = (
+        Index('idx_room_change_time', 'room_id', 'change_time'),
+        Index('idx_device_point', 'device_name', 'point_name'),
+        Index('idx_change_time', 'change_time'),
+        Index('idx_device_type', 'device_type'),
+        {"comment": "设备设定点变更记录表"}
+    )
+    
+    id = Column(
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        comment="主键ID (UUID4)"
+    )
+    
+    room_id = Column(String(10), nullable=False, comment="库房编号")
+    device_type = Column(String(50), nullable=False, comment="设备类型")
+    device_name = Column(String(100), nullable=False, comment="设备名称")
+    point_name = Column(String(100), nullable=False, comment="测点名称")
+    point_description = Column(String(200), nullable=True, comment="测点描述")
+    
+    change_time = Column(DateTime, nullable=False, comment="变更发生时间")
+    previous_value = Column(Float, nullable=False, comment="变更前值")
+    current_value = Column(Float, nullable=False, comment="变更后值")
+    
+    change_type = Column(String(50), nullable=False, comment="变更类型")
+    change_detail = Column(String(200), nullable=True, comment="变更详情")
+    change_magnitude = Column(Float, nullable=True, comment="变更幅度")
+    
+    detection_time = Column(DateTime, nullable=False, comment="检测时间")
+    created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
+
+
 def init_database_extensions():
     """
     初始化数据库扩展 (pgcrypto, pgvector)
@@ -185,7 +281,7 @@ def create_tables():
         logger.info(f"[0.1.0] Database {settings.pgsql.DATABASE_NAME} created.")
 
     # 2. 初始化扩展 (必须在建表前)
-    init_database_extensions()
+    # init_database_extensions()
 
     # 3. 创建表结构 (使用 Base.metadata)
     # checkfirst=True 会自动检查表是否存在，无需手动 reflect

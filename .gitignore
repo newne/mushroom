@@ -163,6 +163,7 @@ settings_local.py
 # Logs
 *.log
 logs/
+Logs/
 
 # Temporary files
 *.tmp
@@ -189,3 +190,25 @@ src/data/
 checkpoints/
 outputs/
 results/
+
+# Test files (temporary)
+test_*.py
+*_test.py
+
+# Build artifacts
+dist/
+build/
+
+# PyArmor
+.pyarmor/
+
+# Cache files
+*.cache
+.cache/
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Temporary scripts
+temp_*.py
+tmp_*.py

@@ -9,12 +9,18 @@ from datetime import datetime, timedelta, date
 from typing import Dict, Optional, Any
 
 import pandas as pd
+import numpy as np
 from loguru import logger
 
 from utils.data_preprocessing import (
     query_data_by_batch_time,
 )
 from utils.dataframe_utils import get_all_device_configs
+from global_const.global_const import pgsql_engine, static_settings
+from utils.create_table import MushroomEnvDailyStats
+from sqlalchemy import text
+
+import sqlalchemy
 
 
 class EnvironmentDataProcessor:
@@ -100,11 +106,10 @@ class EnvironmentDataProcessor:
             logger.info(f"Querying environment data for room {room_id}, time range: {start_time} ~ {end_time}")
             
             # 查询历史数据 - 使用与 get_env_status.py 相同的逻辑
-            df = all_query_df.groupby("device_alias").apply(
+            df = all_query_df.groupby("device_alias", group_keys=False).apply(
                 query_data_by_batch_time, 
                 start_time, 
-                end_time, 
-                include_groups=True  # 包含分组列，避免KeyError
+                end_time
             ).reset_index().sort_values("time")
             
             if df.empty:
@@ -294,6 +299,287 @@ class EnvironmentDataProcessor:
         except Exception as e:
             logger.error(f"Failed to build structured record for room {room_id}: {e}")
             raise
+
+    def compute_and_store_daily_stats(self, start_time: datetime, end_time: Optional[datetime] = None, rooms: Optional[list] = None):
+        """
+        计算给定时间区间（或单日）内所有库房的日度温/湿/CO2 统计并写入 mushroom_env_daily_stats 表。
+
+        参数:
+            start_time: 开始时间（包含）
+            end_time: 结束时间（不包含），若为 None 则统计 start_time 当天
+            rooms: 可选房间列表，若为 None 则从静态配置或设备列表自动推断
+        """
+        if end_time is None:
+            # 统计单日
+            day_start = datetime(
+                start_time.year, start_time.month, start_time.day)
+            day_end = day_start + timedelta(days=1)
+        else:
+            day_start = start_time
+            day_end = end_time
+
+        # 推断房间列表
+        if rooms is None:
+            try:
+                # 优先从静态配置读取 rooms
+                rooms_cfg = getattr(static_settings.mushroom, 'rooms', {})
+                rooms = list(rooms_cfg.keys()) if rooms_cfg else []
+            except Exception:
+                rooms = []
+
+            if not rooms:
+                # 回退：从所有设备配置中解析 room 后缀
+                all_configs = get_all_device_configs()
+                room_set = set()
+                for df in all_configs.values():
+                    if 'device_name' in df.columns:
+                        for name in df['device_name'].astype(str):
+                            if '_' in name:
+                                room_set.add(name.split('_')[-1])
+                rooms = sorted(room_set)
+
+        logger.info(
+            f"Computing daily stats for rooms: {rooms}, range: {day_start} ~ {day_end}")
+
+        # For each room, query historical data and compute stats per day (day granularity)
+        results = []
+        for room in rooms:
+            try:
+                room_configs = self._get_device_configs_cached(room)
+                if not room_configs:
+                    logger.debug(f"No configs for room {room}, skipping")
+                    continue
+
+                all_query_df = pd.concat(
+                    room_configs.values(), ignore_index=True)
+                if all_query_df.empty:
+                    logger.debug(
+                        f"Empty device query df for room {room}, skipping")
+                    continue
+
+                df = all_query_df.groupby("device_alias", group_keys=False).apply(
+                    query_data_by_batch_time, day_start, day_end
+                ).reset_index().sort_values("time")
+
+                if df.empty:
+                    logger.debug(
+                        f"No historical data for room {room} in range, skipping")
+                    continue
+
+                # ensure time column is datetime and derive room
+                df['time'] = pd.to_datetime(df['time'])
+                df['room'] = df['device_name'].apply(
+                    lambda x: str(x).split('_')[-1])
+
+                # filter to this room and time window
+                df_room = df[df['room'] == room].copy()
+                if df_room.empty:
+                    logger.debug(
+                        f"No data rows matching room {room}, skipping")
+                    continue
+
+                df_room = df_room[(df_room['time'] >= day_start) & (
+                    df_room['time'] < day_end)].copy()
+                if df_room.empty:
+                    logger.debug(
+                        f"No data for room {room} in the specified date range after filtering, skipping")
+                    continue
+
+                # add a stat_date column once for fast filtering later
+                df_room['stat_date'] = df_room['time'].dt.date
+
+                # vectorized aggregation: compute counts, min/max/mean and quantiles per stat_date and point
+                mask = df_room['point_name'].isin(
+                    ['temperature', 'humidity', 'co2'])
+                df_points = df_room[mask]
+                if df_points.empty:
+                    logger.debug(
+                        f"No temperature/humidity/co2 points for room {room}, skipping")
+                    continue
+
+                agg = df_points.groupby(['stat_date', 'point_name'])['value'].agg(
+                    count='count',
+                    min='min',
+                    max='max',
+                    mean='mean',
+                    q25=lambda x: x.quantile(0.25),
+                    median=lambda x: x.quantile(0.5),
+                    q75=lambda x: x.quantile(0.75),
+                ).reset_index()
+
+                if agg.empty:
+                    logger.debug(
+                        f"Aggregation result empty for room {room}, skipping")
+                    continue
+
+                # pivot so we can access metrics per point quickly
+                pivot = agg.set_index(
+                    ['stat_date', 'point_name']).unstack(level=-1)
+
+                # prepare mushroom_info per stat_date to extract in_day_num and batch_date without per-row loops
+                m_info = df_room[df_room['device_name'].astype(
+                    str).str.startswith(f'mushroom_info_{room}')]
+                m_info_pivot = None
+                if not m_info.empty:
+                    m_info_pivot = m_info.pivot_table(
+                        index='stat_date', columns='point_name', values='value', aggfunc='first')
+
+                # Vectorized: flatten pivot columns to <point>_<metric>, build df per stat_date
+                flat = pivot.copy()
+                # pivot columns are (metric, point) -> convert to point_metric
+                flat.columns = [f"{col[1]}_{col[0]}" for col in flat.columns]
+                df_flat = flat.reset_index()
+                # ensure stat_date is date
+                df_flat['stat_date'] = pd.to_datetime(
+                    df_flat['stat_date']).dt.date
+
+                df_rec = pd.DataFrame()
+                df_rec['stat_date'] = df_flat['stat_date']
+
+                # helper to safely extract column values or fillna
+                def _col(name):
+                    return df_flat[name] if name in df_flat.columns else pd.Series([np.nan] * len(df_flat))
+
+                # temperature
+                df_rec['temp_count'] = pd.to_numeric(
+                    _col('temperature_count'), errors='coerce').fillna(0).astype(int)
+                df_rec['temp_min'] = pd.to_numeric(
+                    _col('temperature_min'), errors='coerce')
+                df_rec['temp_max'] = pd.to_numeric(
+                    _col('temperature_max'), errors='coerce')
+                df_rec['temp_median'] = pd.to_numeric(
+                    _col('temperature_median'), errors='coerce')
+                df_rec['temp_q25'] = pd.to_numeric(
+                    _col('temperature_q25'), errors='coerce')
+                df_rec['temp_q75'] = pd.to_numeric(
+                    _col('temperature_q75'), errors='coerce')
+
+                # humidity
+                df_rec['humidity_count'] = pd.to_numeric(
+                    _col('humidity_count'), errors='coerce').fillna(0).astype(int)
+                df_rec['humidity_min'] = pd.to_numeric(
+                    _col('humidity_min'), errors='coerce')
+                df_rec['humidity_max'] = pd.to_numeric(
+                    _col('humidity_max'), errors='coerce')
+                df_rec['humidity_median'] = pd.to_numeric(
+                    _col('humidity_median'), errors='coerce')
+                df_rec['humidity_q25'] = pd.to_numeric(
+                    _col('humidity_q25'), errors='coerce')
+                df_rec['humidity_q75'] = pd.to_numeric(
+                    _col('humidity_q75'), errors='coerce')
+
+                # co2
+                df_rec['co2_count'] = pd.to_numeric(
+                    _col('co2_count'), errors='coerce').fillna(0).astype(int)
+                df_rec['co2_min'] = pd.to_numeric(
+                    _col('co2_min'), errors='coerce')
+                df_rec['co2_max'] = pd.to_numeric(
+                    _col('co2_max'), errors='coerce')
+                df_rec['co2_median'] = pd.to_numeric(
+                    _col('co2_median'), errors='coerce')
+                df_rec['co2_q25'] = pd.to_numeric(
+                    _col('co2_q25'), errors='coerce')
+                df_rec['co2_q75'] = pd.to_numeric(
+                    _col('co2_q75'), errors='coerce')
+
+                # attach room_id
+                df_rec['room_id'] = room
+
+                # merge mushroom info if present
+                if m_info_pivot is not None and not m_info_pivot.empty:
+                    mdf = m_info_pivot.reset_index()
+                    mdf['stat_date'] = pd.to_datetime(mdf['stat_date']).dt.date
+                    # keep only relevant columns
+                    keep_cols = [c for c in (
+                        'stat_date', 'in_day_num', 'in_year', 'in_month', 'in_day') if c in mdf.columns]
+                    if keep_cols:
+                        df_rec = df_rec.merge(
+                            mdf[keep_cols], on='stat_date', how='left')
+                        # normalize in_day_num
+                        if 'in_day_num' in df_rec.columns:
+                            df_rec['in_day_num'] = pd.to_numeric(
+                                df_rec['in_day_num'], errors='coerce')
+                            df_rec['is_growth_phase'] = ((df_rec['in_day_num'] >= 1) & (
+                                df_rec['in_day_num'] <= 27)).astype(int).fillna(0)
+                        else:
+                            df_rec['in_day_num'] = None
+                            df_rec['is_growth_phase'] = 0
+
+                        # build batch_date
+                        if set(('in_year', 'in_month', 'in_day')).issubset(df_rec.columns):
+                            try:
+                                df_rec['batch_date'] = pd.to_datetime(
+                                    dict(year=df_rec['in_year'].astype(float).astype('Int64'),
+                                         month=df_rec['in_month'].astype(
+                                             float).astype('Int64'),
+                                         day=df_rec['in_day'].astype(float).astype('Int64')),
+                                    errors='coerce'
+                                ).dt.date
+                            except Exception:
+                                df_rec['batch_date'] = None
+                        else:
+                            df_rec['batch_date'] = None
+                else:
+                    df_rec['in_day_num'] = None
+                    df_rec['is_growth_phase'] = 0
+                    df_rec['batch_date'] = None
+
+                # finalize records and append
+                # normalize is_growth_phase to Python bool or None to match DB boolean column
+                if 'is_growth_phase' in df_rec.columns:
+                    def _to_bool(v):
+                        try:
+                            if pd.isna(v):
+                                return None
+                            iv = int(v)
+                            return True if iv == 1 else False
+                        except Exception:
+                            return None
+                    df_rec['is_growth_phase'] = df_rec['is_growth_phase'].apply(
+                        _to_bool)
+
+                df_rec = df_rec.replace({np.nan: None})
+                # ensure correct column order and names as expected by DB
+                out_cols = [
+                    'room_id', 'stat_date', 'in_day_num', 'is_growth_phase',
+                    'temp_median', 'temp_min', 'temp_max', 'temp_q25', 'temp_q75', 'temp_count',
+                    'humidity_median', 'humidity_min', 'humidity_max', 'humidity_q25', 'humidity_q75', 'humidity_count',
+                    'co2_median', 'co2_min', 'co2_max', 'co2_q25', 'co2_q75', 'co2_count',
+                    'batch_date'
+                ]
+                # map existing df_rec to out_cols, adding absent cols with None
+                records_df = pd.DataFrame()
+                for c in out_cols:
+                    records_df[c] = df_rec[c] if c in df_rec.columns else None
+
+                results.extend(records_df.to_dict(orient='records'))
+            except Exception as e:
+                logger.error(f"Failed to compute stats for room {room}: {e}")
+                continue
+
+        # After processing all rooms/days, write batch to DB using to_sql
+        if not results:
+            logger.info("No daily stats to write.")
+            return
+
+        try:
+            df_out = pd.DataFrame(results)
+            # Ensure stat_date is date/datetime
+            if 'stat_date' in df_out.columns:
+                df_out['stat_date'] = pd.to_datetime(
+                    df_out['stat_date']).dt.date
+
+            # Bulk insert via to_sql — 不再删除已有记录，直接按批次追加。
+            # 后续若存在多条相同 (room_id, stat_date) 的记录，可以通过索引或筛选最新记录来选择。
+            try:
+                df_out.to_sql('mushroom_env_daily_stats', con=pgsql_engine,
+                              if_exists='append', index=False, method='multi')
+                logger.info(
+                    f"Batch appended {len(df_out)} daily-stats rows to mushroom_env_daily_stats")
+            except Exception as e:
+                logger.error(f"Failed to batch write daily stats: {e}")
+        except Exception as e:
+            logger.error(f"Failed to batch write daily stats: {e}")
 
 
 def create_env_data_processor() -> EnvironmentDataProcessor:

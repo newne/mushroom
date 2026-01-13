@@ -2,6 +2,7 @@ import logging
 import sys
 
 from loguru import logger
+from global_const.global_const import env
 
 
 class InterceptHandler(logging.Handler):
@@ -11,9 +12,9 @@ class InterceptHandler(logging.Handler):
         logger_opt.log(record.levelno, record.getMessage())
 
 
-def loguru_setting(production=False):
+def loguru_setting(production=env):
     folder_ = "./Logs/"
-    prefix_ = "gld_load_scheduling-"
+    prefix_ = "mushroom_solution-"
     rotation_ = "00:00"
     retention_ = "30 days"
     encoding_ = "utf-8"
