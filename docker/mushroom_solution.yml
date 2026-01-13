@@ -68,11 +68,6 @@ services:
       POSTGRES_PORT: 5432
       POSTGRES_DB: ${POSTGRES_DB:-mushroom_db}
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      # 数值计算线程优化（适用于 OpenBLAS/MKL 等）
-      OMP_NUM_THREADS: 4
-      OPENBLAS_NUM_THREADS: 4
-      MKL_NUM_THREADS: 4
-      NUMEXPR_NUM_THREADS: 4
       # AI模型相关配置
       TRANSFORMERS_CACHE: /models/.cache
       HF_HOME: /models/.cache

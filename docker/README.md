@@ -69,11 +69,14 @@ TRANSFORMERS_OFFLINE: 0                        # 允许在线下载
 ```
 
 ### 性能优化配置
-```yaml
-OMP_NUM_THREADS: 4              # OpenMP线程数
-OPENBLAS_NUM_THREADS: 4         # OpenBLAS线程数
-MKL_NUM_THREADS: 4              # MKL线程数
-NUMEXPR_NUM_THREADS: 4          # NumExpr线程数
+数值计算线程优化参数在启动脚本 `run.sh` 中设置：
+```bash
+export OMP_NUM_THREADS=4              # OpenMP线程数
+export OPENBLAS_NUM_THREADS=4         # OpenBLAS线程数
+export MKL_NUM_THREADS=4              # MKL线程数
+export NUMEXPR_NUM_THREADS=4          # NumExpr线程数
+export VECLIB_MAXIMUM_THREADS=4       # VecLib线程数
+export NUMBA_NUM_THREADS=4            # Numba线程数
 ```
 
 ## 资源限制
