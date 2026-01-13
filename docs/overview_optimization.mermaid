@@ -1,0 +1,136 @@
+graph TD
+    subgraph "数据输入层"
+        A1[RGB图像数据] --> B1{多模态图像分析};
+        B1 --> C1[CLIP图像特征 + LLaMA生长描述];
+
+        A2[环境传感器数据] --> C2[环境特征: 温湿度/光照/CO₂];
+
+        A3[批次元数据] --> C3[批次特征: 品种/天数/位置];
+
+        A4[历史生长记录] --> C4[历史特征: 趋势/对比];
+        
+        A5[设备设定值监控] --> C5[设备状态: 开关值/设定值变更];
+    end
+
+    subgraph "知识检索模块"
+        D1[当前状态查询] --> E{向量相似度检索引擎};
+
+        subgraph "知识库"
+            F1[专家经验库];
+            F2[历史案例库];
+            F3[最佳实践库];
+            F4[异常模式库];
+            F5[向量化图像库];
+            F6[环境调控历史];
+        end
+
+        F1 --> E;
+        F2 --> E;
+        F3 --> E;
+        F4 --> E;
+        F5 --> E;
+        F6 --> E;
+
+        E --> G1[Top-5相似生长阶段];
+        E --> G2[历史温湿度调控数据];
+        E --> G3[相关知识片段];
+    end
+
+    subgraph "智能诊断模块"
+        C1 --> H{多模态诊断大模型};
+        C2 --> H;
+        C3 --> H;
+        C4 --> H;
+        C5 --> H;
+        G1 --> H;
+        G2 --> H;
+        G3 --> H;
+
+        H --> I1[生长阶段评估];
+        H --> I2[健康状态诊断];
+        H --> I3[品质等级预测];
+        H --> I4[环境适宜性分析];
+        H --> I5[推理依据与置信度];
+    end
+
+    subgraph "决策优化模块"
+        I1 --> J{智能决策引擎};
+        I2 --> J;
+        I3 --> J;
+        I4 --> J;
+
+        J --> K1[生长状态评估结果];
+        J --> K2[具体设备参数调节];
+        J --> K3[环境参数调整建议];
+
+        K1 --> L1[状态描述: 如"适度偏低，需要增加湿度"];
+        K2 --> L2[设备指令: 如"611库房左加湿器循环开4分钟，关8分钟"];
+        K3 --> L3[调整方向: 温度±2℃, 湿度±5%, CO₂±200ppm];
+    end
+
+    subgraph "执行与控制模块"
+        L1 --> M[生成控制策略];
+        L2 --> M;
+        L3 --> M;
+        M --> N[下发控制指令];
+        N --> O[环境调节执行];
+        O --> P[环境状态更新];
+    end
+
+    subgraph "反馈与学习模块"
+        P --> Q[效果监测与统计];
+        Q --> R[反馈数据收集];
+        R --> S{知识库更新};
+
+        I1 --> S;
+        L1 --> S;
+        L2 --> S;
+        R --> S;
+
+        S --> F1;
+        S --> F2;
+        S --> F3;
+        S --> F4;
+        S --> F5;
+        S --> F6;
+    end
+
+    subgraph "已完成功能模块"
+        FUNC1[天级别环境统计];
+        FUNC2[设备设定值监控];
+        FUNC3[图像向量化处理];
+        FUNC4[多模态特征融合];
+        
+        C2 -.-> FUNC1;
+        C5 -.-> FUNC2;
+        C1 -.-> FUNC3;
+        C1 -.-> FUNC4;
+    end
+
+    subgraph "未来发展方向"
+        FUTURE1[多模态大模型决策推理];
+        FUTURE2[智能化环境调控建议];
+        FUTURE3[基于历史数据的优化决策];
+        
+        H -.-> FUTURE1;
+        J -.-> FUTURE2;
+        G1 -.-> FUTURE3;
+        G2 -.-> FUTURE3;
+    end
+
+    %% 关键流程标注
+    subgraph "核心数据流"
+        DATA_FLOW["多模态数据 → 向量检索 → 多模态融合 → 大模型诊断 → 智能决策 → 精准执行"];
+    end
+
+    style H fill:#e1f5e1
+    style E fill:#e8f4f8
+    style J fill:#fff3e0
+    style S fill:#f1f8e9
+    style FUNC1 fill:#e3f2fd
+    style FUNC2 fill:#e3f2fd
+    style FUNC3 fill:#e3f2fd
+    style FUNC4 fill:#e3f2fd
+    style FUTURE1 fill:#fff8e1
+    style FUTURE2 fill:#fff8e1
+    style FUTURE3 fill:#fff8e1
