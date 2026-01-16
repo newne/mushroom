@@ -1,0 +1,95 @@
+{
+  "default_rooms": ["607", "608", "611", "612"],
+  "time_limits": {
+    "max_batch_days": 30,
+    "default_hours_back": 1
+  },
+  "database": {
+    "table_name": "device_setpoint_changes",
+    "batch_size": 1000,
+    "required_fields": [
+      "room_id", "device_type", "device_name", "point_name",
+      "change_time", "previous_value", "current_value", "change_type"
+    ]
+  },
+  "thresholds": {
+    "air_cooler": {
+      "temp_set": 0.5,
+      "temp_diffset": 0.2,
+      "cyc_on_time": 1.0,
+      "cyc_off_time": 1.0
+    },
+    "fresh_air_fan": {
+      "co2_on": 50.0,
+      "co2_off": 50.0,
+      "on": 1.0,
+      "off": 1.0
+    },
+    "humidifier": {
+      "on": 2.0,
+      "off": 2.0
+    },
+    "grow_light": {
+      "on_mset": 5.0,
+      "off_mset": 5.0
+    },
+    "mushroom_info": {
+      "in_num": 1.0,
+      "in_day_num": 1.0
+    }
+  },
+  "device_types": {
+    "air_cooler": {
+      "monitored_points": [
+        "on_off", "temp_set", "temp_diffset", "cyc_on_time", 
+        "cyc_off_time", "air_on_off", "hum_on_off", "cyc_on_off"
+      ],
+      "description": "冷风机设备监控点"
+    },
+    "fresh_air_fan": {
+      "monitored_points": [
+        "mode", "control", "co2_on", "co2_off", "on", "off"
+      ],
+      "description": "新风机设备监控点"
+    },
+    "humidifier": {
+      "monitored_points": ["mode", "on", "off"],
+      "description": "加湿器设备监控点"
+    },
+    "grow_light": {
+      "monitored_points": [
+        "model", "on_mset", "off_mset", "on_off1", "on_off2", 
+        "on_off3", "on_off4", "choose1", "choose2", "choose3", "choose4"
+      ],
+      "description": "补光灯设备监控点"
+    },
+    "mushroom_info": {
+      "monitored_points": ["in_num", "in_day_num"],
+      "description": "蘑菇信息监控点"
+    }
+  },
+  "change_types": {
+    "digital_on_off": {
+      "description": "数字量开关变化 (0->1 或 1->0)",
+      "requires_threshold": false
+    },
+    "analog_value": {
+      "description": "模拟量数值变化",
+      "requires_threshold": true
+    },
+    "enum_state": {
+      "description": "枚举状态变化",
+      "requires_threshold": false
+    },
+    "threshold_cross": {
+      "description": "阈值穿越",
+      "requires_threshold": true
+    }
+  },
+  "monitoring": {
+    "enable_batch_monitoring": true,
+    "enable_real_time_monitoring": true,
+    "log_level": "INFO",
+    "performance_monitoring": true
+  }
+}

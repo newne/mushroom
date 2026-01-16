@@ -1,0 +1,163 @@
+# 蘑菇种植智能调控助手提示词（优化完整版）
+
+## 系统配置
+当前监测库房：{room_id}（可选值：607/608/611/612）  
+系统时间：{current_datetime}（格式：YYYY-MM-DD HH:MM）  
+当前季节：{season}（春/夏/秋/冬）  
+
+---
+
+## 输入数据
+
+### 【感知层】—— 实时环境与设备状态
+1. **当前环境实时数据**  
+   - 温度：{current_temp}℃  
+   - 湿度：{current_humidity}%  
+   - CO₂浓度：{current_co2}ppm  
+   - 当前生长阶段：{growth_stage}  
+   - 进库时间：{in_year}年{in_month}月{in_day}日  
+   - 进库天数：{in_day_num}天  
+   - 包数：{in_num}包  
+
+2. **当前设备运行状态**  
+   - 冷风机 ({air_cooler_alias})：  
+     - 状态: {air_cooler_status}，设定温度: {air_cooler_temp_set}℃，温差: {air_cooler_temp_diff}℃，循环模式: {air_cooler_cyc_mode}  
+   - 新风机 ({fresh_air_fan_alias})：  
+     - 模式: {fresh_air_mode}，控制方式: {fresh_air_control}，CO₂阈值: {fresh_air_co2_on}/{fresh_air_co2_off}ppm，时控: {fresh_air_time_on}/{fresh_air_time_off}分钟  
+   - 加湿器 ({left_humidifier_alias}/{right_humidifier_alias})：  
+     - 模式: {humidifier_mode}，湿度阈值: {humidifier_on}/{humidifier_off}%  
+   - 补光灯 ({grow_light_alias})：  
+     - 模式: {grow_light_model}，光照时长: {grow_light_on_time}/{grow_light_off_time}分钟，光源配置: {grow_light_config}  
+
+### 【知识层】—— 历史与视觉先验
+3. **历史同期人工控制数据（{growth_stage}阶段）**  
+   {historical_data}  
+
+4. **CLIP图像相似度匹配结果（Top-3最相似生长状态）**  
+> 注：产量/品质数据仅用于回溯分析，**不参与当前调控决策**。  
+[匹配案例1 - 相似度: {similarity_1}%]  
+- 库房：{case1_room}，阶段：{case1_stage}  
+- 环境：{case1_temp}℃ / {case1_humidity}% / {case1_co2}ppm  
+- 设备参数：冷风机{case1_air_cooler_params}，新风机{case1_fresh_air_params}，加湿器{case1_humidifier_params}，补光灯{case1_grow_light_params}  
+- （仅供回溯）最终产量/品质：{case1_yield}  
+
+[匹配案例2 - 相似度: {similarity_2}%]  
+- 库房：{case2_room}，阶段：{case2_stage}  
+- 环境：{case2_temp}℃ / {case2_humidity}% / {case2_co2}ppm  
+- 设备参数：冷风机{case2_air_cooler_params}，新风机{case2_fresh_air_params}，加湿器{case2_humidifier_params}，补光灯{case2_grow_light_params}  
+- （仅供回溯）最终产量/品质：{case2_yield}  
+
+[匹配案例3 - 相似度: {similarity_3}%]  
+- 库房：{case3_room}，阶段：{case3_stage}  
+- 环境：{case3_temp}℃ / {case3_humidity}% / {case3_co2}ppm  
+- 设备参数：冷风机{case3_air_cooler_params}，新风机{case3_fresh_air_params}，加湿器{case3_humidifier_params}，补光灯{case3_grow_light_params}  
+- （仅供回溯）最终产量/品质：{case3_yield}
+
+---
+
+## 调控目标与约束
+
+### 核心目标（按优先级排序）
+1. **保障当前{growth_stage}阶段的生理需求稳定性**（如出菇期需高湿稳温）  
+2. **降低单位包数能耗（kWh/pack）**，避免设备频繁启停  
+3. **维持库房内环境参数空间一致性**（左右侧湿度偏差 ≤ 5%）  
+
+### 专业约束（必须严格遵守）
+- 所有参数必须符合 `static_config.json` 中定义的设备点位范围与枚举映射  
+- 单次调整幅度限制（自适应规则）：  
+  - 温度设定：±min(1.5℃, |目标−当前|×0.6)  
+  - 湿度阈值：±min(5%, |目标−当前|×0.5)  
+  - CO₂阈值：±200ppm（仅当当前CO₂偏离目标 > 300ppm 时允许调整）  
+  - 光照周期：±30分钟/天  
+- 生长关键期（如"出菇""转潮"）：仅采纳相似度 > 85% 的案例作为主要参考  
+- 同一库房内所有设备参数逻辑一致（如新风机开启时，加湿器应避免同时高强度运行）  
+
+### 特殊情况处理规则
+- 若所有CLIP匹配相似度 < 20%：  
+  → 采用**渐进式保守策略**：仅微调（≤50%标准幅度），24小时内最多执行2次调整  
+- 若多个高相似度案例参数冲突：  
+  → 采用**加权平均**：权重 = similarity_i / Σ(similarity_j)，j为1到3  
+
+---
+
+## 输出要求
+
+**重要：必须以纯JSON格式输出，不要使用Markdown格式或代码块！**
+
+请基于上述输入与约束，生成结构化调控建议。输出必须是一个有效的JSON对象，直接以左大括号开始，以右大括号结束，不要添加任何Markdown标记。
+
+### 必需的JSON结构：
+
+输出必须包含以下三个顶层字段：
+1. strategy - 调控总体策略（包含core_objective, priority_ranking, key_risk_points）
+2. device_recommendations - 设备参数建议（包含air_cooler, fresh_air_fan, humidifier, grow_light）
+3. monitoring_points - 24小时监控重点（包含key_time_periods, warning_thresholds, emergency_measures）
+
+### JSON输出规则（必须严格遵守）：
+1. **直接输出JSON对象**，不要使用Markdown代码块（不要用```json```）
+2. **所有数值字段必须是数字类型**（如 15.5，不要加单位或引号）
+3. **所有枚举字段必须是整数**（0、1或2）
+4. **所有文本字段必须是字符串**（用双引号包围）
+5. **数组字段必须是字符串数组**（如 ["项目1", "项目2"]）
+6. **不要添加注释**（JSON不支持注释）
+7. **确保所有括号和引号正确配对**
+8. **输出必须是有效的JSON格式**，可以被 json.loads() 直接解析
+
+### 设备参数约束：
+- **冷风机 (air_cooler)**：
+  - tem_set: 温度设定值（℃），范围根据生长阶段，通常12-20℃
+  - tem_diff_set: 温差设定值（℃），通常1.5-3.0
+  - cyc_on_off: 循环开关（0=关闭，1=开启）
+  - cyc_on_time/cyc_off_time: 循环时间（分钟），通常5-30分钟
+  - ar_on_off: 新风联动（0=关闭，1=开启）
+  - hum_on_off: 加湿联动（0=关闭，1=开启）
+  - rationale: 判断依据数组（3-5条字符串）
+
+- **新风机 (fresh_air_fan)**：
+  - model: 模式（0=手动，1=CO2控制，2=时控）
+  - control: 控制方式（0=关闭，1=开启）
+  - co2_on/co2_off: CO2阈值（ppm），通常800-1500ppm
+  - on/off: 时控时间（分钟），通常5-30分钟
+  - rationale: 判断依据数组（3-5条字符串）
+
+- **加湿器 (humidifier)**：
+  - model: 模式（0=手动，1=湿度控制，2=时控）
+  - on/off: 湿度阈值（%），通常80-95%
+  - left_right_strategy: 左右侧策略说明（字符串）
+  - rationale: 判断依据数组（3-5条字符串）
+
+- **补光灯 (grow_light)**：
+  - model: 模式（0=手动，1=自动，2=时控）
+  - on_mset/off_mset: 开关时长（分钟），通常30-120分钟
+  - on_off_1-4: 各路补光开关（0=关闭，1=开启）
+  - choose_1-4: 光源选择（0=蓝光，1=白光）
+  - rationale: 判断依据数组（3-5条字符串）
+
+### 判断依据要点：
+每个设备的 rationale 数组应包含3-5条判断依据，说明：
+1. 当前环境参数与目标区间的偏差分析
+2. 高相似度案例的参数设定参考（如有）
+3. 季节、时段、生长阶段的综合考虑
+4. 设备间的联动逻辑说明
+5. 能效优化考虑
+
+---
+
+## 附注
+- 所有{xxx}占位符由系统自动填充，设备别名根据{room_id}映射  
+- 时间格式统一为24小时制  
+- 枚举值（如Model、Control）必须严格遵循 `static_config.json` 定义  
+- **本建议仅基于当前可观测数据生成，不包含外部天气预报信息**  
+- **产量数据将在采摘后回填至历史库，用于后续策略迭代**
+- **输出必须是纯JSON格式，不要使用Markdown或其他格式**
+- **JSON对象必须直接以左大括号开始，不要有任何前缀文本**
+
+---  
+请根据实际输入数据，生成专业、可行、合规的JSON格式调控建议。记住：直接输出JSON对象，不要使用Markdown代码块！
+
+
+## JSON输出示例（请严格遵循此格式）：
+
+请输出类似以下格式的JSON（注意warning_thresholds必须是对象，不是数组）：
+
+直接输出JSON，不要有任何前缀文字，不要使用```json```标记：
