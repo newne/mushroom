@@ -1,21 +1,14 @@
 """
-设备设定点变更监控模块 (重构版本)
-
-重构改进：
-1. 统一模型定义：使用 create_table.py 中的 DeviceSetpointChange 类
-2. 配置文件化：将硬编码值移到配置文件中管理
-3. 模块化设计：分离配置管理、数据库操作等逻辑
-4. 代码一致性：统一导入、命名和错误处理
+设备设定点变更监控模块
 
 功能说明：
 用于监控指定库房中所有设备的设定点/开关点变化情况，检测关键控制参数的变更并记录到数据库。
 
 架构设计说明：
-1. 配置层：从 static_config.json 和 setpoint_monitor_config.json 读取配置
+1. 配置层：从 static_config.json 读取设备配置，包含 point_name（系统标识符）和 point_alias（用户友好别名）
 2. 查询层：通过 dataframe_utils 获取设备配置，使用 get_data 模块查询历史数据
 3. 数据转换：get_data.get_device_history_cal 将 point_alias 值赋给返回DataFrame的 point_name 列
 4. 监控层：使用 point_alias 作为配置映射键，与查询返回的数据结构保持一致
-5. 存储层：统一使用 create_table.py 中定义的数据库模型
 
 标识符使用说明：
 - point_name: 设备通信使用的系统内部标识符（如 "TemSet", "OnOff"）
@@ -23,23 +16,29 @@
 - 查询返回的数据中，point_name 列实际包含 point_alias 值，实现了标识符转换
 """
 
+import json
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass
+from enum import Enum
 
 import pandas as pd
 import numpy as np
 from loguru import logger
+from sqlalchemy import Column, String, DateTime, Float, Integer, Text, Boolean, Index, func
+from sqlalchemy.orm import declarative_base
 
 from utils.data_preprocessing import query_data_by_batch_time
 from utils.dataframe_utils import get_all_device_configs
-from utils.create_table import DeviceSetpointChange, create_tables
-from utils.setpoint_config import (
-    SetpointConfigManager, 
-    ChangeType, 
-    get_setpoint_config_manager
-)
 from global_const.global_const import pgsql_engine, static_settings
+
+
+class ChangeType(Enum):
+    """变更类型枚举"""
+    DIGITAL_ON_OFF = "digital_on_off"      # 数字量开关变化 (0->1 或 1->0)
+    ANALOG_VALUE = "analog_value"          # 模拟量数值变化
+    ENUM_STATE = "enum_state"              # 枚举状态变化
+    THRESHOLD_CROSS = "threshold_cross"    # 阈值穿越
 
 
 @dataclass
@@ -66,23 +65,12 @@ class SetpointConfig:
 
 
 class DeviceSetpointChangeMonitor:
-    """设备设定点变更监控器 (重构版本)"""
+    """设备设定点变更监控器"""
     
-    def __init__(self, config_manager: Optional[SetpointConfigManager] = None):
-        """
-        初始化监控器
-        
-        Args:
-            config_manager: 配置管理器实例，None 表示使用全局实例
-        """
-        self.config_manager = config_manager or get_setpoint_config_manager()
+    def __init__(self):
+        """初始化监控器"""
         self.setpoint_configs = self._initialize_setpoint_configs_from_static()
-        
         logger.info(f"Initialized setpoint monitor with {len(self.setpoint_configs)} configurations from static settings")
-        
-        # 显示配置摘要
-        summary = self.config_manager.get_config_summary()
-        logger.debug(f"Config summary: {summary}")
     
     def _initialize_setpoint_configs_from_static(self) -> List[SetpointConfig]:
         """
@@ -90,7 +78,7 @@ class DeviceSetpointChangeMonitor:
         
         设计说明：
         1. 从 static_settings.mushroom.datapoint 读取设备配置
-        2. 基于配置文件中的监控规则，识别需要监控的关键设定点
+        2. 基于预定义的监控规则，识别需要监控的关键设定点
         3. 同时保存 point_name（系统标识符）和 point_alias（业务标识符）
         4. 后续数据匹配将使用 point_alias 作为主键
         
@@ -103,8 +91,186 @@ class DeviceSetpointChangeMonitor:
             # 获取静态配置中的数据点配置
             datapoint_config = static_settings.mushroom.datapoint
             
-            # 从配置管理器获取设备类型和监控点配置
-            device_types = self.config_manager.get_all_device_types()
+            # 定义需要监控的设定点及其配置规则
+            # 注意：这里的键对应 static_config.json 中的 point_alias 字段（用户友好别名）
+            # 根据 static_config.json 全面梳理所有设备类型的设定点和开关点
+            setpoint_definitions = {
+                'air_cooler': {
+                    # 冷风机开关状态
+                    'on_off': {
+                        'change_type': ChangeType.DIGITAL_ON_OFF,
+                        'description': '冷风机开关状态'
+                    },
+                    # 温度设定值
+                    'temp_set': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 0.5,  # 温度变化0.5度触发监控
+                        'description': '温度设定值'
+                    },
+                    # 温差设定值
+                    'temp_diffset': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 0.2,  # 温差变化0.2度触发监控
+                        'description': '温差设定值'
+                    },
+                    # 冷风机循环开启时间设定
+                    'cyc_on_time': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 1.0,  # 时间变化1分钟触发监控
+                        'description': '冷风机循环开启时间设定'
+                    },
+                    # 冷风机循环关闭时间设定
+                    'cyc_off_time': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 1.0,  # 时间变化1分钟触发监控
+                        'description': '冷风机循环关闭时间设定'
+                    },
+                    # 新风联动冷风机开关
+                    'air_on_off': {
+                        'change_type': ChangeType.DIGITAL_ON_OFF,
+                        'description': '新风联动冷风机开关'
+                    },
+                    # 加湿联动冷风机开关
+                    'hum_on_off': {
+                        'change_type': ChangeType.DIGITAL_ON_OFF,
+                        'description': '加湿联动冷风机开关'
+                    },
+                    # 冷风机循环开关
+                    'cyc_on_off': {
+                        'change_type': ChangeType.DIGITAL_ON_OFF,
+                        'description': '冷风机循环开关'
+                    }
+                },
+                'fresh_air_fan': {
+                    # 新风模式
+                    'mode': {
+                        'change_type': ChangeType.ENUM_STATE,
+                        'description': '新风模式'
+                    },
+                    # 新风控制方式
+                    'control': {
+                        'change_type': ChangeType.ENUM_STATE,
+                        'description': '新风控制方式'
+                    },
+                    # CO2启动新风阈值
+                    'co2_on': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 50.0,  # CO2浓度变化50ppm触发监控
+                        'description': 'CO2启动新风阈值'
+                    },
+                    # CO2停止新风阈值
+                    'co2_off': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 50.0,  # CO2浓度变化50ppm触发监控
+                        'description': 'CO2停止新风阈值'
+                    },
+                    # 新风开启时间设定
+                    'on': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 1.0,  # 时间变化1分钟触发监控
+                        'description': '新风开启时间设定'
+                    },
+                    # 新风停止时间设定
+                    'off': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 1.0,  # 时间变化1分钟触发监控
+                        'description': '新风停止时间设定'
+                    }
+                },
+                'humidifier': {
+                    # 加湿器模式
+                    'mode': {
+                        'change_type': ChangeType.ENUM_STATE,
+                        'description': '加湿器模式'
+                    },
+                    # 加湿器开启设定
+                    'on': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 2.0,  # 湿度变化2%触发监控
+                        'description': '加湿器开启设定'
+                    },
+                    # 加湿器停止设定
+                    'off': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 2.0,  # 湿度变化2%触发监控
+                        'description': '加湿器停止设定'
+                    }
+                },
+                'grow_light': {
+                    # 补光模式
+                    'model': {
+                        'change_type': ChangeType.ENUM_STATE,
+                        'description': '补光模式'
+                    },
+                    # 补光开启分钟设定
+                    'on_mset': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 5.0,  # 时间变化5分钟触发监控
+                        'description': '补光开启分钟设定'
+                    },
+                    # 补光停止分钟设定
+                    'off_mset': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 5.0,  # 时间变化5分钟触发监控
+                        'description': '补光停止分钟设定'
+                    },
+                    # 1#补光开关
+                    'on_off1': {
+                        'change_type': ChangeType.DIGITAL_ON_OFF,
+                        'description': '1#补光开关'
+                    },
+                    # 2#补光开关
+                    'on_off2': {
+                        'change_type': ChangeType.DIGITAL_ON_OFF,
+                        'description': '2#补光开关'
+                    },
+                    # 3#补光开关
+                    'on_off3': {
+                        'change_type': ChangeType.DIGITAL_ON_OFF,
+                        'description': '3#补光开关'
+                    },
+                    # 4#补光开关
+                    'on_off4': {
+                        'change_type': ChangeType.DIGITAL_ON_OFF,
+                        'description': '4#补光开关'
+                    },
+                    # 1#光源选择
+                    'choose1': {
+                        'change_type': ChangeType.ENUM_STATE,
+                        'description': '1#光源选择'
+                    },
+                    # 2#光源选择
+                    'choose2': {
+                        'change_type': ChangeType.ENUM_STATE,
+                        'description': '2#光源选择'
+                    },
+                    # 3#光源选择
+                    'choose3': {
+                        'change_type': ChangeType.ENUM_STATE,
+                        'description': '3#光源选择'
+                    },
+                    # 4#光源选择
+                    'choose4': {
+                        'change_type': ChangeType.ENUM_STATE,
+                        'description': '4#光源选择'
+                    }
+                },
+                # 蘑菇信息设定点（进库信息变更监控）
+                'mushroom_info': {
+                    # 进库包数
+                    'in_num': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 1.0,  # 包数变化1个触发监控
+                        'description': '进库包数'
+                    },
+                    # 进库天数
+                    'in_day_num': {
+                        'change_type': ChangeType.ANALOG_VALUE,
+                        'threshold': 1.0,  # 天数变化1天触发监控
+                        'description': '进库天数'
+                    }
+                }
+            }
             
             # 遍历静态配置中的设备类型
             for device_type_key in datapoint_config.keys():
@@ -121,8 +287,8 @@ class DeviceSetpointChangeMonitor:
                     point_list = device_type_config.point_list
                     
                     # 检查是否有需要监控的设定点
-                    if device_type_key in device_types:
-                        monitored_points = self.config_manager.get_monitored_points(device_type_key)
+                    if device_type_key in setpoint_definitions:
+                        setpoint_defs = setpoint_definitions[device_type_key]
                         
                         for point in point_list:
                             point_name = point.get('point_name')
@@ -133,31 +299,24 @@ class DeviceSetpointChangeMonitor:
                                 continue
                             
                             # 使用 point_alias 进行匹配（而不是 point_name）
-                            if point_alias in monitored_points:
-                                # 从配置管理器获取阈值
-                                threshold = self.config_manager.get_threshold(device_type_key, point_alias)
-                                
-                                # 根据阈值确定变更类型
-                                change_type = self._determine_change_type(point, threshold)
+                            if point_alias in setpoint_defs:
+                                setpoint_def = setpoint_defs[point_alias]
                                 
                                 # 获取枚举映射（如果存在）
                                 enum_mapping = point.get('enum', {})
-                                
-                                # 获取描述信息
-                                description = point.get('description', f"{device_type_key}.{point_alias}")
                                 
                                 config = SetpointConfig(
                                     device_type=device_type_key,
                                     point_name=point_name,
                                     point_alias=point_alias,
-                                    change_type=change_type,
-                                    threshold=threshold,
-                                    description=description,
+                                    change_type=setpoint_def['change_type'],
+                                    threshold=setpoint_def.get('threshold'),
+                                    description=setpoint_def['description'],
                                     enum_mapping=enum_mapping if enum_mapping else None
                                 )
                                 configs.append(config)
                                 
-                                logger.debug(f"Added setpoint config: {device_type_key}.{point_name} -> {point_alias} ({change_type.value})")
+                                logger.debug(f"Added setpoint config: {device_type_key}.{point_name} -> {point_alias} ({setpoint_def['change_type'].value})")
                     else:
                         logger.debug(f"No setpoint definitions found for device type: {device_type_key}")
                         
@@ -180,32 +339,6 @@ class DeviceSetpointChangeMonitor:
             logger.error(f"Failed to initialize setpoint configs from static settings: {e}")
             # 如果从静态配置加载失败，返回空列表
             return []
-    
-    def _determine_change_type(self, point_config: Dict[str, Any], threshold: Optional[float]) -> ChangeType:
-        """
-        根据测点配置和阈值确定变更类型
-        
-        Args:
-            point_config: 测点配置字典
-            threshold: 阈值
-            
-        Returns:
-            ChangeType: 变更类型
-        """
-        # 检查是否有枚举配置
-        if point_config.get('enum'):
-            return ChangeType.ENUM_STATE
-        
-        # 检查数据类型
-        data_type = point_config.get('data_type', '').lower()
-        
-        if data_type in ['bool', 'boolean'] or 'on_off' in point_config.get('point_alias', ''):
-            return ChangeType.DIGITAL_ON_OFF
-        elif threshold is not None:
-            return ChangeType.ANALOG_VALUE
-        else:
-            # 默认为模拟量
-            return ChangeType.ANALOG_VALUE
     
     def get_room_setpoint_data(self, room_id: str, start_time: datetime, end_time: datetime) -> pd.DataFrame:
         """
@@ -415,23 +548,18 @@ class DeviceSetpointChangeMonitor:
             logger.error(f"Failed to detect setpoint changes: {e}")
             return []
     
-    def monitor_room_setpoint_changes(self, room_id: str, hours_back: Optional[int] = None) -> List[Dict[str, Any]]:
+    def monitor_room_setpoint_changes(self, room_id: str, hours_back: int = 1) -> List[Dict[str, Any]]:
         """
         监控指定库房的设定点变更（从当前时间往前指定小时数）
         
         Args:
             room_id: 库房号
-            hours_back: 往前查询的小时数，None 表示使用配置文件中的默认值
+            hours_back: 往前查询的小时数
             
         Returns:
             变更记录列表
         """
         try:
-            # 获取时间范围配置
-            if hours_back is None:
-                time_limits = self.config_manager.get_time_limits()
-                hours_back = time_limits.get('default_hours_back', 1)
-            
             # 计算时间范围
             end_time = datetime.now()
             start_time = end_time - timedelta(hours=hours_back)
@@ -455,24 +583,36 @@ class DeviceSetpointChangeMonitor:
             logger.error(f"Failed to monitor setpoint changes for room {room_id}: {e}")
             return []
     
-    def monitor_all_rooms_setpoint_changes(self, hours_back: Optional[int] = None) -> Dict[str, List[Dict[str, Any]]]:
+    def monitor_all_rooms_setpoint_changes(self, hours_back: int = 1) -> Dict[str, List[Dict[str, Any]]]:
         """
         监控所有库房的设定点变更
         
         房间获取策略：
-        1. 优先从配置管理器获取房间列表（已集成静态配置和默认配置的逻辑）
-        2. 并行处理所有房间的监控任务
+        1. 优先从 static_settings.mushroom.rooms 获取房间列表
+        2. 如果获取失败，使用默认房间列表作为备选
+        3. 并行处理所有房间的监控任务
         
         Args:
-            hours_back: 往前查询的小时数，None 表示使用配置文件中的默认值
+            hours_back: 往前查询的小时数
             
         Returns:
             按库房分组的变更记录字典 {room_id: [change_records]}
         """
         try:
-            # 从配置管理器获取房间列表
-            rooms = self.config_manager.get_default_rooms()
-            logger.info(f"Monitoring setpoint changes for {len(rooms)} rooms: {rooms}")
+            # 从静态配置获取所有库房列表
+            rooms = []
+            try:
+                rooms_cfg = getattr(static_settings.mushroom, 'rooms', {})
+                if rooms_cfg and hasattr(rooms_cfg, 'keys'):
+                    rooms = list(rooms_cfg.keys())
+                    logger.info(f"Found {len(rooms)} rooms from static config: {rooms}")
+                else:
+                    logger.warning("No rooms configuration found in static settings")
+                    rooms = ['607', '608', '611', '612']
+            except Exception as e:
+                logger.warning(f"Failed to get rooms from static config: {e}")
+                rooms = ['607', '608', '611', '612']
+                logger.info(f"Using default room list: {rooms}")
             
             all_changes = {}
             total_changes = 0
@@ -494,7 +634,6 @@ class DeviceSetpointChangeMonitor:
                 except Exception as e:
                     logger.error(f"Failed to monitor room {room_id}: {e}")
                     all_changes[room_id] = []  # 确保所有房间都有记录
-            
             logger.info(f"Monitoring completed: {successful_rooms}/{len(rooms)} rooms processed successfully")
             logger.info(f"Total setpoint changes detected across all rooms: {total_changes}")
             
@@ -528,32 +667,16 @@ class DeviceSetpointChangeMonitor:
             return True
         
         try:
-            # 获取数据库配置
-            db_config = self.config_manager.get_database_config()
-            table_name = db_config.get('table_name', 'device_setpoint_changes')
-            batch_size = db_config.get('batch_size', 1000)
-            
             # 转换为DataFrame
             df = pd.DataFrame(changes)
             
-            # 验证必要字段
-            required_fields = db_config.get('required_fields', [
-                'room_id', 'device_type', 'device_name', 'point_name',
-                'change_time', 'previous_value', 'current_value', 'change_type'
-            ])
-            
-            missing_fields = [field for field in required_fields if field not in df.columns]
-            if missing_fields:
-                raise ValueError(f"Missing required fields in change records: {missing_fields}")
-            
             # 存储到数据库
             df.to_sql(
-                table_name,
+                'device_setpoint_changes',
                 con=pgsql_engine,
                 if_exists='append',
                 index=False,
-                method='multi',
-                chunksize=batch_size
+                method='multi'
             )
             
             logger.info(f"Successfully stored {len(changes)} setpoint change records")
@@ -564,10 +687,50 @@ class DeviceSetpointChangeMonitor:
             return False
 
 
+# 数据库表定义
+Base = declarative_base()
+
+class DeviceSetpointChange(Base):
+    """设备设定点变更记录表"""
+    __tablename__ = "device_setpoint_changes"
+    
+    __table_args__ = (
+        Index('idx_room_change_time', 'room_id', 'change_time'),
+        Index('idx_device_point', 'device_name', 'point_name'),
+        Index('idx_change_time', 'change_time'),
+        Index('idx_device_type', 'device_type'),
+        {"comment": "设备设定点变更记录表"}
+    )
+    
+    id = Column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+        comment="主键ID (自增)"
+    )
+    
+    room_id = Column(String(10), nullable=False, comment="库房编号")
+    device_type = Column(String(50), nullable=False, comment="设备类型")
+    device_name = Column(String(100), nullable=False, comment="设备名称")
+    point_name = Column(String(100), nullable=False, comment="测点名称")
+    point_description = Column(String(200), nullable=True, comment="测点描述")
+    
+    change_time = Column(DateTime, nullable=False, comment="变更发生时间")
+    previous_value = Column(Float, nullable=False, comment="变更前值")
+    current_value = Column(Float, nullable=False, comment="变更后值")
+    
+    change_type = Column(String(50), nullable=False, comment="变更类型")
+    change_detail = Column(String(200), nullable=True, comment="变更详情")
+    change_magnitude = Column(Float, nullable=True, comment="变更幅度")
+    
+    detection_time = Column(DateTime, nullable=False, comment="检测时间")
+    created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
+
+
 def create_setpoint_monitor_table():
-    """创建设定点监控表（使用统一的表定义）"""
+    """创建设定点监控表"""
     try:
-        create_tables()
+        Base.metadata.create_all(bind=pgsql_engine, checkfirst=True)
         logger.info("Setpoint monitor table created/verified successfully")
     except Exception as e:
         logger.error(f"Failed to create setpoint monitor table: {e}")
@@ -576,26 +739,37 @@ def create_setpoint_monitor_table():
 def batch_monitor_setpoint_changes(
     start_time: datetime, 
     end_time: datetime, 
-    store_results: bool = True,
-    config_manager: Optional[SetpointConfigManager] = None
+    store_results: bool = True
 ) -> Dict[str, Any]:
     """
-    批量监控所有库房在指定时间范围内的设定点变更情况 (重构版本)
+    批量监控所有库房在指定时间范围内的设定点变更情况
     
-    改进说明：
-    1. 使用配置管理器获取房间列表和配置参数
-    2. 统一使用 create_table.py 中的数据库模型
-    3. 移除硬编码的房间列表和配置参数
-    4. 改进错误处理和日志记录
+    功能说明：
+    1. 获取所有可用库房列表
+    2. 遍历每个库房进行设定点变更分析
+    3. 检测各类设备的设定点变化（温度、湿度、CO2、开关状态等）
+    4. 将检测结果批量存储到数据库
+    
+    数据处理逻辑：
+    - 兼容现有的 point_name 和 point_alias 标识符转换机制
+    - 查询返回数据中 point_name 列实际包含 point_alias 值
+    - 维护完整的配置信息映射（设备类型、变更类型、阈值、描述等）
     
     Args:
         start_time: 分析起始时间
         end_time: 分析结束时间  
         store_results: 是否存储结果到数据库，默认True
-        config_manager: 配置管理器实例，None 表示使用全局实例
         
     Returns:
-        Dict[str, Any]: 包含处理结果的详细信息字典
+        Dict[str, Any]: 包含以下信息的字典
+        - success: bool, 操作是否成功
+        - total_rooms: int, 处理的库房总数
+        - successful_rooms: int, 成功处理的库房数
+        - total_changes: int, 检测到的变更总数
+        - changes_by_room: Dict[str, int], 按库房分组的变更数量
+        - processing_time: float, 处理耗时（秒）
+        - error_rooms: List[str], 处理失败的库房列表
+        - stored_records: int, 存储到数据库的记录数
         
     Raises:
         ValueError: 当时间参数无效时
@@ -608,20 +782,13 @@ def batch_monitor_setpoint_changes(
     if start_time >= end_time:
         raise ValueError("start_time must be earlier than end_time")
     
-    # 获取配置管理器
-    if config_manager is None:
-        config_manager = get_setpoint_config_manager()
-    
-    # 检查时间范围是否合理
+    # 检查时间范围是否合理（不超过30天）
     time_diff = end_time - start_time
-    time_limits = config_manager.get_time_limits()
-    max_days = time_limits.get('max_batch_days', 30)
-    
-    if time_diff.days > max_days:
-        logger.warning(f"Large time range detected: {time_diff.days} days (max recommended: {max_days}). This may take a long time to process.")
+    if time_diff.days > 30:
+        logger.warning(f"Large time range detected: {time_diff.days} days. This may take a long time to process.")
     
     processing_start = datetime.now()
-    logger.info(f"🚀 Starting batch setpoint monitoring (refactored version)")
+    logger.info(f"🚀 Starting batch setpoint monitoring")
     logger.info(f"   Time range: {start_time} ~ {end_time} ({time_diff})")
     
     # 初始化结果统计
@@ -644,12 +811,24 @@ def batch_monitor_setpoint_changes(
         
         # 创建监控器实例
         logger.info("🔧 Creating setpoint monitor instance...")
-        monitor = DeviceSetpointChangeMonitor(config_manager)
+        monitor = DeviceSetpointChangeMonitor()
         
         # 获取所有库房列表
-        logger.info("📍 Getting available rooms from configuration...")
-        rooms = config_manager.get_default_rooms()
-        logger.info(f"Found {len(rooms)} rooms: {rooms}")
+        logger.info("📍 Getting available rooms from static configuration...")
+        rooms = []
+        try:
+            rooms_cfg = getattr(static_settings.mushroom, 'rooms', {})
+            if rooms_cfg and hasattr(rooms_cfg, 'keys'):
+                rooms = list(rooms_cfg.keys())
+                logger.info(f"Found {len(rooms)} rooms from static config: {rooms}")
+            else:
+                logger.warning("No rooms configuration found in static settings")
+                rooms = ['607', '608', '611', '612']
+                logger.info(f"Using default room list: {rooms}")
+        except Exception as e:
+            logger.warning(f"Failed to get rooms from static config: {e}")
+            rooms = ['607', '608', '611', '612']
+            logger.info(f"Using default room list: {rooms}")
         
         result['total_rooms'] = len(rooms)
         
@@ -707,13 +886,31 @@ def batch_monitor_setpoint_changes(
             logger.info(f"💾 Storing {len(all_changes)} change records to database...")
             
             try:
-                success = monitor.store_setpoint_changes(all_changes)
-                if success:
-                    result['stored_records'] = len(all_changes)
-                    logger.info(f"✅ Successfully stored {len(all_changes)} change records to database")
-                else:
-                    result['stored_records'] = 0
-                    logger.error("Failed to store change records to database")
+                # 转换为DataFrame
+                df = pd.DataFrame(all_changes)
+                
+                # 验证必要字段
+                required_fields = [
+                    'room_id', 'device_type', 'device_name', 'point_name', 
+                    'change_time', 'previous_value', 'current_value', 'change_type'
+                ]
+                
+                missing_fields = [field for field in required_fields if field not in df.columns]
+                if missing_fields:
+                    raise ValueError(f"Missing required fields in change records: {missing_fields}")
+                
+                # 批量插入数据库
+                df.to_sql(
+                    'device_setpoint_changes',
+                    con=pgsql_engine,
+                    if_exists='append',
+                    index=False,
+                    method='multi',
+                    chunksize=1000  # 分批插入，提高性能
+                )
+                
+                result['stored_records'] = len(df)
+                logger.info(f"✅ Successfully stored {len(df)} change records to database")
                 
             except Exception as e:
                 logger.error(f"Failed to store change records to database: {e}")
@@ -757,29 +954,22 @@ def batch_monitor_setpoint_changes(
         raise
 
 
-def validate_batch_monitoring_environment(config_manager: Optional[SetpointConfigManager] = None) -> bool:
+def validate_batch_monitoring_environment() -> bool:
     """
-    验证批量监控环境的可用性 (重构版本)
+    验证批量监控环境的可用性
     
     检查项目：
     1. 数据库连接可用性
-    2. 配置文件可访问性
+    2. 静态配置文件可访问性
     3. 必要模块导入状态
     4. 监控器实例创建能力
-    
-    Args:
-        config_manager: 配置管理器实例，None 表示使用全局实例
     
     Returns:
         bool: 环境验证是否通过
     """
-    logger.info("🔍 Validating batch monitoring environment (refactored version)...")
+    logger.info("🔍 Validating batch monitoring environment...")
     
     try:
-        # 获取配置管理器
-        if config_manager is None:
-            config_manager = get_setpoint_config_manager()
-        
         # 检查数据库连接
         logger.debug("Checking database connection...")
         try:
@@ -789,18 +979,6 @@ def validate_batch_monitoring_environment(config_manager: Optional[SetpointConfi
             logger.debug("✅ Database connection OK")
         except Exception as e:
             logger.error(f"❌ Database connection failed: {e}")
-            return False
-        
-        # 检查配置管理器
-        logger.debug("Checking configuration manager...")
-        try:
-            summary = config_manager.get_config_summary()
-            if summary['device_types_count'] == 0:
-                logger.error("❌ No device types configured")
-                return False
-            logger.debug(f"✅ Configuration manager OK: {summary}")
-        except Exception as e:
-            logger.error(f"❌ Configuration manager check failed: {e}")
             return False
         
         # 检查静态配置
@@ -819,7 +997,7 @@ def validate_batch_monitoring_environment(config_manager: Optional[SetpointConfi
         # 检查监控器创建
         logger.debug("Checking monitor instance creation...")
         try:
-            monitor = DeviceSetpointChangeMonitor(config_manager)
+            monitor = DeviceSetpointChangeMonitor()
             if not monitor.setpoint_configs:
                 logger.error("❌ Monitor has no setpoint configurations")
                 return False
@@ -845,48 +1023,37 @@ def validate_batch_monitoring_environment(config_manager: Optional[SetpointConfi
         return False
 
 
-def create_setpoint_monitor(config_manager: Optional[SetpointConfigManager] = None) -> DeviceSetpointChangeMonitor:
-    """
-    创建设定点监控器实例 (重构版本)
-    
-    Args:
-        config_manager: 配置管理器实例，None 表示使用全局实例
-        
-    Returns:
-        DeviceSetpointChangeMonitor: 监控器实例
-    """
-    return DeviceSetpointChangeMonitor(config_manager)
+def create_setpoint_monitor() -> DeviceSetpointChangeMonitor:
+    """创建设定点监控器实例"""
+    return DeviceSetpointChangeMonitor()
 
 
 if __name__ == "__main__":
-    # 测试代码 - 演示重构后的设定点监控系统功能
-    print("🚀 启动设定点变更监控系统测试 (重构版本)")
-    print("=" * 70)
+    # 测试代码 - 演示设定点监控系统的功能
+    print("🚀 启动设定点变更监控系统测试")
+    print("=" * 60)
     
     # 环境验证
-    # print("\n🔍 验证批量监控环境...")
-    # if not validate_batch_monitoring_environment():
-    #     print("❌ 环境验证失败，请检查配置")
-    #     exit(1)
-    
-    # 创建配置管理器
-    config_manager = get_setpoint_config_manager()
-    
-    # 显示配置摘要
-    summary = config_manager.get_config_summary()
-    print(f"\n📋 配置摘要:")
-    print(f"  配置文件: {summary['config_path']}")
-    print(f"  默认房间数: {summary['default_rooms_count']}")
-    print(f"  设备类型数: {summary['device_types_count']}")
-    print(f"  监控点总数: {summary['total_monitored_points']}")
-    print(f"  批量监控: {'启用' if summary['monitoring_enabled']['batch'] else '禁用'}")
-    print(f"  实时监控: {'启用' if summary['monitoring_enabled']['real_time'] else '禁用'}")
+    print("\n🔍 验证批量监控环境...")
+    if not validate_batch_monitoring_environment():
+        print("❌ 环境验证失败，请检查配置")
+        exit(1)
     
     # 创建监控器实例
-    monitor = create_setpoint_monitor(config_manager)
+    monitor = create_setpoint_monitor()
     
-    # 显示从配置加载的设定点配置
-    print(f"\n📋 从配置加载的设定点监控配置 (共 {len(monitor.setpoint_configs)} 个):")
+    # 创建数据库表
+    create_setpoint_monitor_table()
+    
+    # 显示架构设计说明
+    print("\n📖 系统架构说明:")
+    print("1. 配置层：从 static_config.json 读取设备配置")
+    print("2. 查询层：使用 point_alias 过滤设定点数据")
+    print("3. 数据层：get_data 模块进行标识符转换")
+    print("4. 监控层：基于 point_alias 进行配置映射")
+    
+    # 显示从静态配置加载的设定点配置
+    print(f"\n📋 从静态配置加载的设定点监控配置 (共 {len(monitor.setpoint_configs)} 个):")
     device_types = {}
     for config in monitor.setpoint_configs:
         device_type = config.device_type
@@ -896,22 +1063,19 @@ if __name__ == "__main__":
     
     for device_type, configs in device_types.items():
         print(f"\n🔧 {device_type.upper()} ({len(configs)} 个监控点):")
-        for config in configs[:3]:  # 显示前3个
+        for config in configs:
             threshold_info = f", 阈值: {config.threshold}" if config.threshold else ""
             enum_info = f", 枚举: {list(config.enum_mapping.keys())}" if config.enum_mapping else ""
             print(f"   • {config.point_name} -> {config.point_alias}")
             print(f"     类型: {config.change_type.value}{threshold_info}{enum_info}")
             print(f"     描述: {config.description}")
-        if len(configs) > 3:
-            print(f"   ... 还有 {len(configs) - 3} 个监控点")
     
     # 测试单个库房监控
     print(f"\n🔍 测试单个库房监控:")
-    rooms = config_manager.get_default_rooms()
-    test_room_id = rooms[0] if rooms else "611"
-    print(f"正在监控库房 {test_room_id} 的设定点变更（使用配置的默认时间范围）...")
+    test_room_id = "611"
+    print(f"正在监控库房 {test_room_id} 的设定点变更（最近1小时）...")
     
-    changes = monitor.monitor_room_setpoint_changes(test_room_id)
+    changes = monitor.monitor_room_setpoint_changes(test_room_id, hours_back=1)
     
     if changes:
         print(f"✅ 检测到 {len(changes)} 个设定点变更:")
@@ -927,15 +1091,12 @@ if __name__ == "__main__":
         print("ℹ️ 未检测到设定点变更")
     
     # 测试批量监控功能
-    print(f"\n🚀 测试批量监控功能 (重构版本):")
+    print(f"\n🚀 测试批量监控功能:")
     print("正在执行批量设定点变更分析...")
     
-    # 设定测试时间范围
-    time_limits = config_manager.get_time_limits()
-    default_hours = time_limits.get('default_hours_back', 1)
-    
+    # 设定测试时间范围（最近2小时）
     end_time = datetime.now()
-    start_time = end_time - timedelta(hours=default_hours * 2)  # 使用配置的2倍时间
+    start_time = end_time - timedelta(hours=2)
     
     print(f"时间范围: {start_time.strftime('%Y-%m-%d %H:%M:%S')} ~ {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
     
@@ -944,8 +1105,7 @@ if __name__ == "__main__":
         result = batch_monitor_setpoint_changes(
             start_time=start_time,
             end_time=end_time,
-            store_results=True,
-            config_manager=config_manager
+            store_results=True
         )
         
         if result['success']:
@@ -969,16 +1129,45 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ 批量监控异常: {e}")
     
-    print(f"\n🎯 重构版本测试完成！")
-    print("=" * 70)
+    # 边界条件测试
+    print(f"\n🧪 边界条件测试:")
     
-    # 重构改进总结
-    print(f"\n📋 重构改进总结:")
-    print("1. ✅ 统一模型定义：使用 create_table.py 中的 DeviceSetpointChange")
-    print("2. ✅ 配置文件化：硬编码值移到 setpoint_monitor_config.json")
-    print("3. ✅ 模块化设计：分离配置管理器和数据库操作")
-    print("4. ✅ 代码一致性：统一导入、命名和错误处理")
-    print("5. ✅ 灵活配置：支持动态配置和热重载")
-    print("6. ✅ 改进日志：更详细的操作日志和错误信息")
-    print("7. ✅ 环境验证：完整的环境检查和边界条件处理")
-    print("8. ✅ 向后兼容：保持原有API接口不变")
+    # 测试无效时间范围
+    try:
+        invalid_result = batch_monitor_setpoint_changes(
+            start_time=end_time,  # 开始时间晚于结束时间
+            end_time=start_time,
+            store_results=False
+        )
+        print("❌ 应该抛出异常但没有")
+    except ValueError as e:
+        print(f"✅ 正确捕获无效时间范围: {e}")
+    except Exception as e:
+        print(f"⚠️ 意外异常: {e}")
+    
+    # 测试空时间范围
+    try:
+        empty_start = datetime.now() - timedelta(minutes=1)
+        empty_end = datetime.now() - timedelta(minutes=1)
+        empty_result = batch_monitor_setpoint_changes(
+            start_time=empty_start,
+            end_time=empty_end,
+            store_results=False
+        )
+        print(f"✅ 空时间范围测试: 检测到 {empty_result['total_changes']} 个变更")
+    except Exception as e:
+        print(f"⚠️ 空时间范围测试异常: {e}")
+    
+    print(f"\n🎯 测试完成！")
+    print("=" * 60)
+    
+    # 功能总结
+    print(f"\n📋 批量监控功能特性:")
+    print("1. ✅ 支持指定时间范围的批量分析")
+    print("2. ✅ 自动获取所有可用库房列表")
+    print("3. ✅ 并行处理多个库房的监控任务")
+    print("4. ✅ 完整的错误处理和重试机制")
+    print("5. ✅ 详细的进度反馈和统计信息")
+    print("6. ✅ 高效的批量数据库存储")
+    print("7. ✅ 环境验证和边界条件检查")
+    print("8. ✅ 兼容现有的标识符转换机制")

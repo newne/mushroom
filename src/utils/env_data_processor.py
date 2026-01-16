@@ -199,8 +199,6 @@ class EnvironmentDataProcessor:
                     in_date = collection_time.date()  # 使用采集日期作为默认值
             except ValueError:
                 in_date = collection_time.date()
-            
-            growth_stage = "normal" if 1 <= growth_day <= 27 else "non_growth"
 
             # === 2. 冷风机 ===
             air_cooler_config = {
@@ -273,7 +271,7 @@ class EnvironmentDataProcessor:
 
             # === 7. 语义描述（用于 CLIP 嵌入）===
             # 使用简化的身份元数据模板，专注于以图搜图
-            text_for_embedding = f"Mushroom Room {room_id}, {growth_stage} stage, Day {growth_day}."
+            text_for_embedding = f"Mushroom Room {room_id}, Day {growth_day}."
             semantic_description = text_for_embedding
 
             # === 8. 构建完整记录 ===
@@ -281,11 +279,9 @@ class EnvironmentDataProcessor:
                 "room_id": room_id,
                 "collection_datetime": collection_time,
                 "image_path": image_path,
-                "file_name": image_path.split("/")[-1],
                 "in_date": in_date,
                 "in_num": in_num,
                 "growth_day": growth_day,
-                "growth_stage": growth_stage,
                 "air_cooler_config": air_cooler_config,  # 直接传递字典，不序列化
                 "fresh_fan_config": fresh_fan_config,    # 直接传递字典，不序列化
                 "light_count": light_count,
@@ -605,7 +601,6 @@ if __name__ == "__main__":
     if env_data:
         print("✅ 环境数据获取成功:")
         print(f"   语义描述: {env_data['semantic_description']}")
-        print(f"   生长阶段: {env_data['growth_stage']}")
         print(f"   补光数量: {env_data['light_count']}")
     else:
         print("❌ 环境数据获取失败")

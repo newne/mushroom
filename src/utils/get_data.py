@@ -8,6 +8,7 @@
 """
 
 import json
+from typing import Optional
 
 import pandas as pd
 import requests
@@ -23,6 +24,128 @@ class GetData(SendRequest):
         self.host = host
         self.port = port
         self.urls = urls
+        self._cached_prompt = None  # 缓存提示词，避免频繁请求
+
+    def get_mushroom_prompt(self) -> Optional[str]:
+        """
+        从API动态获取蘑菇描述提示词
+        
+        Returns:
+            str: 获取到的提示词内容，如果失败则返回None
+        """
+        # 如果已有缓存，直接返回
+        if self._cached_prompt:
+            return self._cached_prompt
+            
+        try:
+            # 从配置文件读取API相关配置
+            # Dynaconf会将配置键转换为大小写两种形式，尝试两种方式访问
+            prompt_url = None
+            if hasattr(self.urls, 'prompt_mushroom_description'):
+                prompt_url = self.urls.prompt_mushroom_description
+            elif hasattr(self.urls, 'PROMPT_MUSHROOM_DESCRIPTION'):
+                prompt_url = self.urls.PROMPT_MUSHROOM_DESCRIPTION
+            
+            if not prompt_url:
+                logger.warning("[Prompt API] 配置文件中未找到prompt_mushroom_description，使用默认提示词")
+                fallback_prompt = getattr(settings.llama, 'mushroom_descripe_prompt', None)
+                return fallback_prompt
+            
+            # 格式化URL
+            prompt_url = prompt_url.format(host=self.host)
+            
+            # 检查是否有prompt配置
+            if not hasattr(settings, 'prompt'):
+                logger.warning("[Prompt API] 配置文件中未找到prompt配置，使用默认提示词")
+                fallback_prompt = getattr(settings.llama, 'mushroom_descripe_prompt', None)
+                return fallback_prompt
+                
+            backend_token = settings.prompt.backend_token
+            
+            headers = {
+                "Authorization": backend_token,
+                "User-Agent": "Apifox/1.0.0 (https://apifox.com)",
+                "Accept": "*/*",
+                "Connection": "keep-alive"
+            }
+            
+            logger.info(f"[Prompt API] 正在从API获取提示词: {prompt_url}")
+            
+            # 发送GET请求
+            response = requests.get(
+                prompt_url,
+                headers=headers,
+                timeout=10  # 设置10秒超时
+            )
+            
+            # 检查响应状态
+            if response.status_code == 200:
+                data = response.json()
+                
+                # 根据API响应结构提取提示词内容
+                if isinstance(data, dict):
+                    # 先记录完整响应以便调试
+                    logger.debug(f"[Prompt API] API响应结构: {list(data.keys())}")
+                    
+                    prompt_content = None
+                    
+                    # API返回格式: {"success": true, "data": {"content": {"template": "..."}}}
+                    if 'data' in data and isinstance(data['data'], dict):
+                        data_obj = data['data']
+                        if 'content' in data_obj and isinstance(data_obj['content'], dict):
+                            content_obj = data_obj['content']
+                            if 'template' in content_obj and isinstance(content_obj['template'], str):
+                                prompt_content = content_obj['template']
+                                logger.debug("[Prompt API] 从data.content.template获取提示词")
+                    
+                    # 如果上面的路径没找到，尝试其他可能的字段
+                    if not prompt_content:
+                        for field in ['content', 'prompt', 'instruction', 'text', 'roleInstruction']:
+                            if field in data and isinstance(data[field], str):
+                                prompt_content = data[field]
+                                logger.debug(f"[Prompt API] 从字段 '{field}' 获取提示词")
+                                break
+                        
+                        # 尝试data嵌套的其他字段
+                        if not prompt_content and 'data' in data and isinstance(data['data'], dict):
+                            data_obj = data['data']
+                            for field in ['content', 'prompt', 'instruction', 'text', 'roleInstruction', 'template']:
+                                if field in data_obj and isinstance(data_obj[field], str):
+                                    prompt_content = data_obj[field]
+                                    logger.debug(f"[Prompt API] 从data.{field}获取提示词")
+                                    break
+                    
+                    if prompt_content:
+                        self._cached_prompt = prompt_content
+                        logger.info(f"[Prompt API] 成功获取提示词，长度: {len(prompt_content)} 字符")
+                        return prompt_content
+                    else:
+                        logger.warning(f"[Prompt API] API响应中未找到提示词内容")
+                        logger.debug(f"[Prompt API] 响应顶层键: {list(data.keys())}")
+                        if 'data' in data:
+                            logger.debug(f"[Prompt API] data键: {list(data['data'].keys()) if isinstance(data['data'], dict) else type(data['data'])}")
+                else:
+                    logger.warning(f"[Prompt API] API响应格式异常: {type(data)}")
+            else:
+                logger.error(f"[Prompt API] API请求失败，状态码: {response.status_code}, 响应: {response.text}")
+                
+        except requests.exceptions.Timeout:
+            logger.error("[Prompt API] API请求超时")
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"[Prompt API] API连接失败: {e}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[Prompt API] API请求异常: {e}")
+        except json.JSONDecodeError as e:
+            logger.error(f"[Prompt API] API响应JSON解析失败: {e}")
+        except Exception as e:
+            logger.error(f"[Prompt API] 获取提示词时发生未知错误: {e}")
+        
+        # 如果API获取失败，返回配置文件中的默认提示词作为后备
+        logger.warning("[Prompt API] API获取失败，使用配置文件中的默认提示词")
+        fallback_prompt = getattr(settings.llama, 'mushroom_descripe_prompt', None)
+        if fallback_prompt:
+            logger.info("[Prompt API] 已加载配置文件中的后备提示词")
+        return fallback_prompt
 
     def get_history_data(
         self,

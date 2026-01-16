@@ -96,13 +96,35 @@ add_reduction_chiller_key = dict(
 # 假设settings.mysql是一个包含数据库配置的对象
 engine_url = f"{settings.mysql.database_type}+{settings.mysql.driver}://{settings.mysql.username}:{quote_plus(settings.mysql.password)}@{settings.mysql.host}:{settings.mysql.port}/{settings.mysql.database_name}"
 
+# MySQL引擎配置 - 针对Docker网络环境优化
 mysql_engine = sqlalchemy.create_engine(
-    engine_url, pool_pre_ping=True, pool_recycle=1800
+    engine_url,
+    pool_pre_ping=True,          # 连接前检查连接是否有效
+    pool_recycle=1800,            # 连接回收时间（30分钟）
+    pool_size=5,                  # 连接池大小
+    max_overflow=10,              # 最大溢出连接数
+    pool_timeout=30,              # 获取连接的超时时间（秒）
+    connect_args={
+        "connect_timeout": 10     # TCP连接超时（秒）- 适应Docker网络
+    },
+    echo=False                    # 不输出SQL日志
 )
 pg_engine_url = f"{settings.pgsql.database_type}+{settings.pgsql.driver}://{settings.pgsql.username}:{quote_plus(settings.pgsql.password)}@{settings.pgsql.host}:{settings.pgsql.port}/{settings.pgsql.database_name}"
 
+# PostgreSQL引擎配置 - 针对Docker网络环境优化
 pgsql_engine = sqlalchemy.create_engine(
-    pg_engine_url, pool_pre_ping=True, pool_recycle=1800
+    pg_engine_url,
+    pool_pre_ping=True,          # 连接前检查连接是否有效
+    pool_recycle=1800,            # 连接回收时间（30分钟）
+    pool_size=5,                  # 连接池大小
+    max_overflow=10,              # 最大溢出连接数
+    pool_timeout=30,              # 获取连接的超时时间（秒）
+    connect_args={
+        "connect_timeout": 10,    # TCP连接超时（秒）- 适应Docker网络
+        "options": "-c statement_timeout=300000"  # SQL语句超时（5分钟）
+    },
+    echo=False,                   # 不输出SQL日志
+    future=True                   # 使用SQLAlchemy 2.0风格
 )
 
 

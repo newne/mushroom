@@ -27,11 +27,11 @@ class MushroomImageEmbedding(Base):
     # 修正点：这里必须是一个元组，字典作为最后一个元素
     __table_args__ = (
         # --- 索引定义 ---
-        Index('idx_room_stage', 'room_id', 'growth_stage'),  # 库房+阶段查询
+        Index('idx_room_growth_day', 'room_id', 'growth_day'),  # 库房+生长天数查询
         Index('idx_collection_time', 'collection_datetime'),  # 时间范围查询
-        Index('idx_in_date', 'in_date'),  # # 2. 时间索引：进库日期（支持范围查询）
-        # 4. 唯一索引：图片路径（去重）
-        Index('uq_image_path', 'image_path', unique=True),
+        Index('idx_in_date', 'in_date'),  # 时间索引：进库日期（支持范围查询）
+        Index('uq_image_path', 'image_path', unique=True),  # 唯一索引：图片路径（去重）
+        Index('idx_image_quality', 'image_quality_score'),  # 图像质量索引（支持质量筛选）
         # --- 表级参数字典（必须放在最后） ---
         {"comment": "蘑菇图片多模态向量存储表（含结构化控制参数）"}
     )
@@ -44,12 +44,13 @@ class MushroomImageEmbedding(Base):
     )
     collection_datetime = Column(DateTime, nullable=False, comment="采集时间")
     image_path = Column(Text, nullable=False, unique=True, comment="图片存储路径")
-    file_name = Column(String(255), nullable=False, comment="原始文件名")
     room_id = Column(String(10), nullable=False, comment="库房编号")
     in_date = Column(Date, nullable=False, comment="进库日期 (YYYY-MM-DD)")
     in_num = Column(Integer, nullable=True, comment="进库包数")
     growth_day = Column(Integer, nullable=False, comment="生长天数")
-    growth_stage = Column(String(20), nullable=False, comment="生长阶段")
+    
+    # 图像质量评价字段
+    image_quality_score = Column(Float, nullable=True, comment="图像质量评分 (0-100)")
 
     air_cooler_config = Column(
         JSON,
@@ -121,9 +122,6 @@ class MushroomImageEmbedding(Base):
     
     # LLaMA生成的蘑菇生长情况描述
     llama_description = Column(Text, nullable=True, comment="LLaMA生成的蘑菇生长情况描述")
-    
-    # 完整的文本描述（身份元数据 + LLaMA描述）
-    full_text_description = Column(Text, nullable=True, comment="完整文本描述（身份元数据 + LLaMA描述）")
 
     # 假设 EMBEDDING_DIM 已定义
     embedding = Column(Vector(EMBEDDING_DIM), nullable=False, comment="图像嵌入向量")

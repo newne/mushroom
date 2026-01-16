@@ -35,12 +35,7 @@ def parse_iot_dataframe_to_records(
             'growth_day': df.get((room_id, 'mushroom_info', 'in_day_num'))
         }, index=df.index).fillna(0).infer_objects(copy=False)  # <--- ✅ 修复点
 
-        # 生长阶段判断
-        growth_stage = np.where(
-            (info_df['growth_day'] >= 1) & (info_df['growth_day'] <= 27),
-            "normal",
-            "non_growth"
-        )
+        # 注意：growth_stage 字段已从数据库表中删除，此处不再需要计算
 
         # 2. 环境传感器
         env_df = pd.DataFrame({
@@ -105,7 +100,6 @@ def parse_iot_dataframe_to_records(
         env_data = env_df.to_dict('records')
         i_data = info_df.to_dict('records')
 
-        gstages = growth_stage.tolist()
         l_counts = light_count.tolist()
         h_counts = humidifier_count.tolist()
 
@@ -114,13 +108,10 @@ def parse_iot_dataframe_to_records(
                 "room_id": room_id,
                 "collection_datetime": ct,
                 "image_path": image_paths.get((idx, room_id), f"/default/{room_id}_{ct.strftime('%Y%m%d_%H%M%S')}.jpg"),
-                "file_name": image_paths.get((idx, room_id), "").split("/")[
-                                 -1] or f"{room_id}_{ct.strftime('%Y%m%d_%H%M%S')}.jpg",
                 "in_date": date(i['in_year'], i['in_month'], i['in_day']) if i['in_year'] and i['in_month'] and i[
                     'in_day'] else date(1970, 1, 1),
                 "in_num": i['in_num'],
                 "growth_day": i['growth_day'],
-                "growth_stage": gstg,
                 "air_cooler_config": json.dumps(ac, ensure_ascii=False),
                 "fresh_fan_config": json.dumps({
                     "mode": ff['mode'], "control": ff['control'], "status": ff['status'],
@@ -142,8 +133,8 @@ def parse_iot_dataframe_to_records(
                     right_status=hu['r_status'], right_on=hu['r_on'], right_off=hu['r_off']
                 )
             }
-            for idx, ct, i, gstg, ac, ff, lt, hu, env, lc, hc in zip(
-                indices, times, i_data, gstages, ac_data, ff_data, lt_data, hu_data, env_data, l_counts, h_counts
+            for idx, ct, i, ac, ff, lt, hu, env, lc, hc in zip(
+                indices, times, i_data, ac_data, ff_data, lt_data, hu_data, env_data, l_counts, h_counts
             )
         ]
         all_records.extend(records)

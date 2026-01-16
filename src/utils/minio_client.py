@@ -26,6 +26,10 @@ class MinIOClient:
         self.config = self._load_config()
         self.client = self._create_client()
         
+        # 延迟导入以避免循环依赖
+        from utils.mushroom_image_processor import MushroomImagePathParser
+        self.path_parser = MushroomImagePathParser()
+        
     def _load_config(self) -> Dict[str, Any]:
         """从全局settings加载配置"""
         try:
@@ -261,21 +265,21 @@ class MinIOClient:
         
         Args:
             object_name: 对象名称，格式如 "611/20251219/611_192168001237_20251127_20251219170000.jpg"
+                        或 "8/20260105/8_1921681231_202615_20260105121130.jpg" (6位日期格式)
             
         Returns:
             解析出的时间对象，失败返回None
         """
         try:
-            # 正则表达式匹配路径格式: {库房号}/{日期}/{库房号}_{IP}_{采集日期}_{详细时间}.jpg
-            pattern = r'(\d+)/(\d{8})/\d+_\d+_\d{7,8}_(\d{14})\.jpg'
-            match = re.match(pattern, object_name)
+            # 使用统一的路径解析器
+            image_info = self.path_parser.parse_path(object_name)
             
-            if match:
-                detailed_time = match.group(3)  # 获取详细时间部分
-                # 解析时间格式: YYYYMMDDHHMMSS
-                return datetime.strptime(detailed_time, "%Y%m%d%H%M%S")
+            if image_info:
+                # 从详细时间字段解析datetime
+                # detailed_time格式: YYYYMMDDHHMMSS (14位)
+                return datetime.strptime(image_info.detailed_time, "%Y%m%d%H%M%S")
             else:
-                logger.warning(f"无法解析图片路径时间: {object_name}")
+                logger.warning(f"无法解析图片路径: {object_name}")
                 return None
                 
         except Exception as e:

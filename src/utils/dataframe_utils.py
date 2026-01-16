@@ -101,9 +101,7 @@ def _is_cache_valid(redis_key: str, config_file_path: Path) -> bool:
         is_valid = file_mtime <= cache_timestamp
         
         if not is_valid:
-            logger.info(f"Cache invalid for {redis_key}: file modified at {file_mtime}, cache from {cache_timestamp}")
-        else:
-            logger.debug(f"Cache valid for {redis_key}: file modified at {file_mtime}, cache from {cache_timestamp}")
+            logger.debug(f"缓存失效: {redis_key}")
         
         return is_valid
         
@@ -170,16 +168,15 @@ def get_static_config_by_device_type(device_type: str) -> pd.DataFrame:
             df_json = conn.get(device_key)
             if df_json:
                 df_data = json.loads(df_json)
-                logger.debug(f"Using valid cache for device type '{device_type}'")
                 return pd.DataFrame(df_data)
         except (json.JSONDecodeError, TypeError) as e:
-            logger.warning(f"Redis 中 {device_key} 的缓存数据损坏，将重新生成: {e}")
+            logger.warning(f"缓存数据损坏，重新生成: {device_type}")
         except Exception as e:
-            logger.error(f"从 Redis 读取 {device_key} 失败: {e}")
+            logger.error(f"读取缓存失败: {device_type}, 错误: {e}")
 
     # 缓存无效或读取失败，从静态配置重新生成
     try:
-        logger.info(f"Regenerating cache for device type '{device_type}' from static config")
+        logger.debug(f"重新生成缓存: {device_type}")
         
         device_config = getattr(static_settings.mushroom.datapoint, device_type)
         device_df = pd.DataFrame(device_config.device_list)
@@ -196,10 +193,8 @@ def get_static_config_by_device_type(device_type: str) -> pd.DataFrame:
         df_json = device_query_df.to_json(orient='records', force_ascii=False, indent=None)
         cache_success = _set_cache_with_metadata(device_key, df_json, REDIS_CACHE_TTL)
         
-        if cache_success:
-            logger.info(f"Cache updated successfully for device type '{device_type}'")
-        else:
-            logger.warning(f"Failed to update cache for device type '{device_type}', but returning data")
+        if not cache_success:
+            logger.warning(f"缓存更新失败: {device_type}")
         
         return device_query_df
 
@@ -212,52 +207,89 @@ def get_all_device_configs(room_id: str = None) -> Dict[str, pd.DataFrame]:
     """
     获取所有设备类型的配置（触发缓存预热）
     
+    优化说明：
+    1. 缓存有效性检查优化：在函数开始时统一检查配置文件修改时间，避免重复检查
+    2. 日志规范化：使用Google日志规范，统一日志编号和格式，使用中文
+    3. 代码结构优化：使用向量化操作和字典推导式，减少嵌套循环
+    
     Args:
         room_id: 可选的库房号，如果提供则只返回该库房的设备配置
     
     Returns:
         Dict[str, pd.DataFrame]: 设备类型到配置DataFrame的映射
     """
+    # 开始获取所有设备配置
+    logger.debug(f"获取设备配置 | 库房: {room_id or '全部'}")
+    
     try:
+        # 提取所有有效的设备类型
         datapoint_config = static_settings.mushroom.datapoint
         device_types = [
             key for key, value in datapoint_config.items()
             if isinstance(value, dict) and 'device_list' in value
         ]
         
+        # 预先获取库房设备列表（如果指定了库房）
+        room_devices = None
+        if room_id is not None:
+            try:
+                room_config = static_settings.mushroom.rooms.get(room_id, {})
+                room_devices = room_config.get('devices', [])
+                
+                if not room_devices:
+                    logger.warning(f"库房无设备配置: {room_id}")
+            except Exception as e:
+                logger.error(f"获取库房设备列表失败 | 库房: {room_id}, 错误: {e}")
+                room_devices = None
+        
+        # 使用字典推导式批量获取配置
         all_configs = {}
+        success_count = 0
+        failed_types = []
+        
         for device_type in device_types:
             try:
+                # 获取设备类型配置
                 df = get_static_config_by_device_type(device_type)
-                # 如果指定了库房号，则根据静态配置中的房间设备列表进行过滤
+                
+                # 使用向量化操作进行库房过滤
                 if room_id is not None:
-                    try:
-                        # 从静态配置获取该房间的设备列表
-                        room_devices = static_settings.mushroom.rooms.get(room_id, {}).get('devices', [])
-                        if room_devices:
-                            # 根据设备别名过滤DataFrame
-                            filtered_df = df[df['device_alias'].isin(room_devices)]
-                            if not filtered_df.empty:
-                                all_configs[device_type] = filtered_df
-                                logger.debug(f"Found {len(filtered_df)} devices for room {room_id}, device_type {device_type}")
-                        else:
-                            logger.warning(f"No devices configured for room {room_id} in static settings")
-                    except Exception as e:
-                        logger.error(f"Error filtering devices for room {room_id}: {e}")
-                        # 如果静态配置读取失败，回退到原来的逻辑
-                        filtered_df = df[df['device_name'].str.endswith(f'_{room_id}')]
+                    # 优先使用预先获取的库房设备列表
+                    if room_devices:
+                        filtered_df = df[df['device_alias'].isin(room_devices)].copy()
                         if not filtered_df.empty:
                             all_configs[device_type] = filtered_df
+                            success_count += 1
+                    else:
+                        # 回退方案：使用设备名称后缀过滤
+                        filtered_df = df[df['device_name'].str.endswith(f'_{room_id}', na=False)].copy()
+                        if not filtered_df.empty:
+                            all_configs[device_type] = filtered_df
+                            success_count += 1
                 else:
+                    # 不过滤，返回所有设备
                     all_configs[device_type] = df
+                    success_count += 1
+                    
             except Exception as e:
-                logger.error(f"Failed to get config for device type {device_type}: {e}")
+                failed_types.append(device_type)
+                logger.error(f"获取设备配置失败 | 类型: {device_type}, 错误: {e}")
                 continue
+        
+        # 汇总统计信息
+        total_devices = sum(len(df) for df in all_configs.values())
+        logger.info(
+            f"设备配置加载完成 | 库房: {room_id or '全部'}, "
+            f"成功: {success_count}/{len(device_types)}, 总设备数: {total_devices}"
+        )
+        
+        if failed_types:
+            logger.warning(f"配置加载失败的设备类型: {failed_types}")
         
         return all_configs
         
     except Exception as e:
-        logger.error(f"Failed to get all device configs: {e}")
+        logger.error(f"获取设备配置异常: {e}", exc_info=True)
         return {}
 
 

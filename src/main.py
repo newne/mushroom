@@ -3,6 +3,7 @@ from utils.exception_listener import router
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 import os
+import sys
 
 from utils.loguru_setting import loguru_setting
 
@@ -30,6 +31,16 @@ app.openapi = custom_openapi
 app.include_router(router)
 
 if __name__ == '__main__':
+    # 设置日志
     loguru_setting()
-    # Start the main scheduling tasks
-    main()
+    
+    # 检查是否在容器环境中
+    if os.path.exists('/app') and os.getcwd() == '/app':
+        print("[MAIN] 检测到容器环境，启动调度器...")
+        # 在容器中运行调度器
+        main()
+    else:
+        print("[MAIN] 检测到开发环境，请使用 uvicorn 启动 FastAPI 或直接运行调度器")
+        print("FastAPI: uvicorn main:app --host 0.0.0.0 --port 5000")
+        print("调度器: python -c 'from scheduling.optimized_scheduler import main; main()'")
+        sys.exit(0)

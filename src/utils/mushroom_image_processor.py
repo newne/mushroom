@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
+from dateutil import parser as date_parser
 from loguru import logger
 from sqlalchemy.orm import sessionmaker
 
@@ -48,61 +49,103 @@ class MushroomImagePathParser:
         # 文件路径正则表达式 - 支持多种格式变体
         # 格式: 612/20251224/612_1921681235_20251218_20251224160000.jpg
         # 或: 7/20251224/7_1921681233_2025124_20251224160000.jpg (collection_date可能是7位)
+        # 或: 8/20260113/8_1921681232_202615_20260113160130.jpg (collection_date可能是6位)
         self.path_pattern = re.compile(
-            r'(?P<mushroom_id>\d+)/(?P<date_folder>\d{8})/(?P<mushroom_id_2>\d+)_(?P<collection_ip>\d+)_(?P<collection_date>\d{7,8})_(?P<detailed_time>\d{14})\.jpg'
+            r'(?P<mushroom_id>\d+)/(?P<date_folder>\d{8})/(?P<mushroom_id_2>\d+)_(?P<collection_ip>\d+)_(?P<collection_date>\d{6,8})_(?P<detailed_time>\d{14})\.jpg'
         )
         
         # 文件名正则表达式 - 支持多种格式变体
         # 格式: 612_1921681235_20251218_20251224160000.jpg
         # 或: 7_1921681233_2025124_20251224160000.jpg (collection_date可能是7位)
+        # 或: 8_1921681232_202615_20260113160130.jpg (collection_date可能是6位)
         self.filename_pattern = re.compile(
-            r'(?P<mushroom_id>\d+)_(?P<collection_ip>\d+)_(?P<collection_date>\d{7,8})_(?P<detailed_time>\d{14})\.jpg'
+            r'(?P<mushroom_id>\d+)_(?P<collection_ip>\d+)_(?P<collection_date>\d{6,8})_(?P<detailed_time>\d{14})\.jpg'
         )
     
     def _normalize_collection_date(self, collection_date: str) -> str:
         """
-        标准化采集日期格式
+        标准化采集日期格式，使用 dateutil 自动解析各种格式
         
         Args:
-            collection_date: 原始采集日期，可能是7位或8位
+            collection_date: 原始采集日期，可能是6位、7位或8位
             
         Returns:
-            标准化的8位日期格式
-        """
-        if len(collection_date) == 7:
-            # 7位日期格式分析：2025124 -> 20251204 (12月4日)
-            # 假设格式是 YYYYMDD，其中月份可能缺少前导零
-            year = collection_date[:4]
-            month_day = collection_date[4:]  # 3位数字
+            标准化的8位日期格式 (YYYYMMDD)
             
-            if len(month_day) == 3:
-                # 分析3位数字：可能是 MDD 或 MMD 格式
-                # 根据实际数据，大部分应该是12月的数据
-                # 2025124 很可能是 2025年12月4日
-                if month_day.startswith('12'):
-                    # 124 -> 12月4日 -> 1204
-                    month = '12'
-                    day = '0' + month_day[2]
-                elif month_day[0] == '1' and month_day[1:] in ['01', '02', '03', '04', '05', '06', '07', '08', '09']:
-                    # 1XX 格式，可能是1月
-                    month = '01'
-                    day = month_day[1:]
+        Examples:
+            202615 -> 20260105 (2026年1月5日)
+            2026115 -> 20260115 (2026年1月15日)
+            2025124 -> 20251204 (2025年12月4日)
+            20251224 -> 20251224 (已是标准格式)
+        """
+        date_len = len(collection_date)
+        
+        # 8位标准格式，直接验证并返回
+        if date_len == 8:
+            try:
+                datetime.strptime(collection_date, '%Y%m%d')
+                return collection_date
+            except ValueError as e:
+                logger.error(f"8位日期格式无效: {collection_date}, 错误: {e}")
+                return collection_date
+        
+        # 6位或7位格式，需要智能解析
+        if date_len not in [6, 7]:
+            logger.error(f"无法标准化日期格式(长度异常): {collection_date} (长度: {date_len})")
+            return collection_date
+        
+        year = collection_date[:4]
+        month_day = collection_date[4:]
+        
+        # 构建可能的日期格式列表
+        parse_attempts = []
+        
+        if date_len == 6:
+            # 6位: YYYYMD (月日各1位)
+            m, d = month_day[0], month_day[1]
+            parse_attempts.extend([
+                f"{year}-{m}-{d}",      # 尝试单位数月日
+                f"{year}-0{m}-0{d}",    # 补零
+            ])
+        
+        elif date_len == 7:
+            # 7位: YYYYMDD 或 YYYYMMD
+            first = int(month_day[0])
+            
+            if first == 1:
+                second = int(month_day[1])
+                if second in [0, 1, 2]:
+                    # 10-12月
+                    parse_attempts.extend([
+                        f"{year}-{month_day[:2]}-{month_day[2]}",
+                        f"{year}-{month_day[:2]}-0{month_day[2]}",
+                    ])
                 else:
-                    # 其他情况，假设是月份缺少前导零
-                    month = '0' + month_day[0]
-                    day = month_day[1:]
-                
-                normalized = f"{year}{month}{day}"
-                logger.info(f"日期标准化: {collection_date} -> {normalized}")
-                return normalized
+                    # 1月
+                    parse_attempts.extend([
+                        f"{year}-1-{month_day[1:]}",
+                        f"{year}-01-{month_day[1:]}",
+                    ])
             else:
-                # 其他情况，直接在前面补0
-                return f"{year}0{month_day}"
-        elif len(collection_date) == 8:
-            return collection_date
-        else:
-            logger.warning(f"无法标准化日期格式: {collection_date}")
-            return collection_date
+                # 2-9月
+                parse_attempts.extend([
+                    f"{year}-{month_day[0]}-{month_day[1:]}",
+                    f"{year}-0{month_day[0]}-{month_day[1:]}",
+                ])
+        
+        # 使用 dateutil.parser 尝试解析
+        for attempt in parse_attempts:
+            try:
+                parsed_date = date_parser.parse(attempt, dayfirst=False)
+                normalized = parsed_date.strftime('%Y%m%d')
+                logger.debug(f"日期标准化: {collection_date} -> {normalized}")
+                return normalized
+            except (ValueError, date_parser.ParserError):
+                continue
+        
+        # 所有尝试都失败
+        logger.error(f"无法标准化日期格式({date_len}位): {collection_date}, 尝试: {parse_attempts}")
+        return collection_date
     
     def parse_path(self, file_path: str) -> Optional[MushroomImageInfo]:
         """
@@ -116,14 +159,14 @@ class MushroomImagePathParser:
         """
         match = self.path_pattern.match(file_path)
         if not match:
-            logger.warning(f"路径格式不匹配: {file_path}")
+            logger.warning(f"路径格式不匹配: '{file_path}' | 期望格式: <库房号>/<日期文件夹>/<库房号>_<IP>_<采集日期7-8位>_<详细时间14位>.jpg")
             return None
         
         groups = match.groupdict()
         
         # 验证蘑菇库号一致性
         if groups['mushroom_id'] != groups['mushroom_id_2']:
-            logger.warning(f"蘑菇库号不一致: {groups['mushroom_id']} != {groups['mushroom_id_2']}")
+            logger.warning(f"路径中库房号不一致: 文件夹={groups['mushroom_id']}, 文件名={groups['mushroom_id_2']} | 路径: {file_path}")
             return None
         
         # 标准化采集日期
@@ -153,14 +196,14 @@ class MushroomImagePathParser:
         """
         match = self.filename_pattern.match(filename)
         if not match:
-            logger.warning(f"文件名格式不匹配: {filename}")
+            logger.warning(f"文件名格式不匹配: '{filename}' | 期望格式: <库房号>_<IP>_<采集日期7-8位>_<详细时间14位>.jpg")
             return None
         
         groups = match.groupdict()
         
         # 如果提供了蘑菇库号，验证一致性
         if mushroom_id and groups['mushroom_id'] != mushroom_id:
-            logger.warning(f"蘑菇库号不一致: {groups['mushroom_id']} != {mushroom_id}")
+            logger.warning(f"文件名中库房号不一致: 参数={mushroom_id}, 文件名={groups['mushroom_id']} | 文件: {filename}")
             return None
         
         # 标准化采集日期

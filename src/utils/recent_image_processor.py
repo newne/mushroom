@@ -33,7 +33,7 @@ class RecentImageProcessor:
         self._cache_timestamp = None
         self._cache_hours = None
         
-        logger.info("Recent image processor initialized successfully")
+        logger.debug("图片处理器初始化完成")
     
     def _get_recent_images_cached(self, hours: int = 1, room_id: Optional[str] = None) -> List[Dict]:
         """
@@ -57,21 +57,17 @@ class RecentImageProcessor:
         )
         
         if cache_valid:
-            logger.debug(f"使用缓存的图片数据: {len(self._cached_images)} 张")
             cached_images = self._cached_images
         else:
             # 重新查询并缓存
-            logger.debug(f"查询最近 {hours} 小时的图片数据")
             cached_images = self.minio_client.list_recent_images(hours=hours)
             self._cached_images = cached_images
             self._cache_timestamp = current_time
             self._cache_hours = hours
-            logger.debug(f"缓存图片数据: {len(cached_images)} 张")
         
         # 如果指定了库房，进行过滤
         if room_id:
             filtered_images = [img for img in cached_images if img['room_id'] == room_id]
-            logger.debug(f"库房 {room_id} 过滤后图片数量: {len(filtered_images)}")
             return filtered_images
         
         return cached_images
@@ -97,13 +93,13 @@ class RecentImageProcessor:
         Returns:
             包含摘要和处理结果的统计
         """
-        logger.info(f"开始整合处理最近 {hours} 小时的图片数据")
+        logger.info(f"[IMG-001] 开始处理图片 | 时间范围: 最近{hours}小时")
         
         # 一次性获取所有图片数据
         recent_images = self._get_recent_images_cached(hours=hours)
         
         if not recent_images:
-            logger.warning(f"未找到最近 {hours} 小时的图片")
+            logger.warning(f"[IMG-002] 未找到图片 | 时间范围: 最近{hours}小时")
             return {
                 'summary': {
                     'total_images': 0,
@@ -142,7 +138,7 @@ class RecentImageProcessor:
                 room_groups[room_id] = []
             room_groups[room_id].append(img)
         
-        logger.info(f"涉及库房: {sorted(room_groups.keys())}")
+        logger.info(f"[IMG-003] 图片分布 | 库房: {sorted(room_groups.keys())}, 总数: {len(recent_images)}张")
         
         # 处理统计
         processing_stats = {
@@ -156,15 +152,14 @@ class RecentImageProcessor:
         
         # 处理每个库房的图片
         for room_id, images in room_groups.items():
-            logger.info(f"处理库房 {room_id} 的图片: {len(images)} 张")
-            
             # 按时间排序，处理最新的图片
             images.sort(key=lambda x: x['capture_time'], reverse=True)
             
             # 限制处理数量
             if max_images_per_room:
                 images = images[:max_images_per_room]
-                logger.info(f"限制库房 {room_id} 处理数量为: {len(images)} 张")
+            
+            logger.info(f"[IMG-004] 开始处理库房 | 库房: {room_id}, 图片数: {len(images)}张")
             
             room_stats = self._process_room_images(room_id, images, save_to_db)
             processing_stats['room_stats'][room_id] = room_stats
@@ -175,9 +170,14 @@ class RecentImageProcessor:
             processing_stats['total_failed'] += room_stats['failed']
             processing_stats['total_skipped'] += room_stats['skipped']
         
-        logger.info(f"最近 {hours} 小时图片处理完成 - 总计: 找到={processing_stats['total_found']}, "
-                   f"处理={processing_stats['total_processed']}, 成功={processing_stats['total_success']}, "
-                   f"失败={processing_stats['total_failed']}, 跳过={processing_stats['total_skipped']}")
+        logger.info(
+            f"[IMG-005] 处理完成 | "
+            f"找到: {processing_stats['total_found']}张, "
+            f"处理: {processing_stats['total_processed']}张, "
+            f"成功: {processing_stats['total_success']}张, "
+            f"失败: {processing_stats['total_failed']}张, "
+            f"跳过: {processing_stats['total_skipped']}张"
+        )
         
         return {
             'summary': summary,
@@ -249,27 +249,25 @@ class RecentImageProcessor:
                 
                 # 检查是否已处理
                 if save_to_db and self.encoder._is_already_processed(image_info.file_path):
-                    logger.info(f"跳过已处理图片: {image_info.file_name}")
                     room_stats['skipped'] += 1
                     continue
                 
                 # 处理图片
-                logger.info(f"处理图片: {image_info.file_name}")
                 result = self.encoder.process_single_image(image_info, save_to_db=save_to_db)
                 
                 if result:
                     if result.get('saved_to_db', False):
                         room_stats['success'] += 1
-                        logger.info(f"成功处理并保存: {image_info.file_name}")
+                        logger.info(f"[IMG-006] 处理成功 | 文件: {image_info.file_name}")
                     elif result.get('skip_reason') == 'no_environment_data':
-                        room_stats['success'] += 1  # 算作成功，只是没有环境数据
-                        logger.info(f"成功处理但无环境数据: {image_info.file_name}")
+                        room_stats['success'] += 1
+                        logger.debug(f"处理成功但无环境数据: {image_info.file_name}")
                     else:
                         room_stats['failed'] += 1
-                        logger.warning(f"处理失败: {image_info.file_name}")
+                        logger.warning(f"[IMG-007] 处理失败 | 文件: {image_info.file_name}")
                 else:
                     room_stats['failed'] += 1
-                    logger.error(f"处理返回None: {image_info.file_name}")
+                    logger.error(f"[IMG-008] 处理异常 | 文件: {image_info.file_name}, 返回: None")
                 
                 room_stats['processed'] += 1
                 
@@ -278,9 +276,14 @@ class RecentImageProcessor:
                 room_stats['failed'] += 1
                 room_stats['processed'] += 1
         
-        logger.info(f"库房 {room_id} 处理完成: 处理={room_stats['processed']}, "
-                   f"成功={room_stats['success']}, 失败={room_stats['failed']}, "
-                   f"跳过={room_stats['skipped']}")
+        logger.info(
+            f"[IMG-009] 库房处理完成 | "
+            f"库房: {room_id}, "
+            f"处理: {room_stats['processed']}张, "
+            f"成功: {room_stats['success']}张, "
+            f"失败: {room_stats['failed']}张, "
+            f"跳过: {room_stats['skipped']}张"
+        )
         
         return room_stats
     def process_recent_images(
