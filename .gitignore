@@ -187,12 +187,22 @@ src/data/
 *.onnx
 *.safetensors
 checkpoints/
-outputs/
 results/
 
-# Test files (temporary)
-test_*.py
-*_test.py
+# Output files
+output/
+*.json
+!src/configs/*.json
+!monitoring_points_config.json
+!package.json
+!pyproject.toml
+
+# Temporary files
+.archive/
+*.tmp
+*.temp
+test_rendered_prompt.txt
+decision_analysis_*.json
 
 # Build artifacts
 dist/
@@ -211,3 +221,34 @@ build/
 # Temporary scripts
 temp_*.py
 tmp_*.py
+debug_*.py.bak
+test_*.py.bak
+
+# Project cleanup
+PROJECT_CLEANUP_PLAN.md
+# IDE 缓存和配置
+.kiro/
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Jupyter Notebooks（如果不需要提交）
+*.ipynb
+notebooks/*.html
+
+# 敏感配置文件
+src/configs/.secrets.toml
+.env
+
+# 二进制和模型文件
+*.bin
+*.pt
+*.pth
+*.h5
+*.onnx
+
+# 临时和输出文件
+output/
+.archive/
+*.tmp
