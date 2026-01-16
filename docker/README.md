@@ -285,3 +285,114 @@ if model_path.exists():
 ---
 
 本部署指南确保蘑菇图像处理系统能够在Docker环境中稳定、安全地运行，特别是AI模型的正确挂载和配置。
+
+## 最近修复记录
+
+### 2026-01-13 容器启动问题修复
+
+#### 问题描述
+服务器运行时出现以下错误：
+- `run.sh: line 98: ${COPROC[1]}: Bad file descriptor`
+- 定时任务启动失败
+- 容器重复启动和失败
+
+#### 修复内容
+
+1. **修复启动脚本 (run.sh)**
+   - 移除有问题的 `coproc` 用法，改用标准的 `nohup` 和重定向
+   - 改进进程管理，添加信号处理和优雅退出机制
+   - 修复日志输出重定向问题
+   - 添加进程监控循环，防止服务异常退出
+
+2. **修复主程序入口 (src/main.py)**
+   - 删除根目录的重复 `main.py` 文件
+   - 容器使用 `src/main.py` 作为唯一入口点
+   - 添加环境检测逻辑，区分容器和开发环境
+   - 改进错误处理和日志输出
+
+3. **验证模型路径配置**
+   - 确认模型挂载路径 `./models:/models:rw` 正确
+   - 代码已适配容器路径 `/models` 和开发路径 `../models`
+   - 添加路径检测和回退机制
+
+#### 修复后的启动流程
+
+1. **环境初始化**
+   ```bash
+   # 设置线程限制
+   export OMP_NUM_THREADS=4
+   export OPENBLAS_NUM_THREADS=4
+   # ... 其他线程限制
+   
+   # 创建日志目录
+   mkdir -p /app/Logs
+   ```
+
+2. **服务启动顺序**
+   ```bash
+   # 1. Streamlit (端口 7002)
+   nohup python -m streamlit run streamlit_app.py > streamlit.log 2>&1 &
+   
+   # 2. FastAPI 健康检查 (端口 5000)
+   nohup python -m uvicorn main:app --host 0.0.0.0 --port 5000 > fastapi.log 2>&1 &
+   
+   # 3. 定时任务调度器
+   nohup python main.py > timer.log 2>&1 &
+   ```
+
+3. **进程监控**
+   ```bash
+   # 持续监控所有进程状态
+   while true; do
+       # 检查进程是否存活
+       if ! kill -0 $PID 2>/dev/null; then
+           echo "进程异常退出"
+           exit 1
+       fi
+       sleep 30
+   done
+   ```
+
+#### 测试验证
+
+创建了测试脚本 `scripts/test_container_startup.py` 用于验证：
+- 环境配置正确性
+- 模块导入完整性
+- 数据库连接状态
+- 模型路径可访问性
+
+#### 使用建议
+
+1. **重新构建镜像**
+   ```bash
+   docker-compose -f docker/mushroom_solution.yml build --no-cache
+   ```
+
+2. **启动服务**
+   ```bash
+   docker-compose -f docker/mushroom_solution.yml up -d
+   ```
+
+3. **监控启动过程**
+   ```bash
+   # 查看启动日志
+   docker-compose -f docker/mushroom_solution.yml logs -f mushroom_solution
+   
+   # 检查服务状态
+   curl http://localhost:5000/health/status
+   curl http://localhost:7002
+   ```
+
+4. **故障排查**
+   ```bash
+   # 进入容器检查
+   docker exec -it mushroom_solution bash
+   
+   # 运行测试脚本
+   docker exec mushroom_solution python scripts/test_container_startup.py
+   
+   # 查看具体日志
+   docker exec mushroom_solution tail -f /app/Logs/timer.log
+   ```
+
+这些修复确保了容器能够稳定启动并正常运行所有服务组件。

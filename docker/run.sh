@@ -29,6 +29,27 @@ fail() {
     exit 1
 }
 
+# 进程清理函数
+cleanup() {
+    log "收到退出信号，正在清理进程..."
+    if [[ -n "${STREAMLIT_PID:-}" ]] && kill -0 "$STREAMLIT_PID" 2>/dev/null; then
+        log "停止 Streamlit (PID: $STREAMLIT_PID)"
+        kill -TERM "$STREAMLIT_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${FASTAPI_PID:-}" ]] && kill -0 "$FASTAPI_PID" 2>/dev/null; then
+        log "停止 FastAPI (PID: $FASTAPI_PID)"
+        kill -TERM "$FASTAPI_PID" 2>/dev/null || true
+    fi
+    if [[ -n "${TIMER_PID:-}" ]] && kill -0 "$TIMER_PID" 2>/dev/null; then
+        log "停止定时任务 (PID: $TIMER_PID)"
+        kill -TERM "$TIMER_PID" 2>/dev/null || true
+    fi
+    exit 0
+}
+
+# 设置信号处理
+trap cleanup SIGTERM SIGINT
+
 # =============================
 # 初始化设置
 # =============================
@@ -92,25 +113,66 @@ fi
 # =============================
 # 启动定时任务
 # =============================
-# 1. 定时任务（阻塞型）---- 后台，但日志不再写 /proc/1/fd/1
 log "启动定时任务 main.py..."
-coproc tee -a "$TIMER_LOG" >/dev/stdout          # 当前 bash 的 stdout
-nohup $PYTHON main.py 2>&1 >&${COPROC[1]} &
+
+# 先测试Python环境和依赖
+log "检查Python环境和依赖..."
+if ! $PYTHON -c "import sys; print(f'Python {sys.version}')"; then
+    fail "Python环境检查失败"
+fi
+
+if ! $PYTHON -c "import scheduling.optimized_scheduler; print('调度器模块导入成功')"; then
+    fail "调度器模块导入失败，请检查依赖"
+fi
+
+# 启动定时任务（使用main.py，它会调用调度器）
+# 使用 tee 同时输出到文件和标准输出，这样 docker logs 也能看到
+nohup $PYTHON main.py 2>&1 | tee -a "$TIMER_LOG" &
 TIMER_PID=$!
 log "定时任务已启动，PID=$TIMER_PID"
 
-# 初步验证是否存活
-sleep 3
+# 等待更长时间让任务完全启动
+sleep 5
 if ! kill -0 $TIMER_PID 2>/dev/null; then
+    log "定时任务进程已退出，查看最后几行日志："
+    tail -10 "$TIMER_LOG" | while read line; do
+        log "TIMER_LOG: $line"
+    done
     fail "定时任务启动失败，请检查代码或依赖"
 fi
 
-
-
+log "定时任务运行正常"
 
 log "所有服务已成功启动。保持容器活跃中..."
 
 # =============================
-# 主进程挂起，等待任意后台进程结束
+# 主进程监控循环
 # =============================
-wait
+while true; do
+    # 检查所有进程是否还在运行
+    if ! kill -0 $STREAMLIT_PID 2>/dev/null; then
+        log "ERROR: Streamlit 进程异常退出"
+        log "最后的 Streamlit 日志："
+        tail -20 "$STREAMLIT_LOG" | while read line; do log "  $line"; done
+        fail "Streamlit 进程异常退出"
+    fi
+    if ! kill -0 $FASTAPI_PID 2>/dev/null; then
+        log "ERROR: FastAPI 进程异常退出"
+        log "最后的 FastAPI 日志："
+        tail -20 "$FASTAPI_LOG" | while read line; do log "  $line"; done
+        fail "FastAPI 进程异常退出"
+    fi
+    if ! kill -0 $TIMER_PID 2>/dev/null; then
+        log "ERROR: 定时任务进程异常退出"
+        log "最后的定时任务日志："
+        tail -20 "$TIMER_LOG" | while read line; do log "  $line"; done
+        # 同时检查业务日志
+        if [ -f "$LOG_DIR/mushroom_solution-error.log" ]; then
+            log "最后的业务错误日志："
+            tail -20 "$LOG_DIR/mushroom_solution-error.log" | while read line; do log "  $line"; done
+        fi
+        fail "定时任务进程异常退出，业务日志为：$(tail -50 "$TIMER_LOG")"
+    fi
+    
+    sleep 30
+done
