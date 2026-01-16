@@ -1,201 +1,124 @@
-
-*~
-._*
-*$py.class
-*.7z
-.apdisk
-.archive/
-*.backup
-*_backup.*
-*.bak
-*.bin
-build/
-# Build artifacts
 # Byte-compiled / optimized / DLL files
-*.cache
-.cache
-.cache/
-# Cache files
-celerybeat.pid
-celerybeat-schedule
-# Celery stuff
+__pycache__/
+*.py[cod]
+*$py.class
+
 # C extensions
-checkpoints/
-*.ckpt
-*.config
-config.json
-# Configuration files with sensitive data
-*.cover
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
 .coverage
 .coverage.*
+.cache
+nosetests.xml
 coverage.xml
-# Custom project specific ignores
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs
+.vscode/
+.idea/
+.kiro/
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Models and large binary files
+models/
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.model
+*.h5
+*.joblib
+*.pickle
+*.pkl
+*.onnx
+*.safetensors
+*.msgpack
+
+# Data files
 data/*.csv
 data/*.jpg
 data/*.png
-db.sqlite3
-db.sqlite3-journal
-debug_*.py.bak
-decision_analysis_*.json
-develop-eggs/
-dist/
-# Distribution / packaging
-# Django stuff:
-.dmypy.json
-dmypy.json
-docs/_build/
-downloads/
-.DS_Store
-.DS_Store?
-*.egg
-*.egg-info/
-.eggs/
-eggs/
-ehthumbs.db
-.env
-env/
-ENV/
-env.bak/
-# Environments
-# Flask stuff:
-*.gz
-*.h5
-htmlcov/
-.hypothesis/
-Icon?
-.idea/
-# IDEs
-# IDE 缓存和配置
-.installed.cfg
-# Installer logs
-instance/
+data/*.jpeg
+
+# Jupyter Notebooks
 *.ipynb
-.ipynb_checkpoints
+notebooks/*.html
 .ipynb_checkpoints/
-# IPython
-ipython_config.py
-*.joblib
-*.json
-# Jupyter Notebook
-# Jupyter notebook checkpoints
-# Jupyter Notebooks（如果不需要提交）
-.kiro/
-# Large files
-lib/
-lib64/
-local_settings.py
+
+# Logs
 *.log
 logs/
-# Logs
 Logs/
-*.manifest
-# MinIO and Redis related
-minio_data/
-# mkdocs documentation
-*.mo
-*.model
-models/
-# Models and data files
-models/.cache/
-!monitoring_points_config.json
-*.msgpack
-# mypy
-.mypy_cache/
-nosetests.xml
-notebooks/*.html
-.nox/
-*.old
-*.onnx
-*.orig
-*_original.*
-# OS generated files
-output/
-# Output files
-!package.json
-parts/
-# PEP 582
-*.pickle
-pip-delete-this-directory.txt
-# pipenv
-Pipfile.lock
-pip-log.txt
-*.pkl
-*.pot
-profile_default/
-# Project cleanup
-PROJECT_CLEANUP_PLAN.md
-*.pt
-*.pth
-.pyarmor/
-# PyArmor
-# PyBuilder
-__pycache__/
-*.py[cod]
-*.py,cover
-# pyenv
-# PyInstaller
-__pypackages__/
-!pyproject.toml
-.pyre/
-# Pyre type checker
-.pytest_cache/
-.Python
-.python-version
-*.rar
-redis_data/
-results/
-.ropeproject
-# Rope project settings
-*.safetensors
-# SageMath parsed files
-*.sage.py
-.scrapy
-# Scrapy stuff:
-sdist/
-secrets.py
-settings_local.py
-/site
-*.so
-*.spec
-# Sphinx documentation docs/
-.Spotlight-V100
-.spyderproject
-# Spyder project settings
-.spyproject
-!src/configs/*.json
-src/configs/.secrets.toml
-src/data/
-src/models/
-*.swo
-*.swp
-*.tar
-target/
-*.temp
+src/Logs/*.log
+
 # Temporary files
-# Temporary scripts
-temp_*.py
-test_*.py.bak
-test_rendered_prompt.txt
-Thumbs.db
 *.tmp
-tmp_*.py
-.tox/
-# Translations
-.Trashes
-# Unit test / coverage reports
-var/
-.venv
-.venv/
-venv/
-venv.bak/
-# Virtual environments (specific to this project)
-.vscode/
-.webassets-cache
-wheels/
-*.zip
-# 临时和输出文件
-# 二进制和模型文件
-# 备份和原始文件
-# 敏感配置文件
-# 数据文件（不提交大文件）
-# 模型文件目录（不提交到仓库）
+*.temp
+.archive/
+output/
+
+# Backup files
+*.backup
+*.bak
+*.old
+*_original.*
+*_backup.*
+*.orig
+
+# Sensitive configuration
+src/configs/.secrets.toml
+.env
+
+# Build artifacts
+dist/
+build/
+
+# PyArmor
+.pyarmor/
+
+# Cache files
+*.cache
+.cache/
+
+# Project specific
+PROJECT_CLEANUP_PLAN.md
+GIT_COMMIT_SUMMARY.md
