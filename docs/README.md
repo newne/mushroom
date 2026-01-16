@@ -1,77 +1,74 @@
-# 蘑菇图像处理系统文档
+# 文档目录
 
-本目录包含蘑菇图像处理系统的完整文档。
+本目录包含蘑菇种植智能调控系统的所有文档。
 
-## 📚 文档索引
+## 目录结构
 
-### 核心文档
-- **[系统总览](system_overview.md)** - 系统架构、核心功能和技术特性介绍
-- **[使用指南](usage_guide.md)** - 详细的使用方法、API文档和最佳实践
-- **[系统优化总结](SYSTEM_OPTIMIZATION_SUMMARY.md)** - 最新的优化成果和性能提升
+### development/ - 开发文档
+包含开发过程中的任务实现、问题修复和系统优化文档。
 
-### 功能说明
-- **[蘑菇系统说明](README_MUSHROOM_SYSTEM.md)** - 完整的系统功能说明和示例代码
-- **[CLIP推理工作流](CLIP_INFERENCE_AND_GLOBAL_WORKFLOW.md)** - CLIP模型推理流程和多模态处理
+- **tasks/** - 任务实现文档
+  - 记录各个功能模块的实现过程
+  - 包含需求分析、设计方案和实现细节
+  
+- **fixes/** - 问题修复文档
+  - 记录系统运行中遇到的问题及解决方案
+  - 包含数据库连接、调度器、LLM 解析等问题的修复
+  
+- **optimizations/** - 优化文档
+  - 记录系统性能优化和代码重构
+  - 包含数据库查询、日志系统、数据处理等优化
 
-### 配置指南
-- **[MinIO配置指南](minio_setup_guide.md)** - MinIO对象存储的配置和使用
-- **[蘑菇处理指南](mushroom_processing_guide.md)** - 蘑菇图像处理的详细指南
+### deployment/ - 部署文档
+包含系统部署相关的文档和检查清单。
 
-## 🚀 快速导航
+- Docker 部署指南
+- 部署检查清单
+- 快速部署参考
 
-### 新用户入门
-1. 阅读 [系统总览](system_overview.md) 了解系统架构
-2. 查看 [使用指南](usage_guide.md) 学习基本使用方法
-3. 参考 [MinIO配置指南](minio_setup_guide.md) 配置存储环境
+### guides/ - 使用指南
+包含系统使用和维护的指南文档。
 
-### 开发者参考
-1. 查看 [蘑菇系统说明](README_MUSHROOM_SYSTEM.md) 了解完整功能
-2. 阅读 [CLIP推理工作流](CLIP_INFERENCE_AND_GLOBAL_WORKFLOW.md) 理解处理流程
-3. 参考 [系统优化总结](SYSTEM_OPTIMIZATION_SUMMARY.md) 了解最新特性
+- 日志查看指南
+- 监控点配置指南
+- 数据处理指南
+- MinIO 设置指南
 
-### 运维管理
-1. 使用 [使用指南](usage_guide.md) 中的监控和维护章节
-2. 参考 [蘑菇处理指南](mushroom_processing_guide.md) 进行故障排除
-3. 查看 [系统优化总结](SYSTEM_OPTIMIZATION_SUMMARY.md) 了解性能调优
+### archive/ - 归档文档
+包含已过时或不再使用的文档。
 
-## 📖 文档特色
+## 主要文档
 
-### 系统总览 (system_overview.md)
-- 🏗️ 完整的系统架构图
-- ⚡ 核心功能和技术特性
-- 🔄 数据流程和处理链路
-- 🎯 使用场景和扩展能力
+### 系统架构
+- [系统概览](system_overview.md)
+- [系统架构流程图](system_architecture_flowchart.md)
+- [CLIP 推理和全局工作流](CLIP_INFERENCE_AND_GLOBAL_WORKFLOW.md)
 
-### 使用指南 (usage_guide.md)
-- 🚀 快速开始和环境配置
-- 🛠️ 详细的命令行使用方法
-- 💻 Python API使用示例
-- 🔧 故障排除和性能优化
+### 功能模块
+- [决策分析系统](../src/decision_analysis/README.md)
+- [蘑菇图像处理](mushroom_processing_guide.md)
+- [设备监控点参考](device_monitoring_points_reference.md)
+- [设定点监控指南](setpoint_monitoring_guide.md)
 
-### 系统优化总结 (SYSTEM_OPTIMIZATION_SUMMARY.md)
-- ✅ 最新完成的优化工作
-- 📊 系统测试结果和性能数据
-- 🎯 技术特性和架构改进
-- 🚀 使用方法和最佳实践
+### 优化和性能
+- [系统优化总结](SYSTEM_OPTIMIZATION_SUMMARY.md)
+- [缓存优化指南](cache_optimization_guide.md)
+- [数据库查询优化](get_all_device_configs_optimization.md)
 
-## 🔄 文档更新
+### API 集成
+- [Prompt API 集成指南](prompt_api_integration_guide.md)
 
-文档会随着系统功能的更新而持续维护，主要更新内容包括：
+## 文档维护
 
-- **功能更新**: 新增功能的使用方法和API文档
-- **性能优化**: 系统优化后的配置建议和使用指南
-- **问题修复**: 常见问题的解决方案和故障排除
-- **最佳实践**: 基于实际使用经验的优化建议
+- 新增功能时，请在相应目录下创建文档
+- 修复问题时，请记录问题和解决方案
+- 优化系统时，请记录优化前后的对比
+- 定期将过时文档移至 archive/ 目录
 
-## 📞 获取帮助
+## 文档规范
 
-如果在使用过程中遇到问题：
-
-1. **查看文档**: 首先查看相关文档章节
-2. **运行测试**: 使用 `python main.py validate` 验证系统状态
-3. **查看日志**: 检查详细的处理日志信息
-4. **联系支持**: 提供详细的错误信息和环境配置
-
----
-
-📚 **文档导航** - 快速找到您需要的信息！
+1. 使用 Markdown 格式
+2. 文件名使用小写字母和下划线
+3. 包含清晰的标题和目录
+4. 添加代码示例和配置示例
+5. 记录日期和版本信息
