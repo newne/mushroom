@@ -252,3 +252,13 @@ src/configs/.secrets.toml
 output/
 .archive/
 *.tmp
+
+# 模型文件目录（不提交到仓库）
+models/
+*.msgpack
+*.safetensors
+
+# 数据文件（不提交大文件）
+data/*.csv
+data/*.jpg
+data/*.png
