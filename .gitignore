@@ -119,6 +119,12 @@ build/
 *.cache
 .cache/
 
-# Project specific
-PROJECT_CLEANUP_PLAN.md
-GIT_COMMIT_SUMMARY.md
+# Project specific - Temporary documentation
+PROJECT_CLEANUP_*.md
+CLEANUP_*.md
+GIT_*.md
+LARGE_FILES_*.md
+*_SUMMARY.md.tmp
+*_TEMP.md
+test_rendered_prompt.txt
+decision_analysis_*.json
