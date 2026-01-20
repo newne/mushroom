@@ -70,6 +70,20 @@ class DecisionAnalyzer:
         self.template_path = template_path
         self.decision_config = DECISION_ANALYSIS_CONFIG
         
+        # Load monitoring points config
+        try:
+            config_path = Path(__file__).parent.parent / "configs" / "monitoring_points_config.json"
+            if config_path.exists():
+                with open(config_path, "r", encoding="utf-8") as f:
+                    self.monitoring_points_config = json.load(f)
+                logger.info(f"[DecisionAnalyzer] Loaded monitoring points config from {config_path}")
+            else:
+                logger.warning(f"[DecisionAnalyzer] Monitoring points config not found at {config_path}")
+                self.monitoring_points_config = {}
+        except Exception as e:
+            logger.error(f"[DecisionAnalyzer] Failed to load monitoring points config: {e}")
+            self.monitoring_points_config = {}
+        
         # Initialize all components with error handling
         try:
             logger.debug("[DecisionAnalyzer] Initializing DataExtractor...")
@@ -79,13 +93,13 @@ class DecisionAnalyzer:
             self.clip_matcher = CLIPMatcher(db_engine)
             
             logger.debug("[DecisionAnalyzer] Initializing TemplateRenderer...")
-            self.template_renderer = TemplateRenderer(template_path, static_config)
+            self.template_renderer = TemplateRenderer(template_path, static_config, self.monitoring_points_config)
             
             logger.debug("[DecisionAnalyzer] Initializing LLMClient...")
             self.llm_client = LLMClient(settings)
             
             logger.debug("[DecisionAnalyzer] Initializing OutputHandler...")
-            self.output_handler = OutputHandler(static_config)
+            self.output_handler = OutputHandler(static_config, self.monitoring_points_config)
             
             logger.info("[DecisionAnalyzer] Successfully initialized all components")
             

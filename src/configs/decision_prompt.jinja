@@ -146,36 +146,7 @@
 4. 在rationale中说明多图像综合判断的依据
 ### 设备参数约束：
 
-**注意：以下约束仍然适用，但输出格式必须使用上述结构化格式**
-
-- **冷风机 (air_cooler)**：
-  - tem_set: 温度设定值（℃），范围根据生长阶段，通常12-20℃
-  - tem_diff_set: 温差设定值（℃），通常1.5-3.0
-  - cyc_on_off: 循环开关（0=关闭，1=开启）
-  - cyc_on_time/cyc_off_time: 循环时间（分钟），通常5-30分钟
-  - ar_on_off: 新风联动（0=关闭，1=开启）
-  - hum_on_off: 加湿联动（0=关闭，1=开启）
-  - rationale: 判断依据数组（3-5条字符串）
-
-- **新风机 (fresh_air_fan)**：
-  - model: 模式（0=手动，1=CO2控制，2=时控）
-  - control: 控制方式（0=关闭，1=开启）
-  - co2_on/co2_off: CO2阈值（ppm），通常800-1500ppm
-  - on/off: 时控时间（分钟），通常5-30分钟
-  - rationale: 判断依据数组（3-5条字符串）
-
-- **加湿器 (humidifier)**：
-  - model: 模式（0=手动，1=湿度控制，2=时控）
-  - on/off: 湿度阈值（%），通常80-95%
-  - left_right_strategy: 左右侧策略说明（字符串）
-  - rationale: 判断依据数组（3-5条字符串）
-
-- **补光灯 (grow_light)**：
-  - model: 模式（0=手动，1=自动，2=时控）
-  - on_mset/off_mset: 开关时长（分钟），通常30-120分钟
-  - on_off_1-4: 各路补光开关（0=关闭，1=开启）
-  - choose_1-4: 光源选择（0=蓝光，1=白光）
-  - rationale: 判断依据数组（3-5条字符串）
+{device_constraints_section}
 
 ### 判断依据要点：
 每个设备的 rationale 数组应包含3-5条判断依据，说明：

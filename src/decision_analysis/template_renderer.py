@@ -24,18 +24,20 @@ class TemplateRenderer:
     to template variables and formatting device configurations.
     """
     
-    def __init__(self, template_path: str, static_config: Dict):
+    def __init__(self, template_path: str, static_config: Dict, monitoring_points_config: Dict = None):
         """
         Initialize template renderer
         
         Args:
             template_path: Path to decision_prompt.jinja template file
             static_config: Static configuration dictionary from static_config.json
+            monitoring_points_config: Monitoring points configuration dictionary
             
         Requirements: 6.1, 6.2
         """
         self.template_path = Path(template_path)
         self.static_config = static_config
+        self.monitoring_points_config = monitoring_points_config
         
         # Load template file
         if not self.template_path.exists():
@@ -69,17 +71,23 @@ class TemplateRenderer:
         logger.info(f"[TemplateRenderer] Initialized with template: {template_path}")
     
     def _build_enum_cache(self):
-        """Build a cache of enum mappings for all device types"""
+        """Build cache of enum mappings for faster lookup"""
         self.enum_cache = {}
+        if not self.monitoring_points_config:
+            logger.warning("[TemplateRenderer] No monitoring points config provided")
+            return
+            
+        logger.debug(f"[TemplateRenderer] Building enum cache from config with keys: {list(self.monitoring_points_config.keys())}")
         
-        datapoint = self.static_config.get("mushroom", {}).get("datapoint", {})
-        
-        for device_type, device_config in datapoint.items():
-            if device_type == "remark":
+        for device_id, device_info in self.monitoring_points_config.items():
+            # Skip non-device keys like "room_id"
+            if not isinstance(device_info, dict) or "point_list" not in device_info:
                 continue
+                
+            device_type = device_info.get("device_type")
             
             self.enum_cache[device_type] = {}
-            point_list = device_config.get("point_list", [])
+            point_list = device_info.get("point_list", [])
             
             for point in point_list:
                 point_alias = point.get("point_alias", "")
@@ -562,6 +570,12 @@ class TemplateRenderer:
                     "camera_coverage_info": "单相机视角"
                 })
             
+            # Add dynamic device sections
+            template_vars.update({
+                "device_status_section": self._generate_device_status_section(current_data),
+                "device_constraints_section": self._generate_device_constraints_section()
+            })
+            
             # Render template using Python format strings
             rendered_text = self.template_content.format(**template_vars)
             
@@ -633,3 +647,91 @@ class TemplateRenderer:
             "image_quality_info": quality_info
         }
 
+    def _generate_device_status_section(self, current_data: Dict) -> str:
+        """Generate dynamic device status section"""
+        if not self.monitoring_points_config:
+            return "设备状态配置缺失"
+        
+        lines = []
+        
+        config_key_map = {
+            "air_cooler": "air_cooler_config",
+            "fresh_air_fan": "fresh_fan_config",
+            "humidifier": "humidifier_config",
+            "grow_light": "light_config"
+        }
+        
+        for device_id, device_info in self.monitoring_points_config.items():
+            if not isinstance(device_info, dict) or "point_list" not in device_info:
+                continue
+                
+            device_type = device_info.get("device_type")
+            device_alias = device_info.get("device_alias", device_id)
+            point_list = device_info.get("point_list", [])
+            
+            config_key = config_key_map.get(device_type)
+            device_config = current_data.get(config_key, {})
+            
+            # Format status string
+            status_parts = []
+            for point in point_list:
+                alias = point.get("point_alias")
+                remark = point.get("remark", alias)
+                
+                # Try to find value in device_config
+                # device_config keys might match point_alias
+                val = device_config.get(alias)
+                if val is None:
+                     # Try mapping aliases if needed, but for now assume consistency
+                     val = "未知"
+                
+                # Enum mapping
+                enum_mapping = point.get("enum_mapping")
+                if enum_mapping and val != "未知":
+                    val_str = str(int(val)) if isinstance(val, (int, float)) else str(val)
+                    val = enum_mapping.get(val_str, val)
+                
+                status_parts.append(f"{remark}: {val}")
+            
+            lines.append(f"   - {device_alias} ({device_type}):")
+            lines.append(f"     {', '.join(status_parts)}")
+            
+        return "\n".join(lines)
+
+    def _generate_device_constraints_section(self) -> str:
+        """Generate dynamic device constraints section"""
+        if not self.monitoring_points_config:
+            return "设备约束配置缺失"
+            
+        lines = []
+        
+        for device_id, device_info in self.monitoring_points_config.items():
+            if not isinstance(device_info, dict) or "point_list" not in device_info:
+                continue
+
+            device_type = device_info.get("device_type")
+            device_alias = device_info.get("device_alias", device_id)
+            point_list = device_info.get("point_list", [])
+
+            lines.append(f"- **{device_alias} ({device_type})**:")
+            for point in point_list:
+                alias = point.get("point_alias")
+                remark = point.get("remark", alias)
+                change_type = point.get("change_type", "unknown")
+                
+                constraint_desc = f"{remark}"
+                if change_type == "enum_state":
+                    enum_mapping = point.get("enum_mapping", {})
+                    if enum_mapping:
+                        options = "/".join([f"{k}={v}" for k, v in enum_mapping.items()])
+                        constraint_desc += f" (可选: {options})"
+                elif change_type == "analog_value":
+                    threshold = point.get("threshold")
+                    if threshold:
+                        constraint_desc += f" (阈值: {threshold})"
+                
+                lines.append(f"  - {alias}: {constraint_desc}")
+            lines.append("  - rationale: 判断依据数组（3-5条字符串）")
+            lines.append("") # Empty line for spacing
+            
+        return "\n".join(lines)
