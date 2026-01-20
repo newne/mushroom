@@ -38,6 +38,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from loguru import logger
 
+# 导入日志设置
+from utils.loguru_setting import loguru_setting
+
+# 初始化日志设置
+loguru_setting(production=False)
+
 # ===================== 日志常量定义 =====================
 
 # 日志标识符常量
@@ -79,6 +85,73 @@ LOG_CODES = {
     "MULTI_IMAGE_ERROR": "032",
     "PERFORMANCE_METRICS": "033",
     "FINAL_SUMMARY": "034",
+    "DB_QUERY_START": "035",
+    "DB_QUERY_SUCCESS": "036",
+    "DB_QUERY_ERROR": "037",
+    "IMAGE_PROCESSING_START": "038",
+    "IMAGE_PROCESSING_SUCCESS": "039",
+    "IMAGE_PROCESSING_ERROR": "040",
+    "CLIP_EMBEDDING_START": "041",
+    "CLIP_EMBEDDING_SUCCESS": "042",
+    "CLIP_EMBEDDING_ERROR": "043",
+    "DATA_FETCH_START": "044",
+    "DATA_FETCH_SUCCESS": "045",
+    "DATA_FETCH_ERROR": "046",
+    "LLM_RESPONSE_PARSE_START": "047",
+    "LLM_RESPONSE_PARSE_SUCCESS": "048",
+    "LLM_RESPONSE_PARSE_ERROR": "049",
+    "CONFIG_LOAD_START": "050",
+    "CONFIG_LOAD_SUCCESS": "051",
+    "CONFIG_LOAD_ERROR": "052",
+    "CACHE_HIT": "053",
+    "CACHE_MISS": "054",
+    "CACHE_UPDATE": "055",
+    "REQUEST_SENT": "056",
+    "RESPONSE_RECEIVED": "057",
+    "RESPONSE_DESERIALIZED": "058",
+    "API_CALL_START": "059",
+    "API_CALL_SUCCESS": "060",
+    "API_CALL_ERROR": "061",
+    "CONNECTION_POOL_STATUS": "062",
+    "MEMORY_USAGE": "063",
+    "THREAD_INFO": "064",
+    "ASYNC_OPERATION_START": "065",
+    "ASYNC_OPERATION_COMPLETE": "066",
+    "ASYNC_OPERATION_FAILED": "067",
+    "RETRY_ATTEMPT": "068",
+    "RETRY_SUCCESS": "069",
+    "RETRY_FAILED": "070",
+    "RATE_LIMIT_WAIT": "071",
+    "RATE_LIMIT_EXCEEDED": "072",
+    "AUTHENTICATION_START": "073",
+    "AUTHENTICATION_SUCCESS": "074",
+    "AUTHENTICATION_FAILED": "075",
+    "TOKEN_REFRESHED": "076",
+    "TOKEN_EXPIRED": "077",
+    "SECURITY_CHECK": "078",
+    "PERMISSION_DENIED": "079",
+    "AUDIT_LOG": "080",
+    "HEALTH_CHECK": "081",
+    "SHUTDOWN_SEQUENCE": "082",
+    "HEARTBEAT": "083",
+    "BACKGROUND_TASK_START": "084",
+    "BACKGROUND_TASK_COMPLETE": "085",
+    "BACKGROUND_TASK_FAILED": "086",
+    "BATCH_PROCESS_START": "087",
+    "BATCH_PROCESS_SUCCESS": "088",
+    "BATCH_PROCESS_PARTIAL": "089",
+    "BATCH_PROCESS_FAILED": "090",
+    "TRANSACTION_START": "091",
+    "TRANSACTION_COMMIT": "092",
+    "TRANSACTION_ROLLBACK": "093",
+    "LOCK_ACQUIRED": "094",
+    "LOCK_RELEASED": "095",
+    "LOCK_TIMEOUT": "096",
+    "METRICS_COLLECTED": "097",
+    "EVENT_PUBLISHED": "098",
+    "EVENT_CONSUMED": "099",
+    "STATE_CHANGE": "100",
+    "CONTEXT_INFO": "101",
 }
 
 
@@ -94,7 +167,8 @@ def format_log_message(code: str, message: str, level: str = "INFO") -> str:
     Returns:
         格式化的日志字符串
     """
-    return f"[{LOG_PREFIX}_{code}] {message}"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    return f"[{LOG_PREFIX}_{code}] [{timestamp}] [{level}] {message}"
 
 
 # ===================== 数据模型 =====================
@@ -160,29 +234,7 @@ class EnhancedDecisionAnalysisResult:
 # ===================== 辅助函数 =====================
 
 
-def setup_cli_logger(verbose: bool = False) -> None:
-    """
-    配置CLI输出的logger（仅用于独立命令行调用）
 
-    Args:
-        verbose: 如果为True，显示DEBUG级别日志
-    """
-    logger.remove()
-
-    log_level = "DEBUG" if verbose else "INFO"
-
-    # 使用增强的日志格式，包含更详细的信息
-    logger.add(
-        sys.stdout,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | {module} | <level>{message}</level>",
-        level=log_level,
-        filter=lambda record: "module" in record["extra"]
-        and record["extra"]["module"] == LOG_PREFIX,
-    )
-
-    logger.debug(
-        format_log_message("INIT_START", f"Logger initialized with level: {log_level}")
-    )
 
 
 def parse_datetime(datetime_str: Optional[str]) -> datetime:
@@ -811,6 +863,8 @@ def execute_enhanced_decision_analysis(
         EnhancedDecisionAnalysisResult: 包含执行状态、错误信息和增强结果的结构化对象
     """
     import time
+    import psutil
+    import os
 
     start_time = time.time()
 
@@ -823,6 +877,16 @@ def execute_enhanced_decision_analysis(
         format_log_message(
             "PARAM_PARSE",
             f"Input parameters - room_id: {room_id}, analysis_datetime: {analysis_datetime}, output_file: {output_file}, verbose: {verbose}",
+        )
+    )
+
+    # 记录系统资源使用情况
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    logger.info(
+        format_log_message(
+            "MEMORY_USAGE", 
+            f"Initial memory usage: RSS={memory_info.rss / 1024 / 1024:.2f}MB, VMS={memory_info.vms / 1024 / 1024:.2f}MB"
         )
     )
 
@@ -953,6 +1017,15 @@ def execute_enhanced_decision_analysis(
             format_log_message(
                 "ANALYSIS_START",
                 f"Starting enhanced analysis for room {room_id} at {analysis_datetime}",
+            )
+        )
+        
+        # 记录分析前的上下文信息
+        logger.info(
+            format_log_message(
+                "CONTEXT_INFO",
+                f"Analysis context - Room: {room_id}, Time: {analysis_datetime}, "
+                f"Template: {template_path.name}"
             )
         )
 
@@ -1119,6 +1192,16 @@ def execute_enhanced_decision_analysis(
         )
 
     result.processing_time = time.time() - start_time
+    
+    # 记录最终内存使用情况
+    memory_info = process.memory_info()
+    logger.info(
+        format_log_message(
+            "MEMORY_USAGE", 
+            f"Final memory usage: RSS={memory_info.rss / 1024 / 1024:.2f}MB, VMS={memory_info.vms / 1024 / 1024:.2f}MB, "
+            f"Processing time: {result.processing_time:.2f}s"
+        )
+    )
 
     # 记录最终状态
     if result.success:
@@ -1219,12 +1302,21 @@ Examples:
 
     args = parser.parse_args()
 
-    # Setup logger for CLI mode
-    setup_cli_logger(verbose=args.verbose)
+    # 日志设置已在模块加载时初始化
+    pass
 
     logger.info("=" * 80)
     logger.info("Enhanced Decision Analysis CLI")
     logger.info("=" * 80)
+    
+    # 记录CLI启动上下文
+    logger.info(
+        format_log_message(
+            "CONTEXT_INFO",
+            f"CLI started with args - room_id: {args.room_id}, datetime: {args.datetime}, "
+            f"output: {args.output}, verbose: {args.verbose}, no_console: {args.no_console}"
+        )
+    )
 
     # Parse datetime
     try:
