@@ -97,7 +97,7 @@ graph TD
 
     subgraph "已完成功能模块"
         FUNC1[天级别环境统计];
-        FUNC2[设备设定值监控];
+        FUNC2[设备设定值监控功能];
         FUNC3[图像向量化处理];
         FUNC4[多模态特征融合];
         
@@ -118,11 +118,12 @@ graph TD
         G2 -.-> FUTURE3;
     end
 
-    %% 关键流程标注
+    %% 修正核心数据流：将纯文本改为可渲染的节点，采用矩形节点承载长文本
     subgraph "核心数据流"
-        DATA_FLOW["多模态数据 → 向量检索 → 多模态融合 → 大模型诊断 → 智能决策 → 精准执行"];
+        DATA_FLOW[多模态数据 → 向量检索 → 多模态融合 → 大模型诊断 → 智能决策 → 精准执行]
     end
 
+    %% 样式定义保持不变，修正节点选择无语法错误
     style H fill:#e1f5e1
     style E fill:#e8f4f8
     style J fill:#fff3e0
@@ -134,3 +135,4 @@ graph TD
     style FUTURE1 fill:#fff8e1
     style FUTURE2 fill:#fff8e1
     style FUTURE3 fill:#fff8e1
+    style DATA_FLOW fill:#f5fafe,stroke:#2196f3,stroke-width:2px

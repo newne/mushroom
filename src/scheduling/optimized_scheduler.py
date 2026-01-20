@@ -12,15 +12,19 @@
 1. 建表任务：启动时立即执行
 2. 每日环境统计：每天 01:03:20 执行
 3. 每小时设定点监控：每小时第5分钟执行
-4. 每日CLIP推理：每天 03:02:25 执行前一天图像数据
+4. 每小时CLIP推理：每小时第25分钟执行最近1小时图像数据
+5. 决策分析任务：每天 10:00, 12:00, 14:00 为每个蘑菇房执行
 """
+
+# 标准库导入
 import os
 import signal
 import sys
 import time
-from datetime import datetime, timedelta, timezone
-from typing import NoReturn, Optional, Dict, Any
+from datetime import datetime, timezone
+from typing import NoReturn, Optional
 
+# 第三方库导入
 import pytz
 import sqlalchemy
 from apscheduler import events
@@ -32,239 +36,23 @@ from apscheduler.schedulers import SchedulerAlreadyRunningError, SchedulerNotRun
 
 # 本地模块导入
 from global_const.global_const import settings, pgsql_engine
+from global_const.const_config import (
+    MUSHROOM_ROOM_IDS,
+    DECISION_ANALYSIS_SCHEDULE_TIMES,
+)
 from utils.loguru_setting import logger
-from utils.create_table import create_tables
-from utils.env_data_processor import create_env_data_processor
 from utils.exception_listener import exception_listener, set_scheduler_instance
 
-
-# ===================== 独立任务函数（避免序列化问题） =====================
-def safe_create_tables() -> None:
-    """建表任务（带重试机制）"""
-    max_retries = 3
-    retry_delay = 5
-    
-    for attempt in range(1, max_retries + 1):
-        try:
-            logger.info(f"[TASK] 开始执行建表任务 (尝试 {attempt}/{max_retries})")
-            start_time = datetime.now()
-            
-            create_tables()
-            
-            duration = (datetime.now() - start_time).total_seconds()
-            logger.info(f"[TASK] 建表任务完成，耗时: {duration:.2f}秒")
-            return
-            
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"[TASK] 建表任务失败 (尝试 {attempt}/{max_retries}): {error_msg}")
-            
-            is_connection_error = any(keyword in error_msg.lower() for keyword in [
-                'timeout', 'connection', 'connect', 'database', 'server'
-            ])
-            
-            if is_connection_error and attempt < max_retries:
-                logger.warning(f"[TASK] 检测到连接错误，{retry_delay}秒后重试...")
-                time.sleep(retry_delay)
-            elif attempt >= max_retries:
-                logger.error(f"[TASK] 建表任务失败，已达到最大重试次数 ({max_retries})")
-                # 建表失败不应该导致调度器崩溃，但需要记录严重错误
-                logger.critical("[TASK] 数据库表可能未正确创建，后续任务可能会失败")
-                return
-            else:
-                logger.error(f"[TASK] 建表任务遇到非连接错误，不再重试")
-                return
-
-
-def safe_daily_env_stats() -> None:
-    """每日环境统计任务（带重试机制）"""
-    max_retries = 3
-    retry_delay = 5
-    
-    for attempt in range(1, max_retries + 1):
-        try:
-            logger.info(f"[TASK] 开始执行每日环境统计 (尝试 {attempt}/{max_retries})")
-            start_time = datetime.now()
-            
-            processor = create_env_data_processor()
-            yesterday = datetime.now().date() - timedelta(days=1)
-            processor.compute_and_store_daily_stats(
-                datetime(yesterday.year, yesterday.month, yesterday.day)
-            )
-            
-            duration = (datetime.now() - start_time).total_seconds()
-            logger.info(f"[TASK] 每日环境统计完成，耗时: {duration:.2f}秒")
-            return
-            
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"[TASK] 每日环境统计失败 (尝试 {attempt}/{max_retries}): {error_msg}")
-            
-            is_connection_error = any(keyword in error_msg.lower() for keyword in [
-                'timeout', 'connection', 'connect', 'database', 'server'
-            ])
-            
-            if is_connection_error and attempt < max_retries:
-                logger.warning(f"[TASK] 检测到连接错误，{retry_delay}秒后重试...")
-                time.sleep(retry_delay)
-            elif attempt >= max_retries:
-                logger.error(f"[TASK] 每日环境统计失败，已达到最大重试次数 ({max_retries})")
-                return
-            else:
-                logger.error(f"[TASK] 每日环境统计遇到非连接错误，不再重试")
-                return
-
-
-def safe_hourly_setpoint_monitoring() -> None:
-    """每小时设定点变更监控任务（带数据库连接重试）"""
-    max_retries = 3
-    retry_delay = 5  # 秒
-    
-    for attempt in range(1, max_retries + 1):
-        try:
-            logger.info(f"[TASK] 开始执行设定点变更监控 (尝试 {attempt}/{max_retries})")
-            start_time = datetime.now()
-            
-            # 导入批量监控函数
-            from utils.setpoint_change_monitor import batch_monitor_setpoint_changes
-            
-            # 设定监控时间范围（最近1小时）
-            end_time = datetime.now()
-            monitor_start_time = end_time - timedelta(hours=1)
-            
-            logger.info(f"[TASK] 监控时间范围: {monitor_start_time} ~ {end_time}")
-            
-            # 执行批量监控
-            result = batch_monitor_setpoint_changes(
-                start_time=monitor_start_time,
-                end_time=end_time,
-                store_results=True
-            )
-            
-            # 记录执行结果
-            if result['success']:
-                logger.info(f"[TASK] 设定点监控完成: 处理 {result['successful_rooms']}/{result['total_rooms']} 个库房")
-                logger.info(f"[TASK] 检测到 {result['total_changes']} 个设定点变更，存储 {result['stored_records']} 条记录")
-                
-                # 记录有变更的库房
-                changed_rooms = [room_id for room_id, count in result['changes_by_room'].items() if count > 0]
-                if changed_rooms:
-                    logger.info(f"[TASK] 有变更的库房: {changed_rooms}")
-                
-                if result['error_rooms']:
-                    logger.warning(f"[TASK] 处理失败的库房: {result['error_rooms']}")
-            else:
-                logger.error("[TASK] 设定点监控执行失败")
-            
-            duration = (datetime.now() - start_time).total_seconds()
-            logger.info(f"[TASK] 设定点变更监控完成，耗时: {duration:.2f}秒")
-            
-            # 成功执行，退出重试循环
-            return
-            
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"[TASK] 设定点变更监控失败 (尝试 {attempt}/{max_retries}): {error_msg}")
-            
-            # 检查是否是数据库连接错误
-            is_connection_error = any(keyword in error_msg.lower() for keyword in [
-                'timeout', 'connection', 'connect', 'database', 'server'
-            ])
-            
-            if is_connection_error and attempt < max_retries:
-                logger.warning(f"[TASK] 检测到连接错误，{retry_delay}秒后重试...")
-                time.sleep(retry_delay)
-            elif attempt >= max_retries:
-                logger.error(f"[TASK] 设定点监控任务失败，已达到最大重试次数 ({max_retries})")
-                # 不再抛出异常，避免调度器崩溃
-                return
-            else:
-                # 非连接错误，不重试
-                logger.error(f"[TASK] 设定点监控任务遇到非连接错误，不再重试")
-                return
-
-
-def safe_daily_clip_inference() -> None:
-    """每日CLIP推理任务 - 处理前一天的所有图像（带重试机制）"""
-    max_retries = 3
-    retry_delay = 5
-    
-    for attempt in range(1, max_retries + 1):
-        try:
-            logger.info(f"[CLIP_TASK] 开始执行每日CLIP推理任务 (尝试 {attempt}/{max_retries})")
-            start_time = datetime.now()
-            
-            # 计算前一天的日期
-            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
-            
-            logger.info(f"[CLIP_TASK] 处理日期: {yesterday}")
-            
-            # 延迟导入避免循环依赖和启动时的依赖问题
-            from utils.mushroom_image_encoder import create_mushroom_encoder
-            
-            # 创建编码器
-            logger.info("[CLIP_TASK] 初始化蘑菇图像编码器...")
-            encoder = create_mushroom_encoder()
-            
-            # 执行批量处理前一天的图像
-            logger.info(f"[CLIP_TASK] 开始批量处理 {yesterday} 的图像数据...")
-            stats = encoder.batch_process_images(
-                mushroom_id=None,  # 处理所有库房
-                date_filter=yesterday,
-                batch_size=20  # 增大批处理大小以提高效率
-            )
-            
-            # 记录处理结果
-            duration = (datetime.now() - start_time).total_seconds()
-            success_rate = (stats['success'] / stats['total']) * 100 if stats['total'] > 0 else 0
-            
-            logger.info(f"[CLIP_TASK] 每日CLIP推理任务完成，耗时: {duration:.2f}秒")
-            logger.info(f"[CLIP_TASK] 处理统计: 总计={stats['total']}, 成功={stats['success']}, "
-                       f"失��={stats['failed']}, 跳过={stats['skipped']}, 成功率={success_rate:.1f}%")
-            
-            # 获取详细统计信息
-            try:
-                processing_stats = encoder.get_processing_statistics()
-                if processing_stats:
-                    logger.info(f"[CLIP_TASK] 数据库总记录: {processing_stats.get('total_processed', 0)}")
-                    logger.info(f"[CLIP_TASK] 有环境控制的记录: {processing_stats.get('with_environmental_control', 0)}")
-                    
-                    room_dist = processing_stats.get('room_distribution', {})
-                    if room_dist:
-                        logger.info("[CLIP_TASK] 库房分布:")
-                        for room_id, count in sorted(room_dist.items()):
-                            logger.info(f"[CLIP_TASK]   库房{room_id}: {count}张")
-            except Exception as e:
-                logger.warning(f"[CLIP_TASK] 获取处理统计失败: {e}")
-            
-            # 如果处理失败率过高，记录警告
-            if stats['total'] > 0 and (stats['failed'] / stats['total']) > 0.1:
-                logger.warning(f"[CLIP_TASK] 处理失败率较高: {stats['failed']}/{stats['total']} = {(stats['failed']/stats['total']*100):.1f}%")
-            
-            # 如果没有找到图像，记录信息
-            if stats['total'] == 0:
-                logger.info(f"[CLIP_TASK] 未找到 {yesterday} 的图像数据，可能该日期没有图像或已全部处理")
-            
-            # 成功执行，退出重试循环
-            return
-            
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(f"[CLIP_TASK] 每日CLIP推理任务失败 (尝试 {attempt}/{max_retries}): {error_msg}")
-            
-            is_connection_error = any(keyword in error_msg.lower() for keyword in [
-                'timeout', 'connection', 'connect', 'database', 'server'
-            ])
-            
-            if is_connection_error and attempt < max_retries:
-                logger.warning(f"[CLIP_TASK] 检测到连接错误，{retry_delay}秒后重试...")
-                time.sleep(retry_delay)
-            elif attempt >= max_retries:
-                logger.error(f"[CLIP_TASK] CLIP推理任务失败，已达到最大重试次数 ({max_retries})")
-                return
-            else:
-                logger.error(f"[CLIP_TASK] CLIP推理任务遇到非连接错误，不再重试")
-                return
+# 任务模块导入
+from tasks import (
+    safe_create_tables,
+    safe_daily_env_stats,
+    safe_hourly_setpoint_monitoring,
+    safe_hourly_clip_inference,
+    safe_enhanced_decision_analysis_10_00,
+    safe_enhanced_decision_analysis_12_00,
+    safe_enhanced_decision_analysis_14_00,
+)
 
 
 class OptimizedScheduler:
@@ -298,7 +86,7 @@ class OptimizedScheduler:
             logger.warning(f"Failed to get system timezone: {e}, using UTC")
             return timezone.utc
     
-    def _add_create_tables_job(self) -> Job:
+    def _init_scheduler(self) -> BackgroundScheduler:
         """初始化调度器"""
         # 使用内存存储而非Redis（任务配置固定，无需持久化）
         # 如果需要持久化，可以添加Redis服务并使用 RedisJobStore
@@ -330,54 +118,78 @@ class OptimizedScheduler:
             logger.error(f"[SCHEDULER] 调度器初始化失败: {e}", exc_info=True)
             raise
     
-    def _add_create_tables_job(self) -> Job:
-        """添加建表任务"""
-        job = self.scheduler.add_job(
-            func=safe_create_tables,  # 使用独立函数
-            id="create_tables",
-            next_run_time=datetime.now(self.timezone),
-            replace_existing=True,  # 明确指定替换已存在的任务
-        )
-        logger.info("[SCHEDULER] 建表任务已添加")
-        return job
-    
     def _add_business_jobs(self) -> None:
         """添加业务任务"""
         # 每日环境统计任务（01:03:20执行）
         self.scheduler.add_job(
-            func=safe_daily_env_stats,  # 使用独立函数
+            func=safe_daily_env_stats,
             trigger=CronTrigger(hour=1, minute=3, second=20, timezone=self.timezone),
             id="daily_env_stats",
-            replace_existing=True,  # 明确指定替换已存在的任务
+            replace_existing=True,
         )
         logger.info("[SCHEDULER] 每日环境统计任务已添加")
         
         # 每小时设定点变更监控任务（每小时的第5分钟执行）
         self.scheduler.add_job(
-            func=safe_hourly_setpoint_monitoring,  # 使用独立函数
+            func=safe_hourly_setpoint_monitoring,
             trigger=CronTrigger(minute=5, timezone=self.timezone),
             id="hourly_setpoint_monitoring",
-            replace_existing=True,  # 明确指定替换已存在的任务
+            replace_existing=True,
         )
         logger.info("[SCHEDULER] 每小时设定点监控任务已添加")
         
-        # 每日CLIP推理任务（03:02:25执行）
+        # 每小时CLIP推理任务（每小时第25分钟执行）
         self.scheduler.add_job(
-            func=safe_daily_clip_inference,  # 使用独立函数
-            trigger=CronTrigger(hour=3, minute=2, second=25, timezone=self.timezone),
-            id="daily_clip_inference",
-            replace_existing=True,  # 明确指定替换已存在的任务
+            func=safe_hourly_clip_inference,
+            trigger=CronTrigger(minute=25, timezone=self.timezone),
+            id="hourly_clip_inference",
+            replace_existing=True,
         )
-        logger.info("[SCHEDULER] 每日CLIP推理任务已添加 (每天 03:02:25 执行)")
+        logger.info("[SCHEDULER] 每小时CLIP推理任务已添加 (每小时第25分钟执行)")
+        
+        # ==================== 增强决策分析定时任务 ====================
+        # 每天 10:00, 12:00, 14:00 为所有蘑菇房执行增强决策分析
+        # 增强功能: 多图像分析, 结构化参数调整, 风险评估
+        
+        # 10:00 增强决策分析任务
+        self.scheduler.add_job(
+            func=safe_enhanced_decision_analysis_10_00,
+            trigger=CronTrigger(hour=10, minute=0, second=0, timezone=self.timezone),
+            id="enhanced_decision_analysis_10_00",
+            replace_existing=True,
+        )
+        logger.info("[SCHEDULER] 增强决策分析任务已添加 (每天 10:00 执行)")
+        
+        # 12:00 增强决策分析任务
+        self.scheduler.add_job(
+            func=safe_enhanced_decision_analysis_12_00,
+            trigger=CronTrigger(hour=12, minute=0, second=0, timezone=self.timezone),
+            id="enhanced_decision_analysis_12_00",
+            replace_existing=True,
+        )
+        logger.info("[SCHEDULER] 增强决策分析任务已添加 (每天 12:00 执行)")
+        
+        # 14:00 增强决策分析任务
+        self.scheduler.add_job(
+            func=safe_enhanced_decision_analysis_14_00,
+            trigger=CronTrigger(hour=14, minute=0, second=0, timezone=self.timezone),
+            id="enhanced_decision_analysis_14_00",
+            replace_existing=True,
+        )
+        logger.info("[SCHEDULER] 增强决策分析任务已添加 (每天 14:00 执行)")
+        
+        logger.info(
+            f"[SCHEDULER] 增强决策分析任务配置: 库房={MUSHROOM_ROOM_IDS}, "
+            f"时间点={[f'{h:02d}:{m:02d}' for h, m in DECISION_ANALYSIS_SCHEDULE_TIMES]}, "
+            f"增强功能=多图像分析+结构化参数调整+风险评估"
+        )
     
     def _setup_jobs(self) -> None:
         """设置所有任务"""
-        # 注意：建表任务已在调度器启动前执行，不再作为调度任务添加
-        
-        # 1. 添加业务任务
+        # 添加业务任务
         self._add_business_jobs()
         
-        # 2. 显示任务信息
+        # 显示任务信息
         jobs = self.scheduler.get_jobs()
         logger.info(f"[SCHEDULER] 总共添加了 {len(jobs)} 个任务")
         for job in jobs:

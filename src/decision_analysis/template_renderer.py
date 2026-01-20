@@ -512,4 +512,124 @@ class TemplateRenderer:
                 formatted[key] = value
         
         return formatted
+    
+    def render_enhanced(
+        self,
+        current_data: Dict,
+        env_stats: pd.DataFrame,
+        device_changes: pd.DataFrame,
+        similar_cases: List[SimilarCase],
+        multi_image_analysis: Optional["MultiImageAnalysis"] = None
+    ) -> str:
+        """
+        Render enhanced decision prompt template with multi-image context
+        
+        This enhanced version includes multi-image analysis context in the prompt,
+        providing information about image aggregation and consistency.
+        
+        Args:
+            current_data: Current state data dictionary
+            env_stats: Environmental statistics DataFrame
+            device_changes: Device change records DataFrame
+            similar_cases: List of similar cases
+            multi_image_analysis: Multi-image analysis results
+            
+        Returns:
+            Rendered enhanced prompt text with multi-image context
+            
+        Requirements: Enhanced decision analysis with multi-image support
+        """
+        logger.info("[TemplateRenderer] Rendering enhanced decision prompt template with multi-image context")
+        
+        try:
+            # Map data to template variables (same as regular render)
+            template_vars = self._map_variables(
+                current_data=current_data,
+                env_stats=env_stats,
+                device_changes=device_changes,
+                similar_cases=similar_cases
+            )
+            
+            # Add multi-image context if available
+            if multi_image_analysis:
+                template_vars.update(self._map_multi_image_context(multi_image_analysis))
+            else:
+                # Add default multi-image context
+                template_vars.update({
+                    "multi_image_count": 1,
+                    "image_aggregation_info": "单图像分析",
+                    "image_consistency_info": "N/A",
+                    "camera_coverage_info": "单相机视角"
+                })
+            
+            # Render template using Python format strings
+            rendered_text = self.template_content.format(**template_vars)
+            
+            logger.info(
+                f"[TemplateRenderer] Successfully rendered enhanced template "
+                f"(length: {len(rendered_text)} chars, multi-image: {multi_image_analysis is not None})"
+            )
+            
+            return rendered_text
+            
+        except KeyError as e:
+            logger.error(f"[TemplateRenderer] Missing template variable in enhanced render: {e}")
+            # Fallback to regular render
+            logger.warning("[TemplateRenderer] Falling back to regular render")
+            return self.render(current_data, env_stats, device_changes, similar_cases)
+        except Exception as e:
+            logger.error(f"[TemplateRenderer] Unexpected error during enhanced rendering: {e}")
+            raise
+    
+    def _map_multi_image_context(self, multi_image_analysis: "MultiImageAnalysis") -> Dict:
+        """
+        Map multi-image analysis to template variables
+        
+        Args:
+            multi_image_analysis: Multi-image analysis results
+            
+        Returns:
+            Dictionary of multi-image template variables
+        """
+        logger.debug("[TemplateRenderer] Mapping multi-image context to template variables")
+        
+        # Format image aggregation information
+        aggregation_info = (
+            f"聚合了{multi_image_analysis.total_images_analyzed}张图像 "
+            f"(方法: {multi_image_analysis.aggregation_method})"
+        )
+        
+        # Format consistency information
+        consistency_score = multi_image_analysis.confidence_score
+        if consistency_score >= 0.8:
+            consistency_level = "高"
+        elif consistency_score >= 0.6:
+            consistency_level = "中"
+        else:
+            consistency_level = "低"
+        
+        consistency_info = f"图像一致性: {consistency_level} (分数: {consistency_score:.2f})"
+        
+        # Format view consistency information
+        view_consistency_map = {"high": "高", "medium": "中", "low": "低"}
+        view_consistency_cn = view_consistency_map.get(multi_image_analysis.view_consistency, "未知")
+        camera_coverage = f"视角一致性: {view_consistency_cn}"
+        
+        # Format quality information
+        quality_scores = multi_image_analysis.image_quality_scores
+        if quality_scores:
+            avg_quality = sum(quality_scores) / len(quality_scores)
+            min_quality = min(quality_scores)
+            max_quality = max(quality_scores)
+            quality_info = f"图像质量: 平均{avg_quality:.2f}, 范围[{min_quality:.2f}, {max_quality:.2f}]"
+        else:
+            quality_info = "图像质量: 未评估"
+        
+        return {
+            "multi_image_count": multi_image_analysis.total_images_analyzed,
+            "image_aggregation_info": aggregation_info,
+            "image_consistency_info": consistency_info,
+            "camera_coverage_info": camera_coverage,
+            "image_quality_info": quality_info
+        }
 

@@ -42,52 +42,84 @@ class DataExtractor:
         self.db_engine = db_engine
         logger.info("[DataExtractor] Initialized")
     
-    def extract_current_embedding_data(
+    def extract_embedding_data(
         self,
         room_id: str,
         target_datetime: datetime,
         time_window_days: int = 7,
-        growth_day_window: int = 3
+        growth_day_window: int = 3,
+        image_aggregation_window_minutes: int = 30
     ) -> pd.DataFrame:
         """
-        Extract current image embedding data from MushroomImageEmbedding table
-        
-        Implements filtering by:
-        - Room ID (exact match)
-        - Entry date window (±time_window_days)
-        - Growth day window (±growth_day_window)
+        Alias for extract_current_embedding_data to maintain compatibility
         
         Args:
             room_id: Room number (607/608/611/612)
             target_datetime: Target datetime for analysis
             time_window_days: Entry date time window (±days)
             growth_day_window: Growth day window (±days)
+            image_aggregation_window_minutes: Time window for aggregating multiple images (minutes)
+            
+        Returns:
+            DataFrame containing embedding data with multi-image support
+        """
+        return self.extract_current_embedding_data(
+            room_id=room_id,
+            target_datetime=target_datetime,
+            time_window_days=time_window_days,
+            growth_day_window=growth_day_window,
+            image_aggregation_window_minutes=image_aggregation_window_minutes
+        )
+    
+    def extract_current_embedding_data(
+        self,
+        room_id: str,
+        target_datetime: datetime,
+        time_window_days: int = 7,
+        growth_day_window: int = 3,
+        image_aggregation_window_minutes: int = 30
+    ) -> pd.DataFrame:
+        """
+        Extract current image embedding data from MushroomImageEmbedding table
+        Enhanced to support multi-image aggregation for comprehensive analysis
+        
+        New Implementation: Direct growth day-based filtering
+        - Determines target growth day from recent data or parameters
+        - Filters data directly by growth day window [target_growth_day ± growth_day_window]
+        - No longer uses collection_datetime time window filtering
+        - Prioritizes data by similarity, room_id match, and latest collection_datetime
+        
+        Args:
+            room_id: Room number (607/608/611/612)
+            target_datetime: Target datetime for analysis (used for aggregation window)
+            time_window_days: Legacy parameter (kept for compatibility, not used in filtering)
+            growth_day_window: Growth day window (±days) for filtering
+            image_aggregation_window_minutes: Time window for aggregating multiple images (minutes)
             
         Returns:
             DataFrame containing embedding, env_sensor_status, device configs, etc.
+            Enhanced with multi-image analysis metadata
             
-        Requirements: 1.1, 1.2, 1.3, 1.4, 1.5
+        Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, Multi-Image Enhancement
         """
         logger.info(
-            f"[DataExtractor] Extracting embedding data: "
+            f"[DataExtractor] Extracting embedding data with multi-image support: "
             f"room_id={room_id}, datetime={target_datetime}, "
-            f"time_window=±{time_window_days}days, growth_day_window=±{growth_day_window}days"
+            f"growth_day_window=±{growth_day_window}days, "
+            f"image_aggregation_window={image_aggregation_window_minutes}min"
         )
         
         try:
-            from sqlalchemy import select, and_
+            from sqlalchemy import select, and_, desc
             from sqlalchemy.orm import Session
             from utils.create_table import MushroomImageEmbedding
             
-            # Calculate date range for in_date filtering
-            target_date = target_datetime.date()
-            min_in_date = target_date - timedelta(days=time_window_days)
-            max_in_date = target_date + timedelta(days=time_window_days)
+            # Calculate time window for image aggregation (still used for metadata)
+            aggregation_start = target_datetime - timedelta(minutes=image_aggregation_window_minutes)
+            aggregation_end = target_datetime + timedelta(minutes=image_aggregation_window_minutes)
             
-            # We need to determine the target growth_day from the most recent record
-            # near the target_datetime for this room
             with Session(self.db_engine) as session:
-                # First, find a reference growth_day from records near target_datetime
+                # Step 1: Determine target growth day from the most recent record for this room
                 reference_query = (
                     select(MushroomImageEmbedding.growth_day)
                     .where(
@@ -118,8 +150,8 @@ class DataExtractor:
                     f"range=[{min_growth_day}, {max_growth_day}]"
                 )
                 
-                # Build the main query with all filters
-                # Using idx_room_growth_day and idx_in_date indexes
+                # Step 2: Query data directly based on growth day window
+                # No collection_datetime filtering, only growth day-based filtering
                 query = (
                     select(
                         MushroomImageEmbedding.id,
@@ -141,17 +173,18 @@ class DataExtractor:
                     )
                     .where(
                         and_(
-                            # Room filter (uses idx_room_growth_day)
-                            MushroomImageEmbedding.room_id == room_id,
-                            # Date window filter (uses idx_in_date)
-                            MushroomImageEmbedding.in_date >= min_in_date,
-                            MushroomImageEmbedding.in_date <= max_in_date,
-                            # Growth day window filter (uses idx_room_growth_day)
+                            # Growth day window filter (primary filter)
                             MushroomImageEmbedding.growth_day >= min_growth_day,
                             MushroomImageEmbedding.growth_day <= max_growth_day,
                         )
                     )
-                    .order_by(MushroomImageEmbedding.collection_datetime.desc())
+                    # Step 3: Order by priority: room_id match first, then latest collection_datetime
+                    .order_by(
+                        # Prioritize exact room_id match
+                        (MushroomImageEmbedding.room_id == room_id).desc(),
+                        # Then by latest collection_datetime
+                        MushroomImageEmbedding.collection_datetime.desc()
+                    )
                 )
                 
                 # Execute query and convert to DataFrame
@@ -160,8 +193,7 @@ class DataExtractor:
                 
                 if not rows:
                     logger.warning(
-                        f"[DataExtractor] No data found matching filters: "
-                        f"room_id={room_id}, in_date=[{min_in_date}, {max_in_date}], "
+                        f"[DataExtractor] No data found matching growth day filter: "
                         f"growth_day=[{min_growth_day}, {max_growth_day}]"
                     )
                     return pd.DataFrame()
@@ -178,9 +210,27 @@ class DataExtractor:
                     ]
                 )
                 
+                # Step 4: Further prioritize records from the target room_id
+                target_room_records = df[df['room_id'] == room_id]
+                if not target_room_records.empty:
+                    # Use records from target room if available
+                    df = target_room_records
+                    logger.debug(
+                        f"[DataExtractor] Using {len(df)} records from target room {room_id}"
+                    )
+                else:
+                    # Use all records if no target room records found
+                    logger.debug(
+                        f"[DataExtractor] No records from target room {room_id}, "
+                        f"using {len(df)} records from other rooms"
+                    )
+                
+                # Step 5: Add multi-image analysis metadata
+                df = self._add_multi_image_metadata(df, aggregation_start, aggregation_end)
+                
                 logger.info(
                     f"[DataExtractor] Successfully extracted {len(df)} records "
-                    f"for room_id={room_id}"
+                    f"for room_id={room_id} with multi-image analysis"
                 )
                 
                 return df
@@ -191,6 +241,433 @@ class DataExtractor:
                 exc_info=True
             )
             return pd.DataFrame()
+    
+    def extract_historical_embedding_data_for_similarity(
+        self,
+        room_id: str,
+        current_in_date: date,
+        target_growth_day: int,
+        growth_day_window: int = 3,
+        top_k: int = 3
+    ) -> pd.DataFrame:
+        """
+        Extract historical embedding data for similarity matching
+        
+        This method specifically excludes the current batch (current_in_date) and only
+        searches historical batches for similarity matching. It finds the top-k most
+        similar historical cases based on growth stage and environmental parameters.
+        
+        Args:
+            room_id: Target room number
+            current_in_date: Current batch entry date (to be excluded)
+            target_growth_day: Target growth day for matching
+            growth_day_window: Growth day window (±days)
+            top_k: Number of top similar cases to return
+            
+        Returns:
+            DataFrame containing historical embedding data with environmental parameters
+            Sorted by similarity and environmental parameter closeness
+            
+        Requirements: Historical batch exclusion, similarity-based matching
+        """
+        logger.info(
+            f"[DataExtractor] Extracting historical embedding data for similarity matching: "
+            f"room_id={room_id}, current_in_date={current_in_date}, "
+            f"target_growth_day={target_growth_day}, growth_day_window=±{growth_day_window}, "
+            f"top_k={top_k}"
+        )
+        
+        try:
+            from sqlalchemy import select, and_, not_
+            from sqlalchemy.orm import Session
+            from utils.create_table import MushroomImageEmbedding
+            
+            # Calculate growth day range
+            min_growth_day = target_growth_day - growth_day_window
+            max_growth_day = target_growth_day + growth_day_window
+            
+            logger.debug(
+                f"[DataExtractor] Historical search parameters: "
+                f"exclude_in_date={current_in_date}, "
+                f"growth_day_range=[{min_growth_day}, {max_growth_day}]"
+            )
+            
+            with Session(self.db_engine) as session:
+                # Query historical data excluding current batch
+                query = (
+                    select(
+                        MushroomImageEmbedding.id,
+                        MushroomImageEmbedding.collection_datetime,
+                        MushroomImageEmbedding.room_id,
+                        MushroomImageEmbedding.in_date,
+                        MushroomImageEmbedding.in_num,
+                        MushroomImageEmbedding.growth_day,
+                        MushroomImageEmbedding.embedding,
+                        MushroomImageEmbedding.semantic_description,
+                        MushroomImageEmbedding.llama_description,
+                        MushroomImageEmbedding.image_quality_score,
+                        MushroomImageEmbedding.env_sensor_status,
+                        MushroomImageEmbedding.air_cooler_config,
+                        MushroomImageEmbedding.fresh_fan_config,
+                        MushroomImageEmbedding.humidifier_config,
+                        MushroomImageEmbedding.light_config,
+                        MushroomImageEmbedding.image_path,
+                    )
+                    .where(
+                        and_(
+                            # Exclude current batch
+                            MushroomImageEmbedding.in_date != current_in_date,
+                            # Growth day window filter
+                            MushroomImageEmbedding.growth_day >= min_growth_day,
+                            MushroomImageEmbedding.growth_day <= max_growth_day,
+                            # Ensure we have valid embedding data
+                            MushroomImageEmbedding.embedding.isnot(None),
+                            # Ensure we have environmental sensor data
+                            MushroomImageEmbedding.env_sensor_status.isnot(None)
+                        )
+                    )
+                    # Order by collection_datetime to get diverse historical data
+                    .order_by(MushroomImageEmbedding.collection_datetime.desc())
+                )
+                
+                # Execute query
+                result = session.execute(query)
+                rows = result.fetchall()
+                
+                if not rows:
+                    logger.warning(
+                        f"[DataExtractor] No historical data found for similarity matching: "
+                        f"exclude_in_date={current_in_date}, "
+                        f"growth_day_range=[{min_growth_day}, {max_growth_day}]"
+                    )
+                    return pd.DataFrame()
+                
+                # Convert to DataFrame
+                df = pd.DataFrame(
+                    rows,
+                    columns=[
+                        'id', 'collection_datetime', 'room_id', 'in_date', 'in_num',
+                        'growth_day', 'embedding', 'semantic_description',
+                        'llama_description', 'image_quality_score', 'env_sensor_status',
+                        'air_cooler_config', 'fresh_fan_config', 'humidifier_config',
+                        'light_config', 'image_path'
+                    ]
+                )
+                
+                # Extract environmental parameters for similarity calculation
+                df = self._extract_env_parameters_from_sensor_data(df)
+                
+                # Add batch information for analysis
+                df['is_historical_batch'] = True
+                df['excluded_current_batch'] = current_in_date
+                
+                logger.info(
+                    f"[DataExtractor] Successfully extracted {len(df)} historical records "
+                    f"from {df['in_date'].nunique()} different batches for similarity matching"
+                )
+                
+                # Log batch distribution
+                batch_counts = df['in_date'].value_counts().head(5)
+                logger.debug(
+                    f"[DataExtractor] Top historical batches: "
+                    f"{dict(batch_counts)}"
+                )
+                
+                return df
+                
+        except Exception as e:
+            logger.error(
+                f"[DataExtractor] Failed to extract historical embedding data: {e}",
+                exc_info=True
+            )
+            return pd.DataFrame()
+    
+    def _extract_env_parameters_from_sensor_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Extract environmental parameters from sensor data for similarity matching
+        
+        Args:
+            df: DataFrame with env_sensor_status column
+            
+        Returns:
+            DataFrame with additional environmental parameter columns
+        """
+        if df.empty or 'env_sensor_status' not in df.columns:
+            return df
+        
+        try:
+            import json
+            
+            # Initialize environmental parameter columns
+            df['temperature'] = None
+            df['humidity'] = None
+            df['co2'] = None
+            
+            # Extract parameters from JSON sensor data
+            for idx, row in df.iterrows():
+                if row['env_sensor_status'] is not None:
+                    try:
+                        if isinstance(row['env_sensor_status'], str):
+                            sensor_data = json.loads(row['env_sensor_status'])
+                        else:
+                            sensor_data = row['env_sensor_status']
+                        
+                        # Extract temperature, humidity, CO2
+                        df.at[idx, 'temperature'] = sensor_data.get('temperature')
+                        df.at[idx, 'humidity'] = sensor_data.get('humidity')
+                        df.at[idx, 'co2'] = sensor_data.get('co2')
+                        
+                    except (json.JSONDecodeError, TypeError, AttributeError) as e:
+                        logger.debug(f"[DataExtractor] Failed to parse sensor data for row {idx}: {e}")
+                        continue
+            
+            # Convert to numeric types
+            df['temperature'] = pd.to_numeric(df['temperature'], errors='coerce')
+            df['humidity'] = pd.to_numeric(df['humidity'], errors='coerce')
+            df['co2'] = pd.to_numeric(df['co2'], errors='coerce')
+            
+            # Log extraction statistics
+            valid_temp = df['temperature'].notna().sum()
+            valid_humidity = df['humidity'].notna().sum()
+            valid_co2 = df['co2'].notna().sum()
+            
+            logger.debug(
+                f"[DataExtractor] Environmental parameter extraction: "
+                f"temperature={valid_temp}/{len(df)}, "
+                f"humidity={valid_humidity}/{len(df)}, "
+                f"co2={valid_co2}/{len(df)}"
+            )
+            
+            return df
+            
+        except Exception as e:
+            logger.error(
+                f"[DataExtractor] Failed to extract environmental parameters: {e}",
+                exc_info=True
+            )
+            return df
+    
+    def find_top_similar_historical_cases(
+        self,
+        current_embedding: 'np.ndarray',
+        current_env_params: dict,
+        room_id: str,
+        current_in_date: date,
+        target_growth_day: int,
+        growth_day_window: int = 3,
+        top_k: int = 3
+    ) -> pd.DataFrame:
+        """
+        Find top-k most similar historical cases based on embedding similarity
+        and environmental parameter closeness
+        
+        Args:
+            current_embedding: Current embedding vector
+            current_env_params: Current environmental parameters (temp, humidity, co2)
+            room_id: Target room number
+            current_in_date: Current batch entry date (to be excluded)
+            target_growth_day: Target growth day
+            growth_day_window: Growth day window (±days)
+            top_k: Number of top similar cases to return
+            
+        Returns:
+            DataFrame with top-k most similar historical cases
+            Includes similarity scores and environmental parameter differences
+        """
+        logger.info(
+            f"[DataExtractor] Finding top-{top_k} similar historical cases: "
+            f"room_id={room_id}, current_in_date={current_in_date}, "
+            f"target_growth_day={target_growth_day}"
+        )
+        
+        try:
+            import numpy as np
+            from sklearn.metrics.pairwise import cosine_similarity
+            
+            # Get historical data
+            historical_df = self.extract_historical_embedding_data_for_similarity(
+                room_id=room_id,
+                current_in_date=current_in_date,
+                target_growth_day=target_growth_day,
+                growth_day_window=growth_day_window,
+                top_k=top_k * 5  # Get more candidates for better selection
+            )
+            
+            if historical_df.empty:
+                logger.warning("[DataExtractor] No historical data available for similarity matching")
+                return pd.DataFrame()
+            
+            # Calculate embedding similarities
+            similarities = []
+            valid_indices = []
+            
+            for idx, row in historical_df.iterrows():
+                try:
+                    if row['embedding'] is not None:
+                        hist_embedding = np.array(row['embedding'])
+                        if hist_embedding.shape == current_embedding.shape:
+                            similarity = cosine_similarity(
+                                [current_embedding], [hist_embedding]
+                            )[0][0]
+                            similarities.append(similarity)
+                            valid_indices.append(idx)
+                        else:
+                            logger.debug(f"[DataExtractor] Embedding shape mismatch for row {idx}")
+                    else:
+                        logger.debug(f"[DataExtractor] No embedding data for row {idx}")
+                except Exception as e:
+                    logger.debug(f"[DataExtractor] Error calculating similarity for row {idx}: {e}")
+                    continue
+            
+            if not similarities:
+                logger.warning("[DataExtractor] No valid embeddings found for similarity calculation")
+                return pd.DataFrame()
+            
+            # Filter to valid rows and add similarity scores
+            valid_df = historical_df.loc[valid_indices].copy()
+            valid_df['embedding_similarity'] = similarities
+            
+            # Calculate environmental parameter differences
+            current_temp = current_env_params.get('temperature')
+            current_humidity = current_env_params.get('humidity')
+            current_co2 = current_env_params.get('co2')
+            
+            valid_df['temp_diff'] = None
+            valid_df['humidity_diff'] = None
+            valid_df['co2_diff'] = None
+            valid_df['env_similarity_score'] = 0.0
+            
+            for idx, row in valid_df.iterrows():
+                temp_diff = abs(row['temperature'] - current_temp) if (
+                    current_temp is not None and row['temperature'] is not None
+                ) else float('inf')
+                
+                humidity_diff = abs(row['humidity'] - current_humidity) if (
+                    current_humidity is not None and row['humidity'] is not None
+                ) else float('inf')
+                
+                co2_diff = abs(row['co2'] - current_co2) if (
+                    current_co2 is not None and row['co2'] is not None
+                ) else float('inf')
+                
+                valid_df.at[idx, 'temp_diff'] = temp_diff
+                valid_df.at[idx, 'humidity_diff'] = humidity_diff
+                valid_df.at[idx, 'co2_diff'] = co2_diff
+                
+                # Calculate combined environmental similarity score
+                # Lower differences = higher similarity
+                env_score = 0.0
+                if temp_diff != float('inf'):
+                    env_score += 1.0 / (1.0 + temp_diff / 10.0)  # Normalize by 10°C
+                if humidity_diff != float('inf'):
+                    env_score += 1.0 / (1.0 + humidity_diff / 20.0)  # Normalize by 20%
+                if co2_diff != float('inf'):
+                    env_score += 1.0 / (1.0 + co2_diff / 500.0)  # Normalize by 500ppm
+                
+                valid_df.at[idx, 'env_similarity_score'] = env_score
+            
+            # Calculate combined similarity score
+            # 70% embedding similarity + 30% environmental similarity
+            max_env_score = valid_df['env_similarity_score'].max()
+            if max_env_score > 0:
+                normalized_env_scores = valid_df['env_similarity_score'] / max_env_score
+            else:
+                normalized_env_scores = 0.0
+            
+            valid_df['combined_similarity'] = (
+                0.7 * valid_df['embedding_similarity'] + 
+                0.3 * normalized_env_scores
+            )
+            
+            # Sort by combined similarity and select top-k
+            top_similar = valid_df.nlargest(top_k, 'combined_similarity')
+            
+            logger.info(
+                f"[DataExtractor] Found {len(top_similar)} similar historical cases "
+                f"with avg embedding similarity: {top_similar['embedding_similarity'].mean():.3f}, "
+                f"avg combined similarity: {top_similar['combined_similarity'].mean():.3f}"
+            )
+            
+            # Log top cases
+            for i, (_, row) in enumerate(top_similar.iterrows(), 1):
+                logger.debug(
+                    f"[DataExtractor] Top-{i}: batch={row['in_date']}, "
+                    f"growth_day={row['growth_day']}, "
+                    f"embedding_sim={row['embedding_similarity']:.3f}, "
+                    f"combined_sim={row['combined_similarity']:.3f}, "
+                    f"temp_diff={row['temp_diff']:.1f}°C, "
+                    f"humidity_diff={row['humidity_diff']:.1f}%, "
+                    f"co2_diff={row['co2_diff']:.0f}ppm"
+                )
+            
+            return top_similar
+            
+        except Exception as e:
+            logger.error(
+                f"[DataExtractor] Failed to find similar historical cases: {e}",
+                exc_info=True
+            )
+            return pd.DataFrame()
+
+    def _add_multi_image_metadata(
+        self, 
+        df: pd.DataFrame, 
+        aggregation_start: datetime, 
+        aggregation_end: datetime
+    ) -> pd.DataFrame:
+        """
+        Add multi-image analysis metadata to the DataFrame
+        
+        Args:
+            df: DataFrame with image embedding data
+            aggregation_start: Start time for image aggregation window
+            aggregation_end: End time for image aggregation window
+            
+        Returns:
+            DataFrame with added multi-image metadata columns
+        """
+        if df.empty:
+            return df
+        
+        # Identify images within aggregation window
+        df['within_aggregation_window'] = (
+            (df['collection_datetime'] >= aggregation_start) & 
+            (df['collection_datetime'] <= aggregation_end)
+        )
+        
+        # Count images within aggregation window
+        images_in_window = df[df['within_aggregation_window']].shape[0]
+        
+        # Add metadata columns
+        df['total_images_for_analysis'] = len(df)
+        df['images_in_aggregation_window'] = images_in_window
+        df['aggregation_window_start'] = aggregation_start
+        df['aggregation_window_end'] = aggregation_end
+        
+        # Calculate image quality statistics
+        if 'image_quality_score' in df.columns:
+            quality_scores = df['image_quality_score'].dropna()
+            if not quality_scores.empty:
+                df['avg_image_quality'] = quality_scores.mean()
+                df['min_image_quality'] = quality_scores.min()
+                df['max_image_quality'] = quality_scores.max()
+            else:
+                df['avg_image_quality'] = None
+                df['min_image_quality'] = None
+                df['max_image_quality'] = None
+        
+        # Add time-based weighting for analysis
+        # More recent images get higher weights
+        time_diffs = (df['collection_datetime'] - aggregation_start).dt.total_seconds()
+        max_time_diff = time_diffs.max() if not time_diffs.empty else 1
+        df['time_weight'] = 1.0 - (time_diffs / max_time_diff) * 0.5  # Weight range: 0.5 to 1.0
+        
+        logger.debug(
+            f"[DataExtractor] Added multi-image metadata: "
+            f"total_images={len(df)}, images_in_window={images_in_window}"
+        )
+        
+        return df
     
     def extract_env_daily_stats(
         self,

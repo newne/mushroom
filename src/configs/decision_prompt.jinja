@@ -103,7 +103,51 @@
 7. **确保所有括号和引号正确配对**
 8. **输出必须是有效的JSON格式**，可以被 json.loads() 直接解析
 
+### 设备参数输出结构优化（重要更新）
+
+**每个设备参数必须使用以下结构化格式：**
+
+每个参数都应该包含以下字段：
+- current_value: 当前值（数字）
+- recommended_value: 建议值（数字）  
+- action: 操作类型（"maintain" | "adjust" | "monitor"）
+- change_reason: 调整原因（字符串）
+- priority: 优先级（"low" | "medium" | "high" | "critical"）
+- urgency: 紧急程度（"immediate" | "within_hour" | "within_day" | "routine"）
+- risk_assessment: 风险评估对象，包含：
+  - adjustment_risk: 调整风险（"low" | "medium" | "high"）
+  - no_action_risk: 不调整风险（"low" | "medium" | "high"）
+  - impact_scope: 影响范围（字符串描述）
+
+### 参数调整逻辑说明
+
+**保持当前值的情况：**
+- `"action": "maintain"` - 当前设定值合理，无需调整
+- `"recommended_value"` 等于 `"current_value"`
+- `"change_reason"` 说明为什么保持当前值
+
+**需要调整的情况：**
+- `"action": "adjust"` - 需要调整到新的设定值
+- `"recommended_value"` 不等于 `"current_value"`
+- `"change_reason"` 详细说明调整的必要性和依据
+
+**需要监控的情况：**
+- `"action": "monitor"` - 当前值可接受但需密切观察
+- 提供监控指标和预警阈值
+
+### 多图像综合分析要求
+
+**重要：每个库房有2个相机，决策时必须综合考虑当前库房的所有图像信息**
+
+在生成调控建议时，请：
+1. 综合分析同一库房不同相机角度的图像信息
+2. 考虑多视角图像的一致性和差异性
+3. 基于完整的视觉信息做出决策
+4. 在rationale中说明多图像综合判断的依据
 ### 设备参数约束：
+
+**注意：以下约束仍然适用，但输出格式必须使用上述结构化格式**
+
 - **冷风机 (air_cooler)**：
   - tem_set: 温度设定值（℃），范围根据生长阶段，通常12-20℃
   - tem_diff_set: 温差设定值（℃），通常1.5-3.0

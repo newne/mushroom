@@ -61,10 +61,14 @@ class DecisionAnalyzer:
         """
         logger.info("[DecisionAnalyzer] Initializing decision analyzer...")
         
+        # Import decision analysis configuration
+        from global_const.const_config import DECISION_ANALYSIS_CONFIG
+        
         self.db_engine = db_engine
         self.settings = settings
         self.static_config = static_config
         self.template_path = template_path
+        self.decision_config = DECISION_ANALYSIS_CONFIG
         
         # Initialize all components with error handling
         try:
@@ -540,4 +544,510 @@ class DecisionAnalyzer:
             f"[DecisionAnalyzer] =========================================="
         )
         
-        return decision_output
+    def analyze_enhanced(
+        self,
+        room_id: str,
+        analysis_datetime: datetime
+    ) -> "EnhancedDecisionOutput":
+        """
+        Execute enhanced decision analysis workflow with multi-image support
+        
+        This method implements the enhanced workflow that:
+        1. Extracts multi-image data from the same room
+        2. Aggregates image embeddings for comprehensive analysis
+        3. Generates structured parameter adjustments
+        4. Provides detailed risk assessments and priority levels
+        
+        Args:
+            room_id: Room number (607/608/611/612)
+            analysis_datetime: Analysis timestamp
+            
+        Returns:
+            EnhancedDecisionOutput with structured parameter adjustments
+            
+        Requirements: Enhanced decision analysis with multi-image support
+        """
+        start_time = time.time()
+        
+        logger.info(
+            f"[DecisionAnalyzer] =========================================="
+        )
+        logger.info(
+            f"[DecisionAnalyzer] Starting ENHANCED decision analysis"
+        )
+        logger.info(
+            f"[DecisionAnalyzer] Room ID: {room_id}"
+        )
+        logger.info(
+            f"[DecisionAnalyzer] Analysis Time: {analysis_datetime}"
+        )
+        logger.info(
+            f"[DecisionAnalyzer] Multi-image aggregation: ENABLED"
+        )
+        logger.info(
+            f"[DecisionAnalyzer] =========================================="
+        )
+        
+        # Initialize metadata tracking
+        metadata = {
+            "data_sources": {},
+            "similar_cases_count": 0,
+            "avg_similarity_score": 0.0,
+            "llm_model": self.settings.llama.model,
+            "llm_response_time": 0.0,
+            "total_processing_time": 0.0,
+            "warnings": [],
+            "errors": [],
+            "multi_image_count": 0,
+            "image_aggregation_method": "weighted_average"
+        }
+        
+        # Variables to hold extracted data
+        current_data = {}
+        env_stats = None
+        device_changes = None
+        similar_cases = []
+        rendered_prompt = ""
+        llm_decision = {}
+        multi_image_analysis = None
+        
+        # ====================================================================
+        # STEP 1: Extract Multi-Image Data from Database
+        # ====================================================================
+        logger.info("[DecisionAnalyzer] STEP 1: Extracting multi-image data from database...")
+        step1_start = time.time()
+        
+        try:
+            # Extract current embedding data with multi-image aggregation
+            logger.info("[DecisionAnalyzer] Extracting multi-image embedding data...")
+            embedding_df = self.data_extractor.extract_embedding_data(
+                room_id=room_id,
+                target_datetime=analysis_datetime,
+                time_window_days=7,
+                growth_day_window=3,
+                image_aggregation_window_minutes=self.decision_config["image_aggregation_window"]
+            )
+            
+            if embedding_df.empty:
+                error_msg = f"No embedding data found for room {room_id}"
+                logger.error(f"[DecisionAnalyzer] {error_msg}")
+                metadata["errors"].append(error_msg)
+                metadata["warnings"].append("Using fallback strategy due to missing data")
+            else:
+                # Count images in the aggregation window
+                metadata["multi_image_count"] = len(embedding_df)
+                
+                # Use the most recent record (which may contain aggregated data)
+                latest_record = embedding_df.iloc[0]
+                
+                # Extract environmental sensor status
+                env_sensor_status = latest_record.get("env_sensor_status", {})
+                
+                # Build current_data dictionary
+                current_data = {
+                    "room_id": room_id,
+                    "collection_datetime": latest_record.get("collection_datetime"),
+                    "in_date": latest_record.get("in_date"),
+                    "in_num": latest_record.get("in_num"),
+                    "growth_day": latest_record.get("growth_day"),
+                    "in_day_num": latest_record.get("growth_day"),  # Same as growth_day
+                    "in_year": latest_record.get("in_date").year if latest_record.get("in_date") else None,
+                    "in_month": latest_record.get("in_date").month if latest_record.get("in_date") else None,
+                    "in_day": latest_record.get("in_date").day if latest_record.get("in_date") else None,
+                    "temperature": env_sensor_status.get("temperature", 0.0),
+                    "humidity": env_sensor_status.get("humidity", 0.0),
+                    "co2": env_sensor_status.get("co2", 0.0),
+                    "embedding": latest_record.get("embedding"),
+                    "semantic_description": latest_record.get("semantic_description", ""),
+                    "llama_description": latest_record.get("llama_description"),
+                    "image_quality_score": latest_record.get("image_quality_score"),
+                    "air_cooler_config": latest_record.get("air_cooler_config", {}),
+                    "fresh_fan_config": latest_record.get("fresh_fan_config", {}),
+                    "humidifier_config": latest_record.get("humidifier_config", {}),
+                    "light_config": latest_record.get("light_config", {})
+                }
+                
+                # Create multi-image analysis summary
+                from decision_analysis.data_models import MultiImageAnalysis
+                
+                # Calculate consistency score once to avoid multiple calls
+                consistency_score = self._calculate_image_consistency(embedding_df)
+                view_consistency = "high" if consistency_score >= 0.8 else "medium" if consistency_score >= 0.6 else "low"
+                
+                multi_image_analysis = MultiImageAnalysis(
+                    total_images_analyzed=metadata["multi_image_count"],
+                    image_quality_scores=[float(row.get("image_quality_score", 0.0)) for _, row in embedding_df.iterrows()],
+                    aggregation_method=metadata["image_aggregation_method"],
+                    confidence_score=consistency_score,
+                    view_consistency=view_consistency,
+                    key_observations=[f"Camera {i+1}: Quality {score:.2f}" for i, score in enumerate([float(row.get("image_quality_score", 0.0)) for _, row in embedding_df.iterrows()])]
+                )
+                
+                metadata["data_sources"]["embedding_records"] = len(embedding_df)
+                logger.info(
+                    f"[DecisionAnalyzer] Extracted {len(embedding_df)} embedding records from {metadata['multi_image_count']} images, "
+                    f"using aggregated data from {current_data['collection_datetime']}"
+                )
+                
+                # Validate environmental parameters
+                validation_warnings = self.data_extractor.validate_env_params(embedding_df)
+                if validation_warnings:
+                    metadata["warnings"].extend(validation_warnings)
+            
+            # Extract environmental daily statistics (same as before)
+            logger.info("[DecisionAnalyzer] Extracting environmental statistics...")
+            target_date = analysis_datetime.date()
+            env_stats = self.data_extractor.extract_env_daily_stats(
+                room_id=room_id,
+                target_date=target_date,
+                days_range=1
+            )
+            
+            if env_stats.empty:
+                warning_msg = f"No environmental statistics found for room {room_id}"
+                logger.warning(f"[DecisionAnalyzer] {warning_msg}")
+                metadata["warnings"].append(warning_msg)
+            else:
+                metadata["data_sources"]["env_stats_records"] = len(env_stats)
+                logger.info(
+                    f"[DecisionAnalyzer] Extracted {len(env_stats)} environmental stat records"
+                )
+            
+            # Extract device change records (same as before)
+            logger.info("[DecisionAnalyzer] Extracting device change records...")
+            from datetime import timedelta
+            start_time_changes = analysis_datetime - timedelta(days=7)
+            device_changes = self.data_extractor.extract_device_changes(
+                room_id=room_id,
+                start_time=start_time_changes,
+                end_time=analysis_datetime
+            )
+            
+            # Limit device changes to prevent prompt overflow
+            MAX_DEVICE_CHANGES = 30
+            original_count = len(device_changes)
+            if original_count > MAX_DEVICE_CHANGES:
+                device_changes = device_changes.head(MAX_DEVICE_CHANGES)
+                warning_msg = (
+                    f"Device changes truncated from {original_count} to {MAX_DEVICE_CHANGES} "
+                    f"records to prevent prompt overflow"
+                )
+                logger.warning(f"[DecisionAnalyzer] {warning_msg}")
+                metadata["warnings"].append(warning_msg)
+            
+            if device_changes.empty:
+                warning_msg = f"No device changes found for room {room_id} in the past 7 days"
+                logger.warning(f"[DecisionAnalyzer] {warning_msg}")
+                metadata["warnings"].append(warning_msg)
+            else:
+                metadata["data_sources"]["device_change_records"] = len(device_changes)
+                logger.info(
+                    f"[DecisionAnalyzer] Extracted {len(device_changes)} device change records"
+                )
+            
+            step1_time = time.time() - step1_start
+            logger.info(f"[DecisionAnalyzer] STEP 1 completed in {step1_time:.2f}s")
+            
+        except Exception as e:
+            error_msg = f"Multi-image data extraction failed: {str(e)}"
+            logger.error(f"[DecisionAnalyzer] {error_msg}", exc_info=True)
+            metadata["errors"].append(error_msg)
+            # Continue with empty data - will use fallback strategy
+        
+        # ====================================================================
+        # STEP 2: Find Similar Historical Cases with Multi-Image Boost
+        # ====================================================================
+        logger.info("[DecisionAnalyzer] STEP 2: Finding similar cases with multi-image boost...")
+        step2_start = time.time()
+        
+        try:
+            if current_data and "embedding" in current_data and current_data["embedding"] is not None:
+                import numpy as np
+                
+                query_embedding = current_data["embedding"]
+                
+                # Ensure embedding is numpy array
+                if not isinstance(query_embedding, np.ndarray):
+                    query_embedding = np.array(query_embedding)
+                
+                # Use enhanced CLIP matcher with multi-image support
+                similar_cases = self.clip_matcher.find_similar_cases_multi_image(
+                    query_embedding=query_embedding,
+                    room_id=room_id,
+                    in_date=current_data.get("in_date"),
+                    growth_day=current_data.get("growth_day", 0),
+                    top_k=3,
+                    date_window_days=7,
+                    growth_day_window=3,
+                    multi_image_boost=True,
+                    image_count=metadata["multi_image_count"]
+                )
+                
+                if similar_cases:
+                    metadata["similar_cases_count"] = len(similar_cases)
+                    metadata["avg_similarity_score"] = sum(
+                        case.similarity_score for case in similar_cases
+                    ) / len(similar_cases)
+                    
+                    logger.info(
+                        f"[DecisionAnalyzer] Found {len(similar_cases)} similar cases with multi-image boost, "
+                        f"avg similarity: {metadata['avg_similarity_score']:.2f}%"
+                    )
+                    
+                    # Check for low confidence cases
+                    low_confidence_cases = [
+                        case for case in similar_cases 
+                        if case.confidence_level == "low"
+                    ]
+                    if low_confidence_cases:
+                        warning_msg = (
+                            f"Found {len(low_confidence_cases)} low confidence matches "
+                            f"(similarity < 20%)"
+                        )
+                        logger.warning(f"[DecisionAnalyzer] {warning_msg}")
+                        metadata["warnings"].append(warning_msg)
+                else:
+                    warning_msg = "No similar cases found, will use rule-based strategy"
+                    logger.warning(f"[DecisionAnalyzer] {warning_msg}")
+                    metadata["warnings"].append(warning_msg)
+            else:
+                warning_msg = "No embedding data available for CLIP matching"
+                logger.warning(f"[DecisionAnalyzer] {warning_msg}")
+                metadata["warnings"].append(warning_msg)
+            
+            step2_time = time.time() - step2_start
+            logger.info(f"[DecisionAnalyzer] STEP 2 completed in {step2_time:.2f}s")
+            
+        except Exception as e:
+            error_msg = f"Enhanced CLIP matching failed: {str(e)}"
+            logger.error(f"[DecisionAnalyzer] {error_msg}", exc_info=True)
+            metadata["errors"].append(error_msg)
+            metadata["warnings"].append("Continuing without similar cases")
+            # Continue without similar cases
+        
+        # ====================================================================
+        # STEP 3: Render Enhanced Decision Prompt Template
+        # ====================================================================
+        logger.info("[DecisionAnalyzer] STEP 3: Rendering enhanced decision prompt...")
+        step3_start = time.time()
+        
+        try:
+            import pandas as pd
+            
+            # Ensure we have DataFrames (even if empty)
+            if env_stats is None:
+                env_stats = pd.DataFrame()
+            if device_changes is None:
+                device_changes = pd.DataFrame()
+            
+            # Add multi-image context to the prompt rendering
+            rendered_prompt = self.template_renderer.render_enhanced(
+                current_data=current_data,
+                env_stats=env_stats,
+                device_changes=device_changes,
+                similar_cases=similar_cases,
+                multi_image_analysis=multi_image_analysis
+            )
+            
+            logger.info(
+                f"[DecisionAnalyzer] Rendered enhanced prompt successfully "
+                f"(length: {len(rendered_prompt)} chars, multi-image context included)"
+            )
+            
+            step3_time = time.time() - step3_start
+            logger.info(f"[DecisionAnalyzer] STEP 3 completed in {step3_time:.2f}s")
+            
+        except Exception as e:
+            error_msg = f"Enhanced template rendering failed: {str(e)}"
+            logger.error(f"[DecisionAnalyzer] {error_msg}", exc_info=True)
+            metadata["errors"].append(error_msg)
+            # Fallback to regular rendering
+            try:
+                rendered_prompt = self.template_renderer.render(
+                    current_data=current_data,
+                    env_stats=env_stats,
+                    device_changes=device_changes,
+                    similar_cases=similar_cases
+                )
+                metadata["warnings"].append("Using regular prompt due to enhanced rendering error")
+            except Exception as e2:
+                rendered_prompt = f"生成蘑菇房{room_id}的环境调控建议（多图像综合分析）"
+                metadata["warnings"].append("Using simplified prompt due to rendering errors")
+        
+        # ====================================================================
+        # STEP 4: Call LLM for Enhanced Decision Generation
+        # ====================================================================
+        logger.info("[DecisionAnalyzer] STEP 4: Calling LLM for enhanced decision generation...")
+        step4_start = time.time()
+        
+        try:
+            # Estimate prompt length and add to metadata
+            prompt_length = len(rendered_prompt)
+            prompt_tokens_estimate = prompt_length // 4  # Rough estimate: 1 token ≈ 4 chars
+            
+            logger.info(
+                f"[DecisionAnalyzer] Enhanced prompt length: {prompt_length} chars "
+                f"(~{prompt_tokens_estimate} tokens)"
+            )
+            
+            # Warn if prompt is very long
+            if prompt_tokens_estimate > 3000:
+                warning_msg = (
+                    f"Enhanced prompt is very long (~{prompt_tokens_estimate} tokens), "
+                    "may exceed model context window"
+                )
+                logger.warning(f"[DecisionAnalyzer] {warning_msg}")
+                metadata["warnings"].append(warning_msg)
+            
+            llm_decision = self.llm_client.generate_enhanced_decision(
+                prompt=rendered_prompt,
+                temperature=0.3,  # Lower temperature for more structured output
+                max_tokens=3072   # Increased for enhanced output format
+            )
+            
+            step4_time = time.time() - step4_start
+            metadata["llm_response_time"] = step4_time
+            
+            logger.info(f"[DecisionAnalyzer] STEP 4 completed in {step4_time:.2f}s")
+            
+            # Check if LLM returned fallback decision
+            if llm_decision.get("status") == "fallback":
+                warning_msg = f"LLM fallback: {llm_decision.get('error_reason', 'Unknown')}"
+                logger.warning(f"[DecisionAnalyzer] {warning_msg}")
+                metadata["warnings"].append(warning_msg)
+                
+                # Extract warnings from fallback decision
+                if "metadata" in llm_decision and "warnings" in llm_decision["metadata"]:
+                    metadata["warnings"].extend(llm_decision["metadata"]["warnings"])
+            
+        except Exception as e:
+            error_msg = f"Enhanced LLM call failed: {str(e)}"
+            logger.error(f"[DecisionAnalyzer] {error_msg}", exc_info=True)
+            metadata["errors"].append(error_msg)
+            # Use fallback decision
+            llm_decision = self.llm_client._get_enhanced_fallback_decision(str(e))
+            metadata["warnings"].append("Using enhanced fallback decision due to LLM error")
+        
+        # ====================================================================
+        # STEP 5: Validate and Format Enhanced Output
+        # ====================================================================
+        logger.info("[DecisionAnalyzer] STEP 5: Validating and formatting enhanced output...")
+        step5_start = time.time()
+        
+        try:
+            enhanced_decision_output = self.output_handler.validate_and_format_enhanced(
+                raw_decision=llm_decision,
+                room_id=room_id,
+                multi_image_analysis=multi_image_analysis
+            )
+            
+            # Merge metadata
+            enhanced_decision_output.metadata.data_sources = metadata["data_sources"]
+            enhanced_decision_output.metadata.similar_cases_count = metadata["similar_cases_count"]
+            enhanced_decision_output.metadata.avg_similarity_score = metadata["avg_similarity_score"]
+            enhanced_decision_output.metadata.llm_model = metadata["llm_model"]
+            enhanced_decision_output.metadata.llm_response_time = metadata["llm_response_time"]
+            
+            # Add enhanced metadata
+            enhanced_decision_output.metadata.multi_image_count = metadata["multi_image_count"]
+            enhanced_decision_output.metadata.image_aggregation_method = metadata["image_aggregation_method"]
+            
+            # Add warnings and errors from all steps
+            enhanced_decision_output.metadata.warnings.extend(metadata["warnings"])
+            enhanced_decision_output.metadata.errors.extend(metadata["errors"])
+            
+            step5_time = time.time() - step5_start
+            logger.info(f"[DecisionAnalyzer] STEP 5 completed in {step5_time:.2f}s")
+            
+        except Exception as e:
+            error_msg = f"Enhanced output validation failed: {str(e)}"
+            logger.error(f"[DecisionAnalyzer] {error_msg}", exc_info=True)
+            metadata["errors"].append(error_msg)
+            
+            # Create minimal error output
+            enhanced_decision_output = self.output_handler._create_error_enhanced_output(
+                room_id=room_id,
+                errors=metadata["errors"]
+            )
+            enhanced_decision_output.metadata.warnings = metadata["warnings"]
+        
+        # ====================================================================
+        # Final Summary
+        # ====================================================================
+        total_time = time.time() - start_time
+        enhanced_decision_output.metadata.total_processing_time = total_time
+        
+        logger.info(
+            f"[DecisionAnalyzer] =========================================="
+        )
+        logger.info(
+            f"[DecisionAnalyzer] Enhanced analysis completed"
+        )
+        logger.info(
+            f"[DecisionAnalyzer] Status: {enhanced_decision_output.status}"
+        )
+        logger.info(
+            f"[DecisionAnalyzer] Total time: {total_time:.2f}s"
+        )
+        logger.info(
+            f"[DecisionAnalyzer] Multi-image count: {metadata['multi_image_count']}"
+        )
+        logger.info(
+            f"[DecisionAnalyzer] Data sources: {len(enhanced_decision_output.metadata.data_sources)}"
+        )
+        logger.info(
+            f"[DecisionAnalyzer] Similar cases: {enhanced_decision_output.metadata.similar_cases_count}"
+        )
+        logger.info(
+            f"[DecisionAnalyzer] Warnings: {len(enhanced_decision_output.metadata.warnings)}"
+        )
+        logger.info(
+            f"[DecisionAnalyzer] Errors: {len(enhanced_decision_output.metadata.errors)}"
+        )
+        logger.info(
+            f"[DecisionAnalyzer] =========================================="
+        )
+        
+        return enhanced_decision_output
+    
+    def _calculate_image_consistency(self, embedding_df) -> float:
+        """
+        Calculate consistency score between multiple images
+        
+        Args:
+            embedding_df: DataFrame with image embeddings
+            
+        Returns:
+            Consistency score between 0.0 and 1.0
+        """
+        try:
+            if len(embedding_df) < 2:
+                return 1.0  # Single image is perfectly consistent
+            
+            import numpy as np
+            from sklearn.metrics.pairwise import cosine_similarity
+            
+            embeddings = []
+            for _, row in embedding_df.iterrows():
+                embedding = row.get("embedding")
+                if embedding is not None:
+                    if not isinstance(embedding, np.ndarray):
+                        embedding = np.array(embedding)
+                    embeddings.append(embedding)
+            
+            if len(embeddings) < 2:
+                return 1.0
+            
+            # Calculate pairwise cosine similarities
+            similarities = []
+            for i in range(len(embeddings)):
+                for j in range(i + 1, len(embeddings)):
+                    sim = cosine_similarity([embeddings[i]], [embeddings[j]])[0][0]
+                    similarities.append(sim)
+            
+            # Return average similarity as consistency score
+            return float(np.mean(similarities))
+            
+        except Exception as e:
+            logger.warning(f"[DecisionAnalyzer] Failed to calculate image consistency: {e}")
+            return 0.5  # Default moderate consistency

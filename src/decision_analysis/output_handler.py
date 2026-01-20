@@ -16,10 +16,19 @@ from decision_analysis.data_models import (
     DecisionMetadata,
     DecisionOutput,
     DeviceRecommendations,
+    EnhancedAirCoolerRecommendation,
+    EnhancedDecisionOutput,
+    EnhancedDeviceRecommendations,
+    EnhancedFreshAirFanRecommendation,
+    EnhancedGrowLightRecommendation,
+    EnhancedHumidifierRecommendation,
     FreshAirFanRecommendation,
     GrowLightRecommendation,
     HumidifierRecommendation,
     MonitoringPoints,
+    MultiImageAnalysis,
+    ParameterAdjustment,
+    RiskAssessment,
 )
 
 
@@ -637,3 +646,337 @@ class OutputHandler:
                     warnings.append(f"grow_light.{field}: Missing field, set to default {default}")
         
         return corrected, warnings
+    
+    def validate_and_format_enhanced(
+        self,
+        raw_decision: Dict,
+        room_id: str,
+        multi_image_analysis: MultiImageAnalysis = None
+    ) -> EnhancedDecisionOutput:
+        """
+        Validate and format enhanced decision output with parameter adjustments
+        
+        Validates:
+        - Structure completeness
+        - Parameter adjustment format
+        - Action types (maintain/adjust/monitor)
+        - Risk assessments
+        - Priority and urgency levels
+        
+        Args:
+            raw_decision: Raw decision from LLM
+            room_id: Room number
+            multi_image_analysis: Multi-image analysis results
+            
+        Returns:
+            Validated and formatted EnhancedDecisionOutput
+            
+        Requirements: Enhanced decision analysis with multi-image support
+        """
+        logger.info("[OutputHandler] Validating and formatting enhanced decision output")
+        
+        warnings = []
+        errors = []
+        
+        # Validate structure completeness
+        required_keys = ['strategy', 'device_recommendations', 'monitoring_points']
+        for key in required_keys:
+            if key not in raw_decision:
+                error_msg = f"Missing required key: {key}"
+                logger.error(f"[OutputHandler] {error_msg}")
+                errors.append(error_msg)
+        
+        # If critical structure is missing, return error status
+        if errors:
+            return self._create_error_enhanced_output(room_id, errors)
+        
+        # Extract and validate strategy
+        strategy_data = raw_decision.get('strategy', {})
+        strategy = ControlStrategy(
+            core_objective=strategy_data.get('core_objective', ''),
+            priority_ranking=strategy_data.get('priority_ranking', []),
+            key_risk_points=strategy_data.get('key_risk_points', [])
+        )
+        
+        # Extract and validate enhanced device recommendations
+        device_recs = raw_decision.get('device_recommendations', {})
+        
+        # Validate and create enhanced air cooler recommendations
+        air_cooler_params = device_recs.get('air_cooler', {})
+        enhanced_air_cooler = self._validate_enhanced_air_cooler(air_cooler_params, warnings, errors)
+        
+        # Validate and create enhanced fresh air fan recommendations
+        fresh_air_params = device_recs.get('fresh_air_fan', {})
+        enhanced_fresh_air = self._validate_enhanced_fresh_air_fan(fresh_air_params, warnings, errors)
+        
+        # Validate and create enhanced humidifier recommendations
+        humidifier_params = device_recs.get('humidifier', {})
+        enhanced_humidifier = self._validate_enhanced_humidifier(humidifier_params, warnings, errors)
+        
+        # Validate and create enhanced grow light recommendations
+        grow_light_params = device_recs.get('grow_light', {})
+        enhanced_grow_light = self._validate_enhanced_grow_light(grow_light_params, warnings, errors)
+        
+        enhanced_device_recommendations = EnhancedDeviceRecommendations(
+            air_cooler=enhanced_air_cooler,
+            fresh_air_fan=enhanced_fresh_air,
+            humidifier=enhanced_humidifier,
+            grow_light=enhanced_grow_light
+        )
+        
+        # Extract monitoring points
+        monitoring_data = raw_decision.get('monitoring_points', {})
+        monitoring_points = MonitoringPoints(
+            key_time_periods=monitoring_data.get('key_time_periods', []),
+            warning_thresholds=monitoring_data.get('warning_thresholds', {}),
+            emergency_measures=monitoring_data.get('emergency_measures', [])
+        )
+        
+        # Create metadata
+        metadata = DecisionMetadata(
+            warnings=warnings,
+            errors=errors
+        )
+        
+        # Determine status
+        status = "success" if not errors else "error"
+        
+        logger.info(f"[OutputHandler] Enhanced validation complete: status={status}, warnings={len(warnings)}, errors={len(errors)}")
+        
+        return EnhancedDecisionOutput(
+            status=status,
+            room_id=room_id,
+            analysis_time=datetime.now(),
+            strategy=strategy,
+            device_recommendations=enhanced_device_recommendations,
+            monitoring_points=monitoring_points,
+            multi_image_analysis=multi_image_analysis,
+            metadata=metadata
+        )
+    
+    def _validate_enhanced_air_cooler(
+        self,
+        params: Dict,
+        warnings: List[str],
+        errors: List[str]
+    ) -> EnhancedAirCoolerRecommendation:
+        """Validate and create enhanced air cooler recommendation"""
+        # Extract parameter adjustments
+        tem_set_adj = self._extract_parameter_adjustment(params.get('tem_set', {}), 'tem_set', 'air_cooler')
+        tem_diff_set_adj = self._extract_parameter_adjustment(params.get('tem_diff_set', {}), 'tem_diff_set', 'air_cooler')
+        cyc_on_off_adj = self._extract_parameter_adjustment(params.get('cyc_on_off', {}), 'cyc_on_off', 'air_cooler')
+        cyc_on_time_adj = self._extract_parameter_adjustment(params.get('cyc_on_time', {}), 'cyc_on_time', 'air_cooler')
+        cyc_off_time_adj = self._extract_parameter_adjustment(params.get('cyc_off_time', {}), 'cyc_off_time', 'air_cooler')
+        ar_on_off_adj = self._extract_parameter_adjustment(params.get('ar_on_off', {}), 'ar_on_off', 'air_cooler')
+        hum_on_off_adj = self._extract_parameter_adjustment(params.get('hum_on_off', {}), 'hum_on_off', 'air_cooler')
+        
+        return EnhancedAirCoolerRecommendation(
+            tem_set=tem_set_adj,
+            tem_diff_set=tem_diff_set_adj,
+            cyc_on_off=cyc_on_off_adj,
+            cyc_on_time=cyc_on_time_adj,
+            cyc_off_time=cyc_off_time_adj,
+            ar_on_off=ar_on_off_adj,
+            hum_on_off=hum_on_off_adj,
+            rationale=params.get('rationale', [])
+        )
+    
+    def _validate_enhanced_fresh_air_fan(
+        self,
+        params: Dict,
+        warnings: List[str],
+        errors: List[str]
+    ) -> EnhancedFreshAirFanRecommendation:
+        """Validate and create enhanced fresh air fan recommendation"""
+        model_adj = self._extract_parameter_adjustment(params.get('model', {}), 'model', 'fresh_air_fan')
+        control_adj = self._extract_parameter_adjustment(params.get('control', {}), 'control', 'fresh_air_fan')
+        co2_on_adj = self._extract_parameter_adjustment(params.get('co2_on', {}), 'co2_on', 'fresh_air_fan')
+        co2_off_adj = self._extract_parameter_adjustment(params.get('co2_off', {}), 'co2_off', 'fresh_air_fan')
+        on_adj = self._extract_parameter_adjustment(params.get('on', {}), 'on', 'fresh_air_fan')
+        off_adj = self._extract_parameter_adjustment(params.get('off', {}), 'off', 'fresh_air_fan')
+        
+        return EnhancedFreshAirFanRecommendation(
+            model=model_adj,
+            control=control_adj,
+            co2_on=co2_on_adj,
+            co2_off=co2_off_adj,
+            on=on_adj,
+            off=off_adj,
+            rationale=params.get('rationale', [])
+        )
+    
+    def _validate_enhanced_humidifier(
+        self,
+        params: Dict,
+        warnings: List[str],
+        errors: List[str]
+    ) -> EnhancedHumidifierRecommendation:
+        """Validate and create enhanced humidifier recommendation"""
+        model_adj = self._extract_parameter_adjustment(params.get('model', {}), 'model', 'humidifier')
+        on_adj = self._extract_parameter_adjustment(params.get('on', {}), 'on', 'humidifier')
+        off_adj = self._extract_parameter_adjustment(params.get('off', {}), 'off', 'humidifier')
+        
+        return EnhancedHumidifierRecommendation(
+            model=model_adj,
+            on=on_adj,
+            off=off_adj,
+            left_right_strategy=params.get('left_right_strategy', ''),
+            rationale=params.get('rationale', [])
+        )
+    
+    def _validate_enhanced_grow_light(
+        self,
+        params: Dict,
+        warnings: List[str],
+        errors: List[str]
+    ) -> EnhancedGrowLightRecommendation:
+        """Validate and create enhanced grow light recommendation"""
+        model_adj = self._extract_parameter_adjustment(params.get('model', {}), 'model', 'grow_light')
+        on_mset_adj = self._extract_parameter_adjustment(params.get('on_mset', {}), 'on_mset', 'grow_light')
+        off_mset_adj = self._extract_parameter_adjustment(params.get('off_mset', {}), 'off_mset', 'grow_light')
+        on_off_1_adj = self._extract_parameter_adjustment(params.get('on_off_1', {}), 'on_off_1', 'grow_light')
+        choose_1_adj = self._extract_parameter_adjustment(params.get('choose_1', {}), 'choose_1', 'grow_light')
+        on_off_2_adj = self._extract_parameter_adjustment(params.get('on_off_2', {}), 'on_off_2', 'grow_light')
+        choose_2_adj = self._extract_parameter_adjustment(params.get('choose_2', {}), 'choose_2', 'grow_light')
+        on_off_3_adj = self._extract_parameter_adjustment(params.get('on_off_3', {}), 'on_off_3', 'grow_light')
+        choose_3_adj = self._extract_parameter_adjustment(params.get('choose_3', {}), 'choose_3', 'grow_light')
+        on_off_4_adj = self._extract_parameter_adjustment(params.get('on_off_4', {}), 'on_off_4', 'grow_light')
+        choose_4_adj = self._extract_parameter_adjustment(params.get('choose_4', {}), 'choose_4', 'grow_light')
+        
+        return EnhancedGrowLightRecommendation(
+            model=model_adj,
+            on_mset=on_mset_adj,
+            off_mset=off_mset_adj,
+            on_off_1=on_off_1_adj,
+            choose_1=choose_1_adj,
+            on_off_2=on_off_2_adj,
+            choose_2=choose_2_adj,
+            on_off_3=on_off_3_adj,
+            choose_3=choose_3_adj,
+            on_off_4=on_off_4_adj,
+            choose_4=choose_4_adj,
+            rationale=params.get('rationale', [])
+        )
+    
+    def _extract_parameter_adjustment(
+        self,
+        param_data: Dict,
+        param_name: str,
+        device_type: str
+    ) -> ParameterAdjustment:
+        """Extract and validate parameter adjustment from LLM output"""
+        if not isinstance(param_data, dict):
+            # Fallback for simple value format
+            return ParameterAdjustment(
+                current_value=param_data if param_data is not None else 0,
+                recommended_value=param_data if param_data is not None else 0,
+                action="maintain",
+                change_reason="使用当前值",
+                priority="low",
+                urgency="routine",
+                risk_assessment=RiskAssessment(
+                    adjustment_risk="low",
+                    no_action_risk="low",
+                    impact_scope="无影响"
+                )
+            )
+        
+        # Extract values with defaults
+        current_value = param_data.get('current_value', 0)
+        recommended_value = param_data.get('recommended_value', current_value)
+        action = param_data.get('action', 'maintain')
+        change_reason = param_data.get('change_reason', '无调整说明')
+        priority = param_data.get('priority', 'low')
+        urgency = param_data.get('urgency', 'routine')
+        
+        # Extract risk assessment
+        risk_data = param_data.get('risk_assessment', {})
+        risk_assessment = RiskAssessment(
+            adjustment_risk=risk_data.get('adjustment_risk', 'low'),
+            no_action_risk=risk_data.get('no_action_risk', 'low'),
+            impact_scope=risk_data.get('impact_scope', '无影响')
+        )
+        
+        # Validate action type
+        valid_actions = ['maintain', 'adjust', 'monitor']
+        if action not in valid_actions:
+            logger.warning(f"[OutputHandler] Invalid action '{action}' for {device_type}.{param_name}, using 'maintain'")
+            action = 'maintain'
+        
+        # Validate priority
+        valid_priorities = ['low', 'medium', 'high', 'critical']
+        if priority not in valid_priorities:
+            logger.warning(f"[OutputHandler] Invalid priority '{priority}' for {device_type}.{param_name}, using 'low'")
+            priority = 'low'
+        
+        # Validate urgency
+        valid_urgencies = ['immediate', 'within_hour', 'within_day', 'routine']
+        if urgency not in valid_urgencies:
+            logger.warning(f"[OutputHandler] Invalid urgency '{urgency}' for {device_type}.{param_name}, using 'routine'")
+            urgency = 'routine'
+        
+        return ParameterAdjustment(
+            current_value=current_value,
+            recommended_value=recommended_value,
+            action=action,
+            change_reason=change_reason,
+            priority=priority,
+            urgency=urgency,
+            risk_assessment=risk_assessment
+        )
+    
+    def _create_error_enhanced_output(
+        self,
+        room_id: str,
+        errors: List[str]
+    ) -> EnhancedDecisionOutput:
+        """Create error enhanced decision output"""
+        return EnhancedDecisionOutput(
+            status="error",
+            room_id=room_id,
+            analysis_time=datetime.now(),
+            strategy=ControlStrategy(core_objective="结构验证失败"),
+            device_recommendations=EnhancedDeviceRecommendations(
+                air_cooler=EnhancedAirCoolerRecommendation(
+                    tem_set=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    tem_diff_set=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    cyc_on_off=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    cyc_on_time=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    cyc_off_time=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    ar_on_off=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    hum_on_off=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    rationale=["系统错误"]
+                ),
+                fresh_air_fan=EnhancedFreshAirFanRecommendation(
+                    model=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    control=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    co2_on=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    co2_off=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    on=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    off=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    rationale=["系统错误"]
+                ),
+                humidifier=EnhancedHumidifierRecommendation(
+                    model=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    on=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    off=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    rationale=["系统错误"]
+                ),
+                grow_light=EnhancedGrowLightRecommendation(
+                    model=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    on_mset=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    off_mset=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    on_off_1=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    choose_1=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    on_off_2=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    choose_2=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    on_off_3=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    choose_3=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    on_off_4=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    choose_4=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
+                    rationale=["系统错误"]
+                )
+            ),
+            monitoring_points=MonitoringPoints(),
+            metadata=DecisionMetadata(errors=errors)
+        )

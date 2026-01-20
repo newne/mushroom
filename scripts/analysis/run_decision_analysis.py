@@ -25,22 +25,80 @@ Requirements: 8.5
 import argparse
 import json
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, List, Optional, Union
 
 # Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
 from loguru import logger
 
 
-def setup_logger(verbose: bool = False):
+# ===================== 数据模型 =====================
+
+@dataclass
+class DecisionAnalysisResult:
     """
-    Configure logger for CLI output
+    决策分析执行结果数据模型
+    
+    包含执行状态、错误信息和分析结果的结构化对象
+    
+    Attributes:
+        success: 执行是否成功
+        status: 结果状态 ("success", "partial", "error", "fallback")
+        room_id: 蘑菇房编号
+        analysis_time: 分析执行时间
+        output_file: 输出文件路径（如果有）
+        result: DecisionOutput 对象（如果成功）
+        error_message: 错误信息（如果失败）
+        warnings: 警告信息列表
+        processing_time: 处理耗时（秒）
+        metadata: 额外元数据
+    """
+    success: bool
+    status: str
+    room_id: str
+    analysis_time: datetime
+    output_file: Optional[Path] = None
+    result: Optional[Any] = None  # DecisionOutput
+    error_message: Optional[str] = None
+    warnings: List[str] = field(default_factory=list)
+    processing_time: float = 0.0
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        将结果转换为字典格式
+        
+        Returns:
+            包含所有字段的字典
+        """
+        return {
+            "success": self.success,
+            "status": self.status,
+            "room_id": self.room_id,
+            "analysis_time": self.analysis_time.isoformat(),
+            "output_file": str(self.output_file) if self.output_file else None,
+            "error_message": self.error_message,
+            "warnings": self.warnings,
+            "processing_time": self.processing_time,
+            "metadata": self.metadata
+        }
+
+
+# ===================== 辅助函数 =====================
+
+def setup_cli_logger(verbose: bool = False) -> None:
+    """
+    配置CLI输出的logger（仅用于独立命令行调用）
+    
+    注意：此函数仅在脚本作为独立命令行工具运行时使用
+    在作为模块导入时，应使用 utils.loguru_setting 的全局配置
     
     Args:
-        verbose: If True, show DEBUG level logs
+        verbose: 如果为True，显示DEBUG级别日志
     """
     logger.remove()
     
@@ -55,17 +113,17 @@ def setup_logger(verbose: bool = False):
 
 def parse_datetime(datetime_str: Optional[str]) -> datetime:
     """
-    Parse datetime string to datetime object
+    解析日期时间字符串为datetime对象
     
     Args:
-        datetime_str: Datetime string in format "YYYY-MM-DD HH:MM:SS"
-                     If None, uses current time
+        datetime_str: 日期时间字符串，格式为 "YYYY-MM-DD HH:MM:SS"
+                     如果为None，返回当前时间
     
     Returns:
-        datetime object
+        datetime对象
     
     Raises:
-        ValueError: If datetime string format is invalid
+        ValueError: 日期时间格式无效
     """
     if datetime_str is None:
         return datetime.now()
@@ -89,13 +147,13 @@ def parse_datetime(datetime_str: Optional[str]) -> datetime:
 
 def format_console_output(result) -> str:
     """
-    Format decision output for console display
+    格式化决策输出用于控制台显示
     
     Args:
-        result: DecisionOutput object
+        result: DecisionOutput对象
     
     Returns:
-        Formatted string for console output
+        格式化的控制台输出字符串
     """
     lines = []
     lines.append("=" * 80)
@@ -240,13 +298,13 @@ def format_console_output(result) -> str:
     return "\n".join(lines)
 
 
-def save_json_output(result, output_path: Path):
+def save_json_output(result, output_path: Path) -> None:
     """
-    Save decision output to JSON file
+    保存决策输出到JSON文件
     
     Args:
-        result: DecisionOutput object
-        output_path: Path to output JSON file
+        result: DecisionOutput对象
+        output_path: 输出JSON文件路径
     """
     # Convert result to dictionary
     output_dict = {
@@ -324,12 +382,230 @@ def save_json_output(result, output_path: Path):
     logger.info(f"Results saved to: {output_path}")
 
 
-def main():
+def generate_output_filename(
+    room_id: str,
+    analysis_datetime: datetime,
+    output_dir: Optional[Path] = None
+) -> Path:
     """
-    Main CLI entry point
+    生成输出文件名
     
-    Parses command-line arguments, initializes DecisionAnalyzer,
-    runs analysis, and outputs results to console and JSON file.
+    Args:
+        room_id: 蘑菇房编号
+        analysis_datetime: 分析时间
+        output_dir: 输出目录，默认为项目根目录的output文件夹
+    
+    Returns:
+        完整的输出文件路径
+    """
+    from global_const.const_config import (
+        DECISION_OUTPUT_FILENAME_PATTERN,
+        OUTPUT_DIR_NAME
+    )
+    from global_const.global_const import BASE_DIR
+    
+    # 确定输出目录
+    if output_dir is None:
+        output_dir = BASE_DIR.parent / OUTPUT_DIR_NAME
+    
+    # 确保输出目录存在
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # 生成文件名
+    timestamp = analysis_datetime.strftime("%Y%m%d_%H%M%S")
+    filename = DECISION_OUTPUT_FILENAME_PATTERN.format(
+        room_id=room_id,
+        timestamp=timestamp
+    )
+    
+    return output_dir / filename
+
+
+# ===================== 核心执行函数 =====================
+
+def execute_decision_analysis(
+    room_id: str,
+    analysis_datetime: Optional[datetime] = None,
+    output_file: Optional[Union[str, Path]] = None,
+    verbose: bool = False
+) -> DecisionAnalysisResult:
+    """
+    执行决策分析的主要入口函数
+    
+    此函数封装了完整的决策分析流程，包括：
+    - 数据提取和预处理
+    - CLIP相似度匹配
+    - 模板渲染
+    - LLM决策生成
+    - 输出验证和格式化
+    - JSON文件输出
+    
+    Args:
+        room_id: 蘑菇房编号（"607", "608", "611", "612"）
+        analysis_datetime: 分析时间点，默认为当前时间
+        output_file: 输出JSON文件路径，默认自动生成
+        verbose: 是否启用详细日志输出
+    
+    Returns:
+        DecisionAnalysisResult: 包含执行状态、错误信息和结果的结构化对象
+    
+    Raises:
+        无异常抛出，所有错误都封装在返回结果中
+    
+    Example:
+        >>> result = execute_decision_analysis(
+        ...     room_id="611",
+        ...     analysis_datetime=datetime.now(),
+        ...     output_file="output/result.json",
+        ...     verbose=True
+        ... )
+        >>> if result.success:
+        ...     print(f"分析成功: {result.output_file}")
+        ... else:
+        ...     print(f"分析失败: {result.error_message}")
+    """
+    import time
+    start_time = time.time()
+    
+    # 初始化结果对象
+    if analysis_datetime is None:
+        analysis_datetime = datetime.now()
+    
+    result = DecisionAnalysisResult(
+        success=False,
+        status="pending",
+        room_id=room_id,
+        analysis_time=analysis_datetime,
+        warnings=[]
+    )
+    
+    # 验证房间ID
+    from global_const.const_config import MUSHROOM_ROOM_IDS
+    if room_id not in MUSHROOM_ROOM_IDS:
+        result.status = "error"
+        result.error_message = f"Invalid room_id: {room_id}. Must be one of {MUSHROOM_ROOM_IDS}"
+        result.processing_time = time.time() - start_time
+        return result
+    
+    try:
+        # 导入依赖
+        logger.info(f"[DECISION_ANALYSIS] Starting analysis for room {room_id}")
+        logger.info(f"[DECISION_ANALYSIS] Analysis time: {analysis_datetime}")
+        
+        from global_const.global_const import settings, static_settings, pgsql_engine, BASE_DIR
+        from decision_analysis.decision_analyzer import DecisionAnalyzer
+        
+        # 获取模板路径
+        template_path = BASE_DIR / "configs" / "decision_prompt.jinja"
+        
+        if not template_path.exists():
+            result.status = "error"
+            result.error_message = f"Template file not found: {template_path}"
+            result.processing_time = time.time() - start_time
+            return result
+        
+        # 初始化DecisionAnalyzer
+        logger.info("[DECISION_ANALYSIS] Initializing DecisionAnalyzer...")
+        analyzer = DecisionAnalyzer(
+            db_engine=pgsql_engine,
+            settings=settings,
+            static_config=static_settings,
+            template_path=str(template_path)
+        )
+        logger.info("[DECISION_ANALYSIS] DecisionAnalyzer initialized successfully")
+        
+        # 执行分析
+        logger.info("[DECISION_ANALYSIS] Running analysis...")
+        decision_output = analyzer.analyze(
+            room_id=room_id,
+            analysis_datetime=analysis_datetime
+        )
+        
+        logger.info("[DECISION_ANALYSIS] Analysis completed successfully")
+        
+        # 确定输出文件路径
+        if output_file:
+            output_path = Path(output_file) if isinstance(output_file, str) else output_file
+        else:
+            output_path = generate_output_filename(room_id, analysis_datetime)
+        
+        # 保存JSON输出
+        save_json_output(decision_output, output_path)
+        
+        # 设置成功结果
+        result.success = True
+        result.status = decision_output.status
+        result.result = decision_output
+        result.output_file = output_path
+        result.warnings = decision_output.metadata.warnings.copy()
+        result.metadata = {
+            "data_sources": decision_output.metadata.data_sources,
+            "similar_cases_count": decision_output.metadata.similar_cases_count,
+            "avg_similarity_score": decision_output.metadata.avg_similarity_score,
+            "llm_model": decision_output.metadata.llm_model,
+            "llm_response_time": decision_output.metadata.llm_response_time
+        }
+        
+        # 检查是否有错误
+        # 过滤掉非关键错误，如缺少embedding数据的情况
+        critical_errors = []
+        for error in decision_output.metadata.errors:
+            # 如果错误是关于缺少embedding数据的，这通常不是致命错误
+            # 因为LLM仍然可以根据其他数据（环境统计、设备变更等）生成决策
+            if "No embedding data found" not in error:
+                critical_errors.append(error)
+        
+        if critical_errors:
+            result.success = False
+            result.status = "partial"
+            result.error_message = "; ".join(critical_errors)
+        elif decision_output.metadata.errors:
+            # 如果只有非关键错误（如缺少embedding数据），但仍生成了决策，则认为是成功的
+            result.success = True
+            result.status = "success"
+            # 将非关键错误作为警告处理
+            result.warnings.extend([err for err in decision_output.metadata.errors if "No embedding data found" in err])
+        
+        logger.info(f"[DECISION_ANALYSIS] Results saved to: {output_path}")
+        
+    except ImportError as e:
+        result.status = "error"
+        result.error_message = f"Failed to import dependencies: {e}"
+        logger.error(f"[DECISION_ANALYSIS] Import error: {e}")
+        
+    except Exception as e:
+        result.status = "error"
+        result.error_message = f"Analysis failed: {str(e)}"
+        logger.error(f"[DECISION_ANALYSIS] Analysis failed: {e}", exc_info=verbose)
+    
+    result.processing_time = time.time() - start_time
+    
+    # 记录最终状态
+    if result.success:
+        logger.info(
+            f"[DECISION_ANALYSIS] Completed: room={room_id}, status={result.status}, "
+            f"time={result.processing_time:.2f}s"
+        )
+    else:
+        logger.error(
+            f"[DECISION_ANALYSIS] Failed: room={room_id}, error={result.error_message}, "
+            f"time={result.processing_time:.2f}s"
+        )
+    
+    return result
+
+
+# ===================== 命令行入口 =====================
+
+def main() -> int:
+    """
+    主CLI入口点
+    
+    解析命令行参数，初始化DecisionAnalyzer，
+    运行分析，并输出结果到控制台和JSON文件
+    
+    Returns:
+        退出码：0表示成功，1表示失败
     """
     # Parse command-line arguments
     parser = argparse.ArgumentParser(
@@ -387,8 +663,8 @@ Examples:
     
     args = parser.parse_args()
     
-    # Setup logger
-    setup_logger(verbose=args.verbose)
+    # Setup logger for CLI mode
+    setup_cli_logger(verbose=args.verbose)
     
     logger.info("=" * 80)
     logger.info("Decision Analysis CLI")
@@ -403,98 +679,41 @@ Examples:
         logger.error(f"Error: {e}")
         return 1
     
-    # Import dependencies
-    try:
-        from global_const.global_const import settings, static_settings, pgsql_engine
-        from decision_analysis.decision_analyzer import DecisionAnalyzer
-    except ImportError as e:
-        logger.error(f"Failed to import dependencies: {e}")
-        logger.error("Make sure you are running from the project root directory")
-        return 1
-    
-    # Get template path
-    template_path = Path(__file__).parent.parent / "src" / "configs" / "decision_prompt.jinja"
-    
-    if not template_path.exists():
-        logger.error(f"Template file not found: {template_path}")
-        return 1
-    
-    # Initialize DecisionAnalyzer
-    try:
-        logger.info("Initializing DecisionAnalyzer...")
-        analyzer = DecisionAnalyzer(
-            db_engine=pgsql_engine,
-            settings=settings,
-            static_config=static_settings,
-            template_path=str(template_path)
-        )
-        logger.info("DecisionAnalyzer initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize DecisionAnalyzer: {e}")
-        if args.verbose:
-            logger.exception(e)
-        return 1
-    
-    # Run analysis
-    try:
-        logger.info("")
-        logger.info("Starting decision analysis...")
-        logger.info("")
-        
-        result = analyzer.analyze(
-            room_id=args.room_id,
-            analysis_datetime=analysis_datetime
-        )
-        
-        logger.info("")
-        logger.info("Analysis completed successfully")
-        logger.info("")
-        
-    except Exception as e:
-        logger.error(f"Analysis failed: {e}")
-        if args.verbose:
-            logger.exception(e)
-        return 1
+    # Execute decision analysis
+    result = execute_decision_analysis(
+        room_id=args.room_id,
+        analysis_datetime=analysis_datetime,
+        output_file=args.output,
+        verbose=args.verbose
+    )
     
     # Output results to console
-    if not args.no_console:
-        console_output = format_console_output(result)
+    if not args.no_console and result.success and result.result:
+        console_output = format_console_output(result.result)
         print(console_output)
-    
-    # Save results to JSON file
-    if args.output:
-        output_path = Path(args.output)
-    else:
-        # Generate default filename
-        timestamp = analysis_datetime.strftime("%Y%m%d_%H%M%S")
-        output_filename = f"decision_analysis_{args.room_id}_{timestamp}.json"
-        output_path = Path(output_filename)
-    
-    try:
-        save_json_output(result, output_path)
-    except Exception as e:
-        logger.error(f"Failed to save JSON output: {e}")
-        if args.verbose:
-            logger.exception(e)
-        return 1
     
     # Final summary
     logger.info("")
     logger.info("=" * 80)
     logger.info("Summary")
     logger.info("=" * 80)
+    logger.info(f"Success: {result.success}")
     logger.info(f"Status: {result.status}")
-    logger.info(f"Total Processing Time: {result.metadata.total_processing_time:.2f}s")
-    logger.info(f"Warnings: {len(result.metadata.warnings)}")
-    logger.info(f"Errors: {len(result.metadata.errors)}")
-    logger.info(f"Output File: {output_path.absolute()}")
+    logger.info(f"Total Processing Time: {result.processing_time:.2f}s")
+    
+    if result.warnings:
+        logger.info(f"Warnings: {len(result.warnings)}")
+    
+    if result.error_message:
+        logger.error(f"Error: {result.error_message}")
+    
+    if result.output_file:
+        logger.info(f"Output File: {result.output_file.absolute()}")
+    
     logger.info("=" * 80)
     
     # Return exit code based on status
-    if result.status == "success":
-        return 0
-    else:
-        return 1
+    return 0 if result.success else 1
 
 
 if __name__ == "__main__":

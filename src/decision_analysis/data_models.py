@@ -183,8 +183,160 @@ class SimilarCase:
 
 
 # ============================================================================
-# Output Data Models
+# Enhanced Output Data Models for Optimized Decision Analysis
 # ============================================================================
+
+@dataclass
+class RiskAssessment:
+    """
+    Risk assessment for parameter adjustment
+    
+    Attributes:
+        adjustment_risk: Risk level of making the adjustment
+        no_action_risk: Risk level of not making the adjustment
+        impact_scope: Scope of impact (e.g., temperature_stability, growth_rate)
+        mitigation_measures: Suggested risk mitigation measures
+    """
+    adjustment_risk: str  # "low" | "medium" | "high" | "critical"
+    no_action_risk: str  # "low" | "medium" | "high" | "critical"
+    impact_scope: str
+    mitigation_measures: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ParameterAdjustment:
+    """
+    Individual parameter adjustment recommendation
+    
+    Attributes:
+        current_value: Current parameter value
+        recommended_value: Recommended parameter value
+        action: Action to take ("maintain" | "adjust" | "monitor")
+        change_reason: Detailed reason for the change/maintenance
+        priority: Priority level ("low" | "medium" | "high" | "critical")
+        urgency: Urgency level ("immediate" | "within_hour" | "within_day" | "routine")
+        risk_assessment: Risk assessment for this parameter
+        monitoring_threshold: Threshold for monitoring (if action is "monitor")
+    """
+    current_value: float
+    recommended_value: float
+    action: str  # "maintain" | "adjust" | "monitor"
+    change_reason: str
+    priority: str  # "low" | "medium" | "high" | "critical"
+    urgency: str  # "immediate" | "within_hour" | "within_day" | "routine"
+    risk_assessment: Optional[RiskAssessment] = None
+    monitoring_threshold: Optional[Dict[str, float]] = None
+
+
+@dataclass
+class EnhancedAirCoolerRecommendation:
+    """
+    Enhanced air cooler parameter recommendations with detailed adjustment info
+    """
+    tem_set: ParameterAdjustment
+    tem_diff_set: ParameterAdjustment
+    cyc_on_off: ParameterAdjustment
+    cyc_on_time: ParameterAdjustment
+    cyc_off_time: ParameterAdjustment
+    ar_on_off: ParameterAdjustment
+    hum_on_off: ParameterAdjustment
+    rationale: List[str] = field(default_factory=list)
+    multi_image_analysis: str = ""  # Analysis based on multiple camera views
+
+
+@dataclass
+class EnhancedFreshAirFanRecommendation:
+    """
+    Enhanced fresh air fan parameter recommendations with detailed adjustment info
+    """
+    model: ParameterAdjustment
+    control: ParameterAdjustment
+    co2_on: ParameterAdjustment
+    co2_off: ParameterAdjustment
+    on: ParameterAdjustment
+    off: ParameterAdjustment
+    rationale: List[str] = field(default_factory=list)
+    multi_image_analysis: str = ""
+
+
+@dataclass
+class EnhancedHumidifierRecommendation:
+    """
+    Enhanced humidifier parameter recommendations with detailed adjustment info
+    """
+    model: ParameterAdjustment
+    on: ParameterAdjustment
+    off: ParameterAdjustment
+    left_right_strategy: str = ""
+    rationale: List[str] = field(default_factory=list)
+    multi_image_analysis: str = ""
+
+
+@dataclass
+class EnhancedGrowLightRecommendation:
+    """
+    Enhanced grow light parameter recommendations with detailed adjustment info
+    """
+    model: ParameterAdjustment
+    on_mset: ParameterAdjustment
+    off_mset: ParameterAdjustment
+    on_off_1: ParameterAdjustment
+    choose_1: ParameterAdjustment
+    on_off_2: ParameterAdjustment
+    choose_2: ParameterAdjustment
+    on_off_3: ParameterAdjustment
+    choose_3: ParameterAdjustment
+    on_off_4: ParameterAdjustment
+    choose_4: ParameterAdjustment
+    rationale: List[str] = field(default_factory=list)
+    multi_image_analysis: str = ""
+
+
+@dataclass
+class EnhancedDeviceRecommendations:
+    """
+    Enhanced device parameter recommendations with detailed adjustment info
+    """
+    air_cooler: EnhancedAirCoolerRecommendation
+    fresh_air_fan: EnhancedFreshAirFanRecommendation
+    humidifier: EnhancedHumidifierRecommendation
+    grow_light: EnhancedGrowLightRecommendation
+
+
+@dataclass
+class MultiImageAnalysis:
+    """
+    Multi-image analysis results
+    
+    Attributes:
+        total_images_analyzed: Total number of images analyzed
+        image_quality_scores: Quality scores for each image
+        aggregation_method: Method used to aggregate multiple images
+        confidence_score: Confidence score of the multi-image analysis
+        view_consistency: Consistency between different camera views
+        key_observations: Key observations from multiple views
+    """
+    total_images_analyzed: int
+    image_quality_scores: List[float] = field(default_factory=list)
+    aggregation_method: str = "weighted_average"
+    confidence_score: float = 0.0
+    view_consistency: str = "high"  # "high" | "medium" | "low"
+    key_observations: List[str] = field(default_factory=list)
+
+
+@dataclass
+class EnhancedDecisionOutput:
+    """
+    Enhanced decision output with detailed parameter adjustments
+    """
+    status: str  # "success" | "error"
+    room_id: str
+    analysis_time: datetime
+    strategy: 'ControlStrategy'
+    device_recommendations: EnhancedDeviceRecommendations
+    monitoring_points: 'MonitoringPoints'
+    multi_image_analysis: MultiImageAnalysis
+    metadata: 'DecisionMetadata'
 
 @dataclass
 class AirCoolerRecommendation:
