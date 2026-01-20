@@ -1,6 +1,9 @@
 {
-  "monitoring_points": {
-    "air_cooler": [
+  "room_id": "611",
+  "TD1_Q1MDCH01": {
+    "device_type": "air_cooler",
+    "device_alias": "air_cooler_611",
+    "point_list": [
       {
         "device_type": "air_cooler",
         "point_alias": "on_off",
@@ -11,7 +14,11 @@
         "enum_mapping": {
           "0": "关闭",
           "1": "开启"
-        }
+        },
+        "change": true,
+        "old": 1,
+        "new": 0,
+        "level": "high"
       },
       {
         "device_type": "air_cooler",
@@ -20,7 +27,11 @@
         "remark": "温度设定(分辨率0.1)",
         "change_type": "analog_value",
         "threshold": 0.5,
-        "enum_mapping": null
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "air_cooler",
@@ -29,7 +40,11 @@
         "remark": "温差设定(分辨率0.1)",
         "change_type": "analog_value",
         "threshold": 0.2,
-        "enum_mapping": null
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "air_cooler",
@@ -38,7 +53,11 @@
         "remark": "冷风机循环开启时间设定",
         "change_type": "analog_value",
         "threshold": 1.0,
-        "enum_mapping": null
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "air_cooler",
@@ -47,7 +66,11 @@
         "remark": "冷风机循环关闭时间设定",
         "change_type": "analog_value",
         "threshold": 1.0,
-        "enum_mapping": null
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "air_cooler",
@@ -59,7 +82,11 @@
         "enum_mapping": {
           "0": "关闭",
           "1": "开启"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "air_cooler",
@@ -71,7 +98,11 @@
         "enum_mapping": {
           "0": "关闭",
           "1": "开启"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "air_cooler",
@@ -83,26 +114,18 @@
         "enum_mapping": {
           "0": "关闭",
           "1": "开启"
-        }
-      },
-       {
-        "device_type": "air_cooler",
-        "point_alias": "status",
-        "point_name": "Running",
-        "remark": "冷风机状态",
-        "change_type": "digital_on_off",
-        "threshold": null,
-        "enum_mapping": {
-           "0": "制冷运行",
-              "1": "制热运行",
-              "2": "正常运行",
-              "3": "停止",
-              "4": "关闭"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       }
-
-    ],
-    "fresh_air_fan": [
+    ]
+  },
+  "TD1_Q1MDAR01": {
+    "device_type": "fresh_air_fan",
+    "device_alias": "fresh_air_fan_611",
+    "point_list": [
       {
         "device_type": "fresh_air_fan",
         "point_alias": "mode",
@@ -114,7 +137,11 @@
           "0": "关闭模式",
           "1": "自动模式",
           "2": "手动模式"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "fresh_air_fan",
@@ -126,7 +153,11 @@
         "enum_mapping": {
           "0": "时控",
           "1": "CO2控制"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "fresh_air_fan",
@@ -135,7 +166,11 @@
         "remark": "CO2启动新风",
         "change_type": "analog_value",
         "threshold": 50.0,
-        "enum_mapping": null
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "fresh_air_fan",
@@ -144,7 +179,11 @@
         "remark": "CO2停止新风",
         "change_type": "analog_value",
         "threshold": 50.0,
-        "enum_mapping": null
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "fresh_air_fan",
@@ -153,7 +192,11 @@
         "remark": "新风开启设定",
         "change_type": "analog_value",
         "threshold": 1.0,
-        "enum_mapping": null
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "fresh_air_fan",
@@ -162,10 +205,18 @@
         "remark": "新风停止设定",
         "change_type": "analog_value",
         "threshold": 1.0,
-        "enum_mapping": null
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       }
-    ],
-    "humidifier": [
+    ]
+  },
+  "TD1_Q1MDHUM01": {
+    "device_type": "humidifier",
+    "device_alias": "left_humidifier_611",
+    "point_list": [
       {
         "device_type": "humidifier",
         "point_alias": "mode",
@@ -177,7 +228,11 @@
           "0": "关闭",
           "1": "自动",
           "2": "手动"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "humidifier",
@@ -186,7 +241,11 @@
         "remark": "加湿开启设定",
         "change_type": "analog_value",
         "threshold": 2.0,
-        "enum_mapping": null
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "humidifier",
@@ -195,10 +254,67 @@
         "remark": "加湿停止设定",
         "change_type": "analog_value",
         "threshold": 2.0,
-        "enum_mapping": null
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       }
-    ],
-    "grow_light": [
+    ]
+  },
+  "TD1_Q1MDHUM02": {
+    "device_type": "humidifier",
+    "device_alias": "right_humidifier_611",
+    "point_list": [
+      {
+        "device_type": "humidifier",
+        "point_alias": "mode",
+        "point_name": "Model",
+        "remark": "加湿模式",
+        "change_type": "enum_state",
+        "threshold": null,
+        "enum_mapping": {
+          "0": "关闭",
+          "1": "自动",
+          "2": "手动"
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
+      },
+      {
+        "device_type": "humidifier",
+        "point_alias": "on",
+        "point_name": "On",
+        "remark": "加湿开启设定",
+        "change_type": "analog_value",
+        "threshold": 2.0,
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
+      },
+      {
+        "device_type": "humidifier",
+        "point_alias": "off",
+        "point_name": "Off",
+        "remark": "加湿停止设定",
+        "change_type": "analog_value",
+        "threshold": 2.0,
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
+      }
+    ]
+  },
+  "TD1_Q1MDLIGHT01": {
+    "device_type": "grow_light",
+    "device_alias": "grow_light_611",
+    "point_list": [
       {
         "device_type": "grow_light",
         "point_alias": "model",
@@ -210,7 +326,11 @@
           "0": "关闭",
           "1": "自动",
           "2": "手动"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "grow_light",
@@ -219,7 +339,11 @@
         "remark": "补光开启分钟设定",
         "change_type": "analog_value",
         "threshold": 5.0,
-        "enum_mapping": null
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "grow_light",
@@ -228,7 +352,11 @@
         "remark": "补光停止分钟设定",
         "change_type": "analog_value",
         "threshold": 5.0,
-        "enum_mapping": null
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "grow_light",
@@ -240,7 +368,11 @@
         "enum_mapping": {
           "0": "关闭",
           "1": "自动"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "grow_light",
@@ -252,7 +384,11 @@
         "enum_mapping": {
           "0": "关闭",
           "1": "自动"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "grow_light",
@@ -264,7 +400,11 @@
         "enum_mapping": {
           "0": "关闭",
           "1": "自动"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "grow_light",
@@ -276,7 +416,11 @@
         "enum_mapping": {
           "0": "关闭",
           "1": "自动"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "grow_light",
@@ -288,7 +432,11 @@
         "enum_mapping": {
           "0": "白光",
           "1": "蓝光"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "grow_light",
@@ -300,7 +448,11 @@
         "enum_mapping": {
           "0": "白光",
           "1": "蓝光"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "grow_light",
@@ -312,7 +464,11 @@
         "enum_mapping": {
           "0": "白光",
           "1": "蓝光"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       },
       {
         "device_type": "grow_light",
@@ -324,8 +480,12 @@
         "enum_mapping": {
           "0": "白光",
           "1": "蓝光"
-        }
+        },
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
       }
     ]
-}
+  }
 }

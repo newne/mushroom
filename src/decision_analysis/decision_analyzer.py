@@ -544,6 +544,8 @@ class DecisionAnalyzer:
             f"[DecisionAnalyzer] =========================================="
         )
         
+        return decision_output
+    
     def analyze_enhanced(
         self,
         room_id: str,
