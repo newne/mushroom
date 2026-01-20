@@ -487,5 +487,50 @@
         "level": "medium"
       }
     ]
+  },
+  "TD1_Q1MDTM01": {
+    "device_type": "mushroom_env_status",
+    "device_alias": "env_status_611",
+    "point_list": [
+      {
+        "device_type": "mushroom_env_status",
+        "point_alias": "temperature",
+        "point_name": "Tatmosp",
+        "remark": "库内温度/分辨率0.1",
+        "change_type": "analog_value",
+        "threshold": 0.5,
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
+      },
+      {
+        "device_type": "mushroom_env_status",
+        "point_alias": "humidity",
+        "point_name": "Hatmosp",
+        "remark": "库内湿度",
+        "change_type": "analog_value",
+        "threshold": 2.0,
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
+      },
+      {
+        "device_type": "mushroom_env_status",
+        "point_alias": "co2",
+        "point_name": "Co2",
+        "remark": "库内CO2",
+        "change_type": "analog_value",
+        "threshold": 50.0,
+        "enum_mapping": null,
+        "change": false,
+        "old": 0,
+        "new": 0,
+        "level": "medium"
+      }
+    ]
   }
 }
