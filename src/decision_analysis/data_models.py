@@ -499,6 +499,9 @@ class DecisionMetadata:
         total_processing_time: Total processing time (seconds)
         warnings: List of warning messages
         errors: List of error messages
+        device_config_metadata: Device configuration adaptation metadata
+        multi_image_count: Number of images analyzed (for enhanced analysis)
+        image_aggregation_method: Method used for image aggregation (for enhanced analysis)
     """
     data_sources: Dict[str, int] = field(default_factory=dict)
     similar_cases_count: int = 0
@@ -508,6 +511,9 @@ class DecisionMetadata:
     total_processing_time: float = 0.0
     warnings: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    device_config_metadata: Dict = field(default_factory=dict)
+    multi_image_count: int = 0
+    image_aggregation_method: str = ""
 
 
 @dataclass

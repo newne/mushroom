@@ -32,10 +32,6 @@
     "grow_light": {
       "on_mset": 5.0,
       "off_mset": 5.0
-    },
-    "mushroom_info": {
-      "in_num": 1.0,
-      "in_day_num": 1.0
     }
   },
   "device_types": {
@@ -62,10 +58,6 @@
         "on_off3", "on_off4", "choose1", "choose2", "choose3", "choose4"
       ],
       "description": "补光灯设备监控点"
-    },
-    "mushroom_info": {
-      "monitored_points": ["in_num", "in_day_num"],
-      "description": "蘑菇信息监控点"
     }
   },
   "change_types": {

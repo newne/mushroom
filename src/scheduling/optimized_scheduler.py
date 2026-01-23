@@ -1,12 +1,19 @@
 """
-优化版调度器模块
-基于APScheduler + Redis持久化的定时任务管理系统
+优化版调度器模块（重构版）
+基于APScheduler的模块化定时任务管理系统
+
+重构改进：
+1. 任务模块分离：每个任务独立模块，清晰的接口设计
+2. 公共组件抽取：统一的错误处理、日志记录、数据库操作
+3. 依赖管理优化：避免循环引用，使用绝对导入
+4. 配置集中管理：所有配置参数集中在global_const模块
+5. 保持兼容性：功能行为与原版本完全一致
 
 核心功能：
-1. Redis持久化调度器，支持重启恢复
-2. 统一的任务管理和配置
-3. 完善的错误处理和自动恢复
-4. 优雅的退出机制
+1. 模块化任务管理和配置
+2. 完善的错误处理和自动恢复
+3. 优雅的退出机制
+4. 统一的日志输出格式
 
 定时任务：
 1. 建表任务：启动时立即执行
@@ -43,16 +50,12 @@ from global_const.const_config import (
 from utils.loguru_setting import logger
 from utils.exception_listener import exception_listener, set_scheduler_instance
 
-# 任务模块导入
-from tasks import (
-    safe_create_tables,
-    safe_daily_env_stats,
-    safe_hourly_setpoint_monitoring,
-    safe_hourly_clip_inference,
-    safe_enhanced_decision_analysis_10_00,
-    safe_enhanced_decision_analysis_12_00,
-    safe_enhanced_decision_analysis_14_00,
-)
+# 任务模块导入（重构后的模块化导入）
+from tasks.table import safe_create_tables
+from tasks.env import safe_daily_env_stats
+from tasks.monitoring import safe_hourly_setpoint_monitoring
+from tasks.clip import safe_hourly_clip_inference
+from tasks.decision import safe_batch_decision_analysis
 
 
 class OptimizedScheduler:
@@ -129,14 +132,17 @@ class OptimizedScheduler:
         )
         logger.info("[SCHEDULER] 每日环境统计任务已添加")
         
-        # 每小时设定点变更监控任务（每小时的第5分钟执行）
+        # 每小时设定点变更监控任务（基于静态配置表的优化版）
+        # 功能：从DecisionAnalysisStaticConfig表读取测点配置，检测实时数据变化
+        # 支持：数字量、模拟量、枚举量的变化检测，自动阈值判断
+        # 优化：避免重复查询，具备备用方案，性能优化
         self.scheduler.add_job(
             func=safe_hourly_setpoint_monitoring,
             trigger=CronTrigger(minute=5, timezone=self.timezone),
             id="hourly_setpoint_monitoring",
             replace_existing=True,
         )
-        logger.info("[SCHEDULER] 每小时设定点监控任务已添加")
+        logger.info("[SCHEDULER] 每小时设定点监控任务已添加（基于静态配置表的优化版）")
         
         # 每小时CLIP推理任务（每小时第25分钟执行）
         self.scheduler.add_job(
@@ -147,41 +153,36 @@ class OptimizedScheduler:
         )
         logger.info("[SCHEDULER] 每小时CLIP推理任务已添加 (每小时第25分钟执行)")
         
-        # ==================== 增强决策分析定时任务 ====================
-        # 每天 10:00, 12:00, 14:00 为所有蘑菇房执行增强决策分析
-        # 增强功能: 多图像分析, 结构化参数调整, 风险评估
+        # ==================== 决策分析定时任务（优化版）====================
+        # 每天 10:00, 12:00, 14:00 为所有蘑菇房执行决策分析
+        # 功能: 多图像分析, 结构化参数调整, 风险评估
+        # 存储: 仅存储动态结果表（静态配置相对固定，无需重复存储）
+        # 优化: 不生成JSON文件，直接存储到数据库，提高执行效率
         
-        # 10:00 增强决策分析任务
+        # 提取时间点配置
+        hours = [str(hour) for hour, minute in DECISION_ANALYSIS_SCHEDULE_TIMES]
+        minutes = [str(minute) for hour, minute in DECISION_ANALYSIS_SCHEDULE_TIMES]
+        
+        # 添加决策分析任务（单个任务，多个时间点）
         self.scheduler.add_job(
-            func=safe_enhanced_decision_analysis_10_00,
-            trigger=CronTrigger(hour=10, minute=0, second=0, timezone=self.timezone),
-            id="enhanced_decision_analysis_10_00",
+            func=safe_batch_decision_analysis,
+            trigger=CronTrigger(
+                hour=','.join(hours), 
+                minute=','.join(minutes), 
+                second=0, 
+                timezone=self.timezone
+            ),
+            id="decision_analysis",
             replace_existing=True,
         )
-        logger.info("[SCHEDULER] 增强决策分析任务已添加 (每天 10:00 执行)")
         
-        # 12:00 增强决策分析任务
-        self.scheduler.add_job(
-            func=safe_enhanced_decision_analysis_12_00,
-            trigger=CronTrigger(hour=12, minute=0, second=0, timezone=self.timezone),
-            id="enhanced_decision_analysis_12_00",
-            replace_existing=True,
-        )
-        logger.info("[SCHEDULER] 增强决策分析任务已添加 (每天 12:00 执行)")
-        
-        # 14:00 增强决策分析任务
-        self.scheduler.add_job(
-            func=safe_enhanced_decision_analysis_14_00,
-            trigger=CronTrigger(hour=14, minute=0, second=0, timezone=self.timezone),
-            id="enhanced_decision_analysis_14_00",
-            replace_existing=True,
-        )
-        logger.info("[SCHEDULER] 增强决策分析任务已添加 (每天 14:00 执行)")
-        
+        time_points = [f'{h:02d}:{m:02d}' for h, m in DECISION_ANALYSIS_SCHEDULE_TIMES]
+        logger.info(f"[SCHEDULER] 决策分析任务已添加 (每天 {', '.join(time_points)} 执行)")
         logger.info(
-            f"[SCHEDULER] 增强决策分析任务配置: 库房={MUSHROOM_ROOM_IDS}, "
-            f"时间点={[f'{h:02d}:{m:02d}' for h, m in DECISION_ANALYSIS_SCHEDULE_TIMES]}, "
-            f"增强功能=多图像分析+结构化参数调整+风险评估"
+            f"[SCHEDULER] 决策分析任务配置: 库房={MUSHROOM_ROOM_IDS}, "
+            f"时间点={time_points}, "
+            f"功能=多图像分析+结构化参数调整+风险评估, "
+            f"存储=仅动态结果表（优化版）"
         )
     
     def _setup_jobs(self) -> None:

@@ -11,7 +11,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
-from src.utils.minio_client import create_minio_client
+from utils.minio_client import create_minio_client
 from loguru import logger
 
 

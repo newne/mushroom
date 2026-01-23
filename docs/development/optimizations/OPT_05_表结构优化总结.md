@@ -236,7 +236,7 @@ GROUP BY quality_level;
 ```bash
 # 使用 CLIP 推理任务重新处理现有图像
 PYTHONPATH=/mnt/source_data/项目/蘑菇/mushroom_solution/src python -c "
-from utils.mushroom_image_encoder import create_mushroom_encoder
+from src.clip.mushroom_image_encoder import create_mushroom_encoder
 encoder = create_mushroom_encoder()
 # 批量处理所有图像，更新质量评分
 stats = encoder.batch_process_images(batch_size=20)

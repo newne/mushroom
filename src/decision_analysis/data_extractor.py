@@ -11,7 +11,7 @@ The extractor implements intelligent filtering based on room, time windows, and 
 """
 
 from datetime import date, datetime, timedelta
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 import pandas as pd
 from loguru import logger
@@ -170,6 +170,7 @@ class DataExtractor:
                         MushroomImageEmbedding.humidifier_config,
                         MushroomImageEmbedding.light_config,
                         MushroomImageEmbedding.image_path,
+                        MushroomImageEmbedding.collection_ip,
                     )
                     .where(
                         and_(
@@ -206,7 +207,7 @@ class DataExtractor:
                         'growth_day', 'embedding', 'semantic_description',
                         'llama_description', 'image_quality_score', 'env_sensor_status',
                         'air_cooler_config', 'fresh_fan_config', 'humidifier_config',
-                        'light_config', 'image_path'
+                        'light_config', 'image_path', 'collection_ip'
                     ]
                 )
                 
@@ -669,6 +670,420 @@ class DataExtractor:
         
         return df
     
+    def extract_realtime_env_data(
+        self,
+        room_id: str,
+        target_datetime: datetime
+    ) -> pd.DataFrame:
+        """
+        使用实时历史数据接口提取当天的环境数据
+        
+        由于统计天级温湿度数据是批处理任务，只有昨天及以前的历史统计数据，
+        无法获取当天的温湿度统计数据，因此当天的温湿度数据通过实时历史数据查询接口进行获取。
+        
+        参考compute_and_store_daily_stats方法的实现，使用相同的设备配置获取和数据查询逻辑。
+        优化：仅查询环境监测相关的设备数据，避免查询所有设备数据导致数据量过大。
+        
+        Args:
+            room_id: 库房编号
+            target_datetime: 目标分析时间
+            
+        Returns:
+            DataFrame containing environmental statistics computed from real-time data
+            包含温度、湿度、CO2的统计信息（中位数、最小值、最大值、分位数等）
+            
+        Time Range:
+            开始时间: target_datetime当天的0点 (target_datetime.replace(hour=0, minute=0, second=0))
+            结束时间: target_datetime
+            
+        Requirements: 实时环境数据提取，替代extract_env_daily_stats方法
+        """
+        logger.info(
+            f"[DataExtractor] 正在提取实时环境数据: "
+            f"room_id={room_id}, datetime={target_datetime}, "
+            f"time_window=当天0点至目标时间"
+        )
+        
+        try:
+            from utils.dataframe_utils import get_all_device_configs
+            from utils.data_preprocessing import query_data_by_batch_time
+            import pandas as pd
+            import numpy as np
+            
+            # 计算时间范围
+            end_time = target_datetime
+            start_time = target_datetime.replace(hour=0, minute=0, second=0)
+            
+            logger.debug(
+                f"[DataExtractor] 时间范围: [{start_time}, {end_time}]"
+            )
+            
+            # 获取指定库房的设备配置（已在缓存方法中完成筛选）
+            try:
+                # 使用缓存的设备配置获取方法（已筛选为环境监测设备）
+                room_configs = self._get_device_configs_cached_for_realtime(room_id)
+                if not room_configs:
+                    logger.warning(
+                        f"[DataExtractor] 未找到库房 {room_id} 的环境监测设备配置"
+                    )
+                    return pd.DataFrame()
+                
+                # 合并已筛选的设备配置
+                all_query_df = pd.concat(room_configs.values(), ignore_index=True)
+                if all_query_df.empty:
+                    logger.warning(
+                        f"[DataExtractor] 库房 {room_id} 的环境监测设备配置为空"
+                    )
+                    return pd.DataFrame()
+                
+                # 进一步筛选：仅保留环境参数相关的数据点
+                # 环境传感器：temperature, humidity, co2 (使用point_alias)
+                # 蘑菇信息：in_day_num, in_year, in_month, in_day (使用point_alias)
+                required_point_aliases = ['temperature', 'humidity', 'co2', 'in_day_num', 'in_year', 'in_month', 'in_day']
+                
+                # 筛选数据点（使用point_alias列）
+                if 'point_alias' in all_query_df.columns:
+                    alias_mask = all_query_df['point_alias'].isin(required_point_aliases)
+                    all_query_df = all_query_df[alias_mask].copy()
+                elif 'point_name' in all_query_df.columns:
+                    # 回退方案：如果没有point_alias，尝试使用point_name
+                    # 映射原始点名到别名
+                    point_name_mapping = {
+                        'Tatmosp': 'temperature',
+                        'Hatmosp': 'humidity', 
+                        'Co2': 'co2',
+                        'InDayNum': 'in_day_num',
+                        'InYear': 'in_year',
+                        'InMonth': 'in_month',
+                        'InDay': 'in_day'
+                    }
+                    required_point_names = list(point_name_mapping.keys())
+                    point_mask = all_query_df['point_name'].isin(required_point_names)
+                    all_query_df = all_query_df[point_mask].copy()
+                
+                if all_query_df.empty:
+                    logger.warning(
+                        f"[DataExtractor] 库房 {room_id} 未找到必需的环境数据点"
+                    )
+                    return pd.DataFrame()
+                
+                logger.debug(
+                    f"[DataExtractor] 筛选后获取到 {len(all_query_df)} 个环境监测配置项 "
+                    f"(设备类型: {list(room_configs.keys())})"
+                )
+                
+            except Exception as e:
+                logger.error(
+                    f"[DataExtractor] 获取设备配置失败: {e}"
+                )
+                return pd.DataFrame()
+            
+            # 使用实时历史数据查询接口获取数据（参考compute_and_store_daily_stats的实现）
+            try:
+                # 按设备别名分组查询历史数据
+                # 修复：手动遍历设备别名，避免groupby导致的device_alias列访问问题
+                all_data_frames = []
+                unique_device_aliases = all_query_df['device_alias'].unique()
+                
+                logger.debug(
+                    f"[DataExtractor] 开始查询 {len(unique_device_aliases)} 个设备的历史数据: "
+                    f"{unique_device_aliases.tolist()}"
+                )
+                
+                for device_alias in unique_device_aliases:
+                    # 获取该设备的配置
+                    device_config_df = all_query_df[all_query_df['device_alias'] == device_alias].copy()
+                    
+                    try:
+                        # 为该设备查询历史数据
+                        device_data = query_data_by_batch_time(
+                            device_config_df, 
+                            start_time, 
+                            end_time
+                        )
+                        
+                        if not device_data.empty:
+                            all_data_frames.append(device_data)
+                            logger.debug(
+                                f"[DataExtractor] 设备 {device_alias} 获取到 {len(device_data)} 条数据"
+                            )
+                        else:
+                            logger.debug(
+                                f"[DataExtractor] 设备 {device_alias} 无数据"
+                            )
+                            
+                    except Exception as device_error:
+                        logger.warning(
+                            f"[DataExtractor] 设备 {device_alias} 数据查询失败: {device_error}"
+                        )
+                        continue
+                
+                # 合并所有设备的数据
+                if all_data_frames:
+                    df = pd.concat(all_data_frames, ignore_index=True).sort_values("time")
+                else:
+                    df = pd.DataFrame()
+                
+                if df.empty:
+                    logger.warning(
+                        f"[DataExtractor] 未获取到实时环境数据: room_id={room_id}, "
+                        f"时间范围=[{start_time}, {end_time}]"
+                    )
+                    return pd.DataFrame()
+                
+                logger.debug(
+                    f"[DataExtractor] 成功获取 {len(df)} 条实时环境数据记录"
+                )
+                
+            except Exception as e:
+                logger.error(
+                    f"[DataExtractor] 实时数据查询失败: {e}",
+                    exc_info=True
+                )
+                return pd.DataFrame()
+            
+            # 处理和统计环境数据（参考compute_and_store_daily_stats的实现）
+            try:
+                # 确保时间列是datetime类型并添加库房信息
+                df['time'] = pd.to_datetime(df['time'])
+                df['room'] = df['device_name'].apply(lambda x: str(x).split('_')[-1])
+                
+                # 过滤到指定库房和时间窗口
+                df_room = df[df['room'] == room_id].copy()
+                if df_room.empty:
+                    logger.warning(
+                        f"[DataExtractor] 未找到库房 {room_id} 的数据记录"
+                    )
+                    return pd.DataFrame()
+                
+                df_room = df_room[(df_room['time'] >= start_time) & (df_room['time'] < end_time)].copy()
+                if df_room.empty:
+                    logger.warning(
+                        f"[DataExtractor] 时间范围内无库房 {room_id} 的数据"
+                    )
+                    return pd.DataFrame()
+                
+                # 添加统计日期列
+                df_room['stat_date'] = df_room['time'].dt.date
+                
+                # 过滤环境传感器数据点（已在配置筛选阶段完成，这里再次确认）
+                mask = df_room['point_name'].isin(['temperature', 'humidity', 'co2'])
+                df_points = df_room[mask]
+                if df_points.empty:
+                    logger.warning(
+                        f"[DataExtractor] 未找到库房 {room_id} 的温湿度CO2数据点"
+                    )
+                    return pd.DataFrame()
+                
+                # 按统计日期和测点名称分组计算统计指标
+                agg = df_points.groupby(['stat_date', 'point_name'])['value'].agg(
+                    count='count',
+                    min='min',
+                    max='max',
+                    mean='mean',
+                    q25=lambda x: x.quantile(0.25),
+                    median=lambda x: x.quantile(0.5),
+                    q75=lambda x: x.quantile(0.75),
+                ).reset_index()
+                
+                if agg.empty:
+                    logger.warning(
+                        f"[DataExtractor] 聚合结果为空: room_id={room_id}"
+                    )
+                    return pd.DataFrame()
+                
+                # 透视表转换，便于按测点访问指标
+                pivot = agg.set_index(['stat_date', 'point_name']).unstack(level=-1)
+                
+                # 扁平化列名：(metric, point) -> point_metric
+                flat = pivot.copy()
+                flat.columns = [f"{col[1]}_{col[0]}" for col in flat.columns]
+                df_flat = flat.reset_index()
+                
+                # 确保stat_date是日期类型
+                df_flat['stat_date'] = pd.to_datetime(df_flat['stat_date']).dt.date
+                
+                # 构建结果DataFrame
+                df_rec = pd.DataFrame()
+                df_rec['stat_date'] = df_flat['stat_date']
+                
+                # 辅助函数：安全提取列值
+                def _col(name):
+                    return df_flat[name] if name in df_flat.columns else pd.Series([np.nan] * len(df_flat))
+                
+                # 温度统计
+                df_rec['temp_count'] = pd.to_numeric(_col('temperature_count'), errors='coerce').fillna(0).astype(int)
+                df_rec['temp_min'] = pd.to_numeric(_col('temperature_min'), errors='coerce')
+                df_rec['temp_max'] = pd.to_numeric(_col('temperature_max'), errors='coerce')
+                df_rec['temp_median'] = pd.to_numeric(_col('temperature_median'), errors='coerce')
+                df_rec['temp_q25'] = pd.to_numeric(_col('temperature_q25'), errors='coerce')
+                df_rec['temp_q75'] = pd.to_numeric(_col('temperature_q75'), errors='coerce')
+                
+                # 湿度统计
+                df_rec['humidity_count'] = pd.to_numeric(_col('humidity_count'), errors='coerce').fillna(0).astype(int)
+                df_rec['humidity_min'] = pd.to_numeric(_col('humidity_min'), errors='coerce')
+                df_rec['humidity_max'] = pd.to_numeric(_col('humidity_max'), errors='coerce')
+                df_rec['humidity_median'] = pd.to_numeric(_col('humidity_median'), errors='coerce')
+                df_rec['humidity_q25'] = pd.to_numeric(_col('humidity_q25'), errors='coerce')
+                df_rec['humidity_q75'] = pd.to_numeric(_col('humidity_q75'), errors='coerce')
+                
+                # CO2统计
+                df_rec['co2_count'] = pd.to_numeric(_col('co2_count'), errors='coerce').fillna(0).astype(int)
+                df_rec['co2_min'] = pd.to_numeric(_col('co2_min'), errors='coerce')
+                df_rec['co2_max'] = pd.to_numeric(_col('co2_max'), errors='coerce')
+                df_rec['co2_median'] = pd.to_numeric(_col('co2_median'), errors='coerce')
+                df_rec['co2_q25'] = pd.to_numeric(_col('co2_q25'), errors='coerce')
+                df_rec['co2_q75'] = pd.to_numeric(_col('co2_q75'), errors='coerce')
+                
+                # 添加库房ID
+                df_rec['room_id'] = room_id
+                
+                # 尝试获取蘑菇信息（生长天数等）
+                m_info = df_room[df_room['device_name'].astype(str).str.startswith(f'mushroom_info_{room_id}')]
+                if not m_info.empty:
+                    m_info_pivot = m_info.pivot_table(
+                        index='stat_date', columns='point_name', values='value', aggfunc='first'
+                    )
+                    if not m_info_pivot.empty:
+                        mdf = m_info_pivot.reset_index()
+                        mdf['stat_date'] = pd.to_datetime(mdf['stat_date']).dt.date
+                        
+                        # 保留相关列
+                        keep_cols = [c for c in ('stat_date', 'in_day_num', 'in_year', 'in_month', 'in_day') 
+                                   if c in mdf.columns]
+                        if keep_cols:
+                            df_rec = df_rec.merge(mdf[keep_cols], on='stat_date', how='left')
+                            
+                            # 标准化in_day_num
+                            if 'in_day_num' in df_rec.columns:
+                                df_rec['in_day_num'] = pd.to_numeric(df_rec['in_day_num'], errors='coerce')
+                                df_rec['is_growth_phase'] = ((df_rec['in_day_num'] >= 1) & 
+                                                           (df_rec['in_day_num'] <= 27)).astype(bool)
+                            else:
+                                df_rec['in_day_num'] = None
+                                df_rec['is_growth_phase'] = True  # 默认为生长阶段
+                        else:
+                            df_rec['in_day_num'] = None
+                            df_rec['is_growth_phase'] = True
+                    else:
+                        df_rec['in_day_num'] = None
+                        df_rec['is_growth_phase'] = True
+                else:
+                    df_rec['in_day_num'] = None
+                    df_rec['is_growth_phase'] = True
+                
+                # 添加趋势信息（实时数据无历史对比，设为默认值）
+                df_rec['temp_change_rate'] = 0.0
+                df_rec['humidity_change_rate'] = 0.0
+                df_rec['co2_change_rate'] = 0.0
+                df_rec['temp_trend'] = 'stable'
+                df_rec['humidity_trend'] = 'stable'
+                df_rec['co2_trend'] = 'stable'
+                
+                # 替换NaN为None
+                df_rec = df_rec.replace({np.nan: None})
+                
+                logger.info(
+                    f"[DataExtractor] 环境数据提取完成，共获取 {len(df_rec)} 条统计记录 "
+                    f"(温度: {df_rec['temp_count'].sum()}点, "
+                    f"湿度: {df_rec['humidity_count'].sum()}点, "
+                    f"CO2: {df_rec['co2_count'].sum()}点)"
+                )
+                
+                return df_rec
+                
+            except Exception as e:
+                logger.error(
+                    f"[DataExtractor] 环境数据统计处理失败: {e}",
+                    exc_info=True
+                )
+                return pd.DataFrame()
+                
+        except Exception as e:
+            logger.error(
+                f"[DataExtractor] 提取实时环境数据失败: {e}",
+                exc_info=True
+            )
+            return pd.DataFrame()
+    
+    def _get_device_configs_cached_for_realtime(self, room_id: str) -> Optional[Dict]:
+        """
+        为实时数据提取获取设备配置，使用缓存避免重复查询
+        参考compute_and_store_daily_stats的实现
+        
+        重要优化：仅获取环境监测相关的设备类型，避免查询不必要的控制设备
+        
+        Args:
+            room_id: 库房号
+            
+        Returns:
+            筛选后的设备配置字典，仅包含环境监测相关设备
+        """
+        current_time = datetime.now()
+        cache_key = f"realtime_{room_id}"
+        
+        # 检查缓存是否有效
+        if (hasattr(self, '_realtime_device_config_cache') and 
+            cache_key in self._realtime_device_config_cache and 
+            hasattr(self, '_realtime_cache_timestamp') and
+            cache_key in self._realtime_cache_timestamp and
+            (current_time - self._realtime_cache_timestamp[cache_key]).total_seconds() < 300):  # 5分钟缓存
+            
+            logger.debug(f"[DataExtractor] 使用缓存的设备配置: 库房 {room_id}")
+            return self._realtime_device_config_cache[cache_key]
+        
+        # 初始化缓存
+        if not hasattr(self, '_realtime_device_config_cache'):
+            self._realtime_device_config_cache = {}
+        if not hasattr(self, '_realtime_cache_timestamp'):
+            self._realtime_cache_timestamp = {}
+        
+        # 重新查询并缓存
+        logger.debug(f"[DataExtractor] 查询设备配置: 库房 {room_id}")
+        
+        try:
+            from utils.dataframe_utils import get_all_device_configs
+            
+            # 获取指定库房的所有设备配置
+            all_room_configs = get_all_device_configs(room_id=room_id)
+            
+            if not all_room_configs:
+                logger.warning(f"[DataExtractor] 未获取到库房 {room_id} 的设备配置")
+                return None
+            
+            # 筛选优化：仅保留环境监测相关的设备类型
+            # 环境数据提取只需要：环境传感器(温湿度CO2) + 蘑菇信息(生长天数)
+            required_device_types = ['mushroom_env_status', 'mushroom_info']
+            
+            filtered_configs = {
+                device_type: config_df 
+                for device_type, config_df in all_room_configs.items() 
+                if device_type in required_device_types
+            }
+            
+            if not filtered_configs:
+                logger.warning(
+                    f"[DataExtractor] 库房 {room_id} 未找到环境监测设备配置 "
+                    f"(需要: {required_device_types}, 可用: {list(all_room_configs.keys())})"
+                )
+                return None
+            
+            # 缓存筛选后的配置
+            self._realtime_device_config_cache[cache_key] = filtered_configs
+            self._realtime_cache_timestamp[cache_key] = current_time
+            
+            logger.debug(
+                f"[DataExtractor] 缓存筛选后的设备配置: 库房 {room_id}, "
+                f"设备类型: {list(filtered_configs.keys())}, "
+                f"总配置项: {sum(len(df) for df in filtered_configs.values())}"
+            )
+            
+            return filtered_configs
+            
+        except Exception as e:
+            logger.error(f"[DataExtractor] 获取设备配置失败: {e}")
+            return None
+
     def extract_env_daily_stats(
         self,
         room_id: str,

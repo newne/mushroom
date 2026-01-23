@@ -88,10 +88,11 @@
 
 ### 必需的JSON结构：
 
-输出必须包含以下三个顶层字段：
+输出必须包含以下四个顶层字段：
 1. strategy - 调控总体策略（包含core_objective, priority_ranking, key_risk_points）
 2. device_recommendations - 设备参数建议（包含air_cooler, fresh_air_fan, humidifier, grow_light）
 3. monitoring_points - 24小时监控重点（包含key_time_periods, warning_thresholds, emergency_measures）
+4. monitoring_points_config - 监控点配置格式（用于前端展示，包含完整的设备配置信息）
 
 ### JSON输出规则（必须严格遵守）：
 1. **直接输出JSON对象**，不要使用Markdown代码块（不要用```json```）
@@ -108,8 +109,8 @@
 **每个设备参数必须使用以下结构化格式：**
 
 每个参数都应该包含以下字段：
-- current_value: 当前值（数字）
-- recommended_value: 建议值（数字）  
+- current_value: 当前实际值（数字，从实时数据中获取的当前设备设定值）
+- recommended_value: 建议值（数字，基于分析得出的推荐设定值）  
 - action: 操作类型（"maintain" | "adjust" | "monitor"）
 - change_reason: 调整原因（字符串）
 - priority: 优先级（"low" | "medium" | "high" | "critical"）
@@ -119,21 +120,91 @@
   - no_action_risk: 不调整风险（"low" | "medium" | "high"）
   - impact_scope: 影响范围（字符串描述）
 
+**重要：current_value字段填充说明**
+- 对于冷风机温度设定(tem_set)：使用{air_cooler_temp_set}的值，如果为"数据缺失"则使用15.0
+- 对于冷风机温差设定(tem_diff_set)：使用{air_cooler_temp_diff}的值，如果为"数据缺失"则使用2.0
+- 对于新风机CO2阈值(co2_on/co2_off)：使用{fresh_air_co2_on}/{fresh_air_co2_off}的值，如果为"数据缺失"则使用1000/800
+- 对于加湿器湿度阈值(on/off)：使用{humidifier_on}/{humidifier_off}的值，如果为"数据缺失"则使用85/90
+- 对于补光灯时长设定(on_mset/off_mset)：使用{grow_light_on_time}/{grow_light_off_time}的值，如果为"数据缺失"则使用60/60
+- 对于其他开关和模式参数：根据当前设备运行状态中的相应值填充，如果为"数据缺失"则使用0
+
+**recommended_value字段填充说明**
+- 基于环境数据分析、历史案例匹配和专业约束，计算出的最优设定值
+- 如果当前值已经合理，recommended_value应等于current_value
+- 如果需要调整，recommended_value应为建议的新设定值
+- 必须输出具体的数值，不能为0（除非确实需要关闭设备）
+- 温度设定值通常在12-20℃范围内，湿度阈值通常在80-95%范围内
+
+**示例输出格式（重要）：**
+```json
+{
+  "device_recommendations": {
+    "air_cooler": {
+      "tem_set": {
+        "current_value": 15.0,
+        "recommended_value": 16.0,
+        "action": "adjust",
+        "change_reason": "当前温度偏低，建议提高设定温度",
+        "priority": "medium"
+      },
+      "tem_diff_set": {
+        "current_value": 2.0,
+        "recommended_value": 2.0,
+        "action": "maintain",
+        "change_reason": "当前温差设定合理",
+        "priority": "low"
+      }
+    },
+    "fresh_air_fan": {
+      "co2_on": {
+        "current_value": 1000,
+        "recommended_value": 1200,
+        "action": "adjust",
+        "change_reason": "提高CO2启动阈值以减少频繁启停",
+        "priority": "medium"
+      }
+    }
+  }
+}
+```
+
+**注意：current_value和recommended_value必须是具体的数值，不能为0或null！**
+
+### 监控点配置输出要求（新增）
+
+**重要：除了设备参数建议外，还必须输出monitoring_points_config字段，包含以下结构：**
+
+监控点配置应包含：
+- room_id: 库房编号字符串
+- devices: 设备配置对象，包含air_cooler、fresh_air_fan、humidifier、grow_light数组
+- 每个设备包含device_name、device_alias和point_list
+- point_list中每个点包含point_alias、point_name、remark、change_type、threshold、enum_mapping
+- 以及关键的监控字段：change（布尔值）、old（当前值）、new（建议值）、level（优先级）
+
+**监控点配置字段说明：**
+- change: 布尔值，基于action字段确定（action="adjust"时为true，否则为false）
+- old: 数值，使用current_value的值
+- new: 数值，使用recommended_value的值  
+- level: 字符串，基于priority字段映射（critical/high→"high", medium→"medium", low→"low"）
+
 ### 参数调整逻辑说明
 
 **保持当前值的情况：**
 - `"action": "maintain"` - 当前设定值合理，无需调整
 - `"recommended_value"` 等于 `"current_value"`
 - `"change_reason"` 说明为什么保持当前值
+- 监控点配置中 `"change": false`
 
 **需要调整的情况：**
 - `"action": "adjust"` - 需要调整到新的设定值
 - `"recommended_value"` 不等于 `"current_value"`
 - `"change_reason"` 详细说明调整的必要性和依据
+- 监控点配置中 `"change": true`
 
 **需要监控的情况：**
 - `"action": "monitor"` - 当前值可接受但需密切观察
 - 提供监控指标和预警阈值
+- 监控点配置中 `"change": false`
 
 ### 多图像综合分析要求
 

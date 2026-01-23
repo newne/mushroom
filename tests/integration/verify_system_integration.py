@@ -78,7 +78,7 @@ def verify_image_encoder():
     logger.info("=" * 60)
     
     try:
-        from utils.mushroom_image_encoder import create_mushroom_encoder
+        from clip.mushroom_image_encoder import create_mushroom_encoder
         
         encoder = create_mushroom_encoder()
         logger.info("✅ 图像编码器初始化成功")

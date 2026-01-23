@@ -24,7 +24,7 @@ from utils.create_table import MushroomImageEmbedding
 from utils.env_data_processor import create_env_data_processor
 from utils.get_data import GetData
 from utils.minio_client import create_minio_client
-from utils.mushroom_image_processor import create_mushroom_processor, MushroomImageInfo
+from .mushroom_image_processor import create_mushroom_processor, MushroomImageInfo
 
 
 class MushroomImageEncoder:
@@ -567,6 +567,325 @@ class MushroomImageEncoder:
         except Exception as e:
             logger.error(f"[IMG-014] 处理异常 | 文件: {image_info.file_name}, 错误: {e}")
             return None
+    
+    def process_image_batch(self, images_data: List[Dict], save_to_db: bool = True) -> List[Dict]:
+        """
+        批处理多个图像：优化的批量处理方法
+        
+        Args:
+            images_data: 图像数据列表，每个元素包含 {'image': PIL.Image, 'image_info': MushroomImageInfo, 'img_meta': dict}
+            save_to_db: 是否保存到数据库
+            
+        Returns:
+            处理结果列表
+        """
+        if not images_data:
+            return []
+        
+        logger.info(f"[IMG-BATCH] 开始批处理 | 图片数: {len(images_data)}")
+        batch_results = []
+        
+        try:
+            # 1. 批量准备数据
+            batch_data = []
+            for img_data in images_data:
+                image = img_data['image']
+                image_info = img_data['image_info']
+                
+                # 解析时间信息
+                time_info = self.parse_time_from_path(image_info)
+                
+                # 获取环境参数
+                env_data = self.get_environmental_data(image_info.mushroom_id, time_info)
+                
+                batch_data.append({
+                    'image': image,
+                    'image_info': image_info,
+                    'time_info': time_info,
+                    'env_data': env_data
+                })
+            
+            # 2. 分离有环境数据和无环境数据的图片
+            with_env_data = [item for item in batch_data if item['env_data'] is not None]
+            without_env_data = [item for item in batch_data if item['env_data'] is None]
+            
+            logger.debug(f"[IMG-BATCH] 数据分类 | 有环境数据: {len(with_env_data)}, 无环境数据: {len(without_env_data)}")
+            
+            # 3. 批量处理有环境数据的图片
+            if with_env_data:
+                batch_results.extend(self._process_batch_with_env_data(with_env_data, save_to_db))
+            
+            # 4. 批量处理无环境数据的图片（纯图像编码）
+            if without_env_data:
+                batch_results.extend(self._process_batch_without_env_data(without_env_data, save_to_db))
+            
+            logger.info(f"[IMG-BATCH] 批处理完成 | 成功: {sum(1 for r in batch_results if r['success'])}, "
+                       f"失败: {sum(1 for r in batch_results if not r['success'])}")
+            
+            return batch_results
+            
+        except Exception as e:
+            logger.error(f"[IMG-BATCH] 批处理异常: {e}")
+            # 回退到单张处理
+            for img_data in images_data:
+                try:
+                    result = self.process_single_image(img_data['image_info'], save_to_db=save_to_db)
+                    success = result is not None and (not save_to_db or result.get('saved_to_db', False))
+                    batch_results.append({'success': success, 'image_info': img_data['image_info']})
+                except Exception as e2:
+                    logger.error(f"[IMG-BATCH] 回退处理失败: {img_data['image_info'].file_name}, 错误: {e2}")
+                    batch_results.append({'success': False, 'image_info': img_data['image_info']})
+            
+            return batch_results
+    
+    def _process_batch_with_env_data(self, batch_data: List[Dict], save_to_db: bool) -> List[Dict]:
+        """批量处理有环境数据的图片"""
+        results = []
+        
+        try:
+            # 1. 批量获取LLaMA描述
+            images = [item['image'] for item in batch_data]
+            llama_results = self._get_llama_descriptions_batch(images)
+            
+            # 2. 准备批量CLIP编码的数据
+            clip_inputs = []
+            for i, item in enumerate(batch_data):
+                env_data = item['env_data']
+                llama_result = llama_results[i] if i < len(llama_results) else {}
+                
+                # 构建文本描述
+                identity_metadata = env_data.get('semantic_description', f"Mushroom Room {item['image_info'].mushroom_id}, unknown stage, Day 0.")
+                growth_stage_description = llama_result.get('growth_stage_description', '')
+                
+                if growth_stage_description and growth_stage_description != "No visible structures":
+                    full_text_description = f"{identity_metadata} {growth_stage_description}"
+                else:
+                    full_text_description = identity_metadata
+                
+                clip_inputs.append({
+                    'image': item['image'],
+                    'text': full_text_description,
+                    'index': i
+                })
+            
+            # 3. 批量CLIP编码
+            embeddings = self._get_multimodal_embeddings_batch(clip_inputs)
+            
+            # 4. 构建结果并保存
+            for i, item in enumerate(batch_data):
+                try:
+                    embedding = embeddings[i] if i < len(embeddings) else None
+                    
+                    if embedding is None:
+                        logger.error(f"[IMG-BATCH] 编码失败: {item['image_info'].file_name}")
+                        results.append({'success': False, 'image_info': item['image_info']})
+                        continue
+                    
+                    # 构建完整结果
+                    llama_result = llama_results[i] if i < len(llama_results) else {}
+                    env_data = item['env_data'].copy()
+                    
+                    # 添加描述和质量评分
+                    env_data['llama_description'] = llama_result.get('growth_stage_description', 'N/A')
+                    env_data['image_quality_score'] = llama_result.get('image_quality_score')
+                    
+                    result = {
+                        'image_info': item['image_info'],
+                        'embedding': embedding,
+                        'time_info': item['time_info'],
+                        'environmental_data': env_data,
+                        'processed_at': datetime.now()
+                    }
+                    
+                    # 保存到数据库
+                    if save_to_db:
+                        success = self._save_to_database(result)
+                        result['saved_to_db'] = success
+                    else:
+                        result['saved_to_db'] = False
+                        success = True
+                    
+                    results.append({'success': success, 'image_info': item['image_info']})
+                    
+                except Exception as e:
+                    logger.error(f"[IMG-BATCH] 处理单项失败: {item['image_info'].file_name}, 错误: {e}")
+                    results.append({'success': False, 'image_info': item['image_info']})
+            
+        except Exception as e:
+            logger.error(f"[IMG-BATCH] 批量处理有环境数据失败: {e}")
+            # 回退到单张处理
+            for item in batch_data:
+                try:
+                    result = self.process_single_image(item['image_info'], save_to_db=save_to_db)
+                    success = result is not None and (not save_to_db or result.get('saved_to_db', False))
+                    results.append({'success': success, 'image_info': item['image_info']})
+                except Exception as e2:
+                    logger.error(f"[IMG-BATCH] 回退处理失败: {item['image_info'].file_name}, 错误: {e2}")
+                    results.append({'success': False, 'image_info': item['image_info']})
+        
+        return results
+    
+    def _process_batch_without_env_data(self, batch_data: List[Dict], save_to_db: bool) -> List[Dict]:
+        """批量处理无环境数据的图片（纯图像编码）"""
+        results = []
+        
+        try:
+            # 批量图像编码
+            images = [item['image'] for item in batch_data]
+            embeddings = self._get_image_embeddings_batch(images)
+            
+            for i, item in enumerate(batch_data):
+                embedding = embeddings[i] if i < len(embeddings) else None
+                
+                if embedding is None:
+                    logger.error(f"[IMG-BATCH] 纯图像编码失败: {item['image_info'].file_name}")
+                    results.append({'success': False, 'image_info': item['image_info']})
+                    continue
+                
+                # 构建结果（无环境数据）
+                result = {
+                    'image_info': item['image_info'],
+                    'embedding': embedding,
+                    'time_info': item['time_info'],
+                    'environmental_data': None,
+                    'processed_at': datetime.now(),
+                    'saved_to_db': False,
+                    'skip_reason': 'no_environment_data'
+                }
+                
+                results.append({'success': True, 'image_info': item['image_info']})
+                
+        except Exception as e:
+            logger.error(f"[IMG-BATCH] 批量纯图像编码失败: {e}")
+            # 回退到单张处理
+            for item in batch_data:
+                try:
+                    embedding = self.get_image_embedding(item['image'])
+                    success = embedding is not None
+                    results.append({'success': success, 'image_info': item['image_info']})
+                except Exception as e2:
+                    logger.error(f"[IMG-BATCH] 回退纯图像编码失败: {item['image_info'].file_name}, 错误: {e2}")
+                    results.append({'success': False, 'image_info': item['image_info']})
+        
+        return results
+    
+    def _get_multimodal_embeddings_batch(self, clip_inputs: List[Dict]) -> List[Optional[List[float]]]:
+        """批量获取多模态CLIP编码"""
+        try:
+            if not clip_inputs:
+                return []
+            
+            # 准备批量输入
+            images = [item['image'] for item in clip_inputs]
+            texts = [item['text'] for item in clip_inputs]
+            
+            # 确保所有图像为RGB格式
+            processed_images = []
+            for image in images:
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')
+                processed_images.append(image)
+            
+            # 批量预处理
+            inputs = self.clip_processor(
+                text=texts,
+                images=processed_images, 
+                return_tensors="pt", 
+                padding=True,
+                truncation=True
+            ).to(self.device)
+            
+            # 批量获取特征
+            with torch.no_grad():
+                image_features = self.clip_model.get_image_features(pixel_values=inputs['pixel_values'])
+                text_features = self.clip_model.get_text_features(
+                    input_ids=inputs['input_ids'],
+                    attention_mask=inputs['attention_mask']
+                )
+            
+            # 批量融合特征
+            image_weight = 0.7
+            text_weight = 0.3
+            
+            image_features_norm = image_features / image_features.norm(dim=-1, keepdim=True)
+            text_features_norm = text_features / text_features.norm(dim=-1, keepdim=True)
+            
+            multimodal_features = (image_weight * image_features_norm + 
+                                 text_weight * text_features_norm)
+            
+            # 最终归一化并转换为列表
+            embeddings = []
+            for i in range(multimodal_features.shape[0]):
+                embedding = multimodal_features[i].cpu().numpy()
+                embedding = embedding / np.linalg.norm(embedding)
+                embeddings.append(embedding.tolist())
+            
+            logger.debug(f"[IMG-BATCH] 批量多模态编码完成: {len(embeddings)}个")
+            return embeddings
+            
+        except Exception as e:
+            logger.error(f"[IMG-BATCH] 批量多模态编码失败: {e}")
+            return [None] * len(clip_inputs)
+    
+    def _get_image_embeddings_batch(self, images: List[Image.Image]) -> List[Optional[List[float]]]:
+        """批量获取纯图像CLIP编码"""
+        try:
+            if not images:
+                return []
+            
+            # 确保所有图像为RGB格式
+            processed_images = []
+            for image in images:
+                if image.mode != 'RGB':
+                    image = image.convert('RGB')
+                processed_images.append(image)
+            
+            # 批量预处理
+            inputs = self.clip_processor(
+                images=processed_images, 
+                return_tensors="pt"
+            ).to(self.device)
+            
+            # 批量获取图像特征
+            with torch.no_grad():
+                image_features = self.clip_model.get_image_features(**inputs)
+            
+            # 归一化并转换为列表
+            embeddings = []
+            for i in range(image_features.shape[0]):
+                embedding = image_features[i].cpu().numpy()
+                embedding = embedding / np.linalg.norm(embedding)
+                embeddings.append(embedding.tolist())
+            
+            logger.debug(f"[IMG-BATCH] 批量图像编码完成: {len(embeddings)}个")
+            return embeddings
+            
+        except Exception as e:
+            logger.error(f"[IMG-BATCH] 批量图像编码失败: {e}")
+            return [None] * len(images)
+    
+    def _get_llama_descriptions_batch(self, images: List[Image.Image]) -> List[Dict]:
+        """批量获取LLaMA描述"""
+        try:
+            if not images:
+                return []
+            
+            # 当前LLaMA API可能不支持批量处理，逐个处理但优化调用
+            results = []
+            for image in images:
+                try:
+                    result = self._get_llama_description(image)
+                    results.append(result)
+                except Exception as e:
+                    logger.warning(f"[IMG-BATCH] LLaMA描述失败: {e}")
+                    results.append({"growth_stage_description": "", "image_quality_score": None})
+            
+            logger.debug(f"[IMG-BATCH] 批量LLaMA描述完成: {len(results)}个")
+            return results
+            
+        except Exception as e:
+            logger.error(f"[IMG-BATCH] 批量LLaMA描述失败: {e}")
+            return [{"growth_stage_description": "", "image_quality_score": None}] * len(images)
     
     def _save_to_database(self, result: Dict) -> bool:
         """

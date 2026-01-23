@@ -12,8 +12,8 @@ from pathlib import Path
 src_dir = Path(__file__).parent.parent / 'src'
 sys.path.insert(0, str(src_dir))
 
-from utils.recent_image_processor import create_recent_image_processor
-from utils.mushroom_image_encoder import create_mushroom_encoder
+from clip.recent_image_processor import create_recent_image_processor
+from clip.mushroom_image_encoder import create_mushroom_encoder
 from utils.minio_client import create_minio_client
 from datetime import datetime
 
@@ -56,6 +56,19 @@ def main():
         '--room-ids', 
         nargs='+', 
         help='指定多个库房号，用空格分隔'
+    )
+    
+    parser.add_argument(
+        '--batch-size', 
+        type=int, 
+        default=10, 
+        help='批处理大小，每批处理多少张图片 (默认: 10)'
+    )
+    
+    parser.add_argument(
+        '--enable-batch', 
+        action='store_true', 
+        help='启用批处理模式，提升处理效率'
     )
     
     args = parser.parse_args()
@@ -107,12 +120,19 @@ def main():
         # 使用整合的方法：一次调用完成摘要和处理
         print(f"\n🚀 整合处理最近 {args.hours} 小时的图片...")
         
+        # 批处理配置
+        batch_config = {
+            'enabled': args.enable_batch,
+            'batch_size': args.batch_size
+        }
+        
         result = processor.get_recent_image_summary_and_process(
             hours=args.hours,
             room_ids=room_ids,
             max_images_per_room=args.max_per_room,
             save_to_db=save_to_db,
-            show_summary=True
+            show_summary=True,
+            batch_config=batch_config
         )
         
         # 显示处理结果
@@ -134,8 +154,20 @@ def main():
         if args.no_save:
             print("\n⚠️ 注意: 使用了 --no-save 参数，结果未保存到数据库")
         
+        if args.enable_batch:
+            print(f"\n🚀 批处理模式: 启用 (批大小: {args.batch_size})")
+            if 'batch_stats' in result:
+                batch_stats = result['batch_stats']
+                print(f"   批处理统计: 总批数={batch_stats.get('total_batches', 0)}, "
+                      f"平均批大小={batch_stats.get('avg_batch_size', 0):.1f}")
+        
         print(f"\n✅ 整合处理完成! 时间: {datetime.now()}")
-        print("🎯 优化效果: 避免了重复初始化和重复查询，提升了处理效率")
+        optimization_msg = "🎯 优化效果: 避免了重复初始化和重复查询"
+        if args.enable_batch:
+            optimization_msg += f"，启用批处理 (批大小: {args.batch_size}) 提升了处理效率"
+        else:
+            optimization_msg += "，提升了处理效率"
+        print(optimization_msg)
         
     except KeyboardInterrupt:
         print("\n\n⚠️ 用户中断操作")

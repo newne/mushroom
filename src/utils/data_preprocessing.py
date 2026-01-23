@@ -15,8 +15,18 @@ def query_realtime_data(query_df, **kwargs):
     get_data = create_get_data()
     real_time_df = get_data.get_realtime_data(query_df)
     if real_time_df is None or real_time_df.empty:
+        # 使用更安全的日志输出方式，避免tabulate依赖问题
+        try:
+            query_info = query_df.to_markdown()
+        except ImportError:
+            # 如果tabulate不可用，使用简单的字符串表示
+            query_info = f"DataFrame with {len(query_df)} rows and columns: {list(query_df.columns)}"
+        except Exception:
+            # 其他异常情况的后备方案
+            query_info = f"DataFrame with {len(query_df)} rows"
+        
         logger.info(
-            f"[0.0.0] 实时数据为空！退出计算。查询条件： \n {query_df.to_markdown()}"
+            f"[0.0.0] 实时数据为空！退出计算。查询条件： \n {query_info}"
         )
         return
     real_time_df[["device_name", "point_name"]] = real_time_df["p"].str.split(

@@ -128,3 +128,19 @@ LARGE_FILES_*.md
 *_TEMP.md
 test_rendered_prompt.txt
 decision_analysis_*.json
+
+# Test files and data
+test_*.py
+*_test.py
+test_*.json
+*_test.json
+*.csv
+analyze_past_day_data.py
+fix_imports*.py
+sample_*.csv
+static_config_*.csv
+dynamic_results_*.csv
+
+# Demo and temporary scripts
+*_demo.py
+*_temp.py

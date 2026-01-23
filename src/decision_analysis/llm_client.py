@@ -570,6 +570,22 @@ class LLMClient:
                 "Attempting to extract JSON from text..."
             )
             
+            # Try to fix common JSON issues before parsing
+            fixed_response = self._fix_common_json_issues(response_text)
+            if fixed_response != response_text:
+                try:
+                    decision = json.loads(fixed_response)
+                    logger.info("[LLMClient] Successfully parsed enhanced JSON after fixing common issues")
+                    
+                    # Validate and convert if needed
+                    if self._validate_enhanced_structure(decision):
+                        return decision
+                    else:
+                        return self._convert_to_enhanced_format(decision)
+                        
+                except json.JSONDecodeError:
+                    logger.debug("[LLMClient] Fixed JSON still has parsing errors, trying other methods")
+            
             # Try to extract JSON from markdown code blocks (same as regular parsing)
             import re
             
@@ -631,6 +647,41 @@ class LLMClient:
                 exc_info=True
             )
             return self._get_enhanced_fallback_decision(f"Enhanced parse error: {str(e)}")
+    
+    def _fix_common_json_issues(self, json_text: str) -> str:
+        """
+        Fix common JSON formatting issues that LLMs often make
+        
+        Args:
+            json_text: Raw JSON text from LLM
+            
+        Returns:
+            Fixed JSON text
+        """
+        import re
+        
+        # Remove any trailing commas before closing braces/brackets
+        json_text = re.sub(r',(\s*[}\]])', r'\1', json_text)
+        
+        # Fix unescaped quotes in strings (basic attempt)
+        # This is a simple fix - more complex cases might still fail
+        json_text = re.sub(r'(?<!\\)"(?=.*".*:)', r'\\"', json_text)
+        
+        # Remove any text before the first { or after the last }
+        start_idx = json_text.find('{')
+        end_idx = json_text.rfind('}')
+        
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            json_text = json_text[start_idx:end_idx + 1]
+        
+        # Try to fix incomplete JSON by adding missing closing braces
+        open_braces = json_text.count('{')
+        close_braces = json_text.count('}')
+        
+        if open_braces > close_braces:
+            json_text += '}' * (open_braces - close_braces)
+        
+        return json_text
     
     def _validate_enhanced_structure(self, decision: Dict) -> bool:
         """

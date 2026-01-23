@@ -1,47 +1,38 @@
 """
-任务模块
-包含所有定时任务的业务逻辑实现
+定时任务模块
 
-增强功能:
-- 多图像综合分析
-- 结构化参数调整建议
-- 风险评估和优先级指导
+提供统一的任务接口，供调度器调用。
+每个任务模块都包含完整的执行逻辑和错误处理机制。
+
+任务模块：
+- base_task: 基础任务执行框架
+- table: 数据库表管理任务
+- env: 环境统计任务  
+- monitoring: 设定点监控任务
+- clip: CLIP推理任务
+- decision: 决策分析任务
 """
 
-from .table_tasks import safe_create_tables
-from .env_tasks import safe_daily_env_stats
-from .monitoring_tasks import safe_hourly_setpoint_monitoring
-from .clip_tasks import safe_hourly_clip_inference
-from .decision_tasks import (
-    # 增强决策分析函数
-    safe_enhanced_decision_analysis_for_room,
-    safe_enhanced_batch_decision_analysis,
-    safe_enhanced_decision_analysis_10_00,
-    safe_enhanced_decision_analysis_12_00,
-    safe_enhanced_decision_analysis_14_00,
-    # 传统决策分析函数（向后兼容）
-    safe_decision_analysis_for_room,
-    safe_batch_decision_analysis,
-    safe_decision_analysis_10_00,
-    safe_decision_analysis_12_00,
-    safe_decision_analysis_14_00,
-)
+# 导入基础任务框架
+from .base_task import BaseTask, TaskExecutor, task_wrapper
 
+# 导入所有任务接口函数（从子目录导入）
+from .table import safe_create_tables
+from .env import safe_daily_env_stats
+from .monitoring import safe_hourly_setpoint_monitoring
+from .clip import safe_hourly_clip_inference
+from .decision import safe_batch_decision_analysis
+
+# 任务接口列表
 __all__ = [
+    # 基础框架
+    'BaseTask',
+    'TaskExecutor', 
+    'task_wrapper',
+    # 任务接口
     'safe_create_tables',
-    'safe_daily_env_stats',
+    'safe_daily_env_stats', 
     'safe_hourly_setpoint_monitoring',
     'safe_hourly_clip_inference',
-    # 增强决策分析函数
-    'safe_enhanced_decision_analysis_for_room',
-    'safe_enhanced_batch_decision_analysis',
-    'safe_enhanced_decision_analysis_10_00',
-    'safe_enhanced_decision_analysis_12_00',
-    'safe_enhanced_decision_analysis_14_00',
-    # 传统决策分析函数（向后兼容）
-    'safe_decision_analysis_for_room',
     'safe_batch_decision_analysis',
-    'safe_decision_analysis_10_00',
-    'safe_decision_analysis_12_00',
-    'safe_decision_analysis_14_00',
 ]

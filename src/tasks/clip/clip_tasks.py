@@ -1,6 +1,7 @@
 """
 CLIP推理任务模块
-负责蘑菇图像的CLIP推理处理
+
+负责蘑菇图像的CLIP推理处理相关的定时任务。
 """
 
 import time
@@ -33,7 +34,7 @@ def safe_hourly_clip_inference() -> None:
             logger.info(f"[CLIP_TASK] 处理时间范围: {start_time_filter.strftime('%Y-%m-%d %H:%M:%S')} ~ {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
             
             # 导入蘑菇图像编码器
-            from utils.mushroom_image_encoder import create_mushroom_encoder
+            from clip.mushroom_image_encoder import create_mushroom_encoder
             
             # 创建编码器
             logger.info("[CLIP_TASK] 初始化蘑菇图像编码器...")

@@ -12,7 +12,19 @@ class InterceptHandler(logging.Handler):
         logger_opt.log(record.levelno, record.getMessage())
 
 
+# Global flag to prevent duplicate loguru setting initialization
+_loguru_initialized = False
+
 def loguru_setting(production=env):
+    global _loguru_initialized
+    
+    # Prevent duplicate initialization
+    if _loguru_initialized:
+        return
+    
+    # Mark as initialized
+    _loguru_initialized = True
+    
     folder_ = "./Logs/"
     prefix_ = "mushroom_solution-"
     rotation_ = "00:00"
@@ -31,7 +43,10 @@ def loguru_setting(production=env):
     # 根据是否生产环境设置日志级别
     log_level = "INFO" if production else "DEBUG"
 
-    ## loguru 接管所有日志（包括第三方库）。 但是日志数量比较多，基本上作用不大，选择关掉
+    # 移除默认处理器，防止重复日志
+    logger.remove()
+
+    ## loguru 接管所有日志（包括第三方库）。 但是日志数量比较大，基本上作用不大，选择关掉
     # class InterceptHandler(logging.Handler):
     #     def emit(self, record):
     #         # Retrieve context where the logging call occurred, this happens to be in the 6th frame upward

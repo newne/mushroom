@@ -16,10 +16,11 @@ from sqlalchemy import Engine
 
 from decision_analysis.clip_matcher import CLIPMatcher
 from decision_analysis.data_extractor import DataExtractor
-from decision_analysis.data_models import DecisionOutput
+from decision_analysis.data_models import DecisionOutput, MultiImageAnalysis
 from decision_analysis.llm_client import LLMClient
 from decision_analysis.output_handler import OutputHandler
 from decision_analysis.template_renderer import TemplateRenderer
+from decision_analysis.inference_persistence import decision_persistence
 
 
 class DecisionAnalyzer:
@@ -87,7 +88,12 @@ class DecisionAnalyzer:
             logger.debug("[DecisionAnalyzer] Initializing OutputHandler...")
             self.output_handler = OutputHandler(static_config)
             
+            logger.debug("[DecisionAnalyzer] Initializing DeviceConfigAdapter...")
+            from decision_analysis.device_config_adapter import create_device_config_adapter
+            self.device_config_adapter = create_device_config_adapter()
+            
             logger.info("[DecisionAnalyzer] Successfully initialized all components")
+            logger.info(f"[DecisionAnalyzer] Supported device types: {self.device_config_adapter.get_supported_device_types()}")
             
         except Exception as e:
             logger.error(
@@ -224,27 +230,30 @@ class DecisionAnalyzer:
                 if validation_warnings:
                     metadata["warnings"].extend(validation_warnings)
             
-            # Extract environmental daily statistics
-            logger.info("[DecisionAnalyzer] Extracting environmental statistics...")
+            # Extract environmental statistics using real-time data interface
+            logger.info("[DecisionAnalyzer] 正在提取环境统计数据...")
             target_date = analysis_datetime.date()
-            env_stats = self.data_extractor.extract_env_daily_stats(
+            
+            # 使用实时历史数据接口获取当天环境数据
+            # 由于统计天级温湿度数据是批处理任务，只有昨天及以前的历史统计数据，
+            # 无法获取当天的温湿度数据，因此当天的温湿度数据通过实时历史数据查询接口进行获取
+            env_stats = self.data_extractor.extract_realtime_env_data(
                 room_id=room_id,
-                target_date=target_date,
-                days_range=1
+                target_datetime=analysis_datetime
             )
             
             if env_stats.empty:
-                warning_msg = f"No environmental statistics found for room {room_id}"
-                logger.warning(f"[DecisionAnalyzer] {warning_msg}")
+                warning_msg = f"库房 {room_id} 未找到环境统计数据"
+                logger.error(f"[DecisionAnalyzer] 提取环境数据失败: {warning_msg}")
                 metadata["warnings"].append(warning_msg)
             else:
                 metadata["data_sources"]["env_stats_records"] = len(env_stats)
                 logger.info(
-                    f"[DecisionAnalyzer] Extracted {len(env_stats)} environmental stat records"
+                    f"[DecisionAnalyzer] 环境数据提取完成，共获取 {len(env_stats)} 条统计记录"
                 )
             
             # Extract device change records
-            logger.info("[DecisionAnalyzer] Extracting device change records...")
+            logger.info("[DecisionAnalyzer] 正在提取设备变更记录...")
             from datetime import timedelta
             start_time_changes = analysis_datetime - timedelta(days=7)
             device_changes = self.data_extractor.extract_device_changes(
@@ -259,20 +268,19 @@ class DecisionAnalyzer:
             if original_count > MAX_DEVICE_CHANGES:
                 device_changes = device_changes.head(MAX_DEVICE_CHANGES)
                 warning_msg = (
-                    f"Device changes truncated from {original_count} to {MAX_DEVICE_CHANGES} "
-                    f"records to prevent prompt overflow"
+                    f"设备变更记录从 {original_count} 条截断至 {MAX_DEVICE_CHANGES} 条以防止提示词溢出"
                 )
                 logger.warning(f"[DecisionAnalyzer] {warning_msg}")
                 metadata["warnings"].append(warning_msg)
             
             if device_changes.empty:
-                warning_msg = f"No device changes found for room {room_id} in the past 7 days"
+                warning_msg = f"库房 {room_id} 在过去7天内未找到设备变更记录"
                 logger.warning(f"[DecisionAnalyzer] {warning_msg}")
                 metadata["warnings"].append(warning_msg)
             else:
                 metadata["data_sources"]["device_change_records"] = len(device_changes)
                 logger.info(
-                    f"[DecisionAnalyzer] Extracted {len(device_changes)} device change records"
+                    f"[DecisionAnalyzer] 设备变更记录提取完成，共获取 {len(device_changes)} 条记录"
                 )
             
             step1_time = time.time() - step1_start
@@ -544,6 +552,55 @@ class DecisionAnalyzer:
             f"[DecisionAnalyzer] =========================================="
         )
         
+        # ====================================================================
+        # STEP 7: Persist Inference Results to Database
+        # ====================================================================
+        logger.info("[DecisionAnalyzer] STEP 7: Persisting inference results to database...")
+        persistence_start = time.time()
+        
+        try:
+            # 准备输入参数用于存储
+            input_parameters = {
+                "room_id": room_id,
+                "analysis_datetime": analysis_datetime.isoformat(),
+                "time_window_days": 7,
+                "growth_day_window": 3,
+                "template_path": self.template_path,
+                "analysis_type": "basic_decision_analysis"
+            }
+            
+            # 持久化推理结果
+            inference_record_id = decision_persistence.persist_basic_decision_result(
+                room_id=room_id,
+                decision_output=decision_output,
+                analysis_datetime=analysis_datetime,
+                input_parameters=input_parameters,
+                processing_time=decision_output.metadata.total_processing_time,
+                model_version="basic_v1.0",
+                created_by="decision_analyzer"
+            )
+            
+            persistence_time = time.time() - persistence_start
+            logger.info(
+                f"[DecisionAnalyzer] Successfully persisted inference result: "
+                f"RecordID={inference_record_id}, Time={persistence_time:.2f}s"
+            )
+            
+            # 将记录ID添加到元数据中
+            if not hasattr(decision_output.metadata, 'metadata_info'):
+                decision_output.metadata.metadata_info = {}
+            decision_output.metadata.metadata_info["inference_record_id"] = inference_record_id
+            
+        except Exception as e:
+            logger.warning(
+                f"[DecisionAnalyzer] Failed to persist inference result: {e}. "
+                f"Analysis will continue without persistence."
+            )
+            # 添加警告到元数据
+            decision_output.metadata.warnings.append(
+                f"Failed to persist inference result: {str(e)}"
+            )
+        
         return decision_output
     
     def analyze_enhanced(
@@ -611,7 +668,13 @@ class DecisionAnalyzer:
         similar_cases = []
         rendered_prompt = ""
         llm_decision = {}
-        multi_image_analysis = None
+        # 初始化默认的多图像分析对象
+        multi_image_analysis = MultiImageAnalysis(
+            total_images_analyzed=0,
+            confidence_score=0.0,
+            view_consistency="low",
+            key_observations=["初始化默认值"]
+        )
         
         # ====================================================================
         # STEP 1: Extract Multi-Image Data from Database
@@ -670,7 +733,6 @@ class DecisionAnalyzer:
                 }
                 
                 # Create multi-image analysis summary
-                from decision_analysis.data_models import MultiImageAnalysis
                 
                 # Calculate consistency score once to avoid multiple calls
                 consistency_score = self._calculate_image_consistency(embedding_df)
@@ -697,26 +759,29 @@ class DecisionAnalyzer:
                     metadata["warnings"].extend(validation_warnings)
             
             # Extract environmental daily statistics (same as before)
-            logger.info("[DecisionAnalyzer] Extracting environmental statistics...")
+            logger.info("[DecisionAnalyzer] 正在提取环境统计数据...")
             target_date = analysis_datetime.date()
-            env_stats = self.data_extractor.extract_env_daily_stats(
+            
+            # 使用实时历史数据接口获取当天环境数据
+            # 由于统计天级温湿度数据是批处理任务，只有昨天及以前的历史统计数据，
+            # 无法获取当天的温湿度统计数据，因此当天的温湿度数据通过实时历史数据查询接口进行获取
+            env_stats = self.data_extractor.extract_realtime_env_data(
                 room_id=room_id,
-                target_date=target_date,
-                days_range=1
+                target_datetime=analysis_datetime
             )
             
             if env_stats.empty:
-                warning_msg = f"No environmental statistics found for room {room_id}"
-                logger.warning(f"[DecisionAnalyzer] {warning_msg}")
+                warning_msg = f"库房 {room_id} 未找到环境统计数据"
+                logger.error(f"[DecisionAnalyzer] 提取环境数据失败: {warning_msg}")
                 metadata["warnings"].append(warning_msg)
             else:
                 metadata["data_sources"]["env_stats_records"] = len(env_stats)
                 logger.info(
-                    f"[DecisionAnalyzer] Extracted {len(env_stats)} environmental stat records"
+                    f"[DecisionAnalyzer] 环境数据提取完成，共获取 {len(env_stats)} 条统计记录"
                 )
             
             # Extract device change records (same as before)
-            logger.info("[DecisionAnalyzer] Extracting device change records...")
+            logger.info("[DecisionAnalyzer] 正在提取设备变更记录...")
             from datetime import timedelta
             start_time_changes = analysis_datetime - timedelta(days=7)
             device_changes = self.data_extractor.extract_device_changes(
@@ -731,20 +796,19 @@ class DecisionAnalyzer:
             if original_count > MAX_DEVICE_CHANGES:
                 device_changes = device_changes.head(MAX_DEVICE_CHANGES)
                 warning_msg = (
-                    f"Device changes truncated from {original_count} to {MAX_DEVICE_CHANGES} "
-                    f"records to prevent prompt overflow"
+                    f"设备变更记录从 {original_count} 条截断至 {MAX_DEVICE_CHANGES} 条以防止提示词溢出"
                 )
                 logger.warning(f"[DecisionAnalyzer] {warning_msg}")
                 metadata["warnings"].append(warning_msg)
             
             if device_changes.empty:
-                warning_msg = f"No device changes found for room {room_id} in the past 7 days"
+                warning_msg = f"库房 {room_id} 在过去7天内未找到设备变更记录"
                 logger.warning(f"[DecisionAnalyzer] {warning_msg}")
                 metadata["warnings"].append(warning_msg)
             else:
                 metadata["data_sources"]["device_change_records"] = len(device_changes)
                 logger.info(
-                    f"[DecisionAnalyzer] Extracted {len(device_changes)} device change records"
+                    f"[DecisionAnalyzer] 设备变更记录提取完成，共获取 {len(device_changes)} 条记录"
                 )
             
             step1_time = time.time() - step1_start
@@ -937,11 +1001,154 @@ class DecisionAnalyzer:
         step5_start = time.time()
         
         try:
+            # First, validate and format the raw LLM output
             enhanced_decision_output = self.output_handler.validate_and_format_enhanced(
                 raw_decision=llm_decision,
                 room_id=room_id,
                 multi_image_analysis=multi_image_analysis
             )
+            
+            # ====================================================================
+            # STEP 5.1: Device Configuration Adaptation
+            # ====================================================================
+            logger.info("[DecisionAnalyzer] STEP 5.1: Adapting output to device configuration...")
+            
+            try:
+                # Convert enhanced decision output to dictionary for adaptation
+                decision_dict = {
+                    "device_recommendations": {}
+                }
+                
+                # Extract device recommendations from enhanced output
+                if hasattr(enhanced_decision_output, 'device_recommendations'):
+                    device_recs = enhanced_decision_output.device_recommendations
+                    logger.debug(f"[DecisionAnalyzer] Found device_recommendations: {type(device_recs)}")
+                    
+                    # Convert air cooler recommendations
+                    if hasattr(device_recs, 'air_cooler') and device_recs.air_cooler:
+                        air_cooler = device_recs.air_cooler
+                        decision_dict["device_recommendations"]["air_cooler"] = {}
+                        logger.debug(f"[DecisionAnalyzer] Processing air_cooler: {type(air_cooler)}")
+                        
+                        # Map enhanced recommendations to configuration format
+                        air_cooler_mappings = {
+                            'tem_set': 'temp_set',
+                            'tem_diff_set': 'temp_diffset',
+                            'cyc_on_off': 'cyc_on_off',
+                            'cyc_on_time': 'cyc_on_time',
+                            'cyc_off_time': 'cyc_off_time',
+                            'ar_on_off': 'air_on_off',
+                            'hum_on_off': 'hum_on_off'
+                        }
+                        
+                        for attr_name, point_alias in air_cooler_mappings.items():
+                            if hasattr(air_cooler, attr_name):
+                                param_adj = getattr(air_cooler, attr_name)
+                                logger.debug(f"[DecisionAnalyzer] Processing {attr_name}: {type(param_adj)}")
+                                if hasattr(param_adj, 'recommended_value'):
+                                    value = param_adj.recommended_value
+                                    decision_dict["device_recommendations"]["air_cooler"][point_alias] = value
+                                    logger.debug(f"[DecisionAnalyzer] Mapped {attr_name} -> {point_alias}: {value}")
+                                else:
+                                    logger.warning(f"[DecisionAnalyzer] ParameterAdjustment {attr_name} missing recommended_value")
+                            else:
+                                logger.debug(f"[DecisionAnalyzer] air_cooler missing attribute: {attr_name}")
+                    
+                    # Convert fresh air fan recommendations
+                    if hasattr(device_recs, 'fresh_air_fan') and device_recs.fresh_air_fan:
+                        fresh_air = device_recs.fresh_air_fan
+                        decision_dict["device_recommendations"]["fresh_air_fan"] = {}
+                        logger.debug(f"[DecisionAnalyzer] Processing fresh_air_fan: {type(fresh_air)}")
+                        
+                        fresh_air_mappings = {
+                            'model': 'mode',
+                            'control': 'control',
+                            'co2_on': 'co2_on',
+                            'co2_off': 'co2_off',
+                            'on': 'on',
+                            'off': 'off'
+                        }
+                        
+                        for attr_name, point_alias in fresh_air_mappings.items():
+                            if hasattr(fresh_air, attr_name):
+                                param_adj = getattr(fresh_air, attr_name)
+                                if hasattr(param_adj, 'recommended_value'):
+                                    value = param_adj.recommended_value
+                                    decision_dict["device_recommendations"]["fresh_air_fan"][point_alias] = value
+                                    logger.debug(f"[DecisionAnalyzer] Mapped {attr_name} -> {point_alias}: {value}")
+                    
+                    # Convert humidifier recommendations
+                    if hasattr(device_recs, 'humidifier') and device_recs.humidifier:
+                        humidifier = device_recs.humidifier
+                        decision_dict["device_recommendations"]["humidifier"] = {}
+                        logger.debug(f"[DecisionAnalyzer] Processing humidifier: {type(humidifier)}")
+                        
+                        humidifier_mappings = {
+                            'model': 'mode',
+                            'on': 'on',
+                            'off': 'off'
+                        }
+                        
+                        for attr_name, point_alias in humidifier_mappings.items():
+                            if hasattr(humidifier, attr_name):
+                                param_adj = getattr(humidifier, attr_name)
+                                if hasattr(param_adj, 'recommended_value'):
+                                    value = param_adj.recommended_value
+                                    decision_dict["device_recommendations"]["humidifier"][point_alias] = value
+                                    logger.debug(f"[DecisionAnalyzer] Mapped {attr_name} -> {point_alias}: {value}")
+                    
+                    # Convert grow light recommendations
+                    if hasattr(device_recs, 'grow_light') and device_recs.grow_light:
+                        grow_light = device_recs.grow_light
+                        decision_dict["device_recommendations"]["grow_light"] = {}
+                        logger.debug(f"[DecisionAnalyzer] Processing grow_light: {type(grow_light)}")
+                        
+                        grow_light_mappings = {
+                            'model': 'model',
+                            'on_mset': 'on_mset',
+                            'off_mset': 'off_mset',
+                            'on_off_1': 'on_off1',
+                            'on_off_2': 'on_off2',
+                            'on_off_3': 'on_off3',
+                            'on_off_4': 'on_off4',
+                            'choose_1': 'choose1',
+                            'choose_2': 'choose2',
+                            'choose_3': 'choose3',
+                            'choose_4': 'choose4'
+                        }
+                        
+                        for attr_name, point_alias in grow_light_mappings.items():
+                            if hasattr(grow_light, attr_name):
+                                param_adj = getattr(grow_light, attr_name)
+                                if hasattr(param_adj, 'recommended_value'):
+                                    value = param_adj.recommended_value
+                                    decision_dict["device_recommendations"]["grow_light"][point_alias] = value
+                                    logger.debug(f"[DecisionAnalyzer] Mapped {attr_name} -> {point_alias}: {value}")
+                
+                logger.info(f"[DecisionAnalyzer] Extracted device recommendations: {list(decision_dict['device_recommendations'].keys())}")
+                
+                # Adapt decision output to match device configuration
+                adapted_output, adaptation_warnings = self.device_config_adapter.adapt_decision_output(
+                    decision_dict, room_id
+                )
+                
+                # Add adaptation warnings to metadata
+                metadata["warnings"].extend(adaptation_warnings)
+                
+                # Log adaptation results
+                adapted_device_count = len(adapted_output.get("device_recommendations", {}))
+                logger.info(f"[DecisionAnalyzer] Device configuration adaptation completed: "
+                           f"{adapted_device_count} device types adapted, {len(adaptation_warnings)} warnings")
+                
+                # Add device configuration metadata to enhanced output
+                if hasattr(enhanced_decision_output, 'metadata'):
+                    enhanced_decision_output.metadata.device_config_metadata = adapted_output.get("device_config_metadata", {})
+                
+            except Exception as e:
+                error_msg = f"Device configuration adaptation failed: {str(e)}"
+                logger.error(f"[DecisionAnalyzer] {error_msg}", exc_info=True)
+                metadata["warnings"].append(error_msg)
+                # Continue with original output if adaptation fails
             
             # Merge metadata
             enhanced_decision_output.metadata.data_sources = metadata["data_sources"]
@@ -1010,11 +1217,404 @@ class DecisionAnalyzer:
             f"[DecisionAnalyzer] =========================================="
         )
         
+        # ====================================================================
+        # STEP 7: Persist Inference Results to Database
+        # ====================================================================
+        logger.info("[DecisionAnalyzer] STEP 7: Persisting inference results to database...")
+        persistence_start = time.time()
+        
+        try:
+            # 准备输入参数用于存储
+            input_parameters = {
+                "room_id": room_id,
+                "analysis_datetime": analysis_datetime.isoformat(),
+                "time_window_days": 7,
+                "growth_day_window": 3,
+                "image_aggregation_window": self.decision_config["image_aggregation_window"],
+                "template_path": self.template_path,
+                "analysis_type": "enhanced_decision_analysis"
+            }
+            
+            # 持久化推理结果
+            inference_record_id = decision_persistence.persist_enhanced_decision_result(
+                room_id=room_id,
+                enhanced_decision_output=enhanced_decision_output,
+                analysis_datetime=analysis_datetime,
+                input_parameters=input_parameters,
+                processing_time=total_time,
+                model_version="enhanced_v1.0",
+                created_by="decision_analyzer"
+            )
+            
+            persistence_time = time.time() - persistence_start
+            logger.info(
+                f"[DecisionAnalyzer] Successfully persisted inference result: "
+                f"RecordID={inference_record_id}, Time={persistence_time:.2f}s"
+            )
+            
+            # 将记录ID添加到元数据中
+            enhanced_decision_output.metadata.metadata_info = getattr(
+                enhanced_decision_output.metadata, 'metadata_info', {}
+            )
+            enhanced_decision_output.metadata.metadata_info["inference_record_id"] = inference_record_id
+            
+        except Exception as e:
+            logger.warning(
+                f"[DecisionAnalyzer] Failed to persist inference result: {e}. "
+                f"Analysis will continue without persistence."
+            )
+            # 添加警告到元数据
+            enhanced_decision_output.metadata.warnings.append(
+                f"Failed to persist inference result: {str(e)}"
+            )
+        
         return enhanced_decision_output
+    
+    def _map_parameter_to_point_alias(self, device_type: str, parameter_name: str) -> str:
+        """
+        Map enhanced decision parameter names to device configuration point aliases
+        
+        Args:
+            device_type: Type of device (air_cooler, fresh_air_fan, etc.)
+            parameter_name: Parameter name from enhanced decision output
+            
+        Returns:
+            Point alias from device configuration or None if not found
+        """
+        # Mapping from enhanced decision parameter names to configuration point aliases
+        parameter_mappings = {
+            "air_cooler": {
+                "tem_set": "temp_set",
+                "tem_diff_set": "temp_diffset", 
+                "cyc_on_off": "cyc_on_off",
+                "cyc_on_time": "cyc_on_time",
+                "cyc_off_time": "cyc_off_time",
+                "ar_on_off": "air_on_off",
+                "hum_on_off": "hum_on_off",
+                "on_off": "on_off"
+            },
+            "fresh_air_fan": {
+                "model": "mode",
+                "control": "control",
+                "co2_on": "co2_on",
+                "co2_off": "co2_off",
+                "on": "on",
+                "off": "off"
+            },
+            "humidifier": {
+                "model": "mode",
+                "on": "on",
+                "off": "off"
+            },
+            "grow_light": {
+                "model": "model",
+                "on_mset": "on_mset",
+                "off_mset": "off_mset",
+                "on_off_1": "on_off1",
+                "on_off_2": "on_off2",
+                "on_off_3": "on_off3",
+                "on_off_4": "on_off4",
+                "choose_1": "choose1",
+                "choose_2": "choose2",
+                "choose_3": "choose3",
+                "choose_4": "choose4"
+            }
+        }
+        
+        device_mapping = parameter_mappings.get(device_type, {})
+        point_alias = device_mapping.get(parameter_name)
+        
+        if point_alias:
+            # Verify that this point alias is supported in the configuration
+            supported_points = self.device_config_adapter.get_supported_points(device_type)
+            if point_alias in supported_points:
+                return point_alias
+            else:
+                logger.debug(f"[DecisionAnalyzer] Point alias '{point_alias}' not supported for device type '{device_type}'")
+                return None
+        else:
+            logger.debug(f"[DecisionAnalyzer] No mapping found for parameter '{parameter_name}' in device type '{device_type}'")
+            return None
     
     def _calculate_image_consistency(self, embedding_df) -> float:
         """
-        Calculate consistency score between multiple images
+        Calculate camera IP-based image consistency score using pgvector database optimization
+        
+        This enhanced function implements camera IP-based image consistency calculation:
+        1. Groups images by camera IP (collection_ip field) to get latest image from each camera
+        2. Excludes current batch images (same in_date) to ensure historical comparison
+        3. Performs cross-camera similarity matching to avoid intra-camera temporal comparison
+        4. Selects top-5 similar images from different cameras for each query vector
+        5. Uses pgvector optimization with IVFFlat indices and cosine distance operators
+        
+        Args:
+            embedding_df: DataFrame with image embeddings containing 'embedding', 'room_id', 
+                         'in_date', 'collection_ip', 'collection_datetime' columns
+            
+        Returns:
+            Consistency score between 0.0 and 1.0 (higher means more consistent across cameras)
+            
+        Performance Benefits:
+            - Utilizes database-level vector operations (pgvector)
+            - Leverages optimized vector indices (IVFFlat) for faster similarity search
+            - Uses PostgreSQL's native cosine distance operator (<=>)
+            - Reduces CPU computation overhead compared to manual calculations
+        """
+        consistency_start_time = time.time()
+        
+        try:
+            if len(embedding_df) < 2:
+                logger.info("[DecisionAnalyzer] Single image found, returning perfect consistency")
+                return 1.0
+            
+            import numpy as np
+            from sqlalchemy import text
+            from sqlalchemy.orm import sessionmaker
+            from datetime import datetime
+            
+            # Create database session
+            Session = sessionmaker(bind=self.db_engine)
+            session = Session()
+            
+            try:
+                # Extract room_id and current batch date from embedding_df
+                room_id = embedding_df.iloc[0].get('room_id') if not embedding_df.empty else None
+                current_in_date = embedding_df.iloc[0].get('in_date') if not embedding_df.empty else None
+                
+                if not room_id:
+                    logger.warning("[DecisionAnalyzer] No room_id found in embedding data, using fallback")
+                    return self._calculate_image_consistency_fallback(embedding_df)
+                
+                logger.info(f"[DecisionAnalyzer] Starting camera IP-based consistency calculation for room {room_id}")
+                
+                # ====================================================================
+                # STEP 1: Get latest image from each camera IP in current room
+                # ====================================================================
+                logger.info("[DecisionAnalyzer] Step 1: Getting latest images from each camera IP...")
+                
+                # Query to get the latest image from each camera IP in the current room
+                # Exclude current batch (same in_date) to ensure historical comparison
+                camera_query = text("""
+                    WITH latest_by_camera AS (
+                        SELECT 
+                            collection_ip,
+                            embedding,
+                            collection_datetime,
+                            in_date,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY collection_ip 
+                                ORDER BY collection_datetime DESC
+                            ) as rn
+                        FROM mushroom_embedding 
+                        WHERE room_id = :room_id 
+                        AND embedding IS NOT NULL 
+                        AND collection_ip IS NOT NULL
+                        AND (:current_in_date IS NULL OR in_date != :current_in_date)
+                    )
+                    SELECT 
+                        collection_ip,
+                        embedding,
+                        collection_datetime,
+                        in_date
+                    FROM latest_by_camera 
+                    WHERE rn = 1
+                    ORDER BY collection_ip
+                """)
+                
+                camera_results = session.execute(camera_query, {
+                    'room_id': room_id,
+                    'current_in_date': current_in_date
+                }).fetchall()
+                
+                if not camera_results:
+                    logger.warning(f"[DecisionAnalyzer] No historical camera data found for room {room_id}, using fallback")
+                    return self._calculate_image_consistency_fallback(embedding_df)
+                
+                camera_ips = [row[0] for row in camera_results]
+                camera_embeddings = []
+                
+                logger.info(f"[DecisionAnalyzer] Found {len(camera_results)} cameras: {camera_ips}")
+                
+                # Process camera embeddings
+                for row in camera_results:
+                    collection_ip, embedding, collection_datetime, in_date = row
+                    
+                    if embedding is not None:
+                        if isinstance(embedding, str):
+                            # Handle string representation of array
+                            embedding = eval(embedding) if embedding.startswith('[') else embedding
+                        if not isinstance(embedding, (list, np.ndarray)):
+                            continue
+                        if isinstance(embedding, np.ndarray):
+                            embedding = embedding.tolist()
+                        
+                        camera_embeddings.append({
+                            'collection_ip': collection_ip,
+                            'embedding': embedding,
+                            'collection_datetime': collection_datetime,
+                            'in_date': in_date,
+                            'embedding_dim': len(embedding)
+                        })
+                
+                if len(camera_embeddings) < 2:
+                    logger.warning(f"[DecisionAnalyzer] Insufficient camera embeddings ({len(camera_embeddings)}), using fallback")
+                    return self._calculate_image_consistency_fallback(embedding_df)
+                
+                logger.info(f"[DecisionAnalyzer] Processing {len(camera_embeddings)} camera query vectors")
+                for cam_data in camera_embeddings:
+                    logger.debug(f"  - Camera {cam_data['collection_ip']}: {cam_data['embedding_dim']}D vector from {cam_data['collection_datetime']}")
+                
+                # ====================================================================
+                # STEP 2: Exclude current batch images from comparison database
+                # ====================================================================
+                logger.info("[DecisionAnalyzer] Step 2: Preparing historical comparison database...")
+                
+                # Count total and filtered images for logging
+                total_count_query = text("""
+                    SELECT COUNT(*) FROM mushroom_embedding 
+                    WHERE room_id = :room_id AND embedding IS NOT NULL
+                """)
+                total_count = session.execute(total_count_query, {'room_id': room_id}).scalar()
+                
+                filtered_count_query = text("""
+                    SELECT COUNT(*) FROM mushroom_embedding 
+                    WHERE room_id = :room_id 
+                    AND embedding IS NOT NULL 
+                    AND (:current_in_date IS NULL OR in_date != :current_in_date)
+                """)
+                filtered_count = session.execute(filtered_count_query, {
+                    'room_id': room_id,
+                    'current_in_date': current_in_date
+                }).scalar()
+                
+                excluded_count = total_count - filtered_count
+                logger.info(f"[DecisionAnalyzer] Historical database: {filtered_count} images (excluded {excluded_count} current batch images)")
+                
+                # ====================================================================
+                # STEP 3: Cross-camera similarity matching
+                # ====================================================================
+                logger.info("[DecisionAnalyzer] Step 3: Performing cross-camera similarity matching...")
+                
+                all_similarity_scores = []
+                camera_match_stats = {}
+                
+                for i, cam_data in enumerate(camera_embeddings):
+                    camera_ip = cam_data['collection_ip']
+                    embedding = cam_data['embedding']
+                    
+                    logger.debug(f"[DecisionAnalyzer] Processing camera {camera_ip} ({i+1}/{len(camera_embeddings)})")
+                    
+                    # Convert embedding to string format for SQL
+                    embedding_str = '[' + ','.join(map(str, embedding)) + ']'
+                    
+                    # Query for top-5 most similar images from OTHER cameras
+                    # Exclude same camera to avoid intra-camera temporal comparison
+                    similarity_query = text(f"""
+                        SELECT 
+                            collection_ip,
+                            collection_datetime,
+                            in_date,
+                            GREATEST(0, 1 - (embedding <=> '{embedding_str}'::vector)) as similarity_score
+                        FROM mushroom_embedding 
+                        WHERE room_id = :room_id
+                        AND embedding IS NOT NULL
+                        AND collection_ip IS NOT NULL
+                        AND collection_ip != :camera_ip
+                        AND (:current_in_date IS NULL OR in_date != :current_in_date)
+                        ORDER BY embedding <=> '{embedding_str}'::vector
+                        LIMIT 5
+                    """)
+                    
+                    similarity_results = session.execute(similarity_query, {
+                        'room_id': room_id,
+                        'camera_ip': camera_ip,
+                        'current_in_date': current_in_date
+                    }).fetchall()
+                    
+                    if similarity_results:
+                        camera_similarities = [float(row[3]) for row in similarity_results]
+                        camera_avg_similarity = np.mean(camera_similarities)
+                        all_similarity_scores.extend(camera_similarities)
+                        
+                        # Track statistics for this camera
+                        matched_cameras = list(set([row[0] for row in similarity_results]))
+                        camera_match_stats[camera_ip] = {
+                            'matches_found': len(similarity_results),
+                            'avg_similarity': camera_avg_similarity,
+                            'matched_cameras': matched_cameras,
+                            'similarity_range': [min(camera_similarities), max(camera_similarities)]
+                        }
+                        
+                        logger.debug(f"  - Found {len(similarity_results)} matches, avg similarity: {camera_avg_similarity:.3f}")
+                    else:
+                        logger.warning(f"  - No matches found for camera {camera_ip}")
+                        camera_match_stats[camera_ip] = {
+                            'matches_found': 0,
+                            'avg_similarity': 0.0,
+                            'matched_cameras': [],
+                            'similarity_range': [0.0, 0.0]
+                        }
+                
+                # ====================================================================
+                # STEP 4: Calculate overall consistency score
+                # ====================================================================
+                logger.info("[DecisionAnalyzer] Step 4: Calculating overall consistency score...")
+                
+                if all_similarity_scores:
+                    overall_consistency = float(np.mean(all_similarity_scores))
+                    
+                    # Ensure score is in valid range
+                    overall_consistency = max(0.0, min(1.0, overall_consistency))
+                    
+                    # Calculate statistics
+                    similarity_std = float(np.std(all_similarity_scores))
+                    similarity_min = float(np.min(all_similarity_scores))
+                    similarity_max = float(np.max(all_similarity_scores))
+                    
+                    # Log detailed statistics
+                    total_matches = sum(stats['matches_found'] for stats in camera_match_stats.values())
+                    successful_cameras = sum(1 for stats in camera_match_stats.values() if stats['matches_found'] > 0)
+                    
+                    logger.info(f"[DecisionAnalyzer] Cross-camera consistency analysis completed:")
+                    logger.info(f"  - Cameras processed: {len(camera_embeddings)}")
+                    logger.info(f"  - Successful camera matches: {successful_cameras}/{len(camera_embeddings)}")
+                    logger.info(f"  - Total similarity pairs: {total_matches}")
+                    logger.info(f"  - Overall consistency: {overall_consistency:.3f}")
+                    logger.info(f"  - Similarity distribution: min={similarity_min:.3f}, max={similarity_max:.3f}, std={similarity_std:.3f}")
+                    
+                    # Log per-camera statistics
+                    for camera_ip, stats in camera_match_stats.items():
+                        if stats['matches_found'] > 0:
+                            logger.debug(f"  - Camera {camera_ip}: {stats['matches_found']} matches, "
+                                       f"avg={stats['avg_similarity']:.3f}, "
+                                       f"range=[{stats['similarity_range'][0]:.3f}, {stats['similarity_range'][1]:.3f}], "
+                                       f"matched_cameras={stats['matched_cameras']}")
+                    
+                    return overall_consistency
+                else:
+                    logger.warning("[DecisionAnalyzer] No similarity scores calculated, using default consistency")
+                    return 0.5  # Default moderate consistency
+                    
+            finally:
+                session.close()
+                
+        except Exception as e:
+            consistency_time = time.time() - consistency_start_time
+            logger.warning(f"[DecisionAnalyzer] Failed to calculate camera IP-based consistency (time: {consistency_time:.2f}s): {e}")
+            logger.debug(f"[DecisionAnalyzer] Error details: {str(e)}", exc_info=True)
+            # Fallback to manual calculation if database query fails
+            return self._calculate_image_consistency_fallback(embedding_df)
+        
+        finally:
+            consistency_time = time.time() - consistency_start_time
+            logger.info(f"[DecisionAnalyzer] Camera IP-based consistency calculation completed in {consistency_time:.2f}s")
+
+    def _calculate_image_consistency_fallback(self, embedding_df) -> float:
+        """
+        Fallback method for image consistency calculation using manual cosine similarity
+        
+        This method is used when the pgvector-optimized calculation fails, providing
+        a reliable backup using traditional in-memory similarity computation.
         
         Args:
             embedding_df: DataFrame with image embeddings
@@ -1048,8 +1648,10 @@ class DecisionAnalyzer:
                     similarities.append(sim)
             
             # Return average similarity as consistency score
-            return float(np.mean(similarities))
+            # Ensure the result is between 0.0 and 1.0
+            avg_similarity = float(np.mean(similarities))
+            return max(0.0, min(1.0, avg_similarity))
             
         except Exception as e:
-            logger.warning(f"[DecisionAnalyzer] Failed to calculate image consistency: {e}")
+            logger.warning(f"[DecisionAnalyzer] Failed to calculate image consistency (fallback): {e}")
             return 0.5  # Default moderate consistency

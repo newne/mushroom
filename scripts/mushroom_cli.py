@@ -17,7 +17,7 @@ src_dir = project_root / "src"
 sys.path.insert(0, str(src_dir))
 os.chdir(str(src_dir))
 
-from utils.mushroom_image_processor import create_mushroom_processor
+from clip.mushroom_image_processor import create_mushroom_processor
 from utils.minio_service import create_minio_service
 from loguru import logger
 
@@ -155,7 +155,7 @@ def cmd_search(args):
 
 def cmd_encode_images(args):
     """编码图像并获取环境参数"""
-    from utils.mushroom_image_encoder import create_mushroom_encoder
+    from clip.mushroom_image_encoder import create_mushroom_encoder
     
     logger.info("开始图像编码和环境参数获取...")
     
@@ -190,7 +190,7 @@ def cmd_encode_images(args):
 
 def cmd_encode_single(args):
     """编码单个图像"""
-    from utils.mushroom_image_encoder import create_mushroom_encoder
+    from clip.mushroom_image_encoder import create_mushroom_encoder
     
     logger.info(f"编码单个图像: {args.image_path}")
     

@@ -45,7 +45,7 @@ logger = logging.getLogger(__name__)
 def get_db_connection():
     """获取数据库连接"""
     # 使用全局配置的pgsql_engine
-    from src.global_const.global_const import pgsql_engine
+    from global_const.global_const import pgsql_engine
     logger.info("✅ 数据库连接成功")
     return pgsql_engine
 

@@ -15,8 +15,8 @@ current_dir = Path(__file__).parent
 src_dir = current_dir.parent
 sys.path.insert(0, str(src_dir))
 
-from utils.mushroom_image_encoder import create_mushroom_encoder
-from utils.recent_image_processor import create_recent_image_processor
+from clip.mushroom_image_encoder import create_mushroom_encoder
+from clip.recent_image_processor import create_recent_image_processor
 from utils.minio_client import create_minio_client
 from utils.loguru_setting import logger
 

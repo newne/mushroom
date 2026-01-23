@@ -121,7 +121,8 @@ pgsql_engine = sqlalchemy.create_engine(
     pool_timeout=30,              # 获取连接的超时时间（秒）
     connect_args={
         "connect_timeout": 10,    # TCP连接超时（秒）- 适应Docker网络
-        "options": "-c statement_timeout=300000"  # SQL语句超时（5分钟）
+        "options": "-c statement_timeout=300000 -c client_encoding=UTF8",  # SQL语句超时（5分钟）+ UTF8编码
+        "client_encoding": "utf8"  # 明确设置客户端编码为UTF-8
     },
     echo=False,                   # 不输出SQL日志
     future=True                   # 使用SQLAlchemy 2.0风格

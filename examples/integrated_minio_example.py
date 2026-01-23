@@ -14,7 +14,7 @@ import json
 project_root = Path(__file__).parent.parent
 sys.path.append(str(project_root))
 
-from src.utils.minio_service import create_minio_service
+from utils.minio_service import create_minio_service
 from loguru import logger
 
 

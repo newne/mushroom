@@ -45,28 +45,66 @@ class TemplateRenderer:
         
         # Read template content (using Python format strings, not Jinja2)
         with open(self.template_path, "r", encoding="utf-8") as f:
-            template_content = f.read()
+            self.template_content = f.read()
         
-        # Escape literal braces that aren't template variables
-        # A valid variable name for our purposes is ASCII-only: starts with letter/underscore,
-        # followed by letters, digits, or underscores
-        import re
-        
-        def escape_literal_braces(match):
-            content = match.group(1)
-            # Check if it's a valid ASCII identifier (our template variables)
-            if re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', content):
-                return match.group(0)  # Keep as is - it's a variable
-            else:
-                # Escape by doubling the braces - it's literal text
-                return '{{' + content + '}}'
-        
-        self.template_content = re.sub(r'\{([^}]+)\}', escape_literal_braces, template_content)
+        # Escape braces in JSON examples to prevent format string errors
+        # We need to escape braces that are not template variables
+        self.template_content = self._escape_json_examples(self.template_content)
         
         # Build enum mapping cache for faster lookups
         self._build_enum_cache()
         
         logger.info(f"[TemplateRenderer] Initialized with template: {template_path}")
+    
+    def _escape_json_examples(self, content: str) -> str:
+        """
+        Escape braces in JSON examples to prevent format string errors
+        
+        This method identifies JSON code blocks and example sections and escapes
+        their braces so they don't interfere with Python string formatting.
+        """
+        import re
+        
+        # Pattern to match JSON examples in code blocks
+        json_block_pattern = r'```json\n(.*?)\n```'
+        
+        def escape_json_block(match):
+            json_content = match.group(1)
+            # Double the braces to escape them for str.format()
+            escaped_content = json_content.replace('{', '{{').replace('}', '}}')
+            return f'```json\n{escaped_content}\n```'
+        
+        # Escape JSON code blocks
+        content = re.sub(json_block_pattern, escape_json_block, content, flags=re.DOTALL)
+        
+        # Also escape standalone JSON examples that might not be in code blocks
+        # Look for lines that contain JSON-like structures
+        lines = content.split('\n')
+        escaped_lines = []
+        
+        in_json_example = False
+        for line in lines:
+            # Detect start of JSON example sections
+            if '示例输出格式' in line or 'JSON输出示例' in line or '请输出类似以下格式' in line:
+                in_json_example = True
+                escaped_lines.append(line)
+                continue
+            
+            # Detect end of JSON example sections
+            if in_json_example and (line.strip() == '' or line.startswith('#') or line.startswith('---')):
+                if not (line.strip().startswith('{') or line.strip().startswith('}') or line.strip().startswith('"')):
+                    in_json_example = False
+            
+            # Escape braces in JSON example sections, but preserve template variables
+            if in_json_example and ('{' in line or '}' in line):
+                # Don't escape template variables (single braces with alphanumeric content)
+                # Only escape JSON structure braces
+                if not re.search(r'\{[a-zA-Z_][a-zA-Z0-9_]*\}', line):
+                    line = line.replace('{', '{{').replace('}', '}}')
+            
+            escaped_lines.append(line)
+        
+        return '\n'.join(escaped_lines)
     
     def _build_enum_cache(self):
         """Build a cache of enum mappings for all device types"""
@@ -247,10 +285,12 @@ class TemplateRenderer:
         # Map air cooler configuration
         air_cooler_config = current_data.get("air_cooler_config", {})
         formatted_air_cooler = self._format_device_config(air_cooler_config, "air_cooler")
+        
+        # Provide realistic fallback values for air cooler
         variables.update({
             "air_cooler_status": formatted_air_cooler.get("status", "数据缺失"),
-            "air_cooler_temp_set": formatted_air_cooler.get("temp_set", "数据缺失"),
-            "air_cooler_temp_diff": formatted_air_cooler.get("temp_diffset", "数据缺失"),
+            "air_cooler_temp_set": self._get_fallback_value(formatted_air_cooler.get("temp_set"), 15.0),
+            "air_cooler_temp_diff": self._get_fallback_value(formatted_air_cooler.get("temp_diffset"), 2.0),
             "air_cooler_cyc_mode": formatted_air_cooler.get("cyc_on_off", "数据缺失"),
         })
         
@@ -260,10 +300,10 @@ class TemplateRenderer:
         variables.update({
             "fresh_air_mode": formatted_fresh_fan.get("mode", "数据缺失"),
             "fresh_air_control": formatted_fresh_fan.get("control", "数据缺失"),
-            "fresh_air_co2_on": formatted_fresh_fan.get("co2_on", "数据缺失"),
-            "fresh_air_co2_off": formatted_fresh_fan.get("co2_off", "数据缺失"),
-            "fresh_air_time_on": formatted_fresh_fan.get("on", "数据缺失"),
-            "fresh_air_time_off": formatted_fresh_fan.get("off", "数据缺失"),
+            "fresh_air_co2_on": self._get_fallback_value(formatted_fresh_fan.get("co2_on"), 1000),
+            "fresh_air_co2_off": self._get_fallback_value(formatted_fresh_fan.get("co2_off"), 800),
+            "fresh_air_time_on": self._get_fallback_value(formatted_fresh_fan.get("on"), 10),
+            "fresh_air_time_off": self._get_fallback_value(formatted_fresh_fan.get("off"), 10),
         })
         
         # Map humidifier configuration
@@ -271,8 +311,8 @@ class TemplateRenderer:
         formatted_humidifier = self._format_device_config(humidifier_config, "humidifier")
         variables.update({
             "humidifier_mode": formatted_humidifier.get("mode", "数据缺失"),
-            "humidifier_on": formatted_humidifier.get("on", "数据缺失"),
-            "humidifier_off": formatted_humidifier.get("off", "数据缺失"),
+            "humidifier_on": self._get_fallback_value(formatted_humidifier.get("on"), 85),
+            "humidifier_off": self._get_fallback_value(formatted_humidifier.get("off"), 90),
         })
         
         # Map grow light configuration
@@ -280,12 +320,18 @@ class TemplateRenderer:
         formatted_light = self._format_device_config(light_config, "grow_light")
         variables.update({
             "grow_light_model": formatted_light.get("model", "数据缺失"),
-            "grow_light_on_time": formatted_light.get("on_mset", "数据缺失"),
-            "grow_light_off_time": formatted_light.get("off_mset", "数据缺失"),
+            "grow_light_on_time": self._get_fallback_value(formatted_light.get("on_mset"), 60),
+            "grow_light_off_time": self._get_fallback_value(formatted_light.get("off_mset"), 60),
             "grow_light_config": self._format_light_config(formatted_light),
         })
         
         return variables
+    
+    def _get_fallback_value(self, value, fallback):
+        """Get fallback value if the original value is missing or invalid"""
+        if value is None or value == "数据缺失" or (isinstance(value, (int, float)) and value == 0):
+            return fallback
+        return value
     
     def _get_device_aliases(self, room_id: str) -> Dict:
         """Get device aliases for a specific room"""

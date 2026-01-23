@@ -8,8 +8,8 @@ from typing import Optional, List, Dict, Any
 from loguru import logger
 
 from utils.minio_client import create_minio_client
-from utils.mushroom_image_encoder import create_mushroom_encoder
-from utils.mushroom_image_processor import MushroomImagePathParser
+from .mushroom_image_encoder import create_mushroom_encoder
+from .mushroom_image_processor import MushroomImagePathParser
 
 
 class RecentImageProcessor:
@@ -78,7 +78,8 @@ class RecentImageProcessor:
         room_ids: Optional[List[str]] = None,
         max_images_per_room: Optional[int] = None,
         save_to_db: bool = True,
-        show_summary: bool = True
+        show_summary: bool = True,
+        batch_config: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """
         整合的方法：获取摘要并处理图片，避免重复查询
@@ -89,11 +90,19 @@ class RecentImageProcessor:
             max_images_per_room: 每个库房最多处理多少张图片
             save_to_db: 是否保存到数据库
             show_summary: 是否显示摘要信息
+            batch_config: 批处理配置 {'enabled': bool, 'batch_size': int}
             
         Returns:
             包含摘要和处理结果的统计
         """
         logger.info(f"[IMG-001] 开始处理图片 | 时间范围: 最近{hours}小时")
+        
+        # 解析批处理配置
+        batch_enabled = batch_config and batch_config.get('enabled', False)
+        batch_size = batch_config.get('batch_size', 10) if batch_config else 10
+        
+        if batch_enabled:
+            logger.info(f"[IMG-001-BATCH] 批处理模式启用 | 批大小: {batch_size}")
         
         # 一次性获取所有图片数据
         recent_images = self._get_recent_images_cached(hours=hours)
@@ -150,6 +159,13 @@ class RecentImageProcessor:
             'room_stats': {}
         }
         
+        # 批处理统计
+        batch_stats = {
+            'total_batches': 0,
+            'avg_batch_size': 0,
+            'batch_processing_times': []
+        }
+        
         # 处理每个库房的图片
         for room_id, images in room_groups.items():
             # 按时间排序，处理最新的图片
@@ -161,7 +177,16 @@ class RecentImageProcessor:
             
             logger.info(f"[IMG-004] 开始处理库房 | 库房: {room_id}, 图片数: {len(images)}张")
             
-            room_stats = self._process_room_images(room_id, images, save_to_db)
+            if batch_enabled:
+                room_stats, room_batch_stats = self._process_room_images_batch(
+                    room_id, images, save_to_db, batch_size
+                )
+                # 合并批处理统计
+                batch_stats['total_batches'] += room_batch_stats['batches']
+                batch_stats['batch_processing_times'].extend(room_batch_stats['processing_times'])
+            else:
+                room_stats = self._process_room_images(room_id, images, save_to_db)
+            
             processing_stats['room_stats'][room_id] = room_stats
             
             # 更新总统计
@@ -169,6 +194,14 @@ class RecentImageProcessor:
             processing_stats['total_success'] += room_stats['success']
             processing_stats['total_failed'] += room_stats['failed']
             processing_stats['total_skipped'] += room_stats['skipped']
+        
+        # 计算批处理统计
+        if batch_enabled and batch_stats['total_batches'] > 0:
+            batch_stats['avg_batch_size'] = processing_stats['total_processed'] / batch_stats['total_batches']
+            if batch_stats['batch_processing_times']:
+                avg_batch_time = sum(batch_stats['batch_processing_times']) / len(batch_stats['batch_processing_times'])
+                logger.info(f"[IMG-005-BATCH] 批处理统计 | 总批数: {batch_stats['total_batches']}, "
+                           f"平均批大小: {batch_stats['avg_batch_size']:.1f}, 平均批处理时间: {avg_batch_time:.2f}s")
         
         logger.info(
             f"[IMG-005] 处理完成 | "
@@ -179,10 +212,16 @@ class RecentImageProcessor:
             f"跳过: {processing_stats['total_skipped']}张"
         )
         
-        return {
+        result = {
             'summary': summary,
             'processing': processing_stats
         }
+        
+        # 如果启用了批处理，添加批处理统计
+        if batch_enabled:
+            result['batch_stats'] = batch_stats
+        
+        return result
     
     def _generate_summary(self, recent_images: List[Dict], hours: int) -> Dict[str, Any]:
         """生成图片摘要信息"""
@@ -286,6 +325,150 @@ class RecentImageProcessor:
         )
         
         return room_stats
+    
+    def _process_room_images_batch(self, room_id: str, images: List[Dict], save_to_db: bool, batch_size: int) -> tuple:
+        """批处理模式处理单个库房的图片"""
+        import time
+        
+        room_stats = {
+            'found': len(images),
+            'processed': 0,
+            'success': 0,
+            'failed': 0,
+            'skipped': 0
+        }
+        
+        batch_stats = {
+            'batches': 0,
+            'processing_times': []
+        }
+        
+        # 将图片分批处理
+        for i in range(0, len(images), batch_size):
+            batch_start_time = time.time()
+            batch = images[i:i + batch_size]
+            batch_num = (i // batch_size) + 1
+            
+            logger.info(f"[IMG-BATCH-{batch_num}] 处理批次 | 库房: {room_id}, 批大小: {len(batch)}, "
+                       f"进度: {i + len(batch)}/{len(images)}")
+            
+            # 预处理批次：检查哪些图片需要处理
+            batch_to_process = []
+            for img in batch:
+                try:
+                    # 解析图片路径
+                    image_info = self.parser.parse_path(img['object_name'])
+                    
+                    if not image_info:
+                        logger.warning(f"无法解析图片路径: {img['object_name']}")
+                        room_stats['failed'] += 1
+                        continue
+                    
+                    # 检查是否已处理
+                    if save_to_db and self.encoder._is_already_processed(image_info.file_path):
+                        room_stats['skipped'] += 1
+                        continue
+                    
+                    batch_to_process.append((img, image_info))
+                    
+                except Exception as e:
+                    logger.error(f"预处理图片异常 {img['object_name']}: {e}")
+                    room_stats['failed'] += 1
+            
+            # 如果批次中有需要处理的图片，进行批处理
+            if batch_to_process:
+                batch_results = self._process_image_batch(batch_to_process, save_to_db)
+                
+                # 更新统计
+                for result in batch_results:
+                    room_stats['processed'] += 1
+                    if result['success']:
+                        room_stats['success'] += 1
+                    else:
+                        room_stats['failed'] += 1
+            
+            batch_end_time = time.time()
+            batch_processing_time = batch_end_time - batch_start_time
+            batch_stats['processing_times'].append(batch_processing_time)
+            batch_stats['batches'] += 1
+            
+            logger.info(f"[IMG-BATCH-{batch_num}] 批次完成 | 耗时: {batch_processing_time:.2f}s, "
+                       f"处理: {len(batch_to_process)}张")
+        
+        logger.info(
+            f"[IMG-009-BATCH] 库房批处理完成 | "
+            f"库房: {room_id}, "
+            f"批数: {batch_stats['batches']}, "
+            f"处理: {room_stats['processed']}张, "
+            f"成功: {room_stats['success']}张, "
+            f"失败: {room_stats['failed']}张, "
+            f"跳过: {room_stats['skipped']}张"
+        )
+        
+        return room_stats, batch_stats
+    
+    def _process_image_batch(self, batch_to_process: List[tuple], save_to_db: bool) -> List[Dict]:
+        """处理一批图片"""
+        batch_results = []
+        
+        # 批量获取图片数据
+        images_data = []
+        for img, image_info in batch_to_process:
+            try:
+                # 从MinIO获取图像
+                image = self.minio_client.get_image(image_info.file_path)
+                if image is None:
+                    logger.warning(f"[IMG-BATCH] 获取图像失败 | 文件: {image_info.file_name}")
+                    batch_results.append({'success': False, 'image_info': image_info})
+                    continue
+                
+                images_data.append({
+                    'image': image,
+                    'image_info': image_info,
+                    'img_meta': img
+                })
+                
+            except Exception as e:
+                logger.error(f"[IMG-BATCH] 获取图像异常 | 文件: {image_info.file_name}, 错误: {e}")
+                batch_results.append({'success': False, 'image_info': image_info})
+        
+        # 如果有成功获取的图片，进行批量处理
+        if images_data:
+            # 检查是否可以使用批量编码
+            if hasattr(self.encoder, 'process_image_batch'):
+                # 使用批量处理方法
+                try:
+                    batch_processing_results = self.encoder.process_image_batch(images_data, save_to_db)
+                    batch_results.extend(batch_processing_results)
+                except Exception as e:
+                    logger.error(f"[IMG-BATCH] 批量处理失败，回退到单张处理: {e}")
+                    # 回退到单张处理
+                    for img_data in images_data:
+                        try:
+                            result = self.encoder.process_single_image(img_data['image_info'], save_to_db=save_to_db)
+                            success = result is not None and (not save_to_db or result.get('saved_to_db', False))
+                            batch_results.append({'success': success, 'image_info': img_data['image_info']})
+                        except Exception as e2:
+                            logger.error(f"[IMG-BATCH] 单张处理也失败: {img_data['image_info'].file_name}, 错误: {e2}")
+                            batch_results.append({'success': False, 'image_info': img_data['image_info']})
+            else:
+                # 编码器不支持批量处理，使用单张处理但优化调用
+                for img_data in images_data:
+                    try:
+                        result = self.encoder.process_single_image(img_data['image_info'], save_to_db=save_to_db)
+                        success = result is not None and (not save_to_db or result.get('saved_to_db', False))
+                        batch_results.append({'success': success, 'image_info': img_data['image_info']})
+                        
+                        if success:
+                            logger.debug(f"[IMG-BATCH] 处理成功 | 文件: {img_data['image_info'].file_name}")
+                        else:
+                            logger.warning(f"[IMG-BATCH] 处理失败 | 文件: {img_data['image_info'].file_name}")
+                            
+                    except Exception as e:
+                        logger.error(f"[IMG-BATCH] 处理异常 | 文件: {img_data['image_info'].file_name}, 错误: {e}")
+                        batch_results.append({'success': False, 'image_info': img_data['image_info']})
+        
+        return batch_results
     def process_recent_images(
         self, 
         hours: int = 1,
@@ -520,7 +703,7 @@ def create_recent_image_processor(shared_encoder=None, shared_minio_client=None)
 if __name__ == "__main__":
     # 测试代码 - 使用优化后的整合方法
     print("=== 初始化共享组件 ===")
-    from utils.mushroom_image_encoder import create_mushroom_encoder
+    from clip.mushroom_image_encoder import create_mushroom_encoder
     from utils.minio_client import create_minio_client
     
     # 创建共享实例，避免重复初始化

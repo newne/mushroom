@@ -6,7 +6,7 @@ parameters comply with static_config.json specifications.
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 from loguru import logger
 
@@ -688,7 +688,7 @@ class OutputHandler:
         
         # If critical structure is missing, return error status
         if errors:
-            return self._create_error_enhanced_output(room_id, errors)
+            return self._create_error_enhanced_output(room_id, errors, multi_image_analysis)
         
         # Extract and validate strategy
         strategy_data = raw_decision.get('strategy', {})
@@ -928,9 +928,19 @@ class OutputHandler:
     def _create_error_enhanced_output(
         self,
         room_id: str,
-        errors: List[str]
+        errors: List[str],
+        multi_image_analysis: Optional[MultiImageAnalysis] = None
     ) -> EnhancedDecisionOutput:
         """Create error enhanced decision output"""
+        # Use provided multi_image_analysis or create default
+        if multi_image_analysis is None:
+            multi_image_analysis = MultiImageAnalysis(
+                total_images_analyzed=0,
+                confidence_score=0.0,
+                view_consistency="low",
+                key_observations=["系统错误，无法进行多图像分析"]
+            )
+        
         return EnhancedDecisionOutput(
             status="error",
             room_id=room_id,
@@ -978,5 +988,6 @@ class OutputHandler:
                 )
             ),
             monitoring_points=MonitoringPoints(),
+            multi_image_analysis=multi_image_analysis,
             metadata=DecisionMetadata(errors=errors)
         )

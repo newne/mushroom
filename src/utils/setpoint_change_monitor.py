@@ -30,6 +30,7 @@ from dataclasses import dataclass
 import pandas as pd
 import numpy as np
 from loguru import logger
+from sqlalchemy import text
 
 from utils.data_preprocessing import query_data_by_batch_time
 from utils.dataframe_utils import get_all_device_configs
@@ -265,11 +266,27 @@ class DeviceSetpointChangeMonitor:
             # 添加库房信息
             df['room_id'] = room_id
             
-            # 构建配置映射表（使用 point_alias 作为键）
+            # 构建设备别名到设备类型的映射表（用于准确的设备类型识别）
+            device_type_mapping = {}
+            
+            # 遍历DataFrame，为每个设备别名建立设备类型映射
+            for _, row in df.iterrows():
+                device_alias = row.get('device_alias', '')
+                if device_alias:
+                    # 从设备别名中提取设备类型
+                    # 设备别名格式通常为: device_type_room_id (如 grow_light_607, air_cooler_608)
+                    device_parts = device_alias.split('_')
+                    if len(device_parts) >= 2:
+                        # 提取设备类型部分（去掉最后的房间号）
+                        device_type_from_alias = '_'.join(device_parts[:-1])
+                        device_type_mapping[device_alias] = device_type_from_alias
+            
+            # 构建配置映射表（使用 point_alias 作为键，但仅用于获取其他配置信息）
             # 说明：查询返回的 DataFrame 中，point_name 列实际包含 point_alias 值
             # 这是由 get_data.get_device_history_cal 函数的数据转换逻辑决定的
             config_mapping = {}
             for config in self.setpoint_configs:
+                # 使用 point_alias 作为主键（向后兼容）
                 config_mapping[config.point_alias] = {
                     'device_type': config.device_type,
                     'change_type': config.change_type.value,
@@ -279,8 +296,38 @@ class DeviceSetpointChangeMonitor:
                 }
             
             # 添加配置信息到DataFrame
-            # 注意：这里使用 point_name 列进行映射，但该列实际包含 point_alias 值
-            df['device_type'] = df['point_name'].map(lambda x: config_mapping.get(x, {}).get('device_type', 'unknown'))
+            # 优先使用设备别名映射，确保设备类型识别准确
+            def get_device_type(row):
+                device_alias = row.get('device_alias', '')
+                device_name = row.get('device_name', '')
+                
+                # 方法1: 优先使用设备别名映射（最准确的方法）
+                if device_alias in device_type_mapping:
+                    return device_type_mapping[device_alias]
+                
+                # 方法2: 从设备别名中解析设备类型
+                if device_alias:
+                    device_parts = device_alias.split('_')
+                    if len(device_parts) >= 2:
+                        return '_'.join(device_parts[:-1])
+                
+                # 方法3: 从设备名称中解析设备类型（备用方案）
+                if device_name:
+                    device_parts = device_name.split('_')
+                    if len(device_parts) >= 2:
+                        return '_'.join(device_parts[:-1])
+                
+                # 方法4: 最后回退到测点别名映射（已知不准确，仅作最后手段）
+                point_alias = row.get('point_name', '')  # 实际包含 point_alias 值
+                fallback_type = config_mapping.get(point_alias, {}).get('device_type', 'unknown')
+                
+                # 记录回退情况以便调试
+                if fallback_type != 'unknown':
+                    logger.debug(f"Using fallback device type mapping: {device_alias or device_name}.{point_alias} -> {fallback_type}")
+                
+                return fallback_type
+            
+            df['device_type'] = df.apply(get_device_type, axis=1)
             df['change_type'] = df['point_name'].map(lambda x: config_mapping.get(x, {}).get('change_type', 'unknown'))
             df['threshold'] = df['point_name'].map(lambda x: config_mapping.get(x, {}).get('threshold'))
             df['description'] = df['point_name'].map(lambda x: config_mapping.get(x, {}).get('description', ''))
@@ -785,7 +832,7 @@ def validate_batch_monitoring_environment(config_manager: Optional[SetpointConfi
         try:
             # 简单的数据库连接测试
             with pgsql_engine.connect() as conn:
-                conn.execute("SELECT 1")
+                conn.execute(text("SELECT 1"))
             logger.debug("✅ Database connection OK")
         except Exception as e:
             logger.error(f"❌ Database connection failed: {e}")

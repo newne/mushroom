@@ -1,490 +1,469 @@
 {
   "room_id": "611",
-  "TD1_Q1MDCH01": {
-    "device_type": "air_cooler",
-    "device_alias": "air_cooler_611",
-    "point_list": [
+  "devices": {
+    "air_cooler": [
       {
-        "device_type": "air_cooler",
-        "point_alias": "on_off",
-        "point_name": "OnOff",
-        "remark": "冷风机开关",
-        "change_type": "digital_on_off",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "关闭",
-          "1": "开启"
-        },
-        "change": true,
-        "old": 1,
-        "new": 0,
-        "level": "high"
-      },
-      {
-        "device_type": "air_cooler",
-        "point_alias": "temp_set",
-        "point_name": "TemSet",
-        "remark": "温度设定(分辨率0.1)",
-        "change_type": "analog_value",
-        "threshold": 0.5,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "air_cooler",
-        "point_alias": "temp_diffset",
-        "point_name": "TemDiffSet",
-        "remark": "温差设定(分辨率0.1)",
-        "change_type": "analog_value",
-        "threshold": 0.2,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "air_cooler",
-        "point_alias": "cyc_on_time",
-        "point_name": "CycOnTime",
-        "remark": "冷风机循环开启时间设定",
-        "change_type": "analog_value",
-        "threshold": 1.0,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "air_cooler",
-        "point_alias": "cyc_off_time",
-        "point_name": "CycOffTime",
-        "remark": "冷风机循环关闭时间设定",
-        "change_type": "analog_value",
-        "threshold": 1.0,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "air_cooler",
-        "point_alias": "air_on_off",
-        "point_name": "ArOnOff",
-        "remark": "新风联动冷风机开关",
-        "change_type": "digital_on_off",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "关闭",
-          "1": "开启"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "air_cooler",
-        "point_alias": "hum_on_off",
-        "point_name": "HumOnOff",
-        "remark": "加湿联动冷风机开关",
-        "change_type": "digital_on_off",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "关闭",
-          "1": "开启"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "air_cooler",
-        "point_alias": "cyc_on_off",
-        "point_name": "CycOnOff",
-        "remark": "冷风机循环开关",
-        "change_type": "digital_on_off",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "关闭",
-          "1": "开启"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
+        "device_name": "TD1_Q1MDCH01",
+        "device_alias": "air_cooler_611",
+        "point_list": [
+          {
+            "point_alias": "on_off",
+            "point_name": "OnOff",
+            "remark": "冷风机开关",
+            "change_type": "digital_on_off",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "关闭",
+              "1": "开启"
+            },
+            "change": true,
+            "old": 1,
+            "new": 0,
+            "level": "high"
+          },
+          {
+            "point_alias": "temp_set",
+            "point_name": "TemSet",
+            "remark": "温度设定(分辨率0.1)",
+            "change_type": "analog_value",
+            "threshold": 0.5,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "temp_diffset",
+            "point_name": "TemDiffSet",
+            "remark": "温差设定(分辨率0.1)",
+            "change_type": "analog_value",
+            "threshold": 0.2,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "cyc_on_time",
+            "point_name": "CycOnTime",
+            "remark": "冷风机循环开启时间设定",
+            "change_type": "analog_value",
+            "threshold": 1.0,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "cyc_off_time",
+            "point_name": "CycOffTime",
+            "remark": "冷风机循环关闭时间设定",
+            "change_type": "analog_value",
+            "threshold": 1.0,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "air_on_off",
+            "point_name": "ArOnOff",
+            "remark": "新风联动冷风机开关",
+            "change_type": "digital_on_off",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "关闭",
+              "1": "开启"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "hum_on_off",
+            "point_name": "HumOnOff",
+            "remark": "加湿联动冷风机开关",
+            "change_type": "digital_on_off",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "关闭",
+              "1": "开启"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "cyc_on_off",
+            "point_name": "CycOnOff",
+            "remark": "冷风机循环开关",
+            "change_type": "digital_on_off",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "关闭",
+              "1": "开启"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          }
+        ]
       }
-    ]
-  },
-  "TD1_Q1MDAR01": {
-    "device_type": "fresh_air_fan",
-    "device_alias": "fresh_air_fan_611",
-    "point_list": [
+    ],
+    "fresh_air_fan": [
       {
-        "device_type": "fresh_air_fan",
-        "point_alias": "mode",
-        "point_name": "Model",
-        "remark": "新风模式",
-        "change_type": "enum_state",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "关闭模式",
-          "1": "自动模式",
-          "2": "手动模式"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "fresh_air_fan",
-        "point_alias": "control",
-        "point_name": "Control",
-        "remark": "新风控制方式",
-        "change_type": "enum_state",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "时控",
-          "1": "CO2控制"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "fresh_air_fan",
-        "point_alias": "co2_on",
-        "point_name": "Co2On",
-        "remark": "CO2启动新风",
-        "change_type": "analog_value",
-        "threshold": 50.0,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "fresh_air_fan",
-        "point_alias": "co2_off",
-        "point_name": "Co2Off",
-        "remark": "CO2停止新风",
-        "change_type": "analog_value",
-        "threshold": 50.0,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "fresh_air_fan",
-        "point_alias": "on",
-        "point_name": "On",
-        "remark": "新风开启设定",
-        "change_type": "analog_value",
-        "threshold": 1.0,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "fresh_air_fan",
-        "point_alias": "off",
-        "point_name": "Off",
-        "remark": "新风停止设定",
-        "change_type": "analog_value",
-        "threshold": 1.0,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
+        "device_name": "TD1_Q1MDAR01",
+        "device_alias": "fresh_air_fan_611",
+        "point_list": [
+          {
+            "point_alias": "mode",
+            "point_name": "Model",
+            "remark": "新风模式",
+            "change_type": "enum_state",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "关闭模式",
+              "1": "自动模式",
+              "2": "手动模式"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "control",
+            "point_name": "Control",
+            "remark": "新风控制方式",
+            "change_type": "enum_state",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "时控",
+              "1": "CO2控制"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "co2_on",
+            "point_name": "Co2On",
+            "remark": "CO2启动新风",
+            "change_type": "analog_value",
+            "threshold": 50.0,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "co2_off",
+            "point_name": "Co2Off",
+            "remark": "CO2停止新风",
+            "change_type": "analog_value",
+            "threshold": 50.0,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "on",
+            "point_name": "On",
+            "remark": "新风开启设定",
+            "change_type": "analog_value",
+            "threshold": 1.0,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "off",
+            "point_name": "Off",
+            "remark": "新风停止设定",
+            "change_type": "analog_value",
+            "threshold": 1.0,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          }
+        ]
       }
-    ]
-  },
-  "TD1_Q1MDHUM01": {
-    "device_type": "humidifier",
-    "device_alias": "left_humidifier_611",
-    "point_list": [
+    ],
+    "humidifier": [
       {
-        "device_type": "humidifier",
-        "point_alias": "mode",
-        "point_name": "Model",
-        "remark": "加湿模式",
-        "change_type": "enum_state",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "关闭",
-          "1": "自动",
-          "2": "手动"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
+        "device_name": "TD1_Q1MDHUM01",
+        "device_alias": "left_humidifier_611",
+        "point_list": [
+          {
+            "point_alias": "mode",
+            "point_name": "Model",
+            "remark": "加湿模式",
+            "change_type": "enum_state",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "关闭",
+              "1": "自动",
+              "2": "手动"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "on",
+            "point_name": "On",
+            "remark": "加湿开启设定",
+            "change_type": "analog_value",
+            "threshold": 2.0,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "off",
+            "point_name": "Off",
+            "remark": "加湿停止设定",
+            "change_type": "analog_value",
+            "threshold": 2.0,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          }
+        ]
       },
       {
-        "device_type": "humidifier",
-        "point_alias": "on",
-        "point_name": "On",
-        "remark": "加湿开启设定",
-        "change_type": "analog_value",
-        "threshold": 2.0,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "humidifier",
-        "point_alias": "off",
-        "point_name": "Off",
-        "remark": "加湿停止设定",
-        "change_type": "analog_value",
-        "threshold": 2.0,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
+        "device_name": "TD1_Q1MDHUM02",
+        "device_alias": "right_humidifier_611",
+        "point_list": [
+          {
+            "point_alias": "mode",
+            "point_name": "Model",
+            "remark": "加湿模式",
+            "change_type": "enum_state",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "关闭",
+              "1": "自动",
+              "2": "手动"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "on",
+            "point_name": "On",
+            "remark": "加湿开启设定",
+            "change_type": "analog_value",
+            "threshold": 2.0,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "off",
+            "point_name": "Off",
+            "remark": "加湿停止设定",
+            "change_type": "analog_value",
+            "threshold": 2.0,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          }
+        ]
       }
-    ]
-  },
-  "TD1_Q1MDHUM02": {
-    "device_type": "humidifier",
-    "device_alias": "right_humidifier_611",
-    "point_list": [
+    ],
+    "grow_light": [
       {
-        "device_type": "humidifier",
-        "point_alias": "mode",
-        "point_name": "Model",
-        "remark": "加湿模式",
-        "change_type": "enum_state",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "关闭",
-          "1": "自动",
-          "2": "手动"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "humidifier",
-        "point_alias": "on",
-        "point_name": "On",
-        "remark": "加湿开启设定",
-        "change_type": "analog_value",
-        "threshold": 2.0,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "humidifier",
-        "point_alias": "off",
-        "point_name": "Off",
-        "remark": "加湿停止设定",
-        "change_type": "analog_value",
-        "threshold": 2.0,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      }
-    ]
-  },
-  "TD1_Q1MDLIGHT01": {
-    "device_type": "grow_light",
-    "device_alias": "grow_light_611",
-    "point_list": [
-      {
-        "device_type": "grow_light",
-        "point_alias": "model",
-        "point_name": "Model",
-        "remark": "补光模式 0=关闭模式\n1=自动模式\n2=手动模式",
-        "change_type": "enum_state",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "关闭",
-          "1": "自动",
-          "2": "手动"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "grow_light",
-        "point_alias": "on_mset",
-        "point_name": "OnMSet",
-        "remark": "补光开启分钟设定",
-        "change_type": "analog_value",
-        "threshold": 5.0,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "grow_light",
-        "point_alias": "off_mset",
-        "point_name": "OffMSet",
-        "remark": "补光停止分钟设定",
-        "change_type": "analog_value",
-        "threshold": 5.0,
-        "enum_mapping": null,
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "grow_light",
-        "point_alias": "on_off1",
-        "point_name": "OnOff1",
-        "remark": "1#补光开关",
-        "change_type": "digital_on_off",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "关闭",
-          "1": "自动"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "grow_light",
-        "point_alias": "on_off2",
-        "point_name": "OnOff2",
-        "remark": "2#补光开关",
-        "change_type": "digital_on_off",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "关闭",
-          "1": "自动"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "grow_light",
-        "point_alias": "on_off3",
-        "point_name": "OnOff3",
-        "remark": "3#补光开关",
-        "change_type": "digital_on_off",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "关闭",
-          "1": "自动"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "grow_light",
-        "point_alias": "on_off4",
-        "point_name": "OnOff4",
-        "remark": "4#补光开关",
-        "change_type": "digital_on_off",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "关闭",
-          "1": "自动"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "grow_light",
-        "point_alias": "choose1",
-        "point_name": "Choose1",
-        "remark": "1#光源选择",
-        "change_type": "enum_state",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "白光",
-          "1": "蓝光"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "grow_light",
-        "point_alias": "choose2",
-        "point_name": "Choose2",
-        "remark": "2#光源选择",
-        "change_type": "enum_state",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "白光",
-          "1": "蓝光"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "grow_light",
-        "point_alias": "choose3",
-        "point_name": "Choose3",
-        "remark": "3#光源选择",
-        "change_type": "enum_state",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "白光",
-          "1": "蓝光"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
-      },
-      {
-        "device_type": "grow_light",
-        "point_alias": "choose4",
-        "point_name": "Choose4",
-        "remark": "4#光源选择",
-        "change_type": "enum_state",
-        "threshold": null,
-        "enum_mapping": {
-          "0": "白光",
-          "1": "蓝光"
-        },
-        "change": false,
-        "old": 0,
-        "new": 0,
-        "level": "medium"
+        "device_name": "TD1_Q1MDLIGHT01",
+        "device_alias": "grow_light_611",
+        "point_list": [
+          {
+            "point_alias": "model",
+            "point_name": "Model",
+            "remark": "补光模式 0=关闭模式\n1=自动模式\n2=手动模式",
+            "change_type": "enum_state",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "关闭",
+              "1": "自动",
+              "2": "手动"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "on_mset",
+            "point_name": "OnMSet",
+            "remark": "补光开启分钟设定",
+            "change_type": "analog_value",
+            "threshold": 5.0,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "off_mset",
+            "point_name": "OffMSet",
+            "remark": "补光停止分钟设定",
+            "change_type": "analog_value",
+            "threshold": 5.0,
+            "enum_mapping": null,
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "on_off1",
+            "point_name": "OnOff1",
+            "remark": "1#补光开关",
+            "change_type": "digital_on_off",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "关闭",
+              "1": "自动"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "on_off2",
+            "point_name": "OnOff2",
+            "remark": "2#补光开关",
+            "change_type": "digital_on_off",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "关闭",
+              "1": "自动"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "on_off3",
+            "point_name": "OnOff3",
+            "remark": "3#补光开关",
+            "change_type": "digital_on_off",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "关闭",
+              "1": "自动"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "on_off4",
+            "point_name": "OnOff4",
+            "remark": "4#补光开关",
+            "change_type": "digital_on_off",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "关闭",
+              "1": "自动"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "choose1",
+            "point_name": "Choose1",
+            "remark": "1#光源选择",
+            "change_type": "enum_state",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "白光",
+              "1": "蓝光"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "choose2",
+            "point_name": "Choose2",
+            "remark": "2#光源选择",
+            "change_type": "enum_state",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "白光",
+              "1": "蓝光"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "choose3",
+            "point_name": "Choose3",
+            "remark": "3#光源选择",
+            "change_type": "enum_state",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "白光",
+              "1": "蓝光"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          },
+          {
+            "point_alias": "choose4",
+            "point_name": "Choose4",
+            "remark": "4#光源选择",
+            "change_type": "enum_state",
+            "threshold": null,
+            "enum_mapping": {
+              "0": "白光",
+              "1": "蓝光"
+            },
+            "change": false,
+            "old": 0,
+            "new": 0,
+            "level": "medium"
+          }
+        ]
       }
     ]
   }
