@@ -2,7 +2,7 @@
 set -e
 # 配置变量
 : "${DOCKER_REGISTRY:=registry.cn-beijing.aliyuncs.com/ncgnewne}"  # 允许通过环境变量覆盖
-: "${ENCRYPT:=true}"
+: "${ENCRYPT:=false}"  # 默认关闭加密，避免PyArmor许可证问题
 : "${BUILD_IMAGE:=true}"
 : "${PUSH_IMAGE:=true}"
 
@@ -20,39 +20,51 @@ if [ "${ENCRYPT}" = "true" ]; then
 
     # 检查 pyarmor 是否已安装
     if ! command -v pyarmor &> /dev/null; then
-        echo "Error: pyarmor is not installed" >&2
-        exit 1
-    fi
-
-    pyarmor cfg clear_module_co=0
-    pyarmor cfg restrict_module=0
-		pyarmor cfg -p src/streamlit_app.py obf_code=0
-    # 检查并删除dist目录
-    # 生成pyarmor保护的代码
-    if ! pyarmor gen -O dist  -r src/; then
-        echo "Error: PyArmor generation failed" >&2
-        exit 1
-    fi
-    echo "PyArmor generated successfully"
-
-    # 检查并移动 pyarmor_runtime
-    PYARMOR_RUNTIME_DIR=dist/pyarmor_runtime_000000
-    cp -f src/streamlit_app.py dist/src/streamlit_app.py
-    if [ -d "$PYARMOR_RUNTIME_DIR" ]; then
-        TARGET_DIR=dist/src/pyarmor_runtime_000000
-        if [ -d "$TARGET_DIR" ] && [ "$(ls -A $TARGET_DIR)" ]; then
-            echo "Warning: Target directory $TARGET_DIR is not empty, skipping move"
-        else
-            if ! mv "$PYARMOR_RUNTIME_DIR" dist/src/ ; then
-                echo "Error: Failed to move PyArmor runtime " >&2
-                exit 1
-            fi
-            echo "PyArmor runtime moved successfully"
-
-        fi
+        echo "Warning: pyarmor is not installed, skipping encryption" >&2
+        ENCRYPT="false"
     else
-        echo "Warning: PyArmor runtime directory does not exist"
+        pyarmor cfg clear_module_co=0
+        pyarmor cfg restrict_module=0
+        pyarmor cfg -p src/streamlit_app.py obf_code=0
+        
+        # 检查并删除dist目录
+        [ -d dist ] && rm -rf dist
+        
+        # 生成pyarmor保护的代码
+        if ! pyarmor gen -O dist -r src/; then
+            echo "Warning: PyArmor generation failed (license expired?), falling back to unencrypted build" >&2
+            ENCRYPT="false"
+        else
+            echo "PyArmor generated successfully"
+
+            # 检查并移动 pyarmor_runtime
+            PYARMOR_RUNTIME_DIR=dist/pyarmor_runtime_000000
+            cp -f src/streamlit_app.py dist/src/streamlit_app.py
+            if [ -d "$PYARMOR_RUNTIME_DIR" ]; then
+                TARGET_DIR=dist/src/pyarmor_runtime_000000
+                if [ -d "$TARGET_DIR" ] && [ "$(ls -A $TARGET_DIR)" ]; then
+                    echo "Warning: Target directory $TARGET_DIR is not empty, skipping move"
+                else
+                    if ! mv "$PYARMOR_RUNTIME_DIR" dist/src/ ; then
+                        echo "Error: Failed to move PyArmor runtime " >&2
+                        exit 1
+                    fi
+                    echo "PyArmor runtime moved successfully"
+                fi
+            else
+                echo "Warning: PyArmor runtime directory does not exist"
+            fi
+        fi
     fi
+fi
+
+# 如果加密失败或跳过，直接复制源代码
+if [ "${ENCRYPT}" = "false" ]; then
+    echo "Using unencrypted source code..."
+    [ -d dist ] && rm -rf dist
+    mkdir -p dist
+    cp -r src dist/
+    echo "Source code copied to dist/src/"
 fi
 # 读取版本信息
 BASE_VERSION=$(uv version --short --dry-run  2>/dev/null || echo "1.0.0")

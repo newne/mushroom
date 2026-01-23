@@ -93,6 +93,29 @@ export NUMBA_NUM_THREADS=4            # Numba线程数
 
 ## 部署步骤
 
+### 0. 构建Docker镜像
+
+#### PyArmor许可证问题解决方案
+
+如果遇到 "ERROR out of license" 错误，说明PyArmor试用版许可证已过期。
+
+**解决方案（推荐）：**
+```bash
+# 使用无加密构建脚本
+bash docker/build_no_encrypt.sh
+```
+
+**或者使用主构建脚本：**
+```bash
+# 设置环境变量跳过加密
+ENCRYPT=false bash docker/build.sh
+```
+
+**构建脚本说明：**
+- `build.sh` - 主构建脚本，默认关闭加密（`ENCRYPT=false`）
+- `build_no_encrypt.sh` - 专门的无加密构建脚本
+- 生产环境建议购买PyArmor许可证启用代码加密
+
 ### 1. 准备环境
 ```bash
 # 创建必要目录
