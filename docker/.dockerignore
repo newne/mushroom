@@ -1,0 +1,90 @@
+# Docker构建忽略文件
+# 减少构建上下文大小，提升构建速度
+
+# 版本控制
+.git/
+.gitignore
+.github/
+
+# Python缓存和编译文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+.venv/
+venv/
+ENV/
+env/
+
+# IDE和编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 测试和覆盖率
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# 文档
+docs/_build/
+.readthedocs.yml
+
+# 日志文件
+*.log
+Logs/
+
+# 临时文件
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db
+
+# 输出文件
+output/
+*.out
+
+# 大文件和数据（根据需要调整）
+# models/  # 如果模型文件很大且不需要打包到镜像中
+# data/    # 如果数据文件很大且不需要打包到镜像中
+
+# 构建产物
+*.tar.gz
+*.zip
+
+# 密钥和配置（敏感信息）
+*.key
+*.pem
+.env
+.secrets
+
+# 缓存目录
+.cache/
+.ruff_cache/
+
+# 其他
+*.bak
+*.orig
+node_modules/

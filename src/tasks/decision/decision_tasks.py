@@ -61,12 +61,29 @@ def safe_decision_analysis_for_room(room_id: str) -> None:
             )
             start_time = datetime.now()
             
-            # 确保 scripts 目录在 path 中
-            scripts_path = Path(__file__).parent.parent.parent / "scripts" / "analysis"
-            if str(scripts_path) not in sys.path:
-                sys.path.insert(0, str(scripts_path))
+            # 确保正确的路径配置
+            # 使用BASE_DIR统一管理路径
+            from global_const.global_const import ensure_src_path
+            ensure_src_path()
             
-            from run_enhanced_decision_analysis import execute_enhanced_decision_analysis
+            try:
+                from scripts.analysis.run_enhanced_decision_analysis import execute_enhanced_decision_analysis
+            except ImportError as import_error:
+                logger.error(f"[DECISION_TASK] 直接导入失败: {import_error}")
+                # 备用导入方式
+                import importlib.util
+                script_file = os.path.join(scripts_path, "run_enhanced_decision_analysis.py")
+                if os.path.exists(script_file):
+                    spec = importlib.util.spec_from_file_location(
+                        "run_enhanced_decision_analysis", 
+                        script_file
+                    )
+                    module = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(module)
+                    execute_enhanced_decision_analysis = module.execute_enhanced_decision_analysis
+                    logger.info(f"[DECISION_TASK] 使用备用方式成功导入模块")
+                else:
+                    raise ImportError(f"无法找到脚本文件: {script_file}")
             
             # 执行决策分析（仅用于数据库存储，不生成JSON文件）
             analysis_datetime = datetime.now()
@@ -92,7 +109,12 @@ def safe_decision_analysis_for_room(room_id: str) -> None:
                     logger.info(f"[DECISION_TASK] 开始存储动态结果到数据库: 库房{room_id}")
                     
                     # 导入存储函数
-                    sys.path.insert(0, str(Path(__file__).parent.parent / "utils"))
+                    import os
+                    app_root = os.environ.get('APP_ROOT', '/app')
+                    # 使用BASE_DIR统一管理路径
+                    from global_const.global_const import ensure_src_path
+                    ensure_src_path()
+                    
                     from utils.create_table import store_decision_analysis_dynamic_results_only
                     
                     # 直接从result中获取数据，无需读取JSON文件

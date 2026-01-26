@@ -44,12 +44,11 @@ class DecisionAnalysisTask(BaseTask):
         logger.info(f"[{self.task_name}] 开始执行决策分析: 库房{room_id}")
         
         try:
-            # 确保 scripts 目录在 path 中
-            scripts_path = Path(__file__).parent.parent.parent / "scripts" / "analysis"
-            if str(scripts_path) not in sys.path:
-                sys.path.insert(0, str(scripts_path))
+            # 使用BASE_DIR统一管理路径
+            from global_const.global_const import ensure_src_path
+            ensure_src_path()
             
-            from run_enhanced_decision_analysis import execute_enhanced_decision_analysis
+            from scripts.analysis.run_enhanced_decision_analysis import execute_enhanced_decision_analysis
             
             # 执行决策分析（仅用于数据库存储，不生成JSON文件）
             analysis_datetime = datetime.now()
@@ -183,8 +182,9 @@ class DecisionAnalysisTask(BaseTask):
         try:
             logger.info(f"[{self.task_name}] 开始存储动态结果到数据库: 库房{room_id}")
             
-            # 导入存储函数
-            sys.path.insert(0, str(Path(__file__).parent.parent / "utils"))
+            # 使用BASE_DIR统一管理路径
+            from global_const.global_const import ensure_src_path
+            ensure_src_path()
             from utils.create_table import store_decision_analysis_dynamic_results_only
             
             # 直接从result中获取数据，无需读取JSON文件

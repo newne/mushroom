@@ -60,10 +60,10 @@ POSTGRES_USER: postgres         # 数据库用户
 
 ### AI模型配置
 ```yaml
-TRANSFORMERS_CACHE: /models/.cache             # Transformers缓存目录
-HF_HOME: /models/.cache                        # HuggingFace缓存目录
-TORCH_HOME: /models/.cache                     # PyTorch缓存目录
-CLIP_MODEL_PATH: /models/clip-vit-base-patch32 # CLIP模型路径
+TRANSFORMERS_CACHE: /app/models/.cache             # Transformers缓存目录
+HF_HOME: /app/models/.cache                        # HuggingFace缓存目录
+TORCH_HOME: /app/models/.cache                     # PyTorch缓存目录
+CLIP_MODEL_PATH: /app/models/clip-vit-base-patch32 # CLIP模型路径
 HF_HUB_DISABLE_TELEMETRY: 1                   # 禁用遥测
 TRANSFORMERS_OFFLINE: 0                        # 允许在线下载
 ```

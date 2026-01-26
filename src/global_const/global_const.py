@@ -10,6 +10,7 @@
 import os
 from pathlib import Path
 from urllib.parse import quote_plus
+import sys
 
 import redis
 import sqlalchemy
@@ -17,6 +18,14 @@ from dynaconf import Dynaconf
 from loguru import logger
 
 BASE_DIR = Path(__file__).absolute().parent.parent
+
+
+def ensure_src_path():
+    """确保src目录在Python路径中，用于统一的模块导入"""
+    src_path = str(BASE_DIR)
+    if src_path not in sys.path:
+        sys.path.insert(0, src_path)
+    return BASE_DIR
 
 
 def _str_to_bool(value: str) -> bool:
@@ -33,7 +42,7 @@ def get_environment() -> str:
 env = get_environment()
 
 config_dir_path = BASE_DIR / "configs"
-logger.info(f"[9.9.1] 已加载配置文件目录：str(BASE_DIR / {config_dir_path})")
+logger.info(f"[9.9.1] 已加载配置文件目录：{config_dir_path}")
 
 settings = Dynaconf(
     root_path=str(BASE_DIR),
@@ -54,15 +63,42 @@ static_settings = Dynaconf(
 )
 
 # redis config
-pool = redis.ConnectionPool(
-    host=settings.redis.host,
-    port=settings.redis.port,
-    password=settings.redis.password,
-    decode_responses=True,
-)
-conn = redis.Redis(
-    connection_pool=pool,
-)
+try:
+    pool = redis.ConnectionPool(
+        host=settings.redis.host,
+        port=settings.redis.port,
+        password=settings.redis.password,
+        decode_responses=True,
+        socket_connect_timeout=10,
+        socket_timeout=10,
+        retry_on_timeout=True,
+        health_check_interval=30
+    )
+    conn = redis.Redis(connection_pool=pool)
+    logger.info(f"Redis连接池创建成功: {settings.redis.host}:{settings.redis.port}")
+except AttributeError as e:
+    logger.warning(f"Redis配置访问失败: {e}")
+    # 使用环境变量作为备用配置
+    redis_host = os.environ.get('REDIS_HOST', '172.17.0.1')
+    redis_port = int(os.environ.get('REDIS_PORT', '26379'))
+    redis_password = 'Pl5SpB72sllM8DsT'  # 生产环境默认密码
+    
+    pool = redis.ConnectionPool(
+        host=redis_host,
+        port=redis_port,
+        password=redis_password,
+        decode_responses=True,
+        socket_connect_timeout=10,
+        socket_timeout=10,
+        retry_on_timeout=True,
+        health_check_interval=30
+    )
+    conn = redis.Redis(connection_pool=pool)
+    logger.info(f"使用环境变量Redis配置: {redis_host}:{redis_port}")
+except Exception as e:
+    logger.error(f"Redis连接池创建失败: {e}")
+    # 创建一个空的连接对象，避免后续代码报错
+    conn = None
 
 # 数据查询服务接口 - 延迟初始化，避免循环导入
 def create_get_data():

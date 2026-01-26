@@ -1,421 +1,148 @@
-# Docker部署指南
+# Docker 构建系统
 
-本目录包含蘑菇图像处理系统的Docker部署配置。
+## 概述
+
+统一的 Docker 构建系统，支持加密和非加密构建，优化了构建速度和缓存效率。
 
 ## 文件说明
 
-### mushroom_solution.yml
-主要的Docker Compose配置文件，定义了完整的服务栈。
+- `build.sh` - 统一构建脚本，支持多种配置选项
+- `Dockerfile` - 多阶段优化 Dockerfile，支持缓存和快速构建
+- `run.sh` - 容器启动脚本，支持多服务模式
+- `.dockerignore` - Docker 构建忽略文件
+- `.env` - 环境变量配置文件
 
-### 其他文件
-- `Dockerfile`: 容器镜像构建文件
-- `.env`: 环境变量配置文件
-- `secrets/`: 敏感信息存储目录
+## 使用方法
 
-## 服务架构
-
-### 服务组件
-1. **postgres_db**: PostgreSQL数据库 + pgvector扩展
-2. **mushroom_solution**: 主应用服务
-
-### 网络配置
-- **网络名称**: plant_backend
-- **网络类型**: bridge
-- **服务间通信**: 内部网络
-
-## 挂载配置
-
-### 目录挂载
-```yaml
-volumes:
-  - ./configs:/app/configs:ro      # 配置文件（只读）
-  - ./Logs:/app/Logs:rw           # 日志目录（读写）
-  - ./models:/models:rw           # AI模型目录（读写）
-  - ./data:/app/data:ro           # 数据目录（只读）
-```
-
-### 挂载说明
-- **configs**: 应用配置文件，只读挂载保证安全性
-- **Logs**: 日志输出目录，需要写权限
-- **models**: AI模型文件，挂载到根目录便于访问
-- **data**: 输入数据文件，只读挂载
-
-## 环境变量配置
-
-### 基础配置
-```yaml
-PYTHONUNBUFFERED: 1              # Python输出不缓冲
-PYTHONDONTWRITEBYTECODE: 1       # 不生成.pyc文件
-TZ: Asia/Shanghai                # 时区设置
-ENVIRONMENT: production          # 运行环境
-```
-
-### 数据库配置
-```yaml
-POSTGRES_HOST: postgres_db       # 数据库主机
-POSTGRES_PORT: 5432             # 数据库端口
-POSTGRES_DB: mushroom_db        # 数据库名称
-POSTGRES_USER: postgres         # 数据库用户
-```
-
-### AI模型配置
-```yaml
-TRANSFORMERS_CACHE: /models/.cache             # Transformers缓存目录
-HF_HOME: /models/.cache                        # HuggingFace缓存目录
-TORCH_HOME: /models/.cache                     # PyTorch缓存目录
-CLIP_MODEL_PATH: /models/clip-vit-base-patch32 # CLIP模型路径
-HF_HUB_DISABLE_TELEMETRY: 1                   # 禁用遥测
-TRANSFORMERS_OFFLINE: 0                        # 允许在线下载
-```
-
-### 性能优化配置
-数值计算线程优化参数在启动脚本 `run.sh` 中设置：
+### 基本构建（加密）
 ```bash
-export OMP_NUM_THREADS=4              # OpenMP线程数
-export OPENBLAS_NUM_THREADS=4         # OpenBLAS线程数
-export MKL_NUM_THREADS=4              # MKL线程数
-export NUMEXPR_NUM_THREADS=4          # NumExpr线程数
-export VECLIB_MAXIMUM_THREADS=4       # VecLib线程数
-export NUMBA_NUM_THREADS=4            # Numba线程数
+./docker/build.sh
 ```
 
-## 资源限制
-
-### 应用服务
-- **内存限制**: 2048MB
-- **CPU限制**: 4.0核心
-- **健康检查**: HTTP端点检查
-
-### 数据库服务
-- **内存限制**: 512MB
-- **CPU限制**: 2.0核心
-- **健康检查**: pg_isready检查
-
-## 部署步骤
-
-### 0. 构建Docker镜像
-
-#### PyArmor许可证问题解决方案
-
-如果遇到 "ERROR out of license" 错误，说明PyArmor试用版许可证已过期。
-
-**解决方案（推荐）：**
+### 不加密构建
 ```bash
-# 使用无加密构建脚本
-bash docker/build_no_encrypt.sh
+ENCRYPT=true ./docker/build.sh
 ```
 
-**或者使用主构建脚本：**
+### 使用 PyArmor 加密
 ```bash
-# 设置环境变量跳过加密
-ENCRYPT=false bash docker/build.sh
+ENCRYPT=true OBFUSCATION_TOOL=pyarmor ./docker/build.sh
 ```
 
-**构建脚本说明：**
-- `build.sh` - 主构建脚本，默认关闭加密（`ENCRYPT=false`）
-- `build_no_encrypt.sh` - 专门的无加密构建脚本
-- 生产环境建议购买PyArmor许可证启用代码加密
-
-### 1. 准备环境
+### 只构建不推送
 ```bash
-# 创建必要目录
-mkdir -p configs Logs models data secrets
-
-# 设置权限
-chmod 755 configs Logs models data
-chmod 700 secrets
+PUSH_IMAGE=false ./docker/build.sh
 ```
 
-### 2. 配置文件
+### 禁用缓存
 ```bash
-# 复制配置文件到configs目录
-cp src/configs/* configs/
-
-# 创建数据库密码文件
-echo "your_password" > secrets/postgres_password.txt
-chmod 600 secrets/postgres_password.txt
+USE_CACHE=false ./docker/build.sh
 ```
 
-### 3. 模型准备
-```bash
-# 确保CLIP模型存在
-ls -la models/clip-vit-base-patch32/
+## 环境变量
 
-# 如果不存在，系统会自动下载
-# 或手动下载到该目录
-```
+| 变量名 | 默认值 | 说明 |
+|--------|--------|------|
+| `DOCKER_REGISTRY` | `registry.cn-beijing.aliyuncs.com/ncgnewne` | Docker 镜像仓库地址 |
+| `ENCRYPT` | `false` | 是否启用代码加密 |
+| `OBFUSCATION_TOOL` | `codeenigma` | 混淆工具选择 (codeenigma/pyarmor) |
+| `BUILD_IMAGE` | `true` | 是否构建镜像 |
+| `PUSH_IMAGE` | `true` | 是否推送镜像 |
+| `USE_CACHE` | `true` | 是否使用构建缓存 |
+| `EXPIRATION_DATE` | - | CodeEnigma 过期日期 (YYYY-MM-DD) |
 
-### 4. 启动服务
-```bash
-# 启动所有服务
-docker-compose -f docker/mushroom_solution.yml up -d
+## 构建优化
 
-# 查看服务状态
-docker-compose -f docker/mushroom_solution.yml ps
+1. **多阶段构建** - 分离依赖安装和应用代码
+2. **缓存优化** - 使用 Docker 层缓存和 UV 缓存
+3. **并行构建** - 利用 BuildKit 并行处理
+4. **最小化镜像** - 清理不必要的文件和依赖
 
-# 查看日志
-docker-compose -f docker/mushroom_solution.yml logs -f
-```
+## 支持的加密工具
 
-### 5. 验证部署
-```bash
-# 检查健康状态
-curl http://localhost:7002/health
+### CodeEnigma (推荐)
+- 更好的性能和兼容性
+- 支持过期日期设置
+- 更小的运行时开销
 
-# 检查数据库连接
-docker exec postgres_db pg_isready -U postgres
-
-# 检查模型加载
-docker exec mushroom_solution ls -la /app/models/
-```
-
-## 环境变量文件
-
-### .env文件示例
-```bash
-# 镜像版本
-IMAGE_TAG=latest
-
-# 数据库配置
-POSTGRES_DB=mushroom_algorithm
-POSTGRES_USER=postgres
-POSTGRES_PORT=5432
-
-# 应用端口
-STREAMLIT_PORT=7002
-
-# 运行环境
-ENVIRONMENT=production
-```
-
-## 监控和维护
-
-### 日志管理
-```bash
-# 查看应用日志
-docker-compose -f docker/mushroom_solution.yml logs mushroom_solution
-
-# 查看数据库日志
-docker-compose -f docker/mushroom_solution.yml logs postgres_db
-
-# 清理日志
-docker system prune -f
-```
-
-### 数据备份
-```bash
-# 备份数据库
-docker exec postgres_db pg_dump -U postgres mushroom_algorithm > backup.sql
-
-# 备份模型文件
-tar -czf models_backup.tar.gz models/
-
-# 备份配置文件
-tar -czf configs_backup.tar.gz configs/
-```
-
-### 更新部署
-```bash
-# 拉取新镜像
-docker-compose -f docker/mushroom_solution.yml pull
-
-# 重启服务
-docker-compose -f docker/mushroom_solution.yml up -d
-
-# 清理旧镜像
-docker image prune -f
-```
+### PyArmor
+- 传统的 Python 代码保护工具
+- 需要许可证
+- 运行时依赖较大
 
 ## 故障排除
 
-### 常见问题
+### 构建失败
+1. 检查 Docker 是否正常运行
+2. 确认网络连接正常
+3. 检查磁盘空间是否充足
 
-#### 1. 服务启动失败
+### 加密失败
+1. 确认加密工具已正确安装
+2. 检查许可证是否有效（PyArmor）
+3. 查看构建日志中的错误信息
+
+### 推送失败
+1. 确认已登录到镜像仓库
+2. 检查网络连接
+3. 验证仓库权限
+
+## 版本标签
+
+镜像版本格式：`{base_version}-{timestamp}-{git_hash}`
+
+例如：`0.1.0-20260126112355-a515252`
+
+## 构建信息
+
+构建完成后会生成 `build_info.json` 文件，包含：
+- 项目信息
+- 版本号
+- Git 哈希
+- 构建时间
+- 加密状态
+- 构建配置
+
+## 快速开始
+
+### 1. 构建镜像
+
 ```bash
-# 检查配置文件
-docker-compose -f docker/mushroom_solution.yml config
+# 基本构建
+./docker/build.sh
 
-# 查看详细错误
-docker-compose -f docker/mushroom_solution.yml up --no-deps mushroom_solution
+# 加密构建
+ENCRYPT=true ./docker/build.sh
+
+# 不推送到仓库
+PUSH_IMAGE=false ./docker/build.sh
 ```
 
-#### 2. 数据库连接失败
-```bash
-# 检查数据库状态
-docker exec postgres_db pg_isready -U postgres
+### 2. 运行容器
 
-# 检查网络连接
-docker network ls
-docker network inspect plant_backend
+```bash
+# 使用 Docker Compose
+docker-compose -f docker/mushroom_solution.yml up -d
+
+# 直接运行
+docker run -d \
+  --name mushroom_solution \
+  -p 7002:7002 \
+  -p 5000:5000 \
+  registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:latest
 ```
 
-#### 3. 模型加载失败
+## 端口说明
+
+- `7002` - Streamlit Web 界面
+- `5000` - FastAPI 健康检查接口
+
+## 日志查看
+
 ```bash
-# 检查模型文件
-docker exec mushroom_solution ls -la /models/clip-vit-base-patch32/
+# 查看容器日志
+docker logs mushroom_solution
 
-# 检查权限
-docker exec mushroom_solution ls -ld /models/
-
-# 检查环境变量
-docker exec mushroom_solution env | grep -E "(TRANSFORMERS|HF_|TORCH_)"
+# 实时查看日志
+docker logs -f mushroom_solution
 ```
-
-#### 4. 内存不足
-```bash
-# 检查内存使用
-docker stats
-
-# 调整内存限制
-# 编辑 mushroom_solution.yml 中的 mem_limit
-```
-
-### 调试命令
-```bash
-# 进入容器调试
-docker exec -it mushroom_solution bash
-
-# 检查Python环境
-docker exec mushroom_solution python -c "import torch; print(torch.__version__)"
-
-# 测试模型加载
-docker exec mushroom_solution python -c "
-from pathlib import Path
-model_path = Path('/models/clip-vit-base-patch32')
-print(f'Model exists: {model_path.exists()}')
-if model_path.exists():
-    print(f'Files: {list(model_path.glob(\"*\"))[:5]}')
-"
-```
-
-## 安全配置
-
-### 网络安全
-- 使用内部网络隔离服务
-- 只暴露必要的端口
-- 配置防火墙规则
-
-### 数据安全
-- 使用secrets管理敏感信息
-- 配置适当的文件权限
-- 定期备份重要数据
-
-### 访问控制
-- 限制容器权限
-- 使用非root用户运行
-- 配置资源限制
-
----
-
-本部署指南确保蘑菇图像处理系统能够在Docker环境中稳定、安全地运行，特别是AI模型的正确挂载和配置。
-
-## 最近修复记录
-
-### 2026-01-13 容器启动问题修复
-
-#### 问题描述
-服务器运行时出现以下错误：
-- `run.sh: line 98: ${COPROC[1]}: Bad file descriptor`
-- 定时任务启动失败
-- 容器重复启动和失败
-
-#### 修复内容
-
-1. **修复启动脚本 (run.sh)**
-   - 移除有问题的 `coproc` 用法，改用标准的 `nohup` 和重定向
-   - 改进进程管理，添加信号处理和优雅退出机制
-   - 修复日志输出重定向问题
-   - 添加进程监控循环，防止服务异常退出
-
-2. **修复主程序入口 (src/main.py)**
-   - 删除根目录的重复 `main.py` 文件
-   - 容器使用 `src/main.py` 作为唯一入口点
-   - 添加环境检测逻辑，区分容器和开发环境
-   - 改进错误处理和日志输出
-
-3. **验证模型路径配置**
-   - 确认模型挂载路径 `./models:/models:rw` 正确
-   - 代码已适配容器路径 `/models` 和开发路径 `../models`
-   - 添加路径检测和回退机制
-
-#### 修复后的启动流程
-
-1. **环境初始化**
-   ```bash
-   # 设置线程限制
-   export OMP_NUM_THREADS=4
-   export OPENBLAS_NUM_THREADS=4
-   # ... 其他线程限制
-   
-   # 创建日志目录
-   mkdir -p /app/Logs
-   ```
-
-2. **服务启动顺序**
-   ```bash
-   # 1. Streamlit (端口 7002)
-   nohup python -m streamlit run streamlit_app.py > streamlit.log 2>&1 &
-   
-   # 2. FastAPI 健康检查 (端口 5000)
-   nohup python -m uvicorn main:app --host 0.0.0.0 --port 5000 > fastapi.log 2>&1 &
-   
-   # 3. 定时任务调度器
-   nohup python main.py > timer.log 2>&1 &
-   ```
-
-3. **进程监控**
-   ```bash
-   # 持续监控所有进程状态
-   while true; do
-       # 检查进程是否存活
-       if ! kill -0 $PID 2>/dev/null; then
-           echo "进程异常退出"
-           exit 1
-       fi
-       sleep 30
-   done
-   ```
-
-#### 测试验证
-
-创建了测试脚本 `scripts/test_container_startup.py` 用于验证：
-- 环境配置正确性
-- 模块导入完整性
-- 数据库连接状态
-- 模型路径可访问性
-
-#### 使用建议
-
-1. **重新构建镜像**
-   ```bash
-   docker-compose -f docker/mushroom_solution.yml build --no-cache
-   ```
-
-2. **启动服务**
-   ```bash
-   docker-compose -f docker/mushroom_solution.yml up -d
-   ```
-
-3. **监控启动过程**
-   ```bash
-   # 查看启动日志
-   docker-compose -f docker/mushroom_solution.yml logs -f mushroom_solution
-   
-   # 检查服务状态
-   curl http://localhost:5000/health/status
-   curl http://localhost:7002
-   ```
-
-4. **故障排查**
-   ```bash
-   # 进入容器检查
-   docker exec -it mushroom_solution bash
-   
-   # 运行测试脚本
-   docker exec mushroom_solution python scripts/test_container_startup.py
-   
-   # 查看具体日志
-   docker exec mushroom_solution tail -f /app/Logs/timer.log
-   ```
-
-这些修复确保了容器能够稳定启动并正常运行所有服务组件。

@@ -10,10 +10,9 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 
-# 添加src目录到路径
-current_dir = Path(__file__).parent
-src_dir = current_dir.parent
-sys.path.insert(0, str(src_dir))
+# 使用BASE_DIR统一管理路径
+from global_const.global_const import ensure_src_path
+ensure_src_path()
 
 from clip.mushroom_image_encoder import create_mushroom_encoder
 from clip.recent_image_processor import create_recent_image_processor

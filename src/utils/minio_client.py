@@ -5,12 +5,17 @@ MinIO客户端工具类
 路径规范：<库房号>/<日期文件夹>/<库房号><采集日期7-8位><详细时间14位>.jpg
 示例：8/20260105/8192168123120261520260105121130.jpg
 时间解析：仅从文件名中提取最后14位时间戳 YYYYMMDDHHMMSS
+
+包含SSL连接问题的修复方案。
 """
 
 import io
 import os
 import re
+import ssl
 import mimetypes
+import urllib3
+from urllib3.exceptions import InsecureRequestWarning
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Tuple, Union, Set
 from dataclasses import dataclass
@@ -24,6 +29,8 @@ from minio.error import S3Error
 
 from global_const.global_const import settings
 
+# 修复SSL连接问题
+urllib3.disable_warnings(InsecureRequestWarning)
 
 # 常量定义
 IMAGE_EXTENSIONS: Set[str] = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
@@ -75,7 +82,7 @@ class MinIOClient:
             raise
     
     def _create_client(self, http_client: Optional[PoolManager] = None) -> Minio:
-        """创建MinIO客户端"""
+        """创建MinIO客户端，包含SSL连接问题修复"""
         try:
             endpoint = self.config['endpoint']
             # 默认使用HTTPS，可从配置覆盖
@@ -87,6 +94,21 @@ class MinIOClient:
                 'secret_key': self.config['secret_key'],
                 'secure': secure
             }
+            
+            # 如果使用HTTPS，创建自定义的HTTP客户端来处理SSL问题
+            if secure and not http_client:
+                # 创建不验证SSL证书的HTTP客户端（仅用于内网环境）
+                http_client = PoolManager(
+                    timeout=30,
+                    retries=urllib3.Retry(
+                        total=5,
+                        backoff_factor=0.2,
+                        status_forcelist=[500, 502, 503, 504]
+                    ),
+                    cert_reqs='CERT_NONE',
+                    assert_hostname=False
+                )
+                logger.warning("使用不验证SSL证书的HTTP客户端（仅适用于内网环境）")
             
             if http_client:
                 client_kwargs['http_client'] = http_client

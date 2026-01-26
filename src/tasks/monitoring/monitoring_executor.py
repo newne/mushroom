@@ -267,10 +267,11 @@ class SetpointMonitoringTask(BaseTask):
             pd.DataFrame: 实时数据
         """
         try:
-            # 导入数据获取模块
-            sys.path.insert(0, str(Path(__file__).parent.parent / "utils"))
-            from dataframe_utils import get_all_device_configs
-            from data_preprocessing import query_data_by_batch_time
+            # 使用BASE_DIR统一管理路径
+            from global_const.global_const import ensure_src_path
+            ensure_src_path()
+            from utils.dataframe_utils import get_all_device_configs
+            from utils.data_preprocessing import query_data_by_batch_time
             
             # 获取库房设备配置
             device_configs = get_all_device_configs(room_id=room_id)

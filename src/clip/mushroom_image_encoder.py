@@ -84,11 +84,11 @@ class MushroomImageEncoder:
     def _init_clip_model(self):
         """初始化CLIP模型"""
         # 检查本地模型路径
-        # 在容器中，src目录内容被复制到/app，models挂载到/models
+        # 在容器中，源码直接复制到/app，models挂载到/app/models
         # 在开发环境中，保持原有的相对路径计算
         
         # 首先检查容器环境的路径
-        container_model_path = Path('/models/clip-vit-base-patch32')
+        container_model_path = Path('/app/models/clip-vit-base-patch32')
         
         # 然后检查开发环境的路径
         local_model_path = Path(__file__).parent.parent.parent / 'models' / 'clip-vit-base-patch32'
@@ -1060,11 +1060,11 @@ class MushroomImageEncoder:
                 func.count(MushroomImageEmbedding.id).label('count')
             ).group_by(MushroomImageEmbedding.room_id).all()
             
-            # 按生长阶段分组统计
-            stage_stats = session.query(
-                MushroomImageEmbedding.growth_stage,
+            # 按生长天数分组统计（替代growth_stage）
+            growth_day_stats = session.query(
+                MushroomImageEmbedding.growth_day,
                 func.count(MushroomImageEmbedding.id).label('count')
-            ).group_by(MushroomImageEmbedding.growth_stage).all()
+            ).group_by(MushroomImageEmbedding.growth_day).all()
             
             # 按日期分组统计
             date_stats = session.query(
@@ -1087,7 +1087,7 @@ class MushroomImageEncoder:
                 'total_processed': total_count,
                 'with_environmental_control': with_env_control,
                 'room_distribution': {str(room_id): count for room_id, count in room_stats},
-                'growth_stage_distribution': {stage: count for stage, count in stage_stats},
+                'growth_day_distribution': {day: count for day, count in growth_day_stats},
                 'date_distribution': {str(date): count for date, count in date_stats},
                 'light_usage_distribution': {f'light_{count}': usage for count, usage in light_usage},
                 'processing_time': datetime.now().isoformat()

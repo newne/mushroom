@@ -51,27 +51,42 @@ cleanup() {
 trap cleanup SIGTERM SIGINT
 
 # =============================
+# 环境准备
+# =============================
+log "开始启动服务..."
+log "环境变量已通过 Docker 配置设置"
+
+# =============================
 # 初始化设置
 # =============================
 log "开始启动服务..."
 
 cd "$APP_ROOT"
-export PYTHONPATH="$APP_ROOT"
-export TZ=Asia/Shanghai
+# 环境变量已在脚本开始时设置
+
+# 测试基础配置加载
+log "验证配置模块可用性..."
+if $PYTHON -c "import sys; sys.path.insert(0, '/app'); from dynaconf import Dynaconf; print('✓ 配置模块可用')"; then
+    log "配置模块验证通过"
+else
+    fail "配置模块验证失败，无法启动服务"
+fi
+
+# 激活虚拟环境
+if [ -d "/opt/venv" ]; then
+    export VIRTUAL_ENV="/opt/venv"
+    export PATH="/opt/venv/bin:$PATH"
+    log "已激活虚拟环境: /opt/venv"
+else
+    log "警告: 虚拟环境不存在，使用系统Python"
+fi
 
 # 清理旧日志（避免累积）
 > "$TIMER_LOG" 2>/dev/null || true
 > "$STREAMLIT_LOG" 2>/dev/null || true
 > "$FASTAPI_LOG" 2>/dev/null || true
 
-export OMP_NUM_THREADS=4
-export OPENBLAS_NUM_THREADS=4
-export MKL_NUM_THREADS=4
-export NUMEXPR_NUM_THREADS=4
-export VECLIB_MAXIMUM_THREADS=4
-export NUMBA_NUM_THREADS=4
-
-log "已设置线程限制：OMP/OpenBLAS/MKL ≤ 4 threads"
+log "线程限制已在环境设置中配置"
 
 
 # =============================
@@ -100,8 +115,16 @@ fi
 # 启动 FastAPI 应用 (健康检查API)
 # =============================
 log "启动 FastAPI 健康检查服务..."
-FASTAPI_CMD="$PYTHON -m uvicorn main:app --host 0.0.0.0 --port 5000 --workers 1"
-nohup $FASTAPI_CMD 2>&1 | tee -a "$FASTAPI_LOG" &
+# 创建临时启动脚本避免引号嵌套问题
+cat > /tmp/start_fastapi.py << 'EOF'
+import sys
+sys.path.insert(0, '/app')
+from main import app
+import uvicorn
+uvicorn.run(app, host='0.0.0.0', port=5000, workers=1)
+EOF
+
+nohup $PYTHON /tmp/start_fastapi.py 2>&1 | tee -a "$FASTAPI_LOG" &
 FASTAPI_PID=$!
 log "FastAPI 健康检查服务已启动，PID=$FASTAPI_PID"
 
@@ -121,12 +144,13 @@ if ! $PYTHON -c "import sys; print(f'Python {sys.version}')"; then
     fail "Python环境检查失败"
 fi
 
-if ! $PYTHON -c "import scheduling.optimized_scheduler; print('调度器模块导入成功')"; then
+if ! $PYTHON -c "import sys; sys.path.insert(0, '/app'); import scheduling.optimized_scheduler; print('调度器模块导入成功')"; then
     fail "调度器模块导入失败，请检查依赖"
 fi
 
 # 启动定时任务（使用main.py，它会调用调度器）
 # 使用 tee 同时输出到文件和标准输出，这样 docker logs 也能看到
+cd "$APP_ROOT"
 nohup $PYTHON main.py 2>&1 | tee -a "$TIMER_LOG" &
 TIMER_PID=$!
 log "定时任务已启动，PID=$TIMER_PID"

@@ -56,23 +56,15 @@ services:
 
   mushroom_solution:
     <<: [*app-service, *db-deps]
-    image: "registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:${IMAGE_TAG:-latest}"
+    image: "registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:0.1.0-20260126141909-a515252"
     container_name: mushroom_solution
     environment:
       PYTHONUNBUFFERED: 1
       PYTHONDONTWRITEBYTECODE: 1
-      # 生产环境标识（关键配置）
-      # 数据库连接配置
-      POSTGRES_HOST: postgres_db
-      POSTGRES_PORT: 5432
-      POSTGRES_DB: ${POSTGRES_DB:-mushroom_algorithm}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      # AI模型相关配置
-      TRANSFORMERS_CACHE: /models/.cache
-      HF_HOME: /models/.cache
-      TORCH_HOME: /models/.cache
-      # CLIP模型配置
-      CLIP_MODEL_PATH: /models/clip-vit-base-patch32
+      # AI模型缓存配置
+      TRANSFORMERS_CACHE: /app/models/.cache
+      HF_HOME: /app/models/.cache
+      TORCH_HOME: /app/models/.cache
       # 禁用HuggingFace遥测
       HF_HUB_DISABLE_TELEMETRY: 1
       TRANSFORMERS_OFFLINE: 0
@@ -80,10 +72,10 @@ services:
     volumes:
       - ./configs:/app/configs:ro
       - ./Logs:/app/Logs:rw
-      - ./models:/models:rw
+      - ./models:/app/models:rw
       - ./data:/app/data:ro
     ports:
-      - "${STREAMLIT_PORT:-7002}:7002"
+      - "${STREAMLIT_PORT:-7005}:7005"
     mem_limit: 2048m
     cpus: 4.0
 
