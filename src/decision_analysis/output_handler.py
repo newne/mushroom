@@ -16,12 +16,9 @@ from decision_analysis.data_models import (
     DecisionMetadata,
     DecisionOutput,
     DeviceRecommendations,
-    EnhancedAirCoolerRecommendation,
+    DynamicDeviceRecommendation,
     EnhancedDecisionOutput,
     EnhancedDeviceRecommendations,
-    EnhancedFreshAirFanRecommendation,
-    EnhancedGrowLightRecommendation,
-    EnhancedHumidifierRecommendation,
     FreshAirFanRecommendation,
     GrowLightRecommendation,
     HumidifierRecommendation,
@@ -40,16 +37,18 @@ class OutputHandler:
     the final decision output.
     """
     
-    def __init__(self, static_config: Dict):
+    def __init__(self, static_config: Dict, monitoring_points_config: Dict = None):
         """
         Initialize output handler
         
         Args:
             static_config: Static configuration dictionary
+            monitoring_points_config: Monitoring points configuration dictionary
             
         Requirements: 8.1
         """
         self.static_config = static_config
+        self.monitoring_points_config = monitoring_points_config
         logger.info("[OutputHandler] Initialized")
     
     def validate_and_format(
@@ -662,6 +661,7 @@ class OutputHandler:
         - Action types (maintain/adjust/monitor)
         - Risk assessments
         - Priority and urgency levels
+        - Device parameters against monitoring_points_config
         
         Args:
             raw_decision: Raw decision from LLM
@@ -700,29 +700,57 @@ class OutputHandler:
         
         # Extract and validate enhanced device recommendations
         device_recs = raw_decision.get('device_recommendations', {})
+        devices_output = {}
+
+        if self.monitoring_points_config:
+            # Handle potential "devices" wrapper in LLM output
+            if "devices" in device_recs:
+                device_recs_map = device_recs["devices"]
+            else:
+                device_recs_map = device_recs
+                
+            # Dynamic validation based on monitoring_points_config
+            for device_id, device_info in self.monitoring_points_config.items():
+                # Skip non-device keys
+                if not isinstance(device_info, dict) or "point_list" not in device_info:
+                    continue
+                    
+                device_type = device_info.get("device_type")
+                device_alias = device_info.get("device_alias", device_id)
+                points = device_info.get("point_list", [])
+                
+                # Try to find device params in LLM output using alias or ID or type (fallback)
+                device_params = device_recs_map.get(device_alias)
+                if not device_params:
+                    device_params = device_recs_map.get(device_id)
+                if not device_params and device_type not in ["humidifier", "grow_light"]: 
+                    # Only fallback to type if it's likely unique (air_cooler/fresh_air usually one per room)
+                    device_params = device_recs_map.get(device_type)
+                
+                if not device_params:
+                    # Device missing in LLM output
+                    # We can choose to warn or create a default "maintain" recommendation
+                    # logger.warning(f"Device {device_alias} missing in recommendations")
+                    # Let's create an empty one which will be filled with defaults/current values if we had them
+                    device_params = {}
+
+                validated_device = self._validate_dynamic_device(
+                    device_type, 
+                    device_params, 
+                    points, 
+                    warnings, 
+                    errors
+                )
+                
+                # Use alias as key in output map
+                devices_output[device_alias] = validated_device
+        else:
+            # Fallback to empty recommendations if config is missing
+            warning_msg = "No monitoring points configuration provided, skipping device validation"
+            logger.warning(f"[OutputHandler] {warning_msg}")
+            warnings.append(warning_msg)
         
-        # Validate and create enhanced air cooler recommendations
-        air_cooler_params = device_recs.get('air_cooler', {})
-        enhanced_air_cooler = self._validate_enhanced_air_cooler(air_cooler_params, warnings, errors)
-        
-        # Validate and create enhanced fresh air fan recommendations
-        fresh_air_params = device_recs.get('fresh_air_fan', {})
-        enhanced_fresh_air = self._validate_enhanced_fresh_air_fan(fresh_air_params, warnings, errors)
-        
-        # Validate and create enhanced humidifier recommendations
-        humidifier_params = device_recs.get('humidifier', {})
-        enhanced_humidifier = self._validate_enhanced_humidifier(humidifier_params, warnings, errors)
-        
-        # Validate and create enhanced grow light recommendations
-        grow_light_params = device_recs.get('grow_light', {})
-        enhanced_grow_light = self._validate_enhanced_grow_light(grow_light_params, warnings, errors)
-        
-        enhanced_device_recommendations = EnhancedDeviceRecommendations(
-            air_cooler=enhanced_air_cooler,
-            fresh_air_fan=enhanced_fresh_air,
-            humidifier=enhanced_humidifier,
-            grow_light=enhanced_grow_light
-        )
+        enhanced_device_recommendations = EnhancedDeviceRecommendations(devices=devices_output)
         
         # Extract monitoring points
         monitoring_data = raw_decision.get('monitoring_points', {})
@@ -754,108 +782,95 @@ class OutputHandler:
             metadata=metadata
         )
     
-    def _validate_enhanced_air_cooler(
+    def _validate_dynamic_device(
         self,
+        device_type: str,
         params: Dict,
+        points_config: List[Dict],
         warnings: List[str],
         errors: List[str]
-    ) -> EnhancedAirCoolerRecommendation:
-        """Validate and create enhanced air cooler recommendation"""
-        # Extract parameter adjustments
-        tem_set_adj = self._extract_parameter_adjustment(params.get('tem_set', {}), 'tem_set', 'air_cooler')
-        tem_diff_set_adj = self._extract_parameter_adjustment(params.get('tem_diff_set', {}), 'tem_diff_set', 'air_cooler')
-        cyc_on_off_adj = self._extract_parameter_adjustment(params.get('cyc_on_off', {}), 'cyc_on_off', 'air_cooler')
-        cyc_on_time_adj = self._extract_parameter_adjustment(params.get('cyc_on_time', {}), 'cyc_on_time', 'air_cooler')
-        cyc_off_time_adj = self._extract_parameter_adjustment(params.get('cyc_off_time', {}), 'cyc_off_time', 'air_cooler')
-        ar_on_off_adj = self._extract_parameter_adjustment(params.get('ar_on_off', {}), 'ar_on_off', 'air_cooler')
-        hum_on_off_adj = self._extract_parameter_adjustment(params.get('hum_on_off', {}), 'hum_on_off', 'air_cooler')
+    ) -> DynamicDeviceRecommendation:
+        """
+        Validate dynamic device parameters based on configuration
         
-        return EnhancedAirCoolerRecommendation(
-            tem_set=tem_set_adj,
-            tem_diff_set=tem_diff_set_adj,
-            cyc_on_off=cyc_on_off_adj,
-            cyc_on_time=cyc_on_time_adj,
-            cyc_off_time=cyc_off_time_adj,
-            ar_on_off=ar_on_off_adj,
-            hum_on_off=hum_on_off_adj,
-            rationale=params.get('rationale', [])
-        )
-    
-    def _validate_enhanced_fresh_air_fan(
-        self,
-        params: Dict,
-        warnings: List[str],
-        errors: List[str]
-    ) -> EnhancedFreshAirFanRecommendation:
-        """Validate and create enhanced fresh air fan recommendation"""
-        model_adj = self._extract_parameter_adjustment(params.get('model', {}), 'model', 'fresh_air_fan')
-        control_adj = self._extract_parameter_adjustment(params.get('control', {}), 'control', 'fresh_air_fan')
-        co2_on_adj = self._extract_parameter_adjustment(params.get('co2_on', {}), 'co2_on', 'fresh_air_fan')
-        co2_off_adj = self._extract_parameter_adjustment(params.get('co2_off', {}), 'co2_off', 'fresh_air_fan')
-        on_adj = self._extract_parameter_adjustment(params.get('on', {}), 'on', 'fresh_air_fan')
-        off_adj = self._extract_parameter_adjustment(params.get('off', {}), 'off', 'fresh_air_fan')
+        Args:
+            device_type: Device type
+            params: Parameters dictionary from LLM
+            points_config: List of point configurations
+            warnings: List to collect warnings
+            errors: List to collect errors
+            
+        Returns:
+            DynamicDeviceRecommendation object
+        """
+        parameters = {}
+        rationale = params.get('rationale', [])
+        multi_image_analysis = params.get('multi_image_analysis', "")
         
-        return EnhancedFreshAirFanRecommendation(
-            model=model_adj,
-            control=control_adj,
-            co2_on=co2_on_adj,
-            co2_off=co2_off_adj,
-            on=on_adj,
-            off=off_adj,
-            rationale=params.get('rationale', [])
-        )
-    
-    def _validate_enhanced_humidifier(
-        self,
-        params: Dict,
-        warnings: List[str],
-        errors: List[str]
-    ) -> EnhancedHumidifierRecommendation:
-        """Validate and create enhanced humidifier recommendation"""
-        model_adj = self._extract_parameter_adjustment(params.get('model', {}), 'model', 'humidifier')
-        on_adj = self._extract_parameter_adjustment(params.get('on', {}), 'on', 'humidifier')
-        off_adj = self._extract_parameter_adjustment(params.get('off', {}), 'off', 'humidifier')
-        
-        return EnhancedHumidifierRecommendation(
-            model=model_adj,
-            on=on_adj,
-            off=off_adj,
-            left_right_strategy=params.get('left_right_strategy', ''),
-            rationale=params.get('rationale', [])
-        )
-    
-    def _validate_enhanced_grow_light(
-        self,
-        params: Dict,
-        warnings: List[str],
-        errors: List[str]
-    ) -> EnhancedGrowLightRecommendation:
-        """Validate and create enhanced grow light recommendation"""
-        model_adj = self._extract_parameter_adjustment(params.get('model', {}), 'model', 'grow_light')
-        on_mset_adj = self._extract_parameter_adjustment(params.get('on_mset', {}), 'on_mset', 'grow_light')
-        off_mset_adj = self._extract_parameter_adjustment(params.get('off_mset', {}), 'off_mset', 'grow_light')
-        on_off_1_adj = self._extract_parameter_adjustment(params.get('on_off_1', {}), 'on_off_1', 'grow_light')
-        choose_1_adj = self._extract_parameter_adjustment(params.get('choose_1', {}), 'choose_1', 'grow_light')
-        on_off_2_adj = self._extract_parameter_adjustment(params.get('on_off_2', {}), 'on_off_2', 'grow_light')
-        choose_2_adj = self._extract_parameter_adjustment(params.get('choose_2', {}), 'choose_2', 'grow_light')
-        on_off_3_adj = self._extract_parameter_adjustment(params.get('on_off_3', {}), 'on_off_3', 'grow_light')
-        choose_3_adj = self._extract_parameter_adjustment(params.get('choose_3', {}), 'choose_3', 'grow_light')
-        on_off_4_adj = self._extract_parameter_adjustment(params.get('on_off_4', {}), 'on_off_4', 'grow_light')
-        choose_4_adj = self._extract_parameter_adjustment(params.get('choose_4', {}), 'choose_4', 'grow_light')
-        
-        return EnhancedGrowLightRecommendation(
-            model=model_adj,
-            on_mset=on_mset_adj,
-            off_mset=off_mset_adj,
-            on_off_1=on_off_1_adj,
-            choose_1=choose_1_adj,
-            on_off_2=on_off_2_adj,
-            choose_2=choose_2_adj,
-            on_off_3=on_off_3_adj,
-            choose_3=choose_3_adj,
-            on_off_4=on_off_4_adj,
-            choose_4=choose_4_adj,
-            rationale=params.get('rationale', [])
+        for point_config in points_config:
+            point_alias = point_config.get('point_alias')
+            if not point_alias:
+                continue
+                
+            # Extract parameter adjustment
+            param_data = params.get(point_alias, {})
+            param_adj = self._extract_parameter_adjustment(param_data, point_alias, device_type)
+            
+            # Validate values against config constraints
+            current_val = param_adj.current_value
+            recommended_val = param_adj.recommended_value
+            
+            # 1. Validate Enums
+            enum_mapping = point_config.get('enum_mapping')
+            if enum_mapping:
+                # Check current value
+                curr_str = str(int(current_val)) if isinstance(current_val, (int, float)) else str(current_val)
+                if curr_str not in enum_mapping:
+                    # Try to use default
+                    default_key = list(enum_mapping.keys())[0]
+                    param_adj.current_value = int(default_key) if default_key.isdigit() else default_key
+                    warnings.append(f"{device_type}.{point_alias}: Invalid current value '{current_val}', reset to '{default_key}'")
+                
+                # Check recommended value
+                rec_str = str(int(recommended_val)) if isinstance(recommended_val, (int, float)) else str(recommended_val)
+                if rec_str not in enum_mapping:
+                     # Try to use default
+                    default_key = list(enum_mapping.keys())[0]
+                    param_adj.recommended_value = int(default_key) if default_key.isdigit() else default_key
+                    warnings.append(f"{device_type}.{point_alias}: Invalid recommended value '{recommended_val}', reset to '{default_key}'")
+
+            # 2. Validate Thresholds/Ranges (if applicable)
+            # monitoring_points_config.json has 'threshold', but it might be just a value not a range.
+            # Assuming 'threshold' in config implies some limit, but the JSON shows specific values like 0.5, 1.0.
+            # It seems more like a resolution or a default threshold for something else.
+            # The static_config.json has implicit ranges. 
+            # For dynamic validation, we rely on LLM to be smart, but we can check types.
+            
+            # Ensure types match (float for analog, int/string for enum/digital)
+            change_type = point_config.get('change_type')
+            if change_type in ['analog_value']:
+                try:
+                    param_adj.current_value = float(param_adj.current_value)
+                    param_adj.recommended_value = float(param_adj.recommended_value)
+                except (ValueError, TypeError):
+                    warnings.append(f"{device_type}.{point_alias}: Expected float, got {type(param_adj.current_value)}")
+                    param_adj.current_value = 0.0
+                    param_adj.recommended_value = 0.0
+            elif change_type in ['digital_on_off', 'enum_state']:
+                try:
+                    param_adj.current_value = int(param_adj.current_value)
+                    param_adj.recommended_value = int(param_adj.recommended_value)
+                except (ValueError, TypeError):
+                     warnings.append(f"{device_type}.{point_alias}: Expected int, got {type(param_adj.current_value)}")
+                     param_adj.current_value = 0
+                     param_adj.recommended_value = 0
+
+            parameters[point_alias] = param_adj
+
+        return DynamicDeviceRecommendation(
+            parameters=parameters,
+            rationale=rationale,
+            multi_image_analysis=multi_image_analysis
         )
     
     def _extract_parameter_adjustment(
@@ -932,6 +947,7 @@ class OutputHandler:
         multi_image_analysis: Optional[MultiImageAnalysis] = None
     ) -> EnhancedDecisionOutput:
         """Create error enhanced decision output"""
+        
         # Use provided multi_image_analysis or create default
         if multi_image_analysis is None:
             multi_image_analysis = MultiImageAnalysis(
@@ -946,47 +962,7 @@ class OutputHandler:
             room_id=room_id,
             analysis_time=datetime.now(),
             strategy=ControlStrategy(core_objective="结构验证失败"),
-            device_recommendations=EnhancedDeviceRecommendations(
-                air_cooler=EnhancedAirCoolerRecommendation(
-                    tem_set=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    tem_diff_set=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    cyc_on_off=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    cyc_on_time=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    cyc_off_time=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    ar_on_off=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    hum_on_off=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    rationale=["系统错误"]
-                ),
-                fresh_air_fan=EnhancedFreshAirFanRecommendation(
-                    model=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    control=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    co2_on=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    co2_off=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    on=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    off=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    rationale=["系统错误"]
-                ),
-                humidifier=EnhancedHumidifierRecommendation(
-                    model=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    on=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    off=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    rationale=["系统错误"]
-                ),
-                grow_light=EnhancedGrowLightRecommendation(
-                    model=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    on_mset=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    off_mset=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    on_off_1=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    choose_1=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    on_off_2=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    choose_2=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    on_off_3=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    choose_3=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    on_off_4=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    choose_4=ParameterAdjustment(0, 0, "maintain", "系统错误", "low", "routine", RiskAssessment("low", "low", "无影响")),
-                    rationale=["系统错误"]
-                )
-            ),
+            device_recommendations=EnhancedDeviceRecommendations(devices={}),
             monitoring_points=MonitoringPoints(),
             multi_image_analysis=multi_image_analysis,
             metadata=DecisionMetadata(errors=errors)

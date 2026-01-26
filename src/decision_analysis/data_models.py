@@ -229,65 +229,11 @@ class ParameterAdjustment:
 
 
 @dataclass
-class EnhancedAirCoolerRecommendation:
+class DynamicDeviceRecommendation:
     """
-    Enhanced air cooler parameter recommendations with detailed adjustment info
+    Dynamic device parameter recommendations
     """
-    tem_set: ParameterAdjustment
-    tem_diff_set: ParameterAdjustment
-    cyc_on_off: ParameterAdjustment
-    cyc_on_time: ParameterAdjustment
-    cyc_off_time: ParameterAdjustment
-    ar_on_off: ParameterAdjustment
-    hum_on_off: ParameterAdjustment
-    rationale: List[str] = field(default_factory=list)
-    multi_image_analysis: str = ""  # Analysis based on multiple camera views
-
-
-@dataclass
-class EnhancedFreshAirFanRecommendation:
-    """
-    Enhanced fresh air fan parameter recommendations with detailed adjustment info
-    """
-    model: ParameterAdjustment
-    control: ParameterAdjustment
-    co2_on: ParameterAdjustment
-    co2_off: ParameterAdjustment
-    on: ParameterAdjustment
-    off: ParameterAdjustment
-    rationale: List[str] = field(default_factory=list)
-    multi_image_analysis: str = ""
-
-
-@dataclass
-class EnhancedHumidifierRecommendation:
-    """
-    Enhanced humidifier parameter recommendations with detailed adjustment info
-    """
-    model: ParameterAdjustment
-    on: ParameterAdjustment
-    off: ParameterAdjustment
-    left_right_strategy: str = ""
-    rationale: List[str] = field(default_factory=list)
-    multi_image_analysis: str = ""
-
-
-@dataclass
-class EnhancedGrowLightRecommendation:
-    """
-    Enhanced grow light parameter recommendations with detailed adjustment info
-    """
-    model: ParameterAdjustment
-    on_mset: ParameterAdjustment
-    off_mset: ParameterAdjustment
-    on_off_1: ParameterAdjustment
-    choose_1: ParameterAdjustment
-    on_off_2: ParameterAdjustment
-    choose_2: ParameterAdjustment
-    on_off_3: ParameterAdjustment
-    choose_3: ParameterAdjustment
-    on_off_4: ParameterAdjustment
-    choose_4: ParameterAdjustment
+    parameters: Dict[str, ParameterAdjustment] = field(default_factory=dict)
     rationale: List[str] = field(default_factory=list)
     multi_image_analysis: str = ""
 
@@ -297,10 +243,25 @@ class EnhancedDeviceRecommendations:
     """
     Enhanced device parameter recommendations with detailed adjustment info
     """
-    air_cooler: EnhancedAirCoolerRecommendation
-    fresh_air_fan: EnhancedFreshAirFanRecommendation
-    humidifier: EnhancedHumidifierRecommendation
-    grow_light: EnhancedGrowLightRecommendation
+    # Dynamic dictionary of devices: device_type -> DynamicDeviceRecommendation
+    devices: Dict[str, DynamicDeviceRecommendation] = field(default_factory=dict)
+    
+    # Backward compatibility properties (optional, if needed for existing code access)
+    @property
+    def air_cooler(self) -> Optional[DynamicDeviceRecommendation]:
+        return self.devices.get("air_cooler")
+
+    @property
+    def fresh_air_fan(self) -> Optional[DynamicDeviceRecommendation]:
+        return self.devices.get("fresh_air_fan")
+
+    @property
+    def humidifier(self) -> Optional[DynamicDeviceRecommendation]:
+        return self.devices.get("humidifier")
+
+    @property
+    def grow_light(self) -> Optional[DynamicDeviceRecommendation]:
+        return self.devices.get("grow_light")
 
 
 @dataclass
