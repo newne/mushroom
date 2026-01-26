@@ -2,9 +2,11 @@
 set -e
 # 配置变量
 : "${DOCKER_REGISTRY:=registry.cn-beijing.aliyuncs.com/ncgnewne}"  # 允许通过环境变量覆盖
-: "${ENCRYPT:=false}"  # 默认关闭加密，避免PyArmor许可证问题
+: "${ENCRYPT:=false}"  # 默认关闭加密
+: "${OBFUSCATION_TOOL:=codeenigma}"  # 混淆工具选择: pyarmor 或 codeenigma
 : "${BUILD_IMAGE:=true}"
 : "${PUSH_IMAGE:=true}"
+: "${EXPIRATION_DATE:=}"  # 可选的过期日期 (YYYY-MM-DD)
 
 REGISTRY="${DOCKER_REGISTRY}"
 PROJECT_NAME="mushroom_solution"
@@ -16,45 +18,78 @@ VERSION=$(date +%Y%m%d%H%M%S)
 [ -f build_info.json ] && rm build_info.json
 
 if [ "${ENCRYPT}" = "true" ]; then
-    echo "Running pyarmor to obfuscate the code..."
+    echo "Running code obfuscation with ${OBFUSCATION_TOOL}..."
 
-    # 检查 pyarmor 是否已安装
-    if ! command -v pyarmor &> /dev/null; then
-        echo "Warning: pyarmor is not installed, skipping encryption" >&2
-        ENCRYPT="false"
-    else
-        pyarmor cfg clear_module_co=0
-        pyarmor cfg restrict_module=0
-        pyarmor cfg -p src/streamlit_app.py obf_code=0
-        
-        # 检查并删除dist目录
-        [ -d dist ] && rm -rf dist
-        
-        # 生成pyarmor保护的代码
-        if ! pyarmor gen -O dist -r src/; then
-            echo "Warning: PyArmor generation failed (license expired?), falling back to unencrypted build" >&2
+    if [ "${OBFUSCATION_TOOL}" = "codeenigma" ]; then
+        # 使用CodeEnigma进行混淆
+        if ! command -v codeenigma &> /dev/null; then
+            echo "Warning: codeenigma is not installed, skipping encryption" >&2
             ENCRYPT="false"
         else
-            echo "PyArmor generated successfully"
-
-            # 检查并移动 pyarmor_runtime
-            PYARMOR_RUNTIME_DIR=dist/pyarmor_runtime_000000
-            cp -f src/streamlit_app.py dist/src/streamlit_app.py
-            if [ -d "$PYARMOR_RUNTIME_DIR" ]; then
-                TARGET_DIR=dist/src/pyarmor_runtime_000000
-                if [ -d "$TARGET_DIR" ] && [ "$(ls -A $TARGET_DIR)" ]; then
-                    echo "Warning: Target directory $TARGET_DIR is not empty, skipping move"
-                else
-                    if ! mv "$PYARMOR_RUNTIME_DIR" dist/src/ ; then
-                        echo "Error: Failed to move PyArmor runtime " >&2
-                        exit 1
-                    fi
-                    echo "PyArmor runtime moved successfully"
-                fi
+            # 清理旧的输出目录
+            [ -d dist ] && rm -rf dist
+            [ -d cedist ] && rm -rf cedist
+            
+            # 构建CodeEnigma命令
+            CODEENIGMA_CMD="codeenigma obfuscate src --output dist --verbose"
+            
+            # 添加过期日期（如果指定）
+            if [ -n "${EXPIRATION_DATE}" ]; then
+                CODEENIGMA_CMD="${CODEENIGMA_CMD} --expiration ${EXPIRATION_DATE}"
+                echo "Setting expiration date: ${EXPIRATION_DATE}"
+            fi
+            
+            # 执行代码混淆
+            echo "Executing: ${CODEENIGMA_CMD}"
+            if ! eval ${CODEENIGMA_CMD}; then
+                echo "Warning: CodeEnigma obfuscation failed, falling back to unencrypted build" >&2
+                ENCRYPT="false"
             else
-                echo "Warning: PyArmor runtime directory does not exist"
+                echo "CodeEnigma obfuscation completed successfully"
             fi
         fi
+    elif [ "${OBFUSCATION_TOOL}" = "pyarmor" ]; then
+        # 使用PyArmor进行混淆（原有逻辑）
+        if ! command -v pyarmor &> /dev/null; then
+            echo "Warning: pyarmor is not installed, skipping encryption" >&2
+            ENCRYPT="false"
+        else
+            pyarmor cfg clear_module_co=0
+            pyarmor cfg restrict_module=0
+            pyarmor cfg -p src/streamlit_app.py obf_code=0
+            
+            # 检查并删除dist目录
+            [ -d dist ] && rm -rf dist
+            
+            # 生成pyarmor保护的代码
+            if ! pyarmor gen -O dist -r src/; then
+                echo "Warning: PyArmor generation failed (license expired?), falling back to unencrypted build" >&2
+                ENCRYPT="false"
+            else
+                echo "PyArmor generated successfully"
+
+                # 检查并移动 pyarmor_runtime
+                PYARMOR_RUNTIME_DIR=dist/pyarmor_runtime_000000
+                cp -f src/streamlit_app.py dist/src/streamlit_app.py
+                if [ -d "$PYARMOR_RUNTIME_DIR" ]; then
+                    TARGET_DIR=dist/src/pyarmor_runtime_000000
+                    if [ -d "$TARGET_DIR" ] && [ "$(ls -A $TARGET_DIR)" ]; then
+                        echo "Warning: Target directory $TARGET_DIR is not empty, skipping move"
+                    else
+                        if ! mv "$PYARMOR_RUNTIME_DIR" dist/src/ ; then
+                            echo "Error: Failed to move PyArmor runtime " >&2
+                            exit 1
+                        fi
+                        echo "PyArmor runtime moved successfully"
+                    fi
+                else
+                    echo "Warning: PyArmor runtime directory does not exist"
+                fi
+            fi
+        fi
+    else
+        echo "Warning: Unknown obfuscation tool '${OBFUSCATION_TOOL}', skipping encryption" >&2
+        ENCRYPT="false"
     fi
 fi
 
