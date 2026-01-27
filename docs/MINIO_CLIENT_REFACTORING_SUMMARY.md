@@ -9,7 +9,7 @@
 ## 核心改进
 
 ### 1. 安全性增强
-- ✅ **默认HTTPS连接**: `secure=True`，可从配置覆盖
+- ✅ **默认根据 endpoint 推断 scheme**: 若配置中未显式设置 `secure`，客户端会从 `endpoint` 的 scheme（http/https）推断；若无法推断则默认使用 HTTP（`secure=false`）。
 - ✅ **HTTP客户端注入**: 支持连接池、超时、重试配置
 - ✅ **统一错误处理**: 区分`S3Error`与其他异常，使用`_handle_error`统一处理
 

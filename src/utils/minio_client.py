@@ -21,6 +21,7 @@ from typing import Optional, List, Dict, Any, Tuple, Union, Set
 from dataclasses import dataclass
 from functools import lru_cache
 from urllib3 import PoolManager
+from urllib.parse import urlparse
 
 from PIL import Image
 from loguru import logger
@@ -82,22 +83,40 @@ class MinIOClient:
             raise
     
     def _create_client(self, http_client: Optional[PoolManager] = None) -> Minio:
-        """创建MinIO客户端，包含SSL连接问题修复"""
+        """创建MinIO客户端，包含对 endpoint scheme 的自动识别和 SSL 处理"""
         try:
-            endpoint = self.config['endpoint']
-            # 默认使用HTTPS，可从配置覆盖
-            secure = self.config.get('secure', True)
-            
+            raw_endpoint = self.config['endpoint']
+
+            # 优先使用配置中显式的 secure 值（如果存在），否则尝试从 endpoint 推断
+            explicit_secure = self.config.get('secure', None)
+
+            # 支持带或不带 scheme 的 endpoint，例如:
+            #  - "https://host:9000" 或 "http://host:9000" 或 "host:9000"
+            endpoint = raw_endpoint
+            parsed = urlparse(raw_endpoint) if '://' in raw_endpoint else urlparse(f'//{raw_endpoint}')
+            inferred_secure = parsed.scheme.lower() == 'https' if parsed.scheme else None
+
+            if explicit_secure is not None:
+                secure = bool(explicit_secure)
+            elif inferred_secure is not None:
+                secure = inferred_secure
+            else:
+                # 默认针对内网 MinIO 使用 HTTP，避免出现 SSL: WRONG_VERSION_NUMBER
+                secure = False
+
+            # 如果 endpoint 包含 scheme，则使用 netloc（host:port）作为最终 endpoint
+            if parsed.netloc:
+                endpoint = parsed.netloc
+
             client_kwargs = {
                 'endpoint': endpoint,
                 'access_key': self.config['access_key'],
                 'secret_key': self.config['secret_key'],
                 'secure': secure
             }
-            
-            # 如果使用HTTPS，创建自定义的HTTP客户端来处理SSL问题
+
+            # 如果使用 HTTPS 且未传入 http_client，则创建一个允许自签名证书的 PoolManager
             if secure and not http_client:
-                # 创建不验证SSL证书的HTTP客户端（仅用于内网环境）
                 http_client = PoolManager(
                     timeout=30,
                     retries=urllib3.Retry(
@@ -105,21 +124,25 @@ class MinIOClient:
                         backoff_factor=0.2,
                         status_forcelist=[500, 502, 503, 504]
                     ),
-                    cert_reqs='CERT_NONE',
+                    cert_reqs=ssl.CERT_NONE,
                     assert_hostname=False
                 )
                 logger.warning("使用不验证SSL证书的HTTP客户端（仅适用于内网环境）")
-            
+
+            # 当使用 HTTP 时，不设置 SSL 相关参数
             if http_client:
                 client_kwargs['http_client'] = http_client
-            
+
             client = Minio(**client_kwargs)
-            
+
             protocol = "HTTPS" if secure else "HTTP"
             logger.info(f"MinIO客户端创建成功，连接到: {protocol}://{endpoint}")
             return client
             
         except Exception as e:
+            # 对常见 SSL 错误提供友好提示
+            if isinstance(e, ssl.SSLError) or 'WRONG_VERSION_NUMBER' in str(e):
+                logger.error("创建MinIO客户端失败（SSL 错误）: 可能是使用了 HTTPS 连接到仅支持 HTTP 的 MinIO 服务。请检查配置 'MINIO.endpoint' 是否包含 scheme (http/https) 或在配置中显式设置 'secure = false'。")
             logger.error(f"创建MinIO客户端失败: {e}")
             raise
     

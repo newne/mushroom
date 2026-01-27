@@ -443,6 +443,40 @@ router = APIRouter(
 
 
 @router.get(
+    "",
+    summary="获取详细健康状态（根路径）",
+    description="返回所有调度任务的详细健康状态（含超时/异常信息）"
+)
+async def get_root_health_status() -> Dict[str, Any]:
+    """获取详细健康状态接口（根路径，避免重定向）
+
+    Returns:
+        Dict[str, Any]: 详细健康状态响应
+            - status: 整体状态（healthy/unhealthy/error）
+            - jobs: 任务状态详情
+            - unhealthy_jobs: 不健康任务列表
+            - timestamp: 检查时间（UTC ISO格式）
+            - message: 错误信息（仅异常时返回）
+    """
+    try:
+        health_details = get_health_details()
+        return {
+            "status": HEALTHY_STATUS if health_details["overall_healthy"] else UNHEALTHY_STATUS,
+            "jobs": health_details["job_status"],
+            "unhealthy_jobs": health_details["unhealthy_jobs"],
+            "timestamp": health_details["timestamp"]
+        }
+    except Exception as e:
+        error_msg = f"健康检查接口异常: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return {
+            "status": ERROR_STATUS,
+            "message": error_msg,
+            "timestamp": datetime.now(HEALTH_CHECK_CONFIG.timezone).isoformat()
+        }
+
+
+@router.get(
     "/",
     summary="获取详细健康状态",
     description="返回所有调度任务的详细健康状态（含超时/异常信息）"

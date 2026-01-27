@@ -36,6 +36,7 @@ port=26379
 
 [development.minio]
 endpoint = "10.77.77.39:9000"
+secure = false
 bucket = "mogu"
 region = "us-east-1"
 mlflow_s3_endpoint_url = "10.77.77.39:9000"
@@ -209,6 +210,7 @@ port = 26379
 
 [production.minio]
 endpoint = "172.17.0.1:9000"
+secure = false
 bucket = "mogu"
 region = "us-east-1"
 mlflow_s3_endpoint_url = "172.17.0.1:9000"
