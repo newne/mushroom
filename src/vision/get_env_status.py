@@ -42,7 +42,7 @@ def parse_iot_dataframe_to_records(
             'temp': df.get((room_id, 'mushroom_env_status', 'temperature')),
             'hum': df.get((room_id, 'mushroom_env_status', 'humidity')),
             'co2': df.get((room_id, 'mushroom_env_status', 'co2'))
-        }, index=df.index).fillna(0.0)  # <--- 浮点数不需要 infer_objects
+        }, index=df.index).infer_objects(copy=False)
 
         # 3. 设备配置
         # 冷风机

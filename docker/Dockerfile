@@ -123,7 +123,7 @@ LABEL maintainer="mushroom-solution-team" \
       description="Mushroom Solution - AI-powered mushroom growth monitoring system"
 
 # 健康检查 - 检查主要服务是否正常运行
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+HEALTHCHECK --interval=600s --timeout=10s --start-period=120s --retries=3 \
     CMD curl -f http://localhost:5000/health || exit 1
 
 # 暴露端口
