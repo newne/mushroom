@@ -8,6 +8,7 @@ and output validation.
 
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Dict
 
 from dynaconf import Dynaconf
@@ -60,7 +61,7 @@ class DecisionAnalyzer:
             
         Requirements: 12.1
         """
-        logger.info("[DecisionAnalyzer] Initializing decision analyzer...")
+        logger.info("[DecisionAnalyzer] 正在初始化决策分析器...")
         
         # Import decision analysis configuration
         from global_const.const_config import DECISION_ANALYSIS_CONFIG
@@ -77,41 +78,41 @@ class DecisionAnalyzer:
             if config_path.exists():
                 with open(config_path, "r", encoding="utf-8") as f:
                     self.monitoring_points_config = json.load(f)
-                logger.info(f"[DecisionAnalyzer] Loaded monitoring points config from {config_path}")
+                logger.info(f"[DecisionAnalyzer] 已加载监控点配置: {config_path}")
             else:
-                logger.warning(f"[DecisionAnalyzer] Monitoring points config not found at {config_path}")
+                logger.warning(f"[DecisionAnalyzer] 未找到监控点配置: {config_path}")
                 self.monitoring_points_config = {}
         except Exception as e:
-            logger.error(f"[DecisionAnalyzer] Failed to load monitoring points config: {e}")
+            logger.error(f"[DecisionAnalyzer] 加载监控点配置失败: {e}")
             self.monitoring_points_config = {}
         
         # Initialize all components with error handling
         try:
-            logger.debug("[DecisionAnalyzer] Initializing DataExtractor...")
+            logger.debug("[DecisionAnalyzer] 正在初始化 DataExtractor...")
             self.data_extractor = DataExtractor(db_engine)
             
-            logger.debug("[DecisionAnalyzer] Initializing CLIPMatcher...")
+            logger.debug("[DecisionAnalyzer] 正在初始化 CLIPMatcher...")
             self.clip_matcher = CLIPMatcher(db_engine)
             
-            logger.debug("[DecisionAnalyzer] Initializing TemplateRenderer...")
+            logger.debug("[DecisionAnalyzer] 正在初始化 TemplateRenderer...")
             self.template_renderer = TemplateRenderer(template_path, static_config, self.monitoring_points_config)
             
-            logger.debug("[DecisionAnalyzer] Initializing LLMClient...")
+            logger.debug("[DecisionAnalyzer] 正在初始化 LLMClient...")
             self.llm_client = LLMClient(settings)
             
-            logger.debug("[DecisionAnalyzer] Initializing OutputHandler...")
+            logger.debug("[DecisionAnalyzer] 正在初始化 OutputHandler...")
             self.output_handler = OutputHandler(static_config, self.monitoring_points_config)
             
-            logger.debug("[DecisionAnalyzer] Initializing DeviceConfigAdapter...")
+            logger.debug("[DecisionAnalyzer] 正在初始化 DeviceConfigAdapter...")
             from decision_analysis.device_config_adapter import create_device_config_adapter
             self.device_config_adapter = create_device_config_adapter()
             
-            logger.info("[DecisionAnalyzer] Successfully initialized all components")
-            logger.info(f"[DecisionAnalyzer] Supported device types: {self.device_config_adapter.get_supported_device_types()}")
+            logger.info("[DecisionAnalyzer] 所有组件初始化成功")
+            logger.info(f"[DecisionAnalyzer] 支持的设备类型: {self.device_config_adapter.get_supported_device_types()}")
             
         except Exception as e:
             logger.error(
-                f"[DecisionAnalyzer] Failed to initialize components: {e}",
+                f"[DecisionAnalyzer] 组件初始化失败: {e}",
                 exc_info=True
             )
             raise
@@ -149,13 +150,13 @@ class DecisionAnalyzer:
             f"[DecisionAnalyzer] =========================================="
         )
         logger.info(
-            f"[DecisionAnalyzer] Starting decision analysis"
+            f"[DecisionAnalyzer] 开始执行决策分析"
         )
         logger.info(
-            f"[DecisionAnalyzer] Room ID: {room_id}"
+            f"[DecisionAnalyzer] 库房编号: {room_id}"
         )
         logger.info(
-            f"[DecisionAnalyzer] Analysis Time: {analysis_datetime}"
+            f"[DecisionAnalyzer] 分析时间: {analysis_datetime}"
         )
         logger.info(
             f"[DecisionAnalyzer] =========================================="
@@ -184,12 +185,12 @@ class DecisionAnalyzer:
         # ====================================================================
         # STEP 1: Extract Data from Database
         # ====================================================================
-        logger.info("[DecisionAnalyzer] STEP 1: Extracting data from database...")
+        logger.info("[DecisionAnalyzer] 步骤 1: 从数据库提取数据...")
         step1_start = time.time()
         
         try:
             # Extract current embedding data
-            logger.info("[DecisionAnalyzer] Extracting current embedding data...")
+            logger.info("[DecisionAnalyzer] 正在提取当前图像和Embedding数据...")
             embedding_df = self.data_extractor.extract_current_embedding_data(
                 room_id=room_id,
                 target_datetime=analysis_datetime,
@@ -198,10 +199,10 @@ class DecisionAnalyzer:
             )
             
             if embedding_df.empty:
-                error_msg = f"No embedding data found for room {room_id}"
+                error_msg = f"未找到库房 {room_id} 的Embedding数据"
                 logger.error(f"[DecisionAnalyzer] {error_msg}")
                 metadata["errors"].append(error_msg)
-                metadata["warnings"].append("Using fallback strategy due to missing data")
+                metadata["warnings"].append("由于缺失数据，将使用降级策略")
             else:
                 # Use the most recent record
                 latest_record = embedding_df.iloc[0]
@@ -235,8 +236,8 @@ class DecisionAnalyzer:
                 
                 metadata["data_sources"]["embedding_records"] = len(embedding_df)
                 logger.info(
-                    f"[DecisionAnalyzer] Extracted {len(embedding_df)} embedding records, "
-                    f"using latest from {current_data['collection_datetime']}"
+                    f"[DecisionAnalyzer] 提取到 {len(embedding_df)} 条Embedding记录, "
+                    f"使用 {current_data['collection_datetime']} 的最新记录"
                 )
                 
                 # Validate environmental parameters
@@ -298,10 +299,10 @@ class DecisionAnalyzer:
                 )
             
             step1_time = time.time() - step1_start
-            logger.info(f"[DecisionAnalyzer] STEP 1 completed in {step1_time:.2f}s")
+            logger.info(f"[DecisionAnalyzer] 步骤 1 完成，耗时 {step1_time:.2f}秒")
             
         except Exception as e:
-            error_msg = f"Data extraction failed: {str(e)}"
+            error_msg = f"数据提取失败: {str(e)}"
             logger.error(f"[DecisionAnalyzer] {error_msg}", exc_info=True)
             metadata["errors"].append(error_msg)
             # Continue with empty data - will use fallback strategy
@@ -309,7 +310,7 @@ class DecisionAnalyzer:
         # ====================================================================
         # STEP 2: Find Similar Historical Cases (CLIP Matching)
         # ====================================================================
-        logger.info("[DecisionAnalyzer] STEP 2: Finding similar historical cases...")
+        logger.info("[DecisionAnalyzer] 步骤 2: 查找相似历史案例 (CLIP匹配)...")
         step2_start = time.time()
         
         try:
@@ -339,8 +340,8 @@ class DecisionAnalyzer:
                     ) / len(similar_cases)
                     
                     logger.info(
-                        f"[DecisionAnalyzer] Found {len(similar_cases)} similar cases, "
-                        f"avg similarity: {metadata['avg_similarity_score']:.2f}%"
+                        f"[DecisionAnalyzer] 找到 {len(similar_cases)} 个相似案例, "
+                        f"平均相似度: {metadata['avg_similarity_score']:.2f}%"
                     )
                     
                     # Check for low confidence cases
@@ -350,34 +351,34 @@ class DecisionAnalyzer:
                     ]
                     if low_confidence_cases:
                         warning_msg = (
-                            f"Found {len(low_confidence_cases)} low confidence matches "
-                            f"(similarity < 20%)"
+                            f"发现 {len(low_confidence_cases)} 个低置信度匹配 "
+                            f"(相似度 < 20%)"
                         )
                         logger.warning(f"[DecisionAnalyzer] {warning_msg}")
                         metadata["warnings"].append(warning_msg)
                 else:
-                    warning_msg = "No similar cases found, will use rule-based strategy"
+                    warning_msg = "未找到相似案例，将使用基于规则的策略"
                     logger.warning(f"[DecisionAnalyzer] {warning_msg}")
                     metadata["warnings"].append(warning_msg)
             else:
-                warning_msg = "No embedding data available for CLIP matching"
+                warning_msg = "无Embedding数据可用于CLIP匹配"
                 logger.warning(f"[DecisionAnalyzer] {warning_msg}")
                 metadata["warnings"].append(warning_msg)
             
             step2_time = time.time() - step2_start
-            logger.info(f"[DecisionAnalyzer] STEP 2 completed in {step2_time:.2f}s")
+            logger.info(f"[DecisionAnalyzer] 步骤 2 完成，耗时 {step2_time:.2f}秒")
             
         except Exception as e:
-            error_msg = f"CLIP matching failed: {str(e)}"
+            error_msg = f"CLIP匹配失败: {str(e)}"
             logger.error(f"[DecisionAnalyzer] {error_msg}", exc_info=True)
             metadata["errors"].append(error_msg)
-            metadata["warnings"].append("Continuing without similar cases")
+            metadata["warnings"].append("继续执行，不使用相似案例")
             # Continue without similar cases
         
         # ====================================================================
         # STEP 3: Render Decision Prompt Template
         # ====================================================================
-        logger.info("[DecisionAnalyzer] STEP 3: Rendering decision prompt...")
+        logger.info("[DecisionAnalyzer] 步骤 3: 渲染决策提示词模板...")
         step3_start = time.time()
         
         try:
@@ -397,25 +398,25 @@ class DecisionAnalyzer:
             )
             
             logger.info(
-                f"[DecisionAnalyzer] Rendered prompt successfully "
-                f"(length: {len(rendered_prompt)} chars)"
+                f"[DecisionAnalyzer] 提示词模板渲染成功 "
+                f"(长度: {len(rendered_prompt)} 字符)"
             )
             
             step3_time = time.time() - step3_start
-            logger.info(f"[DecisionAnalyzer] STEP 3 completed in {step3_time:.2f}s")
+            logger.info(f"[DecisionAnalyzer] 步骤 3 完成，耗时 {step3_time:.2f}秒")
             
         except Exception as e:
-            error_msg = f"Template rendering failed: {str(e)}"
+            error_msg = f"模板渲染失败: {str(e)}"
             logger.error(f"[DecisionAnalyzer] {error_msg}", exc_info=True)
             metadata["errors"].append(error_msg)
             # Use a simple fallback prompt
             rendered_prompt = f"生成蘑菇房{room_id}的环境调控建议"
-            metadata["warnings"].append("Using simplified prompt due to rendering error")
+            metadata["warnings"].append("由于渲染错误，使用简化提示词")
         
         # ====================================================================
         # STEP 4: Call LLM to Generate Decision
         # ====================================================================
-        logger.info("[DecisionAnalyzer] STEP 4: Calling LLM for decision generation...")
+        logger.info("[DecisionAnalyzer] 步骤 4: 调用LLM生成决策...")
         step4_start = time.time()
         
         try:
@@ -424,15 +425,15 @@ class DecisionAnalyzer:
             prompt_tokens_estimate = prompt_length // 4  # Rough estimate: 1 token ≈ 4 chars
             
             logger.info(
-                f"[DecisionAnalyzer] Prompt length: {prompt_length} chars "
+                f"[DecisionAnalyzer] 提示词长度: {prompt_length} 字符 "
                 f"(~{prompt_tokens_estimate} tokens)"
             )
             
             # Warn if prompt is very long
             if prompt_tokens_estimate > 3000:
                 warning_msg = (
-                    f"Prompt is very long (~{prompt_tokens_estimate} tokens), "
-                    "may exceed model context window"
+                    f"提示词过长 (~{prompt_tokens_estimate} tokens), "
+                    "可能超出模型上下文窗口"
                 )
                 logger.warning(f"[DecisionAnalyzer] {warning_msg}")
                 metadata["warnings"].append(warning_msg)
@@ -446,11 +447,11 @@ class DecisionAnalyzer:
             step4_time = time.time() - step4_start
             metadata["llm_response_time"] = step4_time
             
-            logger.info(f"[DecisionAnalyzer] STEP 4 completed in {step4_time:.2f}s")
+            logger.info(f"[DecisionAnalyzer] 步骤 4 完成，耗时 {step4_time:.2f}秒")
             
             # Check if LLM returned fallback decision
             if llm_decision.get("status") == "fallback":
-                warning_msg = f"LLM fallback: {llm_decision.get('error_reason', 'Unknown')}"
+                warning_msg = f"LLM降级: {llm_decision.get('error_reason', '未知')}"
                 logger.warning(f"[DecisionAnalyzer] {warning_msg}")
                 metadata["warnings"].append(warning_msg)
                 
@@ -459,17 +460,17 @@ class DecisionAnalyzer:
                     metadata["warnings"].extend(llm_decision["metadata"]["warnings"])
             
         except Exception as e:
-            error_msg = f"LLM call failed: {str(e)}"
+            error_msg = f"LLM调用失败: {str(e)}"
             logger.error(f"[DecisionAnalyzer] {error_msg}", exc_info=True)
             metadata["errors"].append(error_msg)
             # Use fallback decision
             llm_decision = self.llm_client._get_fallback_decision(str(e))
-            metadata["warnings"].append("Using fallback decision due to LLM error")
+            metadata["warnings"].append("由于LLM错误，使用降级决策")
         
         # ====================================================================
         # STEP 5: Validate and Format Output
         # ====================================================================
-        logger.info("[DecisionAnalyzer] STEP 5: Validating and formatting output...")
+        logger.info("[DecisionAnalyzer] 步骤 5: 验证并格式化输出...")
         step5_start = time.time()
         
         try:
@@ -490,10 +491,10 @@ class DecisionAnalyzer:
             decision_output.metadata.errors.extend(metadata["errors"])
             
             step5_time = time.time() - step5_start
-            logger.info(f"[DecisionAnalyzer] STEP 5 completed in {step5_time:.2f}s")
+            logger.info(f"[DecisionAnalyzer] 步骤 5 完成，耗时 {step5_time:.2f}秒")
             
         except Exception as e:
-            error_msg = f"Output validation failed: {str(e)}"
+            error_msg = f"输出验证失败: {str(e)}"
             logger.error(f"[DecisionAnalyzer] {error_msg}", exc_info=True)
             metadata["errors"].append(error_msg)
             
@@ -542,25 +543,25 @@ class DecisionAnalyzer:
             f"[DecisionAnalyzer] =========================================="
         )
         logger.info(
-            f"[DecisionAnalyzer] Analysis completed"
+            f"[DecisionAnalyzer] 分析已完成"
         )
         logger.info(
-            f"[DecisionAnalyzer] Status: {decision_output.status}"
+            f"[DecisionAnalyzer] 状态: {decision_output.status}"
         )
         logger.info(
-            f"[DecisionAnalyzer] Total time: {total_time:.2f}s"
+            f"[DecisionAnalyzer] 总耗时: {total_time:.2f}秒"
         )
         logger.info(
-            f"[DecisionAnalyzer] Data sources: {len(decision_output.metadata.data_sources)}"
+            f"[DecisionAnalyzer] 数据源数量: {len(decision_output.metadata.data_sources)}"
         )
         logger.info(
-            f"[DecisionAnalyzer] Similar cases: {decision_output.metadata.similar_cases_count}"
+            f"[DecisionAnalyzer] 相似案例数: {decision_output.metadata.similar_cases_count}"
         )
         logger.info(
-            f"[DecisionAnalyzer] Warnings: {len(decision_output.metadata.warnings)}"
+            f"[DecisionAnalyzer] 警告数: {len(decision_output.metadata.warnings)}"
         )
         logger.info(
-            f"[DecisionAnalyzer] Errors: {len(decision_output.metadata.errors)}"
+            f"[DecisionAnalyzer] 错误数: {len(decision_output.metadata.errors)}"
         )
         logger.info(
             f"[DecisionAnalyzer] =========================================="
@@ -569,7 +570,7 @@ class DecisionAnalyzer:
         # ====================================================================
         # STEP 7: Persist Inference Results to Database
         # ====================================================================
-        logger.info("[DecisionAnalyzer] STEP 7: Persisting inference results to database...")
+        logger.info("[DecisionAnalyzer] 步骤 7: 将推理结果持久化到数据库...")
         persistence_start = time.time()
         
         try:
@@ -596,8 +597,8 @@ class DecisionAnalyzer:
             
             persistence_time = time.time() - persistence_start
             logger.info(
-                f"[DecisionAnalyzer] Successfully persisted inference result: "
-                f"RecordID={inference_record_id}, Time={persistence_time:.2f}s"
+                f"[DecisionAnalyzer] 成功持久化推理结果: "
+                f"RecordID={inference_record_id}, 耗时={persistence_time:.2f}秒"
             )
             
             # 将记录ID添加到元数据中
@@ -607,8 +608,8 @@ class DecisionAnalyzer:
             
         except Exception as e:
             logger.warning(
-                f"[DecisionAnalyzer] Failed to persist inference result: {e}. "
-                f"Analysis will continue without persistence."
+                f"[DecisionAnalyzer] 持久化推理结果失败: {e}. "
+                f"分析将继续，但不进行持久化。"
             )
             # 添加警告到元数据
             decision_output.metadata.warnings.append(

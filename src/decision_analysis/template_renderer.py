@@ -56,7 +56,7 @@ class TemplateRenderer:
         # Build enum mapping cache for faster lookups
         self._build_enum_cache()
         
-        logger.info(f"[TemplateRenderer] Initialized with template: {template_path}")
+        logger.info(f"[TemplateRenderer] 初始化完成，使用模板: {template_path}")
     
     def _escape_json_examples(self, content: str) -> str:
         """
@@ -155,7 +155,7 @@ class TemplateRenderer:
             
         Requirements: 6.3, 6.4, 6.5
         """
-        logger.info("[TemplateRenderer] Rendering decision prompt template")
+        logger.info("[TemplateRenderer] 正在渲染决策提示词模板")
         
         try:
             # Map data to template variables
@@ -166,21 +166,27 @@ class TemplateRenderer:
                 similar_cases=similar_cases
             )
             
+            # Add dynamic device sections
+            template_vars.update({
+                "device_status_section": self._generate_device_status_section(current_data),
+                "device_constraints_section": self._generate_device_constraints_section()
+            })
+            
             # Render template using Python format strings
             rendered_text = self.template_content.format(**template_vars)
             
             logger.info(
-                f"[TemplateRenderer] Successfully rendered template "
-                f"(length: {len(rendered_text)} chars)"
+                f"[TemplateRenderer] 成功渲染模板 "
+                f"(长度: {len(rendered_text)} 字符)"
             )
             
             return rendered_text
             
         except KeyError as e:
-            logger.error(f"[TemplateRenderer] Missing template variable: {e}")
+            logger.error(f"[TemplateRenderer] 缺少模板变量: {e}")
             raise
         except Exception as e:
-            logger.error(f"[TemplateRenderer] Unexpected error during rendering: {e}")
+            logger.error(f"[TemplateRenderer] 渲染过程中发生意外错误: {e}")
             raise
     
     def _map_variables(
@@ -593,7 +599,7 @@ class TemplateRenderer:
             
         Requirements: Enhanced decision analysis with multi-image support
         """
-        logger.info("[TemplateRenderer] Rendering enhanced decision prompt template with multi-image context")
+        logger.info("[TemplateRenderer] 正在渲染增强版决策提示词模板（包含多图像上下文）")
         
         try:
             # Map data to template variables (same as regular render)
@@ -626,19 +632,19 @@ class TemplateRenderer:
             rendered_text = self.template_content.format(**template_vars)
             
             logger.info(
-                f"[TemplateRenderer] Successfully rendered enhanced template "
-                f"(length: {len(rendered_text)} chars, multi-image: {multi_image_analysis is not None})"
+                f"[TemplateRenderer] 成功渲染增强版模板 "
+                f"(长度: {len(rendered_text)} 字符, 多图像分析: {multi_image_analysis is not None})"
             )
             
             return rendered_text
             
         except KeyError as e:
-            logger.error(f"[TemplateRenderer] Missing template variable in enhanced render: {e}")
+            logger.error(f"[TemplateRenderer] 增强版渲染中缺少模板变量: {e}")
             # Fallback to regular render
-            logger.warning("[TemplateRenderer] Falling back to regular render")
+            logger.warning("[TemplateRenderer] 降级到普通渲染模式")
             return self.render(current_data, env_stats, device_changes, similar_cases)
         except Exception as e:
-            logger.error(f"[TemplateRenderer] Unexpected error during enhanced rendering: {e}")
+            logger.error(f"[TemplateRenderer] 增强版渲染过程中发生意外错误: {e}")
             raise
     
     def _map_multi_image_context(self, multi_image_analysis: "MultiImageAnalysis") -> Dict:

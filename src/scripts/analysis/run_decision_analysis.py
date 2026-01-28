@@ -668,16 +668,16 @@ Examples:
     setup_cli_logger(verbose=args.verbose)
     
     logger.info("=" * 80)
-    logger.info("Decision Analysis CLI")
+    logger.info("决策分析命令行工具 / Decision Analysis CLI")
     logger.info("=" * 80)
     
     # Parse datetime
     try:
         analysis_datetime = parse_datetime(args.datetime)
-        logger.info(f"Room ID: {args.room_id}")
-        logger.info(f"Analysis Time: {analysis_datetime}")
+        logger.info(f"库房编号: {args.room_id}")
+        logger.info(f"分析时间: {analysis_datetime}")
     except ValueError as e:
-        logger.error(f"Error: {e}")
+        logger.error(f"错误: {e}")
         return 1
     
     # Execute decision analysis
@@ -696,20 +696,20 @@ Examples:
     # Final summary
     logger.info("")
     logger.info("=" * 80)
-    logger.info("Summary")
+    logger.info("总结 / Summary")
     logger.info("=" * 80)
-    logger.info(f"Success: {result.success}")
-    logger.info(f"Status: {result.status}")
-    logger.info(f"Total Processing Time: {result.processing_time:.2f}s")
+    logger.info(f"成功: {result.success}")
+    logger.info(f"状态: {result.status}")
+    logger.info(f"总处理耗时: {result.processing_time:.2f}秒")
     
     if result.warnings:
-        logger.info(f"Warnings: {len(result.warnings)}")
+        logger.info(f"警告数: {len(result.warnings)}")
     
     if result.error_message:
-        logger.error(f"Error: {result.error_message}")
+        logger.error(f"错误: {result.error_message}")
     
     if result.output_file:
-        logger.info(f"Output File: {result.output_file.absolute()}")
+        logger.info(f"输出文件: {result.output_file.absolute()}")
     
     logger.info("=" * 80)
     
