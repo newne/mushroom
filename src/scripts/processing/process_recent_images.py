@@ -12,8 +12,8 @@ from pathlib import Path
 from global_const.global_const import ensure_src_path
 ensure_src_path()
 
-from clip.recent_image_processor import create_recent_image_processor
-from clip.mushroom_image_encoder import create_mushroom_encoder
+from vision.recent_image_processor import create_recent_image_processor
+from vision.mushroom_image_encoder import create_mushroom_encoder
 from utils.minio_client import create_minio_client
 from datetime import datetime
 

@@ -10,7 +10,7 @@ from global_const.global_const import ensure_src_path
 ensure_src_path()
 
 try:
-    from utils.env_data_processor import create_env_data_processor
+    from environment.processor import create_env_data_processor
     from utils.visualization import analyze_and_plot_rooms
 except Exception:
     # Fallback: import by file path when package import fails
@@ -23,7 +23,7 @@ except Exception:
         return mod
 
     repo_src = os.path.join(SCRIPT_ROOT, "src")
-    env_path = os.path.join(repo_src, "utils", "env_data_processor.py")
+    env_path = os.path.join(repo_src, "environment", "processor.py")
     vis_path = os.path.join(repo_src, "utils", "visualization.py")
     env_mod = _load_from_path("env_data_processor", env_path)
     vis_mod = _load_from_path("visualization", vis_path)

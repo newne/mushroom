@@ -16,12 +16,12 @@
 # 导入基础任务框架
 from .base_task import BaseTask, TaskExecutor, task_wrapper
 
-# 导入所有任务接口函数（从子目录导入）
+# 导入所有任务接口函数（从新模块导入）
 from .table import safe_create_tables
-from .env import safe_daily_env_stats
-from .monitoring import safe_hourly_setpoint_monitoring
-from .clip import safe_hourly_clip_inference
-from .decision import safe_batch_decision_analysis
+from environment.tasks import safe_daily_env_stats
+from monitoring.tasks import safe_hourly_setpoint_monitoring
+from vision.tasks import safe_hourly_clip_inference
+from decision_analysis.tasks import safe_batch_decision_analysis
 
 # 任务接口列表
 __all__ = [

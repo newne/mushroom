@@ -45,7 +45,7 @@ from .task_common import (
     TaskExecutionContext
 )
 
-from .env_data_processor import (
+from environment.processor import (
     EnvDataProcessor,
     create_env_data_processor,
     process_daily_env_stats,

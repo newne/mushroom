@@ -13,7 +13,7 @@ from pathlib import Path
 from global_const.global_const import ensure_src_path
 ensure_src_path()
 
-from utils.env_data_processor import create_env_data_processor
+from environment.processor import create_env_data_processor
 from utils.loguru_setting import logger
 
 
