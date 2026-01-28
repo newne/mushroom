@@ -33,7 +33,7 @@ def parse_iot_dataframe_to_records(
             'in_day': df.get((room_id, 'mushroom_info', 'in_day')),
             'in_num': df.get((room_id, 'mushroom_info', 'in_num')),
             'growth_day': df.get((room_id, 'mushroom_info', 'in_day_num'))
-        }, index=df.index).fillna(0).infer_objects(copy=False)  # <--- ✅ 修复点
+        }, index=df.index).infer_objects(copy=False).fillna(0)  # <--- ✅ 修复点
 
         # 注意：growth_stage 字段已从数据库表中删除，此处不再需要计算
 
@@ -52,7 +52,7 @@ def parse_iot_dataframe_to_records(
             'temp_set': df.get((room_id, 'air_cooler', 'temp_set')),
             'temp': df.get((room_id, 'air_cooler', 'temp')),
             'diff': df.get((room_id, 'air_cooler', 'temp_diffset'))
-        }, index=df.index).fillna(0).infer_objects(copy=False)  # <--- ✅ 修复点
+        }, index=df.index).infer_objects(copy=False).fillna(0)  # <--- ✅ 修复点
 
         # 新风机
         ff_df = pd.DataFrame({
@@ -63,7 +63,7 @@ def parse_iot_dataframe_to_records(
             'time_off': df.get((room_id, 'fresh_air_fan', 'off')),
             'co2_on': df.get((room_id, 'fresh_air_fan', 'co2_on')),
             'co2_off': df.get((room_id, 'fresh_air_fan', 'co2_off'))
-        }, index=df.index).fillna(0).infer_objects(copy=False)  # <--- ✅ 修复点
+        }, index=df.index).infer_objects(copy=False).fillna(0)  # <--- ✅ 修复点
 
         # 补光灯
         lt_df = pd.DataFrame({
@@ -71,7 +71,7 @@ def parse_iot_dataframe_to_records(
             'status': df.get((room_id, 'grow_light', 'mode')),
             'on_mset': df.get((room_id, 'grow_light', 'on_mset')),
             'off_mset': df.get((room_id, 'grow_light', 'off_mset'))
-        }, index=df.index).fillna(0).infer_objects(copy=False)  # <--- ✅ 修复点
+        }, index=df.index).infer_objects(copy=False).fillna(0)  # <--- ✅ 修复点
 
         # 补光灯逻辑
         light_count = ((lt_df['model'] != 0) & (lt_df['status'] < 3)).astype(int)
@@ -167,12 +167,24 @@ def _build_semantic_desc(
     return "。".join(parts) + "。" if parts else "无环境控制策略。"
 
 
-all_query_list=get_all_device_configs()
-all_query_df=pd.concat(all_query_list.values())
-start_time=datetime(2025,12,30,16,1)
-end_time=datetime(2025,12,30,16,3)
-df = all_query_df.groupby("device_alias").apply(query_data_by_batch_time, start_time, end_time,include_groups=True).reset_index().sort_values("time")
-df['room']=df['device_name'].apply(lambda x:x.split('_')[-1])
-df1=df.pivot_table(index='time',columns=['room','device_name','point_name'],values='value')
-res=parse_iot_dataframe_to_records(df1, {}, df1.index)
-print(res)
+if __name__ == "__main__":
+    all_query_list=get_all_device_configs()
+    all_query_df=pd.concat(all_query_list.values())
+    start_time=datetime(2025,12,30,16,1)
+    end_time=datetime(2025,12,30,16,3)
+    
+    # Fix for FutureWarning: Replace groupby.apply with iteration
+    results = []
+    for _, group in all_query_df.groupby("device_alias"):
+        res = query_data_by_batch_time(group, start_time, end_time)
+        results.append(res)
+    
+    if results:
+        df = pd.concat(results).reset_index().sort_values("time")
+    else:
+        df = pd.DataFrame()
+        
+    df['room']=df['device_name'].apply(lambda x:x.split('_')[-1])
+    df1=df.pivot_table(index='time',columns=['room','device_name','point_name'],values='value')
+    res=parse_iot_dataframe_to_records(df1, {}, df1.index)
+    print(res)

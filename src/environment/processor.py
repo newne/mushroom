@@ -60,11 +60,16 @@ class EnvDataProcessor:
                 end_time = collection_time + timedelta(minutes=time_window_minutes)
                 
                 # 查询数据
-                df = env_config.groupby("device_alias").apply(
-                    query_data_by_batch_time, 
-                    start_time, 
-                    end_time
-                ).reset_index(drop=True)
+                # Fix for FutureWarning: Replace groupby.apply with iteration
+                results = []
+                for _, group in env_config.groupby("device_alias"):
+                    res = query_data_by_batch_time(group, start_time, end_time)
+                    results.append(res)
+                
+                if results:
+                    df = pd.concat(results).reset_index(drop=True)
+                else:
+                    df = pd.DataFrame()
                 
                 if not df.empty:
                     # 数据透视
@@ -193,12 +198,16 @@ def get_room_env_data(room_id: str, stat_date: date) -> pd.DataFrame:
         end_time = start_time + timedelta(days=1)
         
         # 3. 查询数据
-        # 使用 groupby().apply() 模式来查询数据
-        df = env_config.groupby("device_alias").apply(
-            query_data_by_batch_time, 
-            start_time, 
-            end_time
-        ).reset_index(drop=True)
+        # Fix for FutureWarning: Replace groupby.apply with iteration
+        results = []
+        for _, group in env_config.groupby("device_alias", as_index=False):
+            res = query_data_by_batch_time(group, start_time, end_time)
+            results.append(res)
+        
+        if results:
+            df = pd.concat(results).reset_index(drop=True)
+        else:
+            df = pd.DataFrame()
         
         if df.empty:
             logger.debug(f"[ENV_PROCESSOR] 库房 {room_id} 在 {stat_date} 无原始环境数据")

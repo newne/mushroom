@@ -206,7 +206,7 @@ class MushroomImageEncoder:
                         logger.warning(f"[LLAMA-003] 质量评分超出范围 | 评分: {quality_score}")
                         quality_score = max(0, min(100, quality_score))
                     
-                    logger.debug(f"LLaMA解析成功: 质量评分={quality_score}")
+                    logger.trace(f"LLaMA解析成功: 质量评分={quality_score}")
                     return {"growth_stage_description": description, "image_quality_score": quality_score}
                     
                 except json.JSONDecodeError as e:
@@ -296,7 +296,7 @@ class MushroomImageEncoder:
             
             # 调用LLaMA API
             result = self._call_llama_api(image_data)
-            logger.debug(f"LLaMA result: description='{result.get('growth_stage_description', '')[:50]}...', quality_score={result.get('image_quality_score')}")
+            logger.trace(f"LLaMA result: description='{result.get('growth_stage_description', '')[:50]}...', quality_score={result.get('image_quality_score')}")
             return result
             
         except Exception as e:
@@ -353,7 +353,7 @@ class MushroomImageEncoder:
             embedding = multimodal_features.cpu().numpy()[0]
             embedding = embedding / np.linalg.norm(embedding)
             
-            logger.debug(f"Generated multimodal embedding for text: '{text_description[:50]}...'")
+            logger.trace(f"Generated multimodal embedding for text: '{text_description[:50]}...'")
             return embedding.tolist()
             
         except Exception as e:
@@ -443,7 +443,7 @@ class MushroomImageEncoder:
             # 映射库房号：MinIO中的库房号 -> 环境配置中的库房号
             mapped_room_id = self._map_room_id(mushroom_id)
             
-            logger.debug(f"Querying environment data for room {mushroom_id} (mapped to {mapped_room_id}) at time {collection_time}")
+            logger.trace(f"Querying environment data for room {mushroom_id} (mapped to {mapped_room_id}) at time {collection_time}")
             
             # 使用映射后的库房号查询环境数据
             env_data = self.env_processor.get_environment_data(
@@ -454,10 +454,10 @@ class MushroomImageEncoder:
             )
             
             if env_data:
-                logger.debug(f"获取环境数据成功: 库房{mushroom_id}")
+                logger.trace(f"获取环境数据成功: 库房{mushroom_id}")
                 return env_data
             else:
-                logger.debug(f"未找到环境数据: 库房{mushroom_id}")
+                logger.trace(f"未找到环境数据: 库房{mushroom_id}")
                 return None
                 
         except Exception as e:
@@ -523,14 +523,14 @@ class MushroomImageEncoder:
             if growth_stage_description and growth_stage_description != "No visible structures":
                 # 结合身份元数据和LLaMA生长阶段描述
                 full_text_description = f"{identity_metadata} {growth_stage_description}"
-                logger.debug(f"使用组合描述: 身份+LLaMA")
+                logger.trace(f"使用组合描述: 身份+LLaMA")
             else:
                 # 如果LLaMA描述失败或为空，仅使用身份元数据
                 full_text_description = identity_metadata
                 if growth_stage_description:
-                    logger.debug(f"LLaMA返回无可见结构，仅使用身份元数据")
+                    logger.trace(f"LLaMA返回无可见结构，仅使用身份元数据")
                 else:
-                    logger.debug(f"LLaMA描述为空，仅使用身份元数据")
+                    logger.trace(f"LLaMA描述为空，仅使用身份元数据")
             
             # 7. 使用多模态编码（图像 + 完整文本描述）
             embedding = self.get_multimodal_embedding(image, full_text_description)
@@ -935,7 +935,7 @@ class MushroomImageEncoder:
                 existing.image_quality_score = env_data.get('image_quality_score', None)
                 existing.updated_at = datetime.now()
                 
-                logger.debug(f"更新数据库记录: {image_info.file_name}")
+                logger.trace(f"更新数据库记录: {image_info.file_name}")
             else:
                 # 创建新记录
                 new_record = MushroomImageEmbedding(
@@ -959,7 +959,7 @@ class MushroomImageEncoder:
                 )
                 
                 session.add(new_record)
-                logger.debug(f"创建数据库记录: {image_info.file_name}")
+                logger.trace(f"创建数据库记录: {image_info.file_name}")
             
             session.commit()
             return True

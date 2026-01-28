@@ -45,7 +45,7 @@ minio_bucket_name = "mogu"
 
 
 [development.llama]
-llama_host = "10.66.66.51"
+llama_host = "10.77.77.49"
 llama_port = "7001"
 model = "qwen/qwen3-vl-4b"
 llama_completions = "http://{0}:{1}/v1/chat/completions"
