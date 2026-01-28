@@ -45,13 +45,6 @@ from .task_common import (
     TaskExecutionContext
 )
 
-from environment.processor import (
-    EnvDataProcessor,
-    create_env_data_processor,
-    process_daily_env_stats,
-    get_env_trend_analysis
-)
-
 # 工具类列表
 __all__ = [
     # 数据库工具
@@ -78,10 +71,4 @@ __all__ = [
     'get_time_range_for_task',
     'validate_room_ids',
     'TaskExecutionContext',
-    
-    # 环境数据处理
-    'EnvDataProcessor',
-    'create_env_data_processor',
-    'process_daily_env_stats',
-    'get_env_trend_analysis',
 ]

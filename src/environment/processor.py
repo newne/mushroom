@@ -25,6 +25,91 @@ class EnvDataProcessor:
         """获取库房环境数据"""
         return get_room_env_data(room_id, stat_date)
     
+    def get_environment_data(self, room_id: str, collection_time: datetime, image_path: str, time_window_minutes: int = 30) -> Dict[str, Any]:
+        """
+        获取指定时间点的环境数据
+        
+        Args:
+            room_id: 库房编号
+            collection_time: 采集时间
+            image_path: 图像路径
+            time_window_minutes: 时间窗口（分钟）
+            
+        Returns:
+            环境数据字典
+        """
+        try:
+            from utils.dataframe_utils import get_all_device_configs
+            from utils.data_preprocessing import query_data_by_batch_time
+            
+            # 1. 初始化结果
+            env_data = {
+                'room_id': room_id,
+                'in_date': collection_time.date(),
+                'semantic_description': f"Mushroom Room {room_id}, Time: {collection_time}",
+                'env_sensor_status': '{}'
+            }
+            
+            # 2. 获取环境传感器配置
+            device_configs = get_all_device_configs(room_id=room_id)
+            
+            # 3. 获取环境传感器数据 (temperature, humidity, co2)
+            if device_configs and 'mushroom_env_status' in device_configs:
+                env_config = device_configs['mushroom_env_status']
+                start_time = collection_time - timedelta(minutes=time_window_minutes)
+                end_time = collection_time + timedelta(minutes=time_window_minutes)
+                
+                # 查询数据
+                df = env_config.groupby("device_alias").apply(
+                    query_data_by_batch_time, 
+                    start_time, 
+                    end_time
+                ).reset_index(drop=True)
+                
+                if not df.empty:
+                    # 数据透视
+                    pivot_col = 'point_alias' if 'point_alias' in df.columns else 'point_name'
+                    # 确保 pivot_col 存在
+                    if pivot_col not in df.columns:
+                         # 尝试使用 point_name
+                         pivot_col = 'point_name'
+
+                    pivot_df = df.pivot_table(
+                        index='time', 
+                        columns=pivot_col, 
+                        values='value'
+                    ).reset_index()
+                    
+                    # 计算平均值并更新 env_data
+                    desc_parts = []
+                    
+                    if 'temperature' in pivot_df.columns:
+                        temp = pivot_df['temperature'].mean()
+                        env_data['temperature'] = temp
+                        desc_parts.append(f"Temperature: {temp:.1f}C")
+                        
+                    if 'humidity' in pivot_df.columns:
+                        hum = pivot_df['humidity'].mean()
+                        env_data['humidity'] = hum
+                        desc_parts.append(f"Humidity: {hum:.1f}%")
+                        
+                    if 'co2' in pivot_df.columns:
+                        co2 = pivot_df['co2'].mean()
+                        env_data['co2'] = co2
+                        desc_parts.append(f"CO2: {co2:.0f}ppm")
+                        
+                    if desc_parts:
+                        env_data['semantic_description'] += ". Environment: " + ", ".join(desc_parts) + "."
+                        
+                    # 序列化传感器状态 (简化)
+                    env_data['env_sensor_status'] = df.head(1).to_json() 
+
+            return env_data
+            
+        except Exception as e:
+            logger.error(f"[ENV_PROCESSOR] 获取环境数据失败: {e}")
+            return None
+
     def calculate_statistics(self, env_data: pd.DataFrame) -> Dict[str, Any]:
         """计算环境统计"""
         return calculate_env_statistics(env_data)
