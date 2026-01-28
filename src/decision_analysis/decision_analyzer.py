@@ -6,6 +6,7 @@ It coordinates data extraction, CLIP matching, template rendering, LLM calling,
 and output validation.
 """
 
+import json
 import time
 from datetime import datetime
 from pathlib import Path
