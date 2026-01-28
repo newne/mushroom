@@ -246,13 +246,16 @@ class MushroomImageProcessor:
         if hasattr(self, 'session'):
             self.session.close()
     
-    def get_mushroom_images(self, mushroom_id: str = None, date_filter: str = None) -> List[MushroomImageInfo]:
+    def get_mushroom_images(self, mushroom_id: str = None, date_filter: str = None,
+                          start_time: datetime = None, end_time: datetime = None) -> List[MushroomImageInfo]:
         """
         获取蘑菇图像列表
         
         Args:
             mushroom_id: 蘑菇库号过滤
             date_filter: 日期过滤 (YYYYMMDD)
+            start_time: 开始时间过滤 (含)
+            end_time: 结束时间过滤 (不含)
             
         Returns:
             蘑菇图像信息列表
@@ -277,12 +280,19 @@ class MushroomImageProcessor:
                 if date_filter and image_info.date_folder != date_filter:
                     continue
                 
+                # 应用时间范围过滤
+                if start_time and image_info.collection_datetime < start_time:
+                    continue
+                if end_time and image_info.collection_datetime >= end_time:
+                    continue
+                
                 mushroom_images.append(image_info)
         
         # 按时间排序
         mushroom_images.sort(key=lambda x: x.collection_datetime)
         
-        logger.info(f"找到 {len(mushroom_images)} 个蘑菇图像文件")
+        time_range_msg = f"[{start_time} ~ {end_time}]" if start_time or end_time else "[全部时间]"
+        logger.info(f"找到 {len(mushroom_images)} 个蘑菇图像文件 {time_range_msg} (原始总数: {len(image_files)})")
         return mushroom_images
     
     def process_single_image(self, image_info: MushroomImageInfo, description: str = None) -> bool:

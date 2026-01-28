@@ -973,6 +973,8 @@ class MushroomImageEncoder:
     
     def batch_process_images(self, mushroom_id: Optional[str] = None, 
                            date_filter: Optional[str] = None,
+                           start_time: Optional[datetime] = None,
+                           end_time: Optional[datetime] = None,
                            batch_size: int = 10) -> Dict[str, int]:
         """
         批量处理图像
@@ -980,21 +982,26 @@ class MushroomImageEncoder:
         Args:
             mushroom_id: 蘑菇库号过滤
             date_filter: 日期过滤 (YYYYMMDD)
+            start_time: 开始时间过滤 (含)
+            end_time: 结束时间过滤 (不含)
             batch_size: 批处理大小
             
         Returns:
             处理统计结果
         """
-        logger.info("🚀 开始批量处理图像")
+        time_msg = f"[{start_time} ~ {end_time}]" if start_time or end_time else ""
+        logger.info(f"🚀 开始批量处理图像 {time_msg}")
         
         # 获取所有蘑菇图像
         all_images = self.processor.get_mushroom_images(
             mushroom_id=mushroom_id,
-            date_filter=date_filter
+            date_filter=date_filter,
+            start_time=start_time,
+            end_time=end_time
         )
         
         if not all_images:
-            logger.warning("⚠️ 未找到符合条件的图像")
+            logger.warning(f"⚠️ 未找到符合条件的图像 {time_msg}")
             return {'total': 0, 'success': 0, 'failed': 0, 'skipped': 0}
         
         logger.info(f"📊 找到 {len(all_images)} 张图像待处理")

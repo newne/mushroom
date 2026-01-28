@@ -54,6 +54,8 @@ def safe_hourly_clip_inference() -> None:
                     stats = encoder.batch_process_images(
                         mushroom_id=room_id,
                         date_filter=None,  # 不使用日期过滤，依赖时间范围过滤
+                        start_time=start_time_filter,
+                        end_time=end_time,
                         batch_size=CLIP_INFERENCE_BATCH_SIZE
                     )
                     
