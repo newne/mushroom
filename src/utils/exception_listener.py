@@ -102,6 +102,12 @@ def get_scheduler_instance() -> Optional[Any]:
         return _SCHEDULER_INSTANCE
 
 # ===================== 超时阈值计算（职责单一） =====================
+def _is_field_static(field: Any) -> bool:
+    """判断 Cron 字段是否为静态值（单个数字）"""
+    if field is None:
+        return False
+    return str(field).isdigit()
+
 def _calculate_cron_timeout(trigger: CronTrigger, job_id: str) -> int:
     """解析 CronTrigger 计算任务超时阈值（秒）
 
@@ -117,7 +123,7 @@ def _calculate_cron_timeout(trigger: CronTrigger, job_id: str) -> int:
     hour_field = next((f for f in fields if f.name == "hour"), None)
 
     # 天级任务（固定小时/分钟）
-    if hour_field and hour_field.is_static and minute_field and minute_field.is_static:
+    if hour_field and _is_field_static(hour_field) and minute_field and _is_field_static(minute_field):
         timeout_sec = 25 * 3600  # 25小时
         logger.debug(
             f"[HEALTH-020] 任务 {job_id} 为天级 Cron 任务 | 超时阈值 {timeout_sec} 秒"
@@ -125,7 +131,7 @@ def _calculate_cron_timeout(trigger: CronTrigger, job_id: str) -> int:
         return timeout_sec
 
     # 小时级任务（分钟固定，小时动态）
-    if hour_field and not hour_field.is_static and minute_field and minute_field.is_static:
+    if hour_field and not _is_field_static(hour_field) and minute_field and _is_field_static(minute_field):
         timeout_sec = 2 * 3600  # 2小时
         logger.debug(
             f"[HEALTH-021] 任务 {job_id} 为小时级 Cron 任务 | 超时阈值 {timeout_sec} 秒"
@@ -133,7 +139,7 @@ def _calculate_cron_timeout(trigger: CronTrigger, job_id: str) -> int:
         return timeout_sec
 
     # 分钟级任务
-    if minute_field and not minute_field.is_static:
+    if minute_field and not _is_field_static(minute_field):
         expr = str(minute_field.expressions[0]) if minute_field.expressions else ""
         if expr.startswith("*/"):
             try:
