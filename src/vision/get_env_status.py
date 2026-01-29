@@ -173,9 +173,9 @@ if __name__ == "__main__":
     start_time=datetime(2025,12,30,16,1)
     end_time=datetime(2025,12,30,16,3)
     
-    # Fix for FutureWarning: Replace groupby.apply with iteration
+    # Fix for FutureWarning: Use include_groups=False to silence deprecation warning
     results = []
-    for _, group in all_query_df.groupby("device_alias"):
+    for _, group in all_query_df.groupby("device_alias", include_groups=False):
         res = query_data_by_batch_time(group, start_time, end_time)
         results.append(res)
     

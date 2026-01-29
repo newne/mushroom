@@ -101,9 +101,21 @@ class MushroomImageEncoder:
             model_name = 'openai/clip-vit-base-patch32'
         
         logger.debug(f"加载CLIP模型: {model_name}")
+        import warnings
+        from transformers import logging as trans_log
+        
+        # 临时抑制transformers库的模型加载警告
+        trans_log.set_verbosity_error()
+        warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
+        
         self.clip_processor = CLIPProcessor.from_pretrained(model_name)
         self.clip_model = CLIPModel.from_pretrained(model_name).to(self.device)
         self.clip_model.eval()
+        
+        # 恢复警告
+        trans_log.set_verbosity_warning()
+        warnings.resetwarnings()
+        
         logger.debug(f"CLIP模型加载完成")
     
     def _init_env_processor(self):
@@ -378,6 +390,37 @@ class MushroomImageEncoder:
             image_weight = 0.7
             text_weight = 0.3
             
+            # 确保特征是tensor格式，处理可能的BaseModelOutputWithPooling对象
+            if hasattr(image_features, 'last_hidden_state'):
+                # Take the pooled output if available, otherwise take the CLS token
+                if hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                    image_features = image_features.pooler_output
+                else:
+                    image_features = image_features.last_hidden_state[:, 0, :]  # Take the CLS token
+            elif hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                image_features = image_features.pooler_output
+            elif torch.is_tensor(image_features):
+                # Already a tensor, use as-is
+                pass
+            else:
+                # Fallback: assume it's a tensor-like object
+                image_features = image_features
+            
+            if hasattr(text_features, 'last_hidden_state'):
+                # Take the pooled output if available, otherwise take the CLS token
+                if hasattr(text_features, 'pooler_output') and text_features.pooler_output is not None:
+                    text_features = text_features.pooler_output
+                else:
+                    text_features = text_features.last_hidden_state[:, 0, :]  # Take the CLS token
+            elif hasattr(text_features, 'pooler_output') and text_features.pooler_output is not None:
+                text_features = text_features.pooler_output
+            elif torch.is_tensor(text_features):
+                # Already a tensor, use as-is
+                pass
+            else:
+                # Fallback: assume it's a tensor-like object
+                text_features = text_features
+            
             # 归一化各自的特征
             image_features_norm = image_features / image_features.norm(dim=-1, keepdim=True)
             text_features_norm = text_features / text_features.norm(dim=-1, keepdim=True)
@@ -422,6 +465,22 @@ class MushroomImageEncoder:
             # 获取图像特征
             with torch.no_grad():
                 image_features = self.clip_model.get_image_features(**inputs)
+            
+            # 确保特征是tensor格式，处理可能的BaseModelOutputWithPooling对象
+            if hasattr(image_features, 'last_hidden_state'):
+                # Take the pooled output if available, otherwise take the CLS token
+                if hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                    image_features = image_features.pooler_output
+                else:
+                    image_features = image_features.last_hidden_state[:, 0, :]  # Take the CLS token
+            elif hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                image_features = image_features.pooler_output
+            elif torch.is_tensor(image_features):
+                # Already a tensor, use as-is
+                pass
+            else:
+                # Fallback: assume it's a tensor-like object
+                image_features = image_features
             
             # 归一化向量（对余弦相似度很重要）
             embedding = image_features.cpu().numpy()[0]
@@ -860,6 +919,37 @@ class MushroomImageEncoder:
             image_weight = 0.7
             text_weight = 0.3
             
+            # 确保特征是tensor格式，处理可能的BaseModelOutputWithPooling对象
+            if hasattr(image_features, 'last_hidden_state'):
+                # Take the pooled output if available, otherwise take the CLS token
+                if hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                    image_features = image_features.pooler_output
+                else:
+                    image_features = image_features.last_hidden_state[:, 0, :]  # Take the CLS token
+            elif hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                image_features = image_features.pooler_output
+            elif torch.is_tensor(image_features):
+                # Already a tensor, use as-is
+                pass
+            else:
+                # Fallback: assume it's a tensor-like object
+                image_features = image_features
+            
+            if hasattr(text_features, 'last_hidden_state'):
+                # Take the pooled output if available, otherwise take the CLS token
+                if hasattr(text_features, 'pooler_output') and text_features.pooler_output is not None:
+                    text_features = text_features.pooler_output
+                else:
+                    text_features = text_features.last_hidden_state[:, 0, :]  # Take the CLS token
+            elif hasattr(text_features, 'pooler_output') and text_features.pooler_output is not None:
+                text_features = text_features.pooler_output
+            elif torch.is_tensor(text_features):
+                # Already a tensor, use as-is
+                pass
+            else:
+                # Fallback: assume it's a tensor-like object
+                text_features = text_features
+            
             image_features_norm = image_features / image_features.norm(dim=-1, keepdim=True)
             text_features_norm = text_features / text_features.norm(dim=-1, keepdim=True)
             
@@ -902,6 +992,22 @@ class MushroomImageEncoder:
             # 批量获取图像特征
             with torch.no_grad():
                 image_features = self.clip_model.get_image_features(**inputs)
+            
+            # 确保特征是tensor格式，处理可能的BaseModelOutputWithPooling对象
+            if hasattr(image_features, 'last_hidden_state'):
+                # Take the pooled output if available, otherwise take the CLS token
+                if hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                    image_features = image_features.pooler_output
+                else:
+                    image_features = image_features.last_hidden_state[:, 0, :]  # Take the CLS token
+            elif hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                image_features = image_features.pooler_output
+            elif torch.is_tensor(image_features):
+                # Already a tensor, use as-is
+                pass
+            else:
+                # Fallback: assume it's a tensor-like object
+                image_features = image_features
             
             # 归一化并转换为列表
             embeddings = []

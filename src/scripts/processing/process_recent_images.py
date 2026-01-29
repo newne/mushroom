@@ -29,7 +29,8 @@ def main():
     )
     
     parser.add_argument(
-        '--room-id', 
+        '--room-id',
+
         type=str, 
         help='指定库房号，如果不指定则处理所有库房'
     )
