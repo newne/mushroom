@@ -118,17 +118,29 @@ class MushroomImageEncoder:
     def _init_llama_client(self):
         """初始化LLaMA客户端"""
         try:
+            # 仅使用 llama-vl 配置，不回退到纯文本 llama 配置
+            # Dynaconf 将 'llama-vl' 转换为 'llama_vl'
+            if hasattr(settings, 'llama_vl'):
+                self.llama_config = settings.llama_vl
+                logger.debug("使用 llama-vl 配置")
+            else:
+                logger.warning("未找到 LLaMA-VL 配置，视觉描述功能将不可用")
+                self.llama_client = False
+                return
+
             # 检查是否启用LLaMA
-            if hasattr(settings.llama, 'enabled') and not settings.llama.enabled:
-                logger.debug("LLaMA已禁用")
+            if hasattr(self.llama_config, 'enabled') and not self.llama_config.enabled:
+                logger.debug("LLaMA-VL已禁用")
                 self.llama_client = False
                 return
                 
             # 标记LLaMA客户端可用
             self.llama_client = True
-            logger.debug("LLaMA客户端初始化完成")
+            logger.debug(f"LLaMA-VL客户端初始化完成 | 模型: {getattr(self.llama_config, 'model', 'unknown')} | "
+                        f"地址: {getattr(self.llama_config, 'llama_host', 'localhost')}:{getattr(self.llama_config, 'llama_port', '7001')}")
+                        
         except Exception as e:
-            logger.warning(f"LLaMA客户端初始化失败: {e}")
+            logger.warning(f"LLaMA-VL客户端初始化失败: {e}")
             self.llama_client = False
     
     def _call_llama_api(self, image_data: str) -> str:
@@ -146,10 +158,17 @@ class MushroomImageEncoder:
             prompt = self.get_data.get_mushroom_prompt()
             if not prompt:
                 logger.warning("[LLAMA-API] 无法获取提示词，使用配置文件中的默认值")
-                prompt = settings.llama.mushroom_descripe_prompt
+                # 尝试从配置获取，如果没有则使用默认值
+                prompt = getattr(self.llama_config, 'mushroom_descripe_prompt', "Describe the mushroom growth stage.")
+            
+            # 获取配置参数，提供默认值
+            model = getattr(self.llama_config, 'model', "qwen/qwen3-vl-2b")
+            temperature = getattr(self.llama_config, 'temperature', 0.7)
+            max_tokens = getattr(self.llama_config, 'max_tokens', 1024)
+            top_p = getattr(self.llama_config, 'top_p', 0.9)
             
             payload = {
-                "model": f"{settings.llama.model}",
+                "model": model,
                 "messages": [
                     {
                         "role": "system",
@@ -162,20 +181,26 @@ class MushroomImageEncoder:
                         ]
                     }
                 ],
-                "max_tokens": -1,
-                "temperature": 0.7,
+                "max_tokens": max_tokens,
+                "temperature": temperature,
+                "top_p": top_p,
                 "stream": False
             }
 
             headers = {
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {settings.llama.api_key}"
+                # 如果有 API Key
+                "Authorization": f"Bearer {getattr(self.llama_config, 'api_key', '')}"
             }
             
-            base_url = settings.llama.llama_completions.format(settings.llama.llama_host, settings.llama.llama_port)
+            # 构建URL
+            host = getattr(self.llama_config, 'llama_host', 'localhost')
+            port = getattr(self.llama_config, 'llama_port', '7001')
+            base_url_template = getattr(self.llama_config, 'llama_completions', "http://{0}:{1}/v1/chat/completions")
+            base_url = base_url_template.format(host, port)
             
             # 从配置获取超时时间，默认600秒
-            timeout = getattr(settings.llama, 'timeout', 600)
+            timeout = getattr(self.llama_config, 'timeout', 600)
             
             # 使用requests直接发送请求，使用配置的超时时间
             resp = requests.post(base_url, json=payload, headers=headers, timeout=timeout)
@@ -187,6 +212,12 @@ class MushroomImageEncoder:
                 # 解析JSON响应
                 try:
                     # 尝试直接解析JSON
+                    # 有些模型可能返回包含Markdown代码块的JSON，需要清理
+                    if "```json" in content:
+                        content = content.split("```json")[1].split("```")[0].strip()
+                    elif "```" in content:
+                        content = content.split("```")[1].split("```")[0].strip()
+                        
                     llama_result = json.loads(content)
                     
                     # 验证必需字段
@@ -210,17 +241,17 @@ class MushroomImageEncoder:
                     return {"growth_stage_description": description, "image_quality_score": quality_score}
                     
                 except json.JSONDecodeError as e:
-                    logger.error(f"[LLAMA-004] JSON解析失败 | 错误: {e}")
+                    logger.error(f"[LLAMA-004] JSON解析失败 | 错误: {e} | 内容: {content[:100]}...")
                     return {"growth_stage_description": "", "image_quality_score": None}
                 except KeyError as e:
                     logger.error(f"[LLAMA-005] 响应缺少键 | 键: {e}")
                     return {"growth_stage_description": "", "image_quality_score": None}
             else:
-                logger.error(f"[LLAMA-006] API调用失败 | 状态码: {resp.status_code}")
+                logger.error(f"[LLAMA-006] API调用失败 | 状态码: {resp.status_code} | 响应: {resp.text[:200]}")
                 return {"growth_stage_description": "", "image_quality_score": None}
                 
         except requests.exceptions.Timeout:
-            logger.warning(f"[LLAMA-007] API超时 | 超时时间: {getattr(settings.llama, 'timeout', 600)}秒")
+            logger.warning(f"[LLAMA-007] API超时 | 超时时间: {getattr(self.llama_config, 'timeout', 600)}秒")
             return {"growth_stage_description": "", "image_quality_score": None}
         except requests.exceptions.ConnectionError as e:
             logger.warning(f"[LLAMA-008] 连接错误 | 错误: {e}")
@@ -231,7 +262,7 @@ class MushroomImageEncoder:
     
     def _resize_image_for_llama(self, image: Image.Image) -> Image.Image:
         """
-        将图像缩放到960x540分辨率用于LLaMA处理，减少运算量
+        将图像缩放到指定分辨率用于LLaMA处理，减少运算量
         
         Args:
             image: 原始PIL图像对象
@@ -240,19 +271,25 @@ class MushroomImageEncoder:
             缩放后的PIL图像对象
         """
         try:
-            # 目标分辨率：短边960，长边按比例缩放
+            # 获取配置的目标分辨率，默认为960
+            target_width = getattr(self.llama_config, 'image_width', 960)
+            target_height = getattr(self.llama_config, 'image_height', 960)
+            
+            # 使用较小的一边作为基准
+            target_size = min(target_width, target_height)
+            
             original_width, original_height = image.size
             
-            # 计算缩放比例，使短边为960
+            # 计算缩放比例，使短边为target_size
             if original_width < original_height:
                 # 宽度是短边
-                scale_ratio = 960 / original_width
-                new_width = 960
+                scale_ratio = target_size / original_width
+                new_width = target_size
                 new_height = int(original_height * scale_ratio)
             else:
                 # 高度是短边
-                scale_ratio = 960 / original_height
-                new_height = 960
+                scale_ratio = target_size / original_height
+                new_height = target_size
                 new_width = int(original_width * scale_ratio)
             
             # 如果新尺寸超过原尺寸，则不放大，保持原尺寸
