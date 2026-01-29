@@ -200,10 +200,16 @@ class MushroomImageEncoder:
             }
 
             headers = {
-                "Content-Type": "application/json",
-                # 如果有 API Key
-                "Authorization": f"Bearer {getattr(self.llama_config, 'api_key', '')}"
+                "Content-Type": "application/json"
             }
+            
+            # 添加API密钥，按照优先级顺序查找
+            # 根据VL模型专用API密钥命名规范，优先使用api_key_vl字段
+            if hasattr(self.llama_config, 'api_key_vl'):
+                headers["X-API-Key"] = self.llama_config.api_key_vl
+            elif hasattr(self.llama_config, 'api_key'):
+                headers["X-API-Key"] = self.llama_config.api_key
+            # 如果都没有，则不设置API密钥（由API服务器决定是否允许）
             
             # 构建URL
             host = getattr(self.llama_config, 'llama_host', 'localhost')

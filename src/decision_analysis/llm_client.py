@@ -92,10 +92,27 @@ class LLMClient:
                 f"with model={self.model}, temperature={temperature}"
             )
             
-            # Send POST request with timeout
+            # Prepare headers with API key if available
+            headers = {
+                "Content-Type": "application/json"
+            }
+            
+            # Add API key if configured
+            # First check for VL-specific API key, then fall back to general API key
+            if hasattr(self.settings, 'llama_vl') and hasattr(self.settings.llama_vl, 'api_key_vl'):
+                headers["X-API-Key"] = self.settings.llama_vl.api_key_vl
+            elif hasattr(self.settings, 'llama') and hasattr(self.settings.llama, 'api_key_vl'):
+                headers["X-API-Key"] = self.settings.llama.api_key_vl
+            elif hasattr(self.settings, 'llama') and hasattr(self.settings.llama, 'api_key'):
+                headers["X-API-Key"] = self.settings.llama.api_key
+            elif hasattr(self.settings, 'llama_vl') and hasattr(self.settings.llama_vl, 'api_key'):
+                headers["X-API-Key"] = self.settings.llama_vl.api_key
+            
+            # Send POST request with timeout and headers
             response = requests.post(
                 self.api_url,
                 json=payload,
+                headers=headers,
                 timeout=self.timeout
             )
             
@@ -452,10 +469,27 @@ class LLMClient:
                 f"with model={self.model}, temperature={temperature}, max_tokens={max_tokens}"
             )
             
-            # Send POST request with timeout
+            # Prepare headers with API key if available
+            headers = {
+                "Content-Type": "application/json"
+            }
+            
+            # Add API key if configured
+            # First check for VL-specific API key, then fall back to general API key
+            if hasattr(self.settings, 'llama_vl') and hasattr(self.settings.llama_vl, 'api_key_vl'):
+                headers["X-API-Key"] = self.settings.llama_vl.api_key_vl
+            elif hasattr(self.settings, 'llama') and hasattr(self.settings.llama, 'api_key_vl'):
+                headers["X-API-Key"] = self.settings.llama.api_key_vl
+            elif hasattr(self.settings, 'llama') and hasattr(self.settings.llama, 'api_key'):
+                headers["X-API-Key"] = self.settings.llama.api_key
+            elif hasattr(self.settings, 'llama_vl') and hasattr(self.settings.llama_vl, 'api_key'):
+                headers["X-API-Key"] = self.settings.llama_vl.api_key
+            
+            # Send POST request with timeout and headers
             response = requests.post(
                 self.api_url,
                 json=payload,
+                headers=headers,
                 timeout=self.timeout
             )
             

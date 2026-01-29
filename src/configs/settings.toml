@@ -53,15 +53,15 @@ enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
 
 [development.llama_vl]
-llama_host = "10.77.77.49"
-llama_port = "7001"
-model = "qwen3-vl-2b"
-llama_completions = "http://{0}:{1}/v1/chat/completions"
+llama_host = "10.77.77.39"
+llama_port = "7002"
+model = "llama-mushroom-vl-light.service"
+llama_completions = "http://{0}:{1}/vl-light/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
 temperature = 0.7
-max_tokens = 1024
-top_p = 0.9
+max_tokens = 2048
+top_p = 0.2
 image_width = 960
 image_height = 960
 device = "cuda" # 即使是API调用，保留此配置以兼容可能的本地加载逻辑
@@ -100,15 +100,15 @@ minio_bucket_name = "mogu"
 [production.llama]
 llama_host = "172.17.0.1"
 llama_port = "7002"
-model = "llama-mushroom-fp16-s.service"
+model = "llama-mushroom-light.service"
 llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
 
 [production.llama_vl]
 llama_host = "172.17.0.1"
-llama_port = "7002/vl-light/"
-model = "llama-mushroom-fp16-s.service"
-llama_completions = "http://{0}:{1}/v1/chat/completions"
+llama_port = "7002"
+model = "llama-mushroom-vl-light.service"
+llama_completions = "http://{0}:{1}/vl-light/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
