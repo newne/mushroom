@@ -952,9 +952,11 @@ class MinIOClient:
             return []
 
 
-def create_minio_client(http_client: Optional[PoolManager] = None) -> MinIOClient:
+_MINIO_CLIENT_INSTANCE: Optional['MinIOClient'] = None
+
+def create_minio_client(http_client: Optional[PoolManager] = None) -> 'MinIOClient':
     """
-    创建MinIO客户端实例
+    创建MinIO客户端实例 (单例模式)
     
     Args:
         http_client: 可选的HTTP客户端，用于连接池和超时控制
@@ -962,7 +964,22 @@ def create_minio_client(http_client: Optional[PoolManager] = None) -> MinIOClien
     Returns:
         MinIOClient实例
     """
-    return MinIOClient(http_client=http_client)
+    global _MINIO_CLIENT_INSTANCE
+    
+    if _MINIO_CLIENT_INSTANCE is None:
+        _MINIO_CLIENT_INSTANCE = MinIOClient(http_client=http_client)
+    elif http_client is not None:
+        # 如果提供了特定的http_client，可能意图是创建一个新的特定配置的客户端
+        # 这里我们保持单例逻辑，但记录一条日志，或者如果需要支持多实例，可以移除单例模式
+        # 鉴于目前需求是解决重复初始化，我们返回现有实例，忽略http_client参数（除非它还没初始化）
+        logger.debug("MinIO客户端已存在，返回现有实例")
+        
+    return _MINIO_CLIENT_INSTANCE
+
+def reset_minio_client():
+    """重置MinIO客户端单例（用于测试）"""
+    global _MINIO_CLIENT_INSTANCE
+    _MINIO_CLIENT_INSTANCE = None
 
 
 def create_http_client_with_pool(timeout: int = 30, retries: int = 3, 

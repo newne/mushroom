@@ -56,13 +56,24 @@ class EnvDataProcessor:
             # 3. 获取环境传感器数据 (temperature, humidity, co2)
             if device_configs and 'mushroom_env_status' in device_configs:
                 env_config = device_configs['mushroom_env_status']
+                
+                # 确保 device_alias 存在于列中
+                if 'device_alias' not in env_config.columns:
+                    if env_config.index.name == 'device_alias':
+                        env_config = env_config.reset_index()
+                        logger.debug("已将 device_alias 从索引重置为列")
+                    else:
+                        logger.warning(f"[ENV_PROCESSOR] 库房 {room_id} 配置缺失 device_alias 列，跳过环境数据查询")
+                        return env_data
+
                 start_time = collection_time - timedelta(minutes=time_window_minutes)
                 end_time = collection_time + timedelta(minutes=time_window_minutes)
                 
                 # 查询数据
                 # Fix for FutureWarning: Replace groupby.apply with iteration
                 results = []
-                for _, group in env_config.groupby("device_alias"):
+                # 使用 as_index=False 确保分组键保留为列
+                for _, group in env_config.groupby("device_alias", as_index=False):
                     res = query_data_by_batch_time(group, start_time, end_time)
                     results.append(res)
                 

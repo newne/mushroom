@@ -546,30 +546,31 @@ class MushroomImageEncoder:
                     'skip_reason': 'no_environment_data'
                 }
             
-            # 5. 使用LLaMA模型获取蘑菇生长情况描述和图像质量评分
+            # 5. LLaMA服务可用性检查 (Strict Mode)
+            if not self.llama_client:
+                logger.warning(f"[IMG-SKIP] LLaMA服务不可用，跳过处理 | 文件: {image_info.file_name}")
+                return None
+
+            # 6. 使用LLaMA模型获取蘑菇生长情况描述和图像质量评分
             llama_result = self._get_llama_description(image)
             
             # 提取growth_stage_description和image_quality_score
             growth_stage_description = llama_result.get('growth_stage_description', '')
             llama_quality_score = llama_result.get('image_quality_score', None)
             
-            # 6. 构建完整的文本描述：身份元数据 + LLaMA生长阶段描述
+            # 7. 验证LLaMA结果 (No Degradation)
+            if not growth_stage_description:
+                logger.warning(f"[IMG-SKIP] LLaMA未能生成描述，跳过处理 | 文件: {image_info.file_name}")
+                return None
+            
+            # 8. 构建完整的文本描述：身份元数据 + LLaMA生长阶段描述
             identity_metadata = env_data.get('semantic_description', f"Mushroom Room {image_info.mushroom_id}, unknown stage, Day 0.")
             
-            # 使用growth_stage_description作为CLIP文本编码的输入
-            if growth_stage_description and growth_stage_description != "No visible structures":
-                # 结合身份元数据和LLaMA生长阶段描述
-                full_text_description = f"{identity_metadata} {growth_stage_description}"
-                logger.trace(f"使用组合描述: 身份+LLaMA")
-            else:
-                # 如果LLaMA描述失败或为空，仅使用身份元数据
-                full_text_description = identity_metadata
-                if growth_stage_description:
-                    logger.trace(f"LLaMA返回无可见结构，仅使用身份元数据")
-                else:
-                    logger.trace(f"LLaMA描述为空，仅使用身份元数据")
+            # 结合身份元数据和LLaMA生长阶段描述
+            full_text_description = f"{identity_metadata} {growth_stage_description}"
+            logger.trace(f"使用组合描述: 身份+LLaMA")
             
-            # 7. 使用多模态编码（图像 + 完整文本描述）
+            # 9. 使用多模态编码（图像 + 完整文本描述）
             embedding = self.get_multimodal_embedding(image, full_text_description)
             
             if embedding is None:
@@ -680,38 +681,54 @@ class MushroomImageEncoder:
         results = []
         
         try:
+            # 0. Strict Check: LLaMA必须可用
+            if not self.llama_client:
+                 logger.warning("[IMG-BATCH-SKIP] LLaMA服务不可用，跳过所有有环境数据的图片")
+                 for item in batch_data:
+                     results.append({'success': False, 'image_info': item['image_info']})
+                 return results
+
             # 1. 批量获取LLaMA描述
             images = [item['image'] for item in batch_data]
             llama_results = self._get_llama_descriptions_batch(images)
             
             # 2. 准备批量CLIP编码的数据
             clip_inputs = []
+            valid_items = [] # (original_index, item, llama_result)
+            
             for i, item in enumerate(batch_data):
-                env_data = item['env_data']
                 llama_result = llama_results[i] if i < len(llama_results) else {}
-                
-                # 构建文本描述
-                identity_metadata = env_data.get('semantic_description', f"Mushroom Room {item['image_info'].mushroom_id}, unknown stage, Day 0.")
                 growth_stage_description = llama_result.get('growth_stage_description', '')
                 
-                if growth_stage_description and growth_stage_description != "No visible structures":
-                    full_text_description = f"{identity_metadata} {growth_stage_description}"
-                else:
-                    full_text_description = identity_metadata
+                # Strict Check: LLaMA描述必须存在
+                if not growth_stage_description:
+                    logger.warning(f"[IMG-BATCH-SKIP] LLaMA描述为空: {item['image_info'].file_name}")
+                    results.append({'success': False, 'image_info': item['image_info']})
+                    continue
+                
+                env_data = item['env_data']
+                identity_metadata = env_data.get('semantic_description', f"Mushroom Room {item['image_info'].mushroom_id}, unknown stage, Day 0.")
+                
+                full_text_description = f"{identity_metadata} {growth_stage_description}"
                 
                 clip_inputs.append({
                     'image': item['image'],
                     'text': full_text_description,
                     'index': i
                 })
+                valid_items.append((i, item, llama_result))
             
+            # 如果没有有效项，直接返回
+            if not clip_inputs:
+                return results
+
             # 3. 批量CLIP编码
             embeddings = self._get_multimodal_embeddings_batch(clip_inputs)
             
             # 4. 构建结果并保存
-            for i, item in enumerate(batch_data):
+            for k, (original_idx, item, llama_result) in enumerate(valid_items):
                 try:
-                    embedding = embeddings[i] if i < len(embeddings) else None
+                    embedding = embeddings[k] if k < len(embeddings) else None
                     
                     if embedding is None:
                         logger.error(f"[IMG-BATCH] 编码失败: {item['image_info'].file_name}")
@@ -719,7 +736,6 @@ class MushroomImageEncoder:
                         continue
                     
                     # 构建完整结果
-                    llama_result = llama_results[i] if i < len(llama_results) else {}
                     env_data = item['env_data'].copy()
                     
                     # 添加描述和质量评分

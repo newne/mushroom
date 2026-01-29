@@ -8,7 +8,7 @@ This document describes the integration of the LLaMA Visual Language Model (VLM)
 A new configuration section `[development.llama-vl]` (and corresponding production section) has been added to control the VLM behavior.
 
 ```toml
-[development.llama-vl]
+[development.llama_vl]
 llama_host = "10.77.77.49"
 llama_port = "7001"
 model = "qwen/qwen3-vl-2b"
