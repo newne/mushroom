@@ -20,7 +20,7 @@ from .base_task import BaseTask, TaskExecutor, task_wrapper
 from .table import safe_create_tables
 from environment.tasks import safe_daily_env_stats
 from monitoring.tasks import safe_hourly_setpoint_monitoring
-from vision.tasks import safe_hourly_clip_inference
+from vision.tasks import safe_hourly_text_quality_inference, safe_daily_top_quality_clip_inference
 from decision_analysis.tasks import safe_batch_decision_analysis
 
 # 任务接口列表
@@ -33,6 +33,7 @@ __all__ = [
     'safe_create_tables',
     'safe_daily_env_stats', 
     'safe_hourly_setpoint_monitoring',
-    'safe_hourly_clip_inference',
+    'safe_hourly_text_quality_inference',
+    'safe_daily_top_quality_clip_inference',
     'safe_batch_decision_analysis',
 ]

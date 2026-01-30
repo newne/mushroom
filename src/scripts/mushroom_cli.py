@@ -11,6 +11,12 @@ import os
 from pathlib import Path
 from datetime import datetime
 
+# Bootstrap sys.path to ensure we can import global_const from src
+current_file = Path(__file__).resolve()
+src_dir = current_file.parent.parent
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+
 # 使用BASE_DIR统一管理路径
 from global_const.global_const import ensure_src_path, BASE_DIR
 ensure_src_path()

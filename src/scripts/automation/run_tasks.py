@@ -15,7 +15,7 @@ from scripts.automation.task_executor import TaskExecutor
 try:
     from environment.tasks import safe_daily_env_stats
     from monitoring.tasks import safe_hourly_setpoint_monitoring
-    from vision.tasks import safe_hourly_clip_inference
+    from vision.tasks import safe_hourly_text_quality_inference, safe_daily_top_quality_clip_inference
     from decision_analysis.tasks import safe_batch_decision_analysis
 except ImportError as e:
     logger.error(f"无法导入任务模块: {e}")
@@ -44,9 +44,14 @@ def main():
         "每小时设定点变更监控 (基于静态配置表)"
     )
     executor.register(
-        "hourly_clip_inference", 
-        safe_hourly_clip_inference, 
-        "每小时图像采集与 CLIP 推理分析"
+        "hourly_text_quality_inference", 
+        safe_hourly_text_quality_inference, 
+        "每小时文本编码与图像质量评估"
+    )
+    executor.register(
+        "daily_top_quality_clip_inference", 
+        safe_daily_top_quality_clip_inference, 
+        "每日Top-5质量图像编码 (02:10)"
     )
     executor.register(
         "decision_analysis", 

@@ -1,0 +1,52 @@
+graph TD
+    %% 节点样式定义
+    classDef process fill:#e1f5fe,stroke:#01579b,stroke-width:2px;
+    classDef decision fill:#fff9c4,stroke:#fbc02d,stroke-width:2px;
+    classDef storage fill:#e0e0e0,stroke:#616161,stroke-width:2px,stroke-dasharray: 5 5;
+    classDef termination fill:#ffcdd2,stroke:#c62828,stroke-width:2px;
+
+    Start([开始: 周期性/手动触发]) --> Init[初始化: 加载配置与依赖]
+    Init --> ParseArgs[/解析参数: 时间窗口, 库房ID/]
+    
+    %% 环境检查与服务启动
+    ParseArgs --> ServiceCheck{服务健康检查?}
+    ServiceCheck -- 失败 --> LogErr[记录致命错误] --> End([异常终止]):::termination
+    ServiceCheck -- 成功 --> ConnectMinIO[连接对象存储 MinIO]
+    ConnectMinIO --> ConnectDB[连接向量数据库 Postgres]
+    ConnectDB --> LoadModel[加载 CLIP 视觉模型]
+
+    %% 数据获取阶段
+    LoadModel --> FetchList[MinIO: 获取最近 N 小时图片列表]:::process
+    FetchList --> Filter{是否存在待处理图片?}
+    Filter -- 无 --> LogInfo[记录: 无新数据] --> End
+    
+    %% 核心处理循环
+    Filter -- 有 --> BatchConfig[应用批处理策略]
+    BatchConfig --> LoopStart(开始处理循环):::process
+    
+    subgraph CoreProcessing [核心业务: 视觉数据结构化转化]
+        direction TB
+        LoopStart --> ParsePath[解析文件路径: 提取库房/时间/位置]
+        ParsePath --> CheckDup{数据库查重?}
+        CheckDup -- 已存在 --> Skip[跳过处理]
+        
+        CheckDup -- 新图片 --> FetchImg[下载原始图片数据]
+        FetchImg --> Encode[CLIP模型推理: 生成图像向量]:::process
+        Encode --> ExtractMeta[提取元数据: 亮度/对比度/时间戳]
+    end
+
+    %% 数据持久化与决策支撑
+    Skip --> LoopNext
+    ExtractMeta --> SaveDB[(写入数据库: 向量+元数据)]:::storage
+    SaveDB -->|数据就绪| NextStep[下游: 触发决策分析模块]
+    SaveDB --> LoopNext{还有下一批?}
+    
+    LoopNext -- 是 --> LoopStart
+    LoopNext -- 否 --> GenSummary[生成运行报告]
+    
+    GenSummary --> LogStats[日志输出: 成功/失败/跳过统计]
+    LogStats --> End([结束任务])
+
+    %% 注释说明
+    click Encode "将非结构化图片转换为机器可理解的向量，是环境调节决策的基础"
+    click SaveDB "为决策系统提供实时数据支撑"

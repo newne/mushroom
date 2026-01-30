@@ -7,6 +7,8 @@
 import base64
 import io
 import json
+import time
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Dict, Optional, Any
@@ -20,7 +22,10 @@ from sqlalchemy.orm import sessionmaker
 from transformers import CLIPProcessor, CLIPModel
 
 from global_const.global_const import pgsql_engine, settings
-from utils.create_table import MushroomImageEmbedding
+from utils.create_table import (
+    MushroomImageEmbedding,
+    ImageTextQuality,
+)
 from environment.processor import create_env_data_processor
 from utils.get_data import GetData
 from utils.minio_client import create_minio_client
@@ -62,9 +67,42 @@ class MushroomImageEncoder:
         self.room_id_mapping = {
             '7': '607',   # MinIO中的7对应环境配置中的607
             '8': '608',   # MinIO中的8对应环境配置中的608
+            '607': '607',
+            '608': '608',
+            '611': '611',
+            '612': '612'
         }
         
+        # 质量控制参数 (默认宽松)
+        self.quality_threshold = 0
+        self.required_keywords = []
+
+        # LLaMA 性能监控配置
+        self.time_threshold = 5000  # 性能警告阈值 (毫秒)
+        self._setup_performance_logger()
+        
         logger.debug("图像编码器初始化完成")
+
+    def _setup_performance_logger(self):
+        """配置 LLaMA 性能监控专用日志"""
+        # 避免重复添加 sink (简单检查)
+        # 注意: 这种检查并不完美，但在单例/工厂模式下足矣
+        if not hasattr(self, '_perf_logger_configured'):
+            log_path = Path("logs/llama_performance.log")
+            try:
+                logger.add(
+                    log_path,
+                    rotation="10 MB",
+                    retention="30 days",
+                    compression="zip",
+                    filter=lambda record: record["extra"].get("type") == "llama_performance",
+                    format="{message}", # 使用 JSON 格式或者自定义格式，这里我们把 message 构造成 JSON 字符串
+                    level="INFO",
+                    enqueue=True
+                )
+                self._perf_logger_configured = True
+            except Exception as e:
+                logger.error(f"配置性能日志失败: {e}")
     
     def _map_room_id(self, room_id: str) -> str:
         """
@@ -108,9 +146,21 @@ class MushroomImageEncoder:
         trans_log.set_verbosity_error()
         warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
         
-        self.clip_processor = CLIPProcessor.from_pretrained(model_name)
-        self.clip_model = CLIPModel.from_pretrained(model_name).to(self.device)
-        self.clip_model.eval()
+        try:
+            self.clip_processor = CLIPProcessor.from_pretrained(model_name)
+            self.clip_model = CLIPModel.from_pretrained(model_name).to(self.device)
+            self.clip_model.eval()
+        except Exception as e:
+            logger.error(f"无法加载CLIP模型 '{model_name}': {e}")
+            if model_name == 'openai/clip-vit-base-patch32':
+                logger.critical(
+                    f"\n❌ 模型加载失败！\n"
+                    f"系统尝试从 HuggingFace 下载模型但连接超时。\n"
+                    f"请手动下载 'openai/clip-vit-base-patch32' 模型并保存到以下位置之一:\n"
+                    f"1. {container_model_path} (容器环境)\n"
+                    f"2. {local_model_path} (本地开发环境)\n"
+                )
+            raise RuntimeError(f"Failed to load CLIP model: {e}") from e
         
         # 恢复警告
         trans_log.set_verbosity_warning()
@@ -155,16 +205,27 @@ class MushroomImageEncoder:
             logger.warning(f"LLaMA-VL客户端初始化失败: {e}")
             self.llama_client = False
     
-    def _call_llama_api(self, image_data: str) -> str:
+    def _call_llama_api(self, image_data: str) -> Dict[str, Any]:
         """
-        直接调用LLaMA API
+        直接调用LLaMA API (集成性能监控)
         
         Args:
             image_data: base64编码的图像数据
             
         Returns:
-            LLaMA生成的描述
+            包含描述和评分的字典
         """
+        # [性能监控] 初始化上下文
+        request_id = str(uuid.uuid4())
+        start_time = time.time()
+        start_time_iso = datetime.now().isoformat()
+        status = "unknown"
+        error_details = None
+        model_name = "unknown"
+        
+        # 绑定专用logger
+        perf_logger = logger.bind(type="llama_performance")
+        
         try:
             # 从API动态获取提示词，如果失败则使用配置文件中的默认值
             prompt = self.get_data.get_mushroom_prompt()
@@ -175,6 +236,8 @@ class MushroomImageEncoder:
             
             # 获取配置参数，提供默认值
             model = getattr(self.llama_config, 'model', "qwen/qwen3-vl-2b")
+            model_name = model # 记录用于日志
+            
             temperature = getattr(self.llama_config, 'temperature', 0.7)
             max_tokens = getattr(self.llama_config, 'max_tokens', 1024)
             top_p = getattr(self.llama_config, 'top_p', 0.9)
@@ -203,13 +266,20 @@ class MushroomImageEncoder:
                 "Content-Type": "application/json"
             }
             
-            # 添加API密钥，按照优先级顺序查找
-            # 根据VL模型专用API密钥命名规范，优先使用api_key_vl字段
-            if hasattr(self.llama_config, 'api_key_vl'):
-                headers["X-API-Key"] = self.llama_config.api_key_vl
-            elif hasattr(self.llama_config, 'api_key'):
-                headers["X-API-Key"] = self.llama_config.api_key
-            # 如果都没有，则不设置API密钥（由API服务器决定是否允许）
+            # 根据模型类型智能选择API密钥
+            # 判断逻辑：如果模型名称中包含 'vl', 'vision', 'qvq' 等关键词，视为多模态模型
+            is_multimodal = any(kw in model.lower() for kw in ['vl', 'vision', 'qvq'])
+            
+            api_key = None
+            if is_multimodal:
+                # 多模态模型：优先使用 vl key，回退到 basic key
+                api_key = getattr(self.llama_config, 'api_key_vl', None) or getattr(self.llama_config, 'api_key', None)
+            else:
+                # 纯文本/通用模型：优先使用 basic key，回退到 vl key (以防配置错配)
+                api_key = getattr(self.llama_config, 'api_key', None) or getattr(self.llama_config, 'api_key_vl', None)
+            
+            if api_key:
+                headers["X-API-Key"] = api_key
             
             # 构建URL
             host = getattr(self.llama_config, 'llama_host', 'localhost')
@@ -240,7 +310,9 @@ class MushroomImageEncoder:
                     
                     # 验证必需字段
                     if "growth_stage_description" not in llama_result or "image_quality_score" not in llama_result:
-                        logger.error(f"[LLAMA-001] 响应缺少必需字段 | 字段: {list(llama_result.keys())}")
+                        status = "failed"
+                        error_details = f"Missing required fields. Keys found: {list(llama_result.keys())}"
+                        logger.error(f"[LLAMA-001] 响应缺少必需字段 | {error_details}")
                         return {"growth_stage_description": "", "image_quality_score": None}
                     
                     # 验证数据类型
@@ -256,27 +328,73 @@ class MushroomImageEncoder:
                         quality_score = max(0, min(100, quality_score))
                     
                     logger.trace(f"LLaMA解析成功: 质量评分={quality_score}")
+                    status = "success"
                     return {"growth_stage_description": description, "image_quality_score": quality_score}
                     
                 except json.JSONDecodeError as e:
+                    status = "failed"
+                    error_details = f"JSON parse error: {str(e)}"
                     logger.error(f"[LLAMA-004] JSON解析失败 | 错误: {e} | 内容: {content[:100]}...")
                     return {"growth_stage_description": "", "image_quality_score": None}
                 except KeyError as e:
+                    status = "failed"
+                    error_details = f"Missing key: {str(e)}"
                     logger.error(f"[LLAMA-005] 响应缺少键 | 键: {e}")
                     return {"growth_stage_description": "", "image_quality_score": None}
             else:
+                status = "failed"
+                error_details = f"HTTP {resp.status_code}: {resp.text[:200]}"
                 logger.error(f"[LLAMA-006] API调用失败 | 状态码: {resp.status_code} | 响应: {resp.text[:200]}")
                 return {"growth_stage_description": "", "image_quality_score": None}
                 
         except requests.exceptions.Timeout:
+            status = "failed"
+            error_details = "Request timed out"
             logger.warning(f"[LLAMA-007] API超时 | 超时时间: {getattr(self.llama_config, 'timeout', 600)}秒")
             return {"growth_stage_description": "", "image_quality_score": None}
         except requests.exceptions.ConnectionError as e:
+            status = "failed"
+            error_details = f"Connection error: {str(e)}"
             logger.warning(f"[LLAMA-008] 连接错误 | 错误: {e}")
             return {"growth_stage_description": "", "image_quality_score": None}
         except Exception as e:
+            status = "failed"
+            error_details = f"Unexpected error: {str(e)}"
             logger.error(f"[LLAMA-009] 调用异常 | 错误: {e}")
             return {"growth_stage_description": "", "image_quality_score": None}
+            
+        finally:
+            # [性能监控] 记录与写入
+            end_time = time.time()
+            duration_ms = (end_time - start_time) * 1000
+            
+            # 构建日志条目 (JSON 友好结构)
+            log_entry = {
+                "timestamp": start_time_iso,
+                "request_id": request_id,
+                "model": model_name,
+                "input_info": {
+                    "image_size_b64": len(image_data)
+                },
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration_ms": round(duration_ms, 2),
+                "status": status,
+                "error": error_details
+            }
+            
+            try:
+                # 写入专用日志文件
+                perf_logger.info(json.dumps(log_entry, ensure_ascii=False))
+                
+                # 检查阈值并触发警告
+                if duration_ms > self.time_threshold:
+                    logger.warning(
+                        f"[LLAMA-PERF] 请求耗时过长 | Duration: {duration_ms:.2f}ms > {self.time_threshold}ms | "
+                        f"Model: {model_name} | ID: {request_id}"
+                    )
+            except Exception as log_err:
+                logger.error(f"写入性能日志失败: {log_err}")
     
     def _resize_image_for_llama(self, image: Image.Image) -> Image.Image:
         """
@@ -566,8 +684,21 @@ class MushroomImageEncoder:
             logger.error(f"Failed to get environment data for room {mushroom_id}: {e}")
             return None
     
+    def get_growth_stage_analysis(self, image: Image.Image) -> Dict[str, Any]:
+        """
+        获取图像的生长阶段分析（公开接口）
+        
+        Args:
+            image: PIL图像对象
+            
+        Returns:
+            包含growth_stage_description和image_quality_score的字典
+        """
+        return self._get_llama_description(image)
+
     def process_single_image(self, image_info: MushroomImageInfo, 
-                           save_to_db: bool = True) -> Optional[Dict]:
+                           save_to_db: bool = True,
+                           precomputed_analysis: Optional[Dict] = None) -> Optional[Dict]:
         """
         处理单个图像：解析时间、获取环境参数、多模态编码
         只有在获取到完整数据（图像+环境数据）时才存储到数据库
@@ -575,6 +706,7 @@ class MushroomImageEncoder:
         Args:
             image_info: 蘑菇图像信息
             save_to_db: 是否保存到数据库
+            precomputed_analysis: 预计算的分析结果（可选），包含growth_stage_description和image_quality_score
             
         Returns:
             处理结果字典
@@ -617,7 +749,11 @@ class MushroomImageEncoder:
                 return None
 
             # 6. 使用LLaMA模型获取蘑菇生长情况描述和图像质量评分
-            llama_result = self._get_llama_description(image)
+            if precomputed_analysis:
+                llama_result = precomputed_analysis
+                logger.trace(f"使用预计算的分析结果: score={llama_result.get('image_quality_score')}")
+            else:
+                llama_result = self._get_llama_description(image)
             
             # 提取growth_stage_description和image_quality_score
             growth_stage_description = llama_result.get('growth_stage_description', '')
@@ -627,6 +763,19 @@ class MushroomImageEncoder:
             if not growth_stage_description:
                 logger.warning(f"[IMG-SKIP] LLaMA未能生成描述，跳过处理 | 文件: {image_info.file_name}")
                 return None
+
+            # 7.1 质量评分筛选
+            if self.quality_threshold > 0:
+                if llama_quality_score is not None and llama_quality_score < self.quality_threshold:
+                    logger.warning(f"[IMG-SKIP-QUALITY] 质量评分过低 ({llama_quality_score} < {self.quality_threshold}) | 文件: {image_info.file_name}")
+                    return None
+
+            # 7.2 关键词内容筛选 (如蘑菇特征)
+            if self.required_keywords:
+                desc_lower = growth_stage_description.lower()
+                if not any(k.lower() in desc_lower for k in self.required_keywords):
+                    logger.warning(f"[IMG-SKIP-CONTENT] 未检测到相关特征 ({self.required_keywords}) | 描述: {growth_stage_description[:30]}... | 文件: {image_info.file_name}")
+                    return None
             
             # 8. 构建完整的文本描述：身份元数据 + LLaMA生长阶段描述
             identity_metadata = env_data.get('semantic_description', f"Mushroom Room {image_info.mushroom_id}, unknown stage, Day 0.")
@@ -705,7 +854,8 @@ class MushroomImageEncoder:
                     'image': image,
                     'image_info': image_info,
                     'time_info': time_info,
-                    'env_data': env_data
+                    'env_data': env_data,
+                    'precomputed_analysis': img_data.get('img_meta', {}).get('_precomputed_analysis')
                 })
             
             # 2. 分离有环境数据和无环境数据的图片
@@ -753,9 +903,23 @@ class MushroomImageEncoder:
                      results.append({'success': False, 'image_info': item['image_info']})
                  return results
 
-            # 1. 批量获取LLaMA描述
-            images = [item['image'] for item in batch_data]
-            llama_results = self._get_llama_descriptions_batch(images)
+            # 1. 批量获取LLaMA描述 (混合 Precomputed 和 Computed)
+            llama_results = [None] * len(batch_data)
+            need_compute_images = []
+            need_compute_indices = []
+
+            for i, item in enumerate(batch_data):
+                if item.get('precomputed_analysis'):
+                    llama_results[i] = item['precomputed_analysis']
+                else:
+                    need_compute_images.append(item['image'])
+                    need_compute_indices.append(i)
+            
+            # 对缺失的进行计算
+            if need_compute_images:
+                computed_results = self._get_llama_descriptions_batch(need_compute_images)
+                for idx, res in zip(need_compute_indices, computed_results):
+                    llama_results[idx] = res
             
             # 2. 准备批量CLIP编码的数据
             clip_inputs = []
@@ -764,6 +928,7 @@ class MushroomImageEncoder:
             for i, item in enumerate(batch_data):
                 llama_result = llama_results[i] if i < len(llama_results) else {}
                 growth_stage_description = llama_result.get('growth_stage_description', '')
+                llama_quality_score = llama_result.get('image_quality_score', 0)
                 
                 # Strict Check: LLaMA描述必须存在
                 if not growth_stage_description:
@@ -771,6 +936,21 @@ class MushroomImageEncoder:
                     results.append({'success': False, 'image_info': item['image_info']})
                     continue
                 
+                # Quality Check
+                if self.quality_threshold > 0:
+                    if llama_quality_score is not None and llama_quality_score < self.quality_threshold:
+                        logger.warning(f"[IMG-BATCH-SKIP-QUALITY] 质量评分过低 ({llama_quality_score}) | {item['image_info'].file_name}")
+                        results.append({'success': False, 'image_info': item['image_info']})
+                        continue
+
+                # Content Check
+                if self.required_keywords:
+                    desc_lower = growth_stage_description.lower()
+                    if not any(k.lower() in desc_lower for k in self.required_keywords):
+                        logger.warning(f"[IMG-BATCH-SKIP-CONTENT] 未检测到相关特征 | {item['image_info'].file_name}")
+                        results.append({'success': False, 'image_info': item['image_info']})
+                        continue
+
                 env_data = item['env_data']
                 identity_metadata = env_data.get('semantic_description', f"Mushroom Room {item['image_info'].mushroom_id}, unknown stage, Day 0.")
                 
@@ -1051,6 +1231,29 @@ class MushroomImageEncoder:
         except Exception as e:
             logger.error(f"[IMG-BATCH] 批量LLaMA描述失败: {e}")
             return [{"growth_stage_description": "", "image_quality_score": None}] * len(images)
+
+    def _insert_text_quality_record(
+        self,
+        session,
+        image_path: str,
+        embedding_id,
+        room_id: Optional[str],
+        in_date,
+        collection_datetime: Optional[datetime],
+        llama_description: Optional[str],
+        image_quality_score: Optional[float],
+    ) -> None:
+        session.add(
+            ImageTextQuality(
+                mushroom_embedding_id=embedding_id,
+                image_path=image_path,
+                room_id=room_id,
+                in_date=in_date,
+                collection_datetime=collection_datetime,
+                llama_description=llama_description,
+                image_quality_score=image_quality_score,
+            )
+        )
     
     def _save_to_database(self, result: Dict) -> bool:
         """
@@ -1096,8 +1299,6 @@ class MushroomImageEncoder:
                 existing.humidifier_config = env_data.get('humidifier_config', '{}')
                 existing.env_sensor_status = env_data.get('env_sensor_status', '{}')
                 existing.semantic_description = env_data.get('semantic_description', '无环境数据。')
-                existing.llama_description = env_data.get('llama_description', 'N/A')
-                existing.image_quality_score = env_data.get('image_quality_score', None)
                 existing.updated_at = datetime.now()
                 
                 logger.trace(f"更新数据库记录: {image_info.file_name}")
@@ -1118,14 +1319,31 @@ class MushroomImageEncoder:
                     humidifier_count=env_data.get('humidifier_count', 0),
                     humidifier_config=env_data.get('humidifier_config', '{}'),
                     env_sensor_status=env_data.get('env_sensor_status', '{}'),
-                    semantic_description=env_data.get('semantic_description', '无环境数据。'),
-                    llama_description=env_data.get('llama_description', 'N/A'),
-                    image_quality_score=env_data.get('image_quality_score', None)
+                    semantic_description=env_data.get('semantic_description', '无环境数据。')
                 )
                 
                 session.add(new_record)
                 logger.trace(f"创建数据库记录: {image_info.file_name}")
             
+            session.flush()
+
+            embedding_id = existing.id if existing else new_record.id
+            room_id = env_data.get('room_id', image_info.mushroom_id)
+            in_date = env_data.get('in_date', result['time_info']['collection_datetime'].date())
+            llama_description = env_data.get('llama_description', None)
+            image_quality_score = env_data.get('image_quality_score', None)
+
+            self._insert_text_quality_record(
+                session,
+                image_info.file_path,
+                embedding_id,
+                room_id,
+                in_date,
+                result['time_info']['collection_datetime'],
+                llama_description,
+                image_quality_score,
+            )
+
             session.commit()
             return True
             
@@ -1202,6 +1420,180 @@ class MushroomImageEncoder:
                    f"成功: {stats['success']}, 失败: {stats['failed']}, 跳过: {stats['skipped']}")
         
         return stats
+
+    def batch_process_text_quality(
+        self,
+        mushroom_id: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        batch_size: int = 10,
+        reprocess: bool = False,
+    ) -> Dict[str, int]:
+        """仅计算文本描述和图像质量评分并落库（不做图像编码）"""
+        time_msg = f"[{start_time} ~ {end_time}]" if start_time or end_time else ""
+        logger.info(f"📝 开始批量文本/质量分析 {time_msg}")
+
+        all_images = self.processor.get_mushroom_images(
+            mushroom_id=mushroom_id,
+            date_filter=None,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        if not all_images:
+            logger.warning(f"⚠️ 未找到符合条件的图像 {time_msg}")
+            return {'total': 0, 'success': 0, 'failed': 0, 'skipped': 0}
+
+        stats = {'total': len(all_images), 'success': 0, 'failed': 0, 'skipped': 0}
+
+        session = self.Session()
+        try:
+            for i in range(0, len(all_images), batch_size):
+                batch = all_images[i:i + batch_size]
+                for image_info in batch:
+                    try:
+                        if not reprocess:
+                            existing = (
+                                session.query(ImageTextQuality)
+                                .filter_by(image_path=image_info.file_path)
+                                .order_by(ImageTextQuality.created_at.desc())
+                                .first()
+                            )
+                            if (
+                                existing
+                                and existing.llama_description
+                                and existing.image_quality_score is not None
+                            ):
+                                stats['skipped'] += 1
+                                continue
+
+                        image = self.minio_client.get_image(image_info.file_path)
+                        if image is None:
+                            stats['failed'] += 1
+                            continue
+
+                        llama_result = self._get_llama_description(image)
+                        growth_stage_description = llama_result.get('growth_stage_description', '')
+                        quality_score = llama_result.get('image_quality_score', None)
+
+                        time_info = self.parse_time_from_path(image_info)
+                        in_date = time_info['collection_datetime'].date()
+                        room_id = self._map_room_id(image_info.mushroom_id)
+
+                        existing_embedding = session.query(MushroomImageEmbedding).filter_by(
+                            image_path=image_info.file_path
+                        ).first()
+                        embedding_id = existing_embedding.id if existing_embedding else None
+
+                        self._insert_text_quality_record(
+                            session,
+                            image_info.file_path,
+                            embedding_id,
+                            room_id,
+                            in_date,
+                            time_info['collection_datetime'],
+                            growth_stage_description if growth_stage_description else None,
+                            quality_score,
+                        )
+                        stats['success'] += 1
+                    except Exception as e:
+                        logger.error(f"❌ 文本/质量处理失败 {image_info.file_name}: {e}")
+                        stats['failed'] += 1
+
+                session.commit()
+
+        except Exception as e:
+            session.rollback()
+            logger.error(f"❌ 批量文本/质量分析失败: {e}")
+        finally:
+            session.close()
+
+        logger.info(
+            f"✅ 文本/质量分析完成 - 总计: {stats['total']}, 成功: {stats['success']}, "
+            f"失败: {stats['failed']}, 跳过: {stats['skipped']}"
+        )
+        return stats
+
+    def process_top_quality_embeddings_for_date(
+        self,
+        target_date,
+        top_k: int = 5,
+        batch_size: int = 10,
+    ) -> Dict[str, int]:
+        """按库房/日期选取Top-K质量图像进行编码"""
+        from global_const.const_config import MUSHROOM_ROOM_IDS
+
+        logger.info(f"📌 开始处理 {target_date} Top-{top_k} 质量图像")
+        stats = {'total': 0, 'success': 0, 'failed': 0, 'skipped': 0}
+
+        session = self.Session()
+        try:
+            for room_id in MUSHROOM_ROOM_IDS:
+                quality_rows = (
+                    session.query(ImageTextQuality)
+                    .filter(ImageTextQuality.room_id == room_id)
+                    .filter(ImageTextQuality.in_date == target_date)
+                    .filter(ImageTextQuality.image_quality_score.isnot(None))
+                    .order_by(
+                        ImageTextQuality.image_quality_score.desc(),
+                        ImageTextQuality.created_at.desc(),
+                    )
+                    .all()
+                )
+
+                if not quality_rows:
+                    continue
+
+                image_map = {
+                    img.file_path: img
+                    for img in self.processor.get_mushroom_images(
+                        mushroom_id=room_id,
+                        date_filter=target_date.strftime('%Y%m%d'),
+                    )
+                }
+
+                seen_paths = set()
+                for row in quality_rows:
+                    if row.image_path in seen_paths:
+                        continue
+                    seen_paths.add(row.image_path)
+                    image_info = image_map.get(row.image_path)
+                    if not image_info:
+                        stats['failed'] += 1
+                        continue
+
+                    if self._is_already_processed(image_info.file_path):
+                        stats['skipped'] += 1
+                        continue
+
+                    precomputed = None
+                    if row.llama_description:
+                        precomputed = {
+                            'growth_stage_description': row.llama_description,
+                            'image_quality_score': row.image_quality_score,
+                        }
+
+                    result = self.process_single_image(
+                        image_info,
+                        save_to_db=True,
+                        precomputed_analysis=precomputed,
+                    )
+                    if result and result.get('saved_to_db', False):
+                        stats['success'] += 1
+                    else:
+                        stats['failed'] += 1
+
+                    stats['total'] += 1
+                    if len(seen_paths) >= top_k:
+                        break
+
+            logger.info(
+                f"✅ Top质量编码完成 - 总计: {stats['total']}, 成功: {stats['success']}, "
+                f"失败: {stats['failed']}, 跳过: {stats['skipped']}"
+            )
+            return stats
+        finally:
+            session.close()
     
     def _is_already_processed(self, image_path: str) -> bool:
         """检查图像是否已经处理过"""

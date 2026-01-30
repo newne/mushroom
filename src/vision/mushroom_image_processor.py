@@ -6,7 +6,7 @@
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 
@@ -62,90 +62,85 @@ class MushroomImagePathParser:
             r'(?P<mushroom_id>\d+)_(?P<collection_ip>\d+)_(?P<collection_date>\d{6,8})_(?P<detailed_time>\d{14})\.jpg'
         )
     
-    def _normalize_collection_date(self, collection_date: str) -> str:
+    def _normalize_collection_date(self, collection_date: str, detailed_time: str) -> str:
         """
-        标准化采集日期格式，使用 dateutil 自动解析各种格式
+        标准化采集日期格式，使用详细时间进行推断验证
         
         Args:
             collection_date: 原始采集日期，可能是6位、7位或8位
+            detailed_time: 详细时间字符串 (14位, YYYYMMDDHHMMSS)，作为参考时间
             
         Returns:
             标准化的8位日期格式 (YYYYMMDD)
-            
-        Examples:
-            202615 -> 20260105 (2026年1月5日)
-            2026115 -> 20260115 (2026年1月15日)
-            2025124 -> 20251204 (2025年12月4日)
-            20251224 -> 20251224 (已是标准格式)
-        """
-        date_len = len(collection_date)
         
-        # 8位标准格式，直接验证并返回
+        Raises:
+            ValueError: 当日期格式无效或时间逻辑不一致时
+        """
+        try:
+            ref_dt = datetime.strptime(detailed_time, "%Y%m%d%H%M%S")
+        except ValueError as e:
+            raise ValueError(f"参考时间格式无效: {detailed_time}") from e
+
+        date_len = len(collection_date)
+        candidates = []
+
         if date_len == 8:
             try:
-                datetime.strptime(collection_date, '%Y%m%d')
-                return collection_date
-            except ValueError as e:
-                logger.error(f"8位日期格式无效: {collection_date}, 错误: {e}")
-                return collection_date
-        
-        # 6位或7位格式，需要智能解析
-        if date_len not in [6, 7]:
-            logger.error(f"无法标准化日期格式(长度异常): {collection_date} (长度: {date_len})")
-            return collection_date
-        
-        year = collection_date[:4]
-        month_day = collection_date[4:]
-        
-        # 构建可能的日期格式列表
-        parse_attempts = []
-        
-        if date_len == 6:
-            # 6位: YYYYMD (月日各1位)
-            m, d = month_day[0], month_day[1]
-            parse_attempts.extend([
-                f"{year}-{m}-{d}",      # 尝试单位数月日
-                f"{year}-0{m}-0{d}",    # 补零
-            ])
-        
-        elif date_len == 7:
-            # 7位: YYYYMDD 或 YYYYMMD
-            first = int(month_day[0])
+                dt = datetime.strptime(collection_date, '%Y%m%d')
+                candidates.append(dt)
+            except ValueError:
+                pass 
+        else:
+            # 非8位日期的推断逻辑
+            if date_len not in [6, 7]:
+                raise ValueError(f"不支持的日期长度: {date_len}")
+
+            year_str = collection_date[:4]
+            remainder = collection_date[4:]
+            potential_dates = []
             
-            if first == 1:
-                second = int(month_day[1])
-                if second in [0, 1, 2]:
-                    # 10-12月
-                    parse_attempts.extend([
-                        f"{year}-{month_day[:2]}-{month_day[2]}",
-                        f"{year}-{month_day[:2]}-0{month_day[2]}",
-                    ])
-                else:
-                    # 1月
-                    parse_attempts.extend([
-                        f"{year}-1-{month_day[1:]}",
-                        f"{year}-01-{month_day[1:]}",
-                    ])
+            if date_len == 6: # YYYYMD -> 2 digits for M D
+                 potential_dates.append(f"{year_str}-{remainder[0]}-{remainder[1]}")
+            elif date_len == 7: # YYYYMDD or YYYYMMD
+                 # M-DD
+                 potential_dates.append(f"{year_str}-{remainder[:1]}-{remainder[1:]}")
+                 # MM-D
+                 potential_dates.append(f"{year_str}-{remainder[:2]}-{remainder[2:]}")
+            
+            for date_str in potential_dates:
+                try:
+                    dt = datetime.strptime(date_str, "%Y-%m-%d")
+                    candidates.append(dt)
+                except ValueError:
+                    continue
+
+        # 验证候选日期
+        valid_candidates = []
+        thirty_days = timedelta(days=30)
+        
+        for dt in candidates:
+            # 检查1: 不应晚于采集时间 (允许同一天)
+            if dt.date() > ref_dt.date():
+                continue 
+            
+            # 检查2: 不应早于采集时间30天
+            if dt.date() < (ref_dt - timedelta(days=30)).date():
+                continue 
+            
+            valid_candidates.append(dt)
+            
+        if not valid_candidates:
+            if candidates:
+                 raise ValueError(f"日期 {collection_date} 与采集时间 {detailed_time} 不一致 (不在30天窗口内或为未来时间)")
             else:
-                # 2-9月
-                parse_attempts.extend([
-                    f"{year}-{month_day[0]}-{month_day[1:]}",
-                    f"{year}-0{month_day[0]}-{month_day[1:]}",
-                ])
+                 raise ValueError(f"无法解析日期格式: {collection_date}")
         
-        # 使用 dateutil.parser 尝试解析
-        for attempt in parse_attempts:
-            try:
-                parsed_date = date_parser.parse(attempt, dayfirst=False)
-                normalized = parsed_date.strftime('%Y%m%d')
-                logger.debug(f"日期标准化: {collection_date} -> {normalized}")
-                return normalized
-            except (ValueError, date_parser.ParserError):
-                continue
+        # 如果有多个符合条件的候选日期，选择最接近采集时间的一个
+        best_candidate = max(valid_candidates, key=lambda x: x)
         
-        # 所有尝试都失败
-        logger.error(f"无法标准化日期格式({date_len}位): {collection_date}, 尝试: {parse_attempts}")
-        return collection_date
+        normalized = best_candidate.strftime('%Y%m%d')
+        logger.debug(f"日期标准化: {collection_date} -> {normalized} (参考: {detailed_time})")
+        return normalized
     
     def parse_path(self, file_path: str) -> Optional[MushroomImageInfo]:
         """
@@ -169,8 +164,12 @@ class MushroomImagePathParser:
             logger.warning(f"路径中库房号不一致: 文件夹={groups['mushroom_id']}, 文件名={groups['mushroom_id_2']} | 路径: {file_path}")
             return None
         
-        # 标准化采集日期
-        normalized_collection_date = self._normalize_collection_date(groups['collection_date'])
+        try:
+            # 标准化采集日期
+            normalized_collection_date = self._normalize_collection_date(groups['collection_date'], groups['detailed_time'])
+        except ValueError as e:
+            logger.error(f"日期解析失败: {e} | 路径: {file_path}")
+            return None
         
         return MushroomImageInfo(
             mushroom_id=groups['mushroom_id'],
@@ -206,8 +205,12 @@ class MushroomImagePathParser:
             logger.warning(f"文件名中库房号不一致: 参数={mushroom_id}, 文件名={groups['mushroom_id']} | 文件: {filename}")
             return None
         
-        # 标准化采集日期
-        normalized_collection_date = self._normalize_collection_date(groups['collection_date'])
+        try:
+            # 标准化采集日期
+            normalized_collection_date = self._normalize_collection_date(groups['collection_date'], groups['detailed_time'])
+        except ValueError as e:
+            logger.error(f"日期解析失败: {e} | 文件: {filename}")
+            return None
         
         # 构建完整路径
         if mushroom_id and date_folder:

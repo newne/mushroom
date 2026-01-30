@@ -3,26 +3,28 @@
 
 - 帮助 AI 代码助理快速定位本仓库的「意图、约定、运行与测试」要点。
 
-# 快速命令（最常用）
+# 快速命令 (Cheatsheet)
 
-- 安装依赖: `uv sync` （项目使用 `uv` 配置多个 torch 源，见 `pyproject.toml`）
-- 常用 CLI:
-  - `python scripts/mushroom_cli.py list --mushroom-id 611` （列出图像文件）
-  - `python scripts/mushroom_cli.py process --mushroom-id 611` （批量处理图像）
-  - `python scripts/mushroom_cli.py encode --mushroom-id 611` （编码图像并获取环境参数）
-  - `python scripts/mushroom_cli.py validate` （验证系统）
-  - `python scripts/mushroom_cli.py health` （健康检查）
-- 测试脚本（独立可运行脚本，非 pytest）：
-  - `python test_enhanced_decision_analysis.py`
-  - `python test_enhanced_decision_with_uv.py`
-  - `python verify_enhanced_deployment.py`
+请在项目根目录运行以下命令：
 
-# 大体架构 / 为什么这样组织
+- **环境安装**: `uv sync` (使用 `uv` 管理依赖，注意 `pyproject.toml` 中的 `cpu`/`cu129` extra)。
+- **启动服务**: `python src/main.py` (启动 API 服务并自动运行后台调度器)。
+- **CLI 工具**:
+  - 健康检查: `python src/scripts/mushroom_cli.py health`
+  - 列出图片: `python src/scripts/mushroom_cli.py list --mushroom-id 611`
+  - 批量处理: `python src/scripts/mushroom_cli.py process --mushroom-id 611`
+  - 路径验证: `python src/scripts/mushroom_cli.py validate -p <path>`
+- **测试**:
+  - 运行所有单元测试: `pytest tests/unit`
+  - 运行集成测试: `pytest tests/integration`
 
-- 存储层: MinIO（对象存储）用于图片，Postgres(+pgvector)用于向量与元数据。配置和初始化逻辑散布在 `src/utils/` 中，MinIO 相关入口在 `src/utils/minio_*` 文件。
-- 处理层: CLIP 用于向量化（`models/clip-*`），LLaMA 用于文本描述和决策分析。两者被封装成共享/可复用的"工厂"对象（`create_*` 风格）。
-- 决策分析层: `src/decision_analysis/` 模块提供智能调控建议，集成多源数据提取、相似度匹配和LLM分析。
-- 应用层: `scripts/mushroom_cli.py` 提供命令行工具，`examples/` 包示例用法，`docker/` 支持容器化部署。
+# 核心架构 (Big Picture)
+
+- **核心服务**: `src/main.py` (FastAPI Server + 调度器) 是常驻入口。
+- **任务层 (Tasks)**: 系统核心由定时任务驱动，位于 `src/tasks/`。逻辑封装在 `safe_*` 函数中，调用各领域模块。
+- **领域层**: `src/decision_analysis/` (LLM决策), `src/vision/` (CLIP处理), `src/monitoring/` (监控)。
+- **存储层**: MinIO（对象存储）用于图片，Postgres(+pgvector)用于向量与元数据。配置在 `src/utils/`。
+- **CLI**: `src/scripts/mushroom_cli.py` 提供开发维度的命令行工具。
 
 # 项目约定与可复用模式（务必遵循）
 
@@ -33,7 +35,8 @@
 - 决策分析输出: 结构化JSON格式，包含设备参数调整建议，必须符合 `configs/static_config.json` 中的设备规范。
 
 # 关键文件与定位示例（快速打开）
-
+核心服务入口: [src/main.py](src/main.py)
+- CLI 工具: [src/scripts/mushroom_cli.py](src/
 - 主入口（CLI）: [scripts/mushroom_cli.py](scripts/mushroom_cli.py)
 - 决策分析核心: [src/decision_analysis/decision_analyzer.py](src/decision_analysis/decision_analyzer.py)
 - 文档索引: [docs/README.md](docs/README.md) 与仓库根 [README.md](README.md)
@@ -50,10 +53,10 @@
 - LLM API: 决策分析模块调用外部 LLaMA API（配置在 `configs/settings.toml`），用于生成调控建议。
 
 # 常见开发流程与调试技巧
-
-- 快速验证环境: `uv sync` -> `python scripts/mushroom_cli.py validate`
-- 本地 MinIO 测试: 运行集成测试检查连接
-- 批量处理示例: `python scripts/mushroom_cli.py process --mushroom-id 611 --date 20260119`
+rc/scripts/mushroom_cli.py health`
+- 本地 MinIO 测试: 运行集成测试 `pytest tests/integration`
+- 批量处理示例: `python src/scripts/mushroom_cli.py process --mushroom-id 611 --date 20260119`
+- 决策分析测试: `pytest tests/unit/test_decision_analyzer --mushroom-id 611 --date 20260119`
 - 决策分析测试: `python test_enhanced_decision_analysis.py`
 - Docker部署: `cd docker && docker-compose -f mushroom_solution.yml up -d`
 

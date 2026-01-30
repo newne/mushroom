@@ -1,0 +1,17 @@
+{
+  "total_records": 5279,
+  "processed_records": 5279,
+  "updated_records": 776,
+  "failed_records": 0,
+  "field_fix_counts": {
+    "in_num": 776
+  },
+  "null_in_num_count": 0,
+  "null_growth_day_count": 0,
+  "zero_in_num_fixed_count": 776,
+  "error_type_counts": {
+    "date_parse": 42,
+    "in_num_zero_no_history": 48,
+    "in_num_invalid": 48
+  }
+}

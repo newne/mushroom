@@ -53,10 +53,10 @@ enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
 
 [development.llama_vl]
-llama_host = "10.77.77.39"
-llama_port = "7002"
-model = "llama-mushroom-vl-light.service"
-llama_completions = "http://{0}:{1}/vl-light/v1/chat/completions"
+llama_host = "10.77.77.49"
+llama_port = "7001"
+model = "qwen3-vl-2b"
+llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
 temperature = 0.7

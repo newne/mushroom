@@ -77,9 +77,12 @@ class OptimizedScheduler:
     
     def _register_signal_handlers(self) -> None:
         """注册信号处理器"""
-        signal.signal(signal.SIGINT, self._handle_shutdown)
-        signal.signal(signal.SIGTERM, self._handle_shutdown)
-        logger.info("[SCHEDULER] 信号处理器已注册")
+        try:
+            signal.signal(signal.SIGINT, self._handle_shutdown)
+            signal.signal(signal.SIGTERM, self._handle_shutdown)
+            logger.info("[SCHEDULER] 信号处理器已注册")
+        except ValueError:
+            logger.warning("[SCHEDULER] 无法在非主线程中注册信号处理器 (如在 Streamlit/Uvicorn 工作线程中运行)，跳过信号注册")
     
     def _start_scheduler(self) -> None:
         """启动调度器"""

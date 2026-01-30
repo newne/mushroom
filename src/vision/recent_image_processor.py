@@ -71,6 +71,77 @@ class RecentImageProcessor:
             return filtered_images
         
         return cached_images
+
+    def _select_best_images(self, images: List[Dict]) -> List[Dict]:
+        """
+        根据AI评分筛选最佳的5张图片 (Growth Stage Scoring Strategy)
+        触发条件: 图片数量 > 10
+        筛选流程:
+        1. 质量过滤 (Quality Scale >= 50)
+        2. 关键词匹配 (e.g. 'mushroom')
+        3. 生长阶段评分 (Relevance Score)
+        4. Top-5 选取
+        """
+        logger.info(f"执行AI优选策略: 从 {len(images)} 张图片中筛选 Top 5")
+        
+        scored_candidates = []
+        skipped_count = 0
+        
+        # 1. 预过滤和评分
+        for img_dict in images:
+            try:
+                # 解析路径
+                image_info = self.parser.parse_path(img_dict['object_name'])
+                if not image_info:
+                    continue
+                
+                # 获取图像
+                image = self.minio_client.get_image(image_info.file_path)
+                if image is None:
+                    continue
+                
+                # 获取分析结果 (LLaMA)
+                # 使用新添加的公开方法
+                analysis = self.encoder.get_growth_stage_analysis(image)
+                score = analysis.get('image_quality_score')
+                description = analysis.get('growth_stage_description', '')
+                
+                # 质量过滤
+                if self.encoder.quality_threshold > 0:
+                     if score is None or score < self.encoder.quality_threshold:
+                         logger.debug(f"[FILTER] Quality fail: {score} < {self.encoder.quality_threshold} | {img_dict.get('object_name')}")
+                         skipped_count += 1
+                         continue
+                
+                # 关键词过滤
+                if self.encoder.required_keywords:
+                    desc_lower = description.lower()
+                    if not any(k.lower() in desc_lower for k in self.encoder.required_keywords):
+                        logger.debug(f"[FILTER] Keyword fail: '{description[:50]}...' not in {self.encoder.required_keywords} | {img_dict.get('object_name')}")
+                        skipped_count += 1
+                        continue
+                
+                # 记录候选者
+                # 将分析结果附带在 img_dict 中，以便后续使用
+                img_dict_with_analysis = img_dict.copy()
+                img_dict_with_analysis['_precomputed_analysis'] = analysis
+                scored_candidates.append({
+                    'score': score if score is not None else 0,
+                    'img_dict': img_dict_with_analysis
+                })
+                
+            except Exception as e:
+                logger.error(f"优选过程出错 {img_dict.get('object_name')}: {e}")
+                continue
+        
+        # 2. 排序并取 Top 5
+        scored_candidates.sort(key=lambda x: x['score'], reverse=True)
+        top_candidates = scored_candidates[:5]
+        
+        selected_images = [cand['img_dict'] for cand in top_candidates]
+        logger.info(f"优选完成: 选中 {len(selected_images)} 张 (筛选池: {len(images)}, 过滤: {skipped_count}, 最高分: {scored_candidates[0]['score'] if scored_candidates else 'N/A'})")
+        
+        return selected_images
     
     def get_recent_image_summary_and_process(
         self, 
@@ -171,7 +242,33 @@ class RecentImageProcessor:
             # 按时间排序，处理最新的图片
             images.sort(key=lambda x: x['capture_time'], reverse=True)
             
-            # 限制处理数量
+            # 按日期分组进行优选 (Daily Top-5 Strategy)
+            # 策略：如果单库房单日收集 > 10 张图片，则启用AI优选 Top 5
+            # 目的：减少冗余计算，保留每天最具代表性的生长阶段图片
+            from itertools import groupby
+            
+            optimized_images = []
+            # images已按时间倒序，直接分组即可 (YYYY-MM-DD grouping)
+            for date_str, group in groupby(images, key=lambda x: x['capture_time'].strftime('%Y-%m-%d')):
+                daily_images = list(group)
+                
+                # Check trigger condition per day
+                if len(daily_images) > 10:
+                    logger.info(f"[IMG-OPT] 库房 {room_id} 在 {date_str} 图片数量 {len(daily_images)} > 10，启用AI智能优选 (Top 5)")
+                    try:
+                        selected = self._select_best_images(daily_images)
+                        optimized_images.extend(selected)
+                    except Exception as e:
+                        logger.error(f"[IMG-OPT] {date_str} AI优选失败，回退到普通处理: {e}")
+                        optimized_images.extend(daily_images)
+                else:
+                    # 图片较少，全部保留
+                    optimized_images.extend(daily_images)
+            
+            # 更新处理列表
+            images = optimized_images
+            
+            # 限制处理数量 (Apply global limit if set)
             if max_images_per_room:
                 images = images[:max_images_per_room]
             

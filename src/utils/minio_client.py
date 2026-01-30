@@ -19,7 +19,7 @@ from urllib3.exceptions import InsecureRequestWarning
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List, Dict, Any, Tuple, Union, Set
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, wraps
 from urllib3 import PoolManager
 from urllib.parse import urlparse
 
@@ -55,6 +55,45 @@ class ImageRecord:
             'last_modified': self.last_modified,
             'size': self.size
         }
+
+
+def handle_minio_errors(operation_name: str, default_return: Any = None, raise_on_error: bool = False):
+    """统一错误处理装饰器"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, *args, **kwargs):
+            try:
+                return func(self, *args, **kwargs)
+            except S3Error as e:
+                # 尝试从 args/kwargs 中构建 context? 
+                # 简单起见，这里假设 _handle_error 需要显式传参，但装饰器无法自动映射参数名。
+                # 我们可以传递所有 kwargs。
+                # 但 MinIOClient._handle_error 参数是 flexible **context。
+                
+                # 为了保持 _handle_error 的 context 功能，我们需要获取参数
+                # 这里暂时只传递 error， context 可能丢失 unless we bind arguments.
+                
+                # 既然原代码显式传递 context (e.g. bucket=bucket_name)，装饰器可能难以完美替代
+                # 除非我们在此不做 context 提取，或者 _handle_error 不依赖特定 key。
+                
+                # 原代码: self._handle_error("upload_image", e, ..., file_path=..., object_name=...)
+                # 装饰器 wrapper 接收 kwargs，但位置参数 args 的名字未知。
+                # Inspect signature? 
+                
+                # 鉴于此复杂性，且用户要求 "消除不必要的...提升效率"，也许保留 try-except 但用 _handle_error 是最稳妥的兼容方式。
+                # 强行上装饰器可能会丢失 logging context。
+                
+                # 不过，我可以让 _handle_error 打印 args 和 kwargs。
+                context = {**kwargs}
+                # converting args to context is hard without inspection.
+                self._handle_error(operation_name, e, raise_on_error=raise_on_error, **context)
+                return default_return
+            except Exception as e:
+                context = {**kwargs}
+                self._handle_error(operation_name, e, raise_on_error=raise_on_error, **context)
+                return default_return
+        return wrapper
+    return decorator
 
 
 class MinIOClient:
@@ -745,142 +784,7 @@ class MinIOClient:
         except Exception as e:
             self._handle_error("generate_presigned_url", e, raise_on_error=False)
             return None
-        """
-        从MinIO获取图片
-        
-        Args:
-            object_name: 对象名称
-            bucket_name: 存储桶名称
-            
-        Returns:
-            PIL Image对象
-        """
-        bucket_name = bucket_name or self.config['bucket']
-        
-        try:
-            response = self.client.get_object(bucket_name, object_name)
-            image_data = response.read()
-            response.close()
-            response.release_conn()
-            
-            # 使用PIL打开图片
-            image = Image.open(io.BytesIO(image_data))
-            logger.info(f"成功获取图片: {object_name}, 尺寸: {image.size}")
-            return image
-            
-        except Exception as e:
-            logger.error(f"获取图片失败 {object_name}: {e}")
-            return None
-    
-    def get_image_bytes(self, object_name: str, bucket_name: Optional[str] = None) -> Optional[bytes]:
-        """
-        从MinIO获取图片字节数据
-        
-        Args:
-            object_name: 对象名称
-            bucket_name: 存储桶名称
-            
-        Returns:
-            图片字节数据
-        """
-        bucket_name = bucket_name or self.config['bucket']
-        
-        try:
-            response = self.client.get_object(bucket_name, object_name)
-            image_data = response.read()
-            response.close()
-            response.release_conn()
-            
-            logger.info(f"成功获取图片字节数据: {object_name}, 大小: {len(image_data)} bytes")
-            return image_data
-            
-        except Exception as e:
-            logger.error(f"获取图片字节数据失败 {object_name}: {e}")
-            return None
-    
-    def upload_image(self, file_path: str, object_name: Optional[str] = None, 
-                    bucket_name: Optional[str] = None) -> bool:
-        """
-        上传图片到MinIO
-        
-        Args:
-            file_path: 本地文件路径
-            object_name: 对象名称，如果为None则使用文件名
-            bucket_name: 存储桶名称
-            
-        Returns:
-            是否上传成功
-        """
-        bucket_name = bucket_name or self.config['bucket']
-        object_name = object_name or os.path.basename(file_path)
-        
-        try:
-            # 确保存储桶存在
-            self.ensure_bucket_exists(bucket_name)
-            
-            # 上传文件
-            self.client.fput_object(bucket_name, object_name, file_path)
-            logger.info(f"成功上传图片: {file_path} -> {bucket_name}/{object_name}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"上传图片失败 {file_path}: {e}")
-            return False
-    
-    def delete_image(self, object_name: str, bucket_name: Optional[str] = None) -> bool:
-        """
-        删除图片
-        
-        Args:
-            object_name: 对象名称
-            bucket_name: 存储桶名称
-            
-        Returns:
-            是否删除成功
-        """
-        bucket_name = bucket_name or self.config['bucket']
-        
-        try:
-            self.client.remove_object(bucket_name, object_name)
-            logger.info(f"成功删除图片: {bucket_name}/{object_name}")
-            return True
-            
-        except Exception as e:
-            logger.error(f"删除图片失败 {object_name}: {e}")
-            return False
-    
-    def get_image_info(self, object_name: str, bucket_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """
-        获取图片信息
-        
-        Args:
-            object_name: 对象名称
-            bucket_name: 存储桶名称
-            
-        Returns:
-            图片信息字典
-        """
-        bucket_name = bucket_name or self.config['bucket']
-        
-        try:
-            stat = self.client.stat_object(bucket_name, object_name)
-            
-            info = {
-                'object_name': object_name,
-                'size': stat.size,
-                'etag': stat.etag,
-                'last_modified': stat.last_modified,
-                'content_type': stat.content_type,
-                'metadata': stat.metadata
-            }
-            
-            logger.info(f"获取图片信息成功: {object_name}")
-            return info
-            
-        except Exception as e:
-            self._handle_error("generate_presigned_url", e, raise_on_error=False)
-            return None
-    
+
     def get_image_info(self, object_name: str, bucket_name: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         获取图片信息

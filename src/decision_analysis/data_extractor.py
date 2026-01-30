@@ -110,9 +110,9 @@ class DataExtractor:
         )
         
         try:
-            from sqlalchemy import select, and_, desc
+            from sqlalchemy import select, and_, desc, func
             from sqlalchemy.orm import Session
-            from utils.create_table import MushroomImageEmbedding
+            from utils.create_table import MushroomImageEmbedding, ImageTextQuality
             
             # Calculate time window for image aggregation (still used for metadata)
             aggregation_start = target_datetime - timedelta(minutes=image_aggregation_window_minutes)
@@ -150,6 +150,31 @@ class DataExtractor:
                     f"range=[{min_growth_day}, {max_growth_day}]"
                 )
                 
+                latest_text_quality = (
+                    select(
+                        ImageTextQuality.image_path.label('image_path'),
+                        func.max(ImageTextQuality.created_at).label('max_created_at')
+                    )
+                    .group_by(ImageTextQuality.image_path)
+                    .subquery()
+                )
+
+                latest_quality = (
+                    select(
+                        ImageTextQuality.image_path.label('image_path'),
+                        ImageTextQuality.llama_description.label('llama_description'),
+                        ImageTextQuality.image_quality_score.label('image_quality_score')
+                    )
+                    .join(
+                        latest_text_quality,
+                        and_(
+                            ImageTextQuality.image_path == latest_text_quality.c.image_path,
+                            ImageTextQuality.created_at == latest_text_quality.c.max_created_at,
+                        ),
+                    )
+                    .subquery()
+                )
+
                 # Step 2: Query data directly based on growth day window
                 # No collection_datetime filtering, only growth day-based filtering
                 query = (
@@ -162,8 +187,8 @@ class DataExtractor:
                         MushroomImageEmbedding.growth_day,
                         MushroomImageEmbedding.embedding,
                         MushroomImageEmbedding.semantic_description,
-                        MushroomImageEmbedding.llama_description,
-                        MushroomImageEmbedding.image_quality_score,
+                        latest_quality.c.llama_description,
+                        latest_quality.c.image_quality_score,
                         MushroomImageEmbedding.env_sensor_status,
                         MushroomImageEmbedding.air_cooler_config,
                         MushroomImageEmbedding.fresh_fan_config,
@@ -171,6 +196,10 @@ class DataExtractor:
                         MushroomImageEmbedding.light_config,
                         MushroomImageEmbedding.image_path,
                         MushroomImageEmbedding.collection_ip,
+                    )
+                    .outerjoin(
+                        latest_quality,
+                        latest_quality.c.image_path == MushroomImageEmbedding.image_path,
                     )
                     .where(
                         and_(
@@ -279,9 +308,9 @@ class DataExtractor:
         )
         
         try:
-            from sqlalchemy import select, and_, not_
+            from sqlalchemy import select, and_, not_, func
             from sqlalchemy.orm import Session
-            from utils.create_table import MushroomImageEmbedding
+            from utils.create_table import MushroomImageEmbedding, ImageTextQuality
             
             # Calculate growth day range
             min_growth_day = target_growth_day - growth_day_window
@@ -294,6 +323,31 @@ class DataExtractor:
             )
             
             with Session(self.db_engine) as session:
+                latest_text_quality = (
+                    select(
+                        ImageTextQuality.image_path.label('image_path'),
+                        func.max(ImageTextQuality.created_at).label('max_created_at')
+                    )
+                    .group_by(ImageTextQuality.image_path)
+                    .subquery()
+                )
+
+                latest_quality = (
+                    select(
+                        ImageTextQuality.image_path.label('image_path'),
+                        ImageTextQuality.llama_description.label('llama_description'),
+                        ImageTextQuality.image_quality_score.label('image_quality_score')
+                    )
+                    .join(
+                        latest_text_quality,
+                        and_(
+                            ImageTextQuality.image_path == latest_text_quality.c.image_path,
+                            ImageTextQuality.created_at == latest_text_quality.c.max_created_at,
+                        ),
+                    )
+                    .subquery()
+                )
+
                 # Query historical data excluding current batch
                 query = (
                     select(
@@ -305,14 +359,18 @@ class DataExtractor:
                         MushroomImageEmbedding.growth_day,
                         MushroomImageEmbedding.embedding,
                         MushroomImageEmbedding.semantic_description,
-                        MushroomImageEmbedding.llama_description,
-                        MushroomImageEmbedding.image_quality_score,
+                        latest_quality.c.llama_description,
+                        latest_quality.c.image_quality_score,
                         MushroomImageEmbedding.env_sensor_status,
                         MushroomImageEmbedding.air_cooler_config,
                         MushroomImageEmbedding.fresh_fan_config,
                         MushroomImageEmbedding.humidifier_config,
                         MushroomImageEmbedding.light_config,
                         MushroomImageEmbedding.image_path,
+                    )
+                    .outerjoin(
+                        latest_quality,
+                        latest_quality.c.image_path == MushroomImageEmbedding.image_path,
                     )
                     .where(
                         and_(

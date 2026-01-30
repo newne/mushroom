@@ -35,7 +35,6 @@ class MushroomImageEmbedding(Base):
         Index('idx_collection_time', 'collection_datetime'),  # 时间范围查询
         Index('idx_in_date', 'in_date'),  # 时间索引：进库日期（支持范围查询）
         Index('uq_image_path', 'image_path', unique=True),  # 唯一索引：图片路径（去重）
-        Index('idx_image_quality', 'image_quality_score'),  # 图像质量索引（支持质量筛选）
         Index('idx_collection_ip', 'collection_ip'),  # 采集IP索引（支持按设备查询）
         Index('idx_room_collection_ip', 'room_id', 'collection_ip'),  # 复合索引：库房+采集IP
         # --- 表级参数字典（必须放在最后） ---
@@ -43,10 +42,10 @@ class MushroomImageEmbedding(Base):
     )
     # --- 字段定义 ---
     id = Column(
-        PgUUID(as_uuid=True),
+        BigInteger,
         primary_key=True,
-        default=uuid.uuid4,  # 使用 UUID4 替代 UUID7
-        comment="主键ID (UUID4)"
+        autoincrement=True,
+        comment="自增主键 (BIGINT)"
     )
     collection_datetime = Column(DateTime, nullable=False, comment="采集时间")
     image_path = Column(Text, nullable=False, unique=True, comment="图片存储路径")
@@ -54,9 +53,6 @@ class MushroomImageEmbedding(Base):
     in_date = Column(Date, nullable=False, comment="进库日期 (YYYY-MM-DD)")
     in_num = Column(Integer, nullable=True, comment="进库包数")
     growth_day = Column(Integer, nullable=False, comment="生长天数")
-    
-    # 图像质量评价字段
-    image_quality_score = Column(Float, nullable=True, comment="图像质量评分 (0-100)")
     
     # 图像采集IP字段 - 从image_path中自动解析
     collection_ip = Column(String(15), nullable=True, comment="图像采集设备IP地址，从image_path自动解析")
@@ -129,12 +125,94 @@ class MushroomImageEmbedding(Base):
 
     semantic_description = Column(Text, nullable=False, comment="策略文本")
     
-    # LLaMA生成的蘑菇生长情况描述
-    llama_description = Column(Text, nullable=True, comment="LLaMA生成的蘑菇生长情况描述")
+    # LLaMA生成的蘑菇生长情况描述已移至独立表
 
     # 假设 EMBEDDING_DIM 已定义
     embedding = Column(Vector(EMBEDDING_DIM), nullable=False, comment="图像嵌入向量")
 
+    created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
+
+
+class ImageTextQuality(Base):
+    """文本描述与图像质量评分表（推荐使用）"""
+    __tablename__ = "image_text_quality"
+
+    __table_args__ = (
+        Index('idx_text_quality_room_date', 'room_id', 'in_date'),
+        Index('idx_text_quality_score', 'image_quality_score'),
+        Index('idx_text_quality_image_path', 'image_path'),
+        Index('idx_text_quality_embedding_id', 'mushroom_embedding_id'),
+        {"comment": "文本描述与图像质量评分表（不保留历史时可避免重复）"}
+    )
+
+    id = Column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+        comment="自增主键 (BIGINT)"
+    )
+    mushroom_embedding_id = Column(BigInteger, nullable=True, comment="关联mushroom_embedding.id")
+    image_path = Column(Text, nullable=False, comment="图片存储路径")
+    room_id = Column(String(10), nullable=True, comment="库房编号")
+    in_date = Column(Date, nullable=True, comment="进库日期 (YYYY-MM-DD)")
+    collection_datetime = Column(DateTime, nullable=True, comment="采集时间")
+    llama_description = Column(Text, nullable=True, comment="LLaMA生成的蘑菇生长情况描述")
+    image_quality_score = Column(Float, nullable=True, comment="图像质量评分 (0-100)")
+    created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
+
+
+class MushroomTextEncoding(Base):
+    """文本编码相关内容表（已废弃，使用 image_text_quality）"""
+    __tablename__ = "mushroom_text_encoding"
+
+    __table_args__ = (
+        Index('idx_text_room_date', 'room_id', 'in_date'),
+        Index('uq_text_image_path', 'image_path', unique=True),
+        Index('idx_text_embedding_id', 'mushroom_embedding_id'),
+        {"comment": "文本编码相关内容表"}
+    )
+
+    id = Column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+        comment="自增主键 (BIGINT)"
+    )
+    mushroom_embedding_id = Column(BigInteger, nullable=True, comment="关联mushroom_embedding.id")
+    image_path = Column(Text, nullable=False, unique=True, comment="图片存储路径")
+    room_id = Column(String(10), nullable=True, comment="库房编号")
+    in_date = Column(Date, nullable=True, comment="进库日期 (YYYY-MM-DD)")
+    llama_description = Column(Text, nullable=True, comment="LLaMA生成的蘑菇生长情况描述")
+    created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
+
+
+class MushroomImageQuality(Base):
+    """图像质量评分表（已废弃，使用 image_text_quality）"""
+    __tablename__ = "mushroom_image_quality"
+
+    __table_args__ = (
+        Index('idx_quality_room_date', 'room_id', 'in_date'),
+        Index('idx_quality_score', 'image_quality_score'),
+        Index('uq_quality_image_path', 'image_path', unique=True),
+        Index('idx_quality_embedding_id', 'mushroom_embedding_id'),
+        {"comment": "图像质量评分表"}
+    )
+
+    id = Column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+        comment="自增主键 (BIGINT)"
+    )
+    mushroom_embedding_id = Column(BigInteger, nullable=True, comment="关联mushroom_embedding.id")
+    image_path = Column(Text, nullable=False, unique=True, comment="图片存储路径")
+    room_id = Column(String(10), nullable=True, comment="库房编号")
+    in_date = Column(Date, nullable=True, comment="进库日期 (YYYY-MM-DD)")
+    collection_datetime = Column(DateTime, nullable=True, comment="采集时间")
+    image_quality_score = Column(Float, nullable=True, comment="图像质量评分 (0-100)")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
 

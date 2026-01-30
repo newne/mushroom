@@ -16,7 +16,7 @@ from utils.loguru_setting import logger
 # 任务模块导入 (重构后)
 from environment.tasks import safe_daily_env_stats
 from monitoring.tasks import safe_hourly_setpoint_monitoring
-from vision.tasks import safe_hourly_clip_inference
+from vision.tasks import safe_hourly_text_quality_inference, safe_daily_top_quality_clip_inference
 from decision_analysis.tasks import safe_batch_decision_analysis
 from tasks.table import safe_create_tables  # This one might stay in tasks/table or move?
 
@@ -57,14 +57,23 @@ def register_jobs(scheduler: BackgroundScheduler, local_timezone: timezone) -> N
     )
     logger.info("[SCHEDULER] 每小时设定点监控任务已添加（基于静态配置表的优化版）")
     
-    # 每小时CLIP推理任务（每小时第25分钟执行）
+    # 每小时文本编码与质量评估任务（每小时第25分钟执行）
     scheduler.add_job(
-        func=safe_hourly_clip_inference,
+        func=safe_hourly_text_quality_inference,
         trigger=CronTrigger(minute=25, timezone=local_timezone),
-        id="hourly_clip_inference",
+        id="hourly_text_quality_inference",
         replace_existing=True,
     )
-    logger.info("[SCHEDULER] 每小时CLIP推理任务已添加 (每小时第25分钟执行)")
+    logger.info("[SCHEDULER] 每小时文本/质量任务已添加 (每小时第25分钟执行)")
+
+    # 每日Top质量图像编码任务（02:10执行）
+    scheduler.add_job(
+        func=safe_daily_top_quality_clip_inference,
+        trigger=CronTrigger(hour=2, minute=10, second=0, timezone=local_timezone),
+        id="daily_top_quality_clip_inference",
+        replace_existing=True,
+    )
+    logger.info("[SCHEDULER] 每日Top质量图像编码任务已添加 (02:10执行)")
     
     # ==================== 决策分析定时任务 ====================
     # 提取时间点配置
