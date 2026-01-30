@@ -105,11 +105,14 @@ EOF
             if [ -d "dist/src" ] && [ "$(ls -A dist/src 2>/dev/null)" ]; then
                 echo "CodeEnigma obfuscation completed successfully"
                 
-                # 处理运行时文件
-                runtime_file="dist/codeenigma_runtime/codeenigma_runtime.cpython-312-x86_64-linux-gnu.so"
-                if [ -f "$runtime_file" ]; then
-                    echo "Moving CodeEnigma runtime file to src directory"
+                # 处理运行时文件（兼容不同输出路径）
+                runtime_file=$(find dist -maxdepth 4 -type f -name "codeenigma_runtime*.so" | head -n 1 || true)
+                if [ -n "$runtime_file" ] && [ -f "$runtime_file" ]; then
+                    echo "Moving CodeEnigma runtime file to src directory: $runtime_file"
                     mv "$runtime_file" dist/src/
+                else
+                    echo "Error: CodeEnigma runtime file not found, falling back to unencrypted build" >&2
+                    ENCRYPT="false"
                 fi
                 
                 # 清理不需要的文件

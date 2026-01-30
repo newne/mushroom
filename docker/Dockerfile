@@ -88,11 +88,20 @@ ENV VIRTUAL_ENV=/opt/venv \
 # 复制所有源代码和运行时文件
 COPY dist/src/ ./
 
-# 验证运行时文件是否存在
-RUN if [ -f codeenigma_runtime.cpython-312-x86_64-linux-gnu.so ]; then \
-        echo "✓ CodeEnigma runtime file found and copied"; \
+# 验证运行时文件是否存在（加密构建必须包含 runtime）
+RUN if [ "$ENCRYPTED" = "true" ]; then \
+        if [ -f codeenigma_runtime.cpython-312-x86_64-linux-gnu.so ]; then \
+            echo "✓ CodeEnigma runtime file found and copied"; \
+        else \
+            echo "Error: CodeEnigma runtime file not found for encrypted build"; \
+            exit 1; \
+        fi; \
     else \
-        echo "Warning: CodeEnigma runtime file not found"; \
+        if [ -f codeenigma_runtime.cpython-312-x86_64-linux-gnu.so ]; then \
+            echo "Note: runtime present in unencrypted build"; \
+        else \
+            echo "Info: runtime not required for unencrypted build"; \
+        fi; \
     fi
 
 # 配置文件目录（运行时通过挂载提供）
