@@ -213,9 +213,16 @@ if [ "${BUILD_IMAGE}" = "true" ]; then
     echo "Use Cache: ${USE_CACHE}"
     echo "============================================================================"
 
-    # 启用 BuildKit
-    export DOCKER_BUILDKIT=1
-    export BUILDKIT_PROGRESS=plain
+    # 启用 BuildKit（若 buildx 不可用则自动降级）
+    if docker buildx version >/dev/null 2>&1; then
+        export DOCKER_BUILDKIT=1
+        export BUILDKIT_PROGRESS=plain
+        echo "BuildKit enabled (buildx detected)"
+    else
+        export DOCKER_BUILDKIT=0
+        unset BUILDKIT_PROGRESS
+        echo "BuildKit disabled (buildx missing); falling back to legacy builder"
+    fi
     
     # 构建参数
     BUILD_ARGS=(
@@ -228,8 +235,12 @@ if [ "${BUILD_IMAGE}" = "true" ]; then
         --tag "${REGISTRY}/${PROJECT_NAME}:${FULL_VERSION}"
         --tag "${REGISTRY}/${PROJECT_NAME}:latest"
         --file docker/Dockerfile
-        --progress=plain
     )
+
+    # BuildKit 才支持 --progress
+    if [ "${DOCKER_BUILDKIT}" = "1" ]; then
+        BUILD_ARGS+=(--progress=plain)
+    fi
     
     # 添加缓存配置
     if [ "${USE_CACHE}" = "true" ]; then
