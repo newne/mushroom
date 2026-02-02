@@ -11,83 +11,102 @@ import time
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import Any
 
 import numpy as np
 import requests
 import torch
-from PIL import Image
 from loguru import logger
+from PIL import Image
 from sqlalchemy.orm import sessionmaker
-from transformers import CLIPProcessor, CLIPModel
+from transformers import CLIPModel, CLIPProcessor
 
+from environment.processor import create_env_data_processor
 from global_const.global_const import pgsql_engine, settings
 from utils.create_table import (
-    MushroomImageEmbedding,
     ImageTextQuality,
+    MushroomImageEmbedding,
 )
-from environment.processor import create_env_data_processor
 from utils.get_data import GetData
 from utils.minio_client import create_minio_client
-from .mushroom_image_processor import create_mushroom_processor, MushroomImageInfo
+
+from .mushroom_image_processor import MushroomImageInfo, create_mushroom_processor
 
 
 class MushroomImageEncoder:
     """蘑菇图像编码器类"""
-    
-    def __init__(self):
+
+    def __init__(self, load_clip: bool = True):
         """初始化编码器"""
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.debug(f"设备: {self.device}")
-        
+
         # 初始化CLIP模型
-        self._init_clip_model()
-        
+        self.clip_model = None
+        self.clip_processor = None
+        if load_clip:
+            self._init_clip_model()
+        else:
+            logger.info("[ImageEncoder] 跳过CLIP模型加载 (仅文本/质量分析)")
+
         # 初始化MinIO客户端和处理器
         self.minio_client = create_minio_client()
         self.processor = create_mushroom_processor()
-        
+
         # 初始化数据库会话
         self.Session = sessionmaker(bind=pgsql_engine)
-        
+
         # 初始化环境数据处理器
         self._init_env_processor()
-        
+
         # 初始化GetData实例用于获取提示词
         self.get_data = GetData(
             urls=settings.data_source_url,
             host=settings.host.host,
-            port=settings.host.port
+            port=settings.host.port,
         )
-        
+
         # 初始化LLaMA客户端
         self._init_llama_client()
-        
+
         # 库房号映射：MinIO中的库房号 -> 环境配置中的库房号
         self.room_id_mapping = {
-            '7': '607',   # MinIO中的7对应环境配置中的607
-            '8': '608',   # MinIO中的8对应环境配置中的608
-            '607': '607',
-            '608': '608',
-            '611': '611',
-            '612': '612'
+            "7": "607",  # MinIO中的7对应环境配置中的607
+            "8": "608",  # MinIO中的8对应环境配置中的608
+            "607": "607",
+            "608": "608",
+            "611": "611",
+            "612": "612",
         }
-        
+
         # 质量控制参数 (默认宽松)
         self.quality_threshold = 0
         self.required_keywords = []
+        self.low_quality_override_keywords = [
+            "菌丝",
+            "菌丝体",
+            "原基",
+            "针",
+            "针尖",
+            "出菇",
+            "mycelium",
+            "primordia",
+            "pinhead",
+            "pinning",
+            "hypha",
+        ]
 
         # LLaMA 性能监控配置
         self.time_threshold = 5000  # 性能警告阈值 (毫秒)
         self._setup_performance_logger()
-        
+
         logger.debug("图像编码器初始化完成")
 
     def _setup_performance_logger(self):
         """配置 LLaMA 性能监控专用日志"""
         # 避免重复添加 sink (简单检查)
         # 注意: 这种检查并不完美，但在单例/工厂模式下足矣
-        if not hasattr(self, '_perf_logger_configured'):
+        if not hasattr(self, "_perf_logger_configured"):
             log_path = Path("logs/llama_performance.log")
             try:
                 logger.add(
@@ -95,22 +114,23 @@ class MushroomImageEncoder:
                     rotation="10 MB",
                     retention="30 days",
                     compression="zip",
-                    filter=lambda record: record["extra"].get("type") == "llama_performance",
-                    format="{message}", # 使用 JSON 格式或者自定义格式，这里我们把 message 构造成 JSON 字符串
+                    filter=lambda record: record["extra"].get("type")
+                    == "llama_performance",
+                    format="{message}",  # 使用 JSON 格式或者自定义格式，这里我们把 message 构造成 JSON 字符串
                     level="INFO",
-                    enqueue=True
+                    enqueue=True,
                 )
                 self._perf_logger_configured = True
             except Exception as e:
                 logger.error(f"配置性能日志失败: {e}")
-    
+
     def _map_room_id(self, room_id: str) -> str:
         """
         映射库房号：将MinIO中的库房号映射到环境配置中的库房号
-        
+
         Args:
             room_id: MinIO中的库房号
-            
+
         Returns:
             环境配置中对应的库房号
         """
@@ -118,41 +138,91 @@ class MushroomImageEncoder:
         if mapped_id != room_id:
             logger.debug(f"Mapped room ID: {room_id} -> {mapped_id}")
         return mapped_id
-    
+
+    def _allow_low_quality(self, description: str) -> bool:
+        """低质量但早期生长阶段允许通过"""
+        if not description:
+            return False
+        desc_lower = description.lower()
+        return any(k.lower() in desc_lower for k in self.low_quality_override_keywords)
+
+    def _save_text_quality_only(
+        self,
+        image_info: MushroomImageInfo,
+        time_info: dict,
+        growth_stage_description: str,
+        llama_quality_score: float | None,
+    ) -> bool:
+        """仅保存文本描述与质量评分"""
+        session = self.Session()
+        try:
+            room_id = self._map_room_id(image_info.mushroom_id)
+            in_date = time_info["collection_datetime"].date()
+            existing_embedding = (
+                session.query(MushroomImageEmbedding)
+                .filter_by(image_path=image_info.file_path)
+                .first()
+            )
+            embedding_id = existing_embedding.id if existing_embedding else None
+
+            self._insert_text_quality_record(
+                session,
+                image_info.file_path,
+                embedding_id,
+                room_id,
+                in_date,
+                time_info["collection_datetime"],
+                growth_stage_description if growth_stage_description else None,
+                llama_quality_score,
+            )
+            session.commit()
+            return True
+        except Exception as e:
+            session.rollback()
+            logger.error(
+                f"[IMG-013] 保存文本/质量失败 | 文件: {image_info.file_name} | 错误: {e}"
+            )
+            return False
+        finally:
+            session.close()
+
     def _init_clip_model(self):
         """初始化CLIP模型"""
         # 检查本地模型路径
         # 在容器中，源码直接复制到/app，models挂载到/app/models
         # 在开发环境中，保持原有的相对路径计算
-        
+
         # 首先检查容器环境的路径
-        container_model_path = Path('/app/models/clip-vit-base-patch32')
-        
+        container_model_path = Path("/app/models/clip-vit-base-patch32")
+
         # 然后检查开发环境的路径
-        local_model_path = Path(__file__).parent.parent.parent / 'models' / 'clip-vit-base-patch32'
-        
+        local_model_path = (
+            Path(__file__).parent.parent.parent / "models" / "clip-vit-base-patch32"
+        )
+
         if container_model_path.exists():
             model_name = str(container_model_path)
         elif local_model_path.exists():
             model_name = str(local_model_path)
         else:
-            model_name = 'openai/clip-vit-base-patch32'
-        
+            model_name = "openai/clip-vit-base-patch32"
+
         logger.debug(f"加载CLIP模型: {model_name}")
         import warnings
+
         from transformers import logging as trans_log
-        
+
         # 临时抑制transformers库的模型加载警告
         trans_log.set_verbosity_error()
         warnings.filterwarnings("ignore", category=UserWarning, module="transformers")
-        
+
         try:
             self.clip_processor = CLIPProcessor.from_pretrained(model_name)
             self.clip_model = CLIPModel.from_pretrained(model_name).to(self.device)
             self.clip_model.eval()
         except Exception as e:
             logger.error(f"无法加载CLIP模型 '{model_name}': {e}")
-            if model_name == 'openai/clip-vit-base-patch32':
+            if model_name == "openai/clip-vit-base-patch32":
                 logger.critical(
                     f"\n❌ 模型加载失败！\n"
                     f"系统尝试从 HuggingFace 下载模型但连接超时。\n"
@@ -161,13 +231,13 @@ class MushroomImageEncoder:
                     f"2. {local_model_path} (本地开发环境)\n"
                 )
             raise RuntimeError(f"Failed to load CLIP model: {e}") from e
-        
+
         # 恢复警告
         trans_log.set_verbosity_warning()
         warnings.resetwarnings()
-        
-        logger.debug(f"CLIP模型加载完成")
-    
+
+        logger.debug("CLIP模型加载完成")
+
     def _init_env_processor(self):
         """初始化环境数据处理器"""
         try:
@@ -176,13 +246,13 @@ class MushroomImageEncoder:
         except Exception as e:
             logger.warning(f"环境数据处理器初始化失败: {e}")
             self.env_processor = None
-    
+
     def _init_llama_client(self):
         """初始化LLaMA客户端"""
         try:
             # 仅使用 llama-vl 配置，不回退到纯文本 llama 配置
             # Dynaconf 将 'llama-vl' 转换为 'llama_vl'
-            if hasattr(settings, 'llama_vl'):
+            if hasattr(settings, "llama_vl"):
                 self.llama_config = settings.llama_vl
                 logger.debug("使用 llama-vl 配置")
             else:
@@ -191,27 +261,29 @@ class MushroomImageEncoder:
                 return
 
             # 检查是否启用LLaMA
-            if hasattr(self.llama_config, 'enabled') and not self.llama_config.enabled:
+            if hasattr(self.llama_config, "enabled") and not self.llama_config.enabled:
                 logger.debug("LLaMA-VL已禁用")
                 self.llama_client = False
                 return
-                
+
             # 标记LLaMA客户端可用
             self.llama_client = True
-            logger.debug(f"LLaMA-VL客户端初始化完成 | 模型: {getattr(self.llama_config, 'model', 'unknown')} | "
-                        f"地址: {getattr(self.llama_config, 'llama_host', 'localhost')}:{getattr(self.llama_config, 'llama_port', '7001')}")
-                        
+            logger.debug(
+                f"LLaMA-VL客户端初始化完成 | 模型: {getattr(self.llama_config, 'model', 'unknown')} | "
+                f"地址: {getattr(self.llama_config, 'llama_host', 'localhost')}:{getattr(self.llama_config, 'llama_port', '7001')}"
+            )
+
         except Exception as e:
             logger.warning(f"LLaMA-VL客户端初始化失败: {e}")
             self.llama_client = False
-    
-    def _call_llama_api(self, image_data: str) -> Dict[str, Any]:
+
+    def _call_llama_api(self, image_data: str) -> dict[str, Any]:
         """
         直接调用LLaMA API (集成性能监控)
-        
+
         Args:
             image_data: base64编码的图像数据
-            
+
         Returns:
             包含描述和评分的字典
         """
@@ -222,81 +294,95 @@ class MushroomImageEncoder:
         status = "unknown"
         error_details = None
         model_name = "unknown"
-        
+
         # 绑定专用logger
         perf_logger = logger.bind(type="llama_performance")
-        
+
         try:
             # 从API动态获取提示词，如果失败则使用配置文件中的默认值
             prompt = self.get_data.get_mushroom_prompt()
             if not prompt:
                 logger.warning("[LLAMA-API] 无法获取提示词，使用配置文件中的默认值")
                 # 尝试从配置获取，如果没有则使用默认值
-                prompt = getattr(self.llama_config, 'mushroom_descripe_prompt', "Describe the mushroom growth stage.")
-            
+                prompt = getattr(
+                    self.llama_config,
+                    "mushroom_descripe_prompt",
+                    "Describe the mushroom growth stage.",
+                )
+
             # 获取配置参数，提供默认值
-            model = getattr(self.llama_config, 'model', "qwen/qwen3-vl-2b")
-            model_name = model # 记录用于日志
-            
-            temperature = getattr(self.llama_config, 'temperature', 0.7)
-            max_tokens = getattr(self.llama_config, 'max_tokens', 1024)
-            top_p = getattr(self.llama_config, 'top_p', 0.9)
-            
+            model = getattr(self.llama_config, "model", "qwen/qwen3-vl-2b")
+            model_name = model  # 记录用于日志
+
+            temperature = getattr(self.llama_config, "temperature", 0.7)
+            max_tokens = getattr(self.llama_config, "max_tokens", 1024)
+            top_p = getattr(self.llama_config, "top_p", 0.9)
+
             payload = {
                 "model": model,
                 "messages": [
-                    {
-                        "role": "system",
-                        "content": prompt
-                    },
+                    {"role": "system", "content": prompt},
                     {
                         "role": "user",
                         "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
-                        ]
-                    }
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{image_data}"
+                                },
+                            }
+                        ],
+                    },
                 ],
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "top_p": top_p,
-                "stream": False
+                "stream": False,
             }
 
-            headers = {
-                "Content-Type": "application/json"
-            }
-            
+            headers = {"Content-Type": "application/json"}
+
             # 根据模型类型智能选择API密钥
             # 判断逻辑：如果模型名称中包含 'vl', 'vision', 'qvq' 等关键词，视为多模态模型
-            is_multimodal = any(kw in model.lower() for kw in ['vl', 'vision', 'qvq'])
-            
+            is_multimodal = any(kw in model.lower() for kw in ["vl", "vision", "qvq"])
+
             api_key = None
             if is_multimodal:
                 # 多模态模型：优先使用 vl key，回退到 basic key
-                api_key = getattr(self.llama_config, 'api_key_vl', None) or getattr(self.llama_config, 'api_key', None)
+                api_key = getattr(self.llama_config, "api_key_vl", None) or getattr(
+                    self.llama_config, "api_key", None
+                )
             else:
                 # 纯文本/通用模型：优先使用 basic key，回退到 vl key (以防配置错配)
-                api_key = getattr(self.llama_config, 'api_key', None) or getattr(self.llama_config, 'api_key_vl', None)
-            
+                api_key = getattr(self.llama_config, "api_key", None) or getattr(
+                    self.llama_config, "api_key_vl", None
+                )
+
             if api_key:
                 headers["X-API-Key"] = api_key
-            
+
             # 构建URL
-            host = getattr(self.llama_config, 'llama_host', 'localhost')
-            port = getattr(self.llama_config, 'llama_port', '7001')
-            base_url_template = getattr(self.llama_config, 'llama_completions', "http://{0}:{1}/v1/chat/completions")
+            host = getattr(self.llama_config, "llama_host", "localhost")
+            port = getattr(self.llama_config, "llama_port", "7001")
+            base_url_template = getattr(
+                self.llama_config,
+                "llama_completions",
+                "http://{0}:{1}/v1/chat/completions",
+            )
             base_url = base_url_template.format(host, port)
-            
+
             # 从配置获取超时时间，默认600秒
-            timeout = getattr(self.llama_config, 'timeout', 600)
-            
+            timeout = getattr(self.llama_config, "timeout", 600)
+
             # 使用requests直接发送请求，使用配置的超时时间
-            resp = requests.post(base_url, json=payload, headers=headers, timeout=timeout)
-            
+            resp = requests.post(
+                base_url, json=payload, headers=headers, timeout=timeout
+            )
+
             if resp.status_code == 200:
                 response_data = resp.json()
                 content = response_data["choices"][0]["message"]["content"]
-                
+
                 # 解析JSON响应
                 try:
                     # 尝试直接解析JSON
@@ -305,36 +391,51 @@ class MushroomImageEncoder:
                         content = content.split("```json")[1].split("```")[0].strip()
                     elif "```" in content:
                         content = content.split("```")[1].split("```")[0].strip()
-                        
+
                     llama_result = json.loads(content)
-                    
+
                     # 验证必需字段
-                    if "growth_stage_description" not in llama_result or "image_quality_score" not in llama_result:
+                    if (
+                        "growth_stage_description" not in llama_result
+                        or "image_quality_score" not in llama_result
+                    ):
                         status = "failed"
                         error_details = f"Missing required fields. Keys found: {list(llama_result.keys())}"
                         logger.error(f"[LLAMA-001] 响应缺少必需字段 | {error_details}")
-                        return {"growth_stage_description": "", "image_quality_score": None}
-                    
+                        return {
+                            "growth_stage_description": "",
+                            "image_quality_score": None,
+                        }
+
                     # 验证数据类型
                     description = str(llama_result["growth_stage_description"])
                     quality_score = llama_result["image_quality_score"]
-                    
+
                     # 验证质量评分范围
                     if not isinstance(quality_score, (int, float)):
-                        logger.warning(f"[LLAMA-002] 质量评分类型无效 | 类型: {type(quality_score)}")
+                        logger.warning(
+                            f"[LLAMA-002] 质量评分类型无效 | 类型: {type(quality_score)}"
+                        )
                         quality_score = None
                     elif quality_score < 0 or quality_score > 100:
-                        logger.warning(f"[LLAMA-003] 质量评分超出范围 | 评分: {quality_score}")
+                        logger.warning(
+                            f"[LLAMA-003] 质量评分超出范围 | 评分: {quality_score}"
+                        )
                         quality_score = max(0, min(100, quality_score))
-                    
+
                     logger.trace(f"LLaMA解析成功: 质量评分={quality_score}")
                     status = "success"
-                    return {"growth_stage_description": description, "image_quality_score": quality_score}
-                    
+                    return {
+                        "growth_stage_description": description,
+                        "image_quality_score": quality_score,
+                    }
+
                 except json.JSONDecodeError as e:
                     status = "failed"
                     error_details = f"JSON parse error: {str(e)}"
-                    logger.error(f"[LLAMA-004] JSON解析失败 | 错误: {e} | 内容: {content[:100]}...")
+                    logger.error(
+                        f"[LLAMA-004] JSON解析失败 | 错误: {e} | 内容: {content[:100]}..."
+                    )
                     return {"growth_stage_description": "", "image_quality_score": None}
                 except KeyError as e:
                     status = "failed"
@@ -344,13 +445,17 @@ class MushroomImageEncoder:
             else:
                 status = "failed"
                 error_details = f"HTTP {resp.status_code}: {resp.text[:200]}"
-                logger.error(f"[LLAMA-006] API调用失败 | 状态码: {resp.status_code} | 响应: {resp.text[:200]}")
+                logger.error(
+                    f"[LLAMA-006] API调用失败 | 状态码: {resp.status_code} | 响应: {resp.text[:200]}"
+                )
                 return {"growth_stage_description": "", "image_quality_score": None}
-                
+
         except requests.exceptions.Timeout:
             status = "failed"
             error_details = "Request timed out"
-            logger.warning(f"[LLAMA-007] API超时 | 超时时间: {getattr(self.llama_config, 'timeout', 600)}秒")
+            logger.warning(
+                f"[LLAMA-007] API超时 | 超时时间: {getattr(self.llama_config, 'timeout', 600)}秒"
+            )
             return {"growth_stage_description": "", "image_quality_score": None}
         except requests.exceptions.ConnectionError as e:
             status = "failed"
@@ -362,31 +467,29 @@ class MushroomImageEncoder:
             error_details = f"Unexpected error: {str(e)}"
             logger.error(f"[LLAMA-009] 调用异常 | 错误: {e}")
             return {"growth_stage_description": "", "image_quality_score": None}
-            
+
         finally:
             # [性能监控] 记录与写入
             end_time = time.time()
             duration_ms = (end_time - start_time) * 1000
-            
+
             # 构建日志条目 (JSON 友好结构)
             log_entry = {
                 "timestamp": start_time_iso,
                 "request_id": request_id,
                 "model": model_name,
-                "input_info": {
-                    "image_size_b64": len(image_data)
-                },
+                "input_info": {"image_size_b64": len(image_data)},
                 "start_time": start_time,
                 "end_time": end_time,
                 "duration_ms": round(duration_ms, 2),
                 "status": status,
-                "error": error_details
+                "error": error_details,
             }
-            
+
             try:
                 # 写入专用日志文件
                 perf_logger.info(json.dumps(log_entry, ensure_ascii=False))
-                
+
                 # 检查阈值并触发警告
                 if duration_ms > self.time_threshold:
                     logger.warning(
@@ -395,27 +498,27 @@ class MushroomImageEncoder:
                     )
             except Exception as log_err:
                 logger.error(f"写入性能日志失败: {log_err}")
-    
+
     def _resize_image_for_llama(self, image: Image.Image) -> Image.Image:
         """
         将图像缩放到指定分辨率用于LLaMA处理，减少运算量
-        
+
         Args:
             image: 原始PIL图像对象
-            
+
         Returns:
             缩放后的PIL图像对象
         """
         try:
             # 获取配置的目标分辨率，默认为960
-            target_width = getattr(self.llama_config, 'image_width', 960)
-            target_height = getattr(self.llama_config, 'image_height', 960)
-            
+            target_width = getattr(self.llama_config, "image_width", 960)
+            target_height = getattr(self.llama_config, "image_height", 960)
+
             # 使用较小的一边作为基准
             target_size = min(target_width, target_height)
-            
+
             original_width, original_height = image.size
-            
+
             # 计算缩放比例，使短边为target_size
             if original_width < original_height:
                 # 宽度是短边
@@ -427,101 +530,125 @@ class MushroomImageEncoder:
                 scale_ratio = target_size / original_height
                 new_height = target_size
                 new_width = int(original_width * scale_ratio)
-            
+
             # 如果新尺寸超过原尺寸，则不放大，保持原尺寸
             if new_width > original_width or new_height > original_height:
-                logger.debug(f"Image already smaller than target size, keeping original: {original_width}x{original_height}")
+                logger.debug(
+                    f"Image already smaller than target size, keeping original: {original_width}x{original_height}"
+                )
                 return image
-            
+
             # 使用高质量重采样进行缩放
-            resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            logger.debug(f"Resized image for LLaMA: {original_width}x{original_height} -> {new_width}x{new_height}")
-            
+            resized_image = image.resize(
+                (new_width, new_height), Image.Resampling.LANCZOS
+            )
+            logger.debug(
+                f"Resized image for LLaMA: {original_width}x{original_height} -> {new_width}x{new_height}"
+            )
+
             return resized_image
-            
+
         except Exception as e:
             logger.warning(f"Failed to resize image for LLaMA, using original: {e}")
             return image
-    
-    def _get_llama_description(self, image: Image.Image) -> Dict[str, Any]:
+
+    def _get_llama_description(self, image: Image.Image) -> dict[str, Any]:
         """
         使用LLaMA模型获取蘑菇生长情况描述和图像质量评分
-        
+
         Args:
             image: PIL图像对象
-            
+
         Returns:
             包含growth_stage_description和image_quality_score的字典
             格式: {"growth_stage_description": str, "image_quality_score": float or None}
         """
         if not self.llama_client:
-            logger.warning("LLaMA client not available, skipping description generation")
+            logger.warning(
+                "LLaMA client not available, skipping description generation"
+            )
             return {"growth_stage_description": "", "image_quality_score": None}
-        
+
         try:
             # 为LLaMA处理缩放图像（减少运算量）
             resized_image = self._resize_image_for_llama(image)
-            
+
             # 将缩放后的PIL图像转换为base64编码
             buffer = io.BytesIO()
-            resized_image.save(buffer, format='JPEG', quality=85)  # 使用适中的质量以平衡文件大小和质量
-            image_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
-            
+            resized_image.save(
+                buffer, format="JPEG", quality=85
+            )  # 使用适中的质量以平衡文件大小和质量
+            image_data = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
             # 调用LLaMA API
             result = self._call_llama_api(image_data)
-            logger.trace(f"LLaMA result: description='{result.get('growth_stage_description', '')[:50]}...', quality_score={result.get('image_quality_score')}")
+            logger.trace(
+                f"LLaMA result: description='{result.get('growth_stage_description', '')[:50]}...', quality_score={result.get('image_quality_score')}"
+            )
             return result
-            
+
         except Exception as e:
             logger.error(f"Failed to get LLaMA description: {e}")
             return {"growth_stage_description": "", "image_quality_score": None}
-    
-    def get_multimodal_embedding(self, image: Image.Image, text_description: str) -> Optional[List[float]]:
+
+    def get_multimodal_embedding(
+        self, image: Image.Image, text_description: str
+    ) -> list[float] | None:
         """
         获取图像和文本的多模态CLIP向量编码
-        
+
         Args:
             image: PIL图像对象
             text_description: 环境数据的语义描述文本
-            
+
         Returns:
             512维联合向量列表，失败返回None
         """
         try:
             # 确保图像为RGB格式
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+
             # 同时预处理图像和文本
             inputs = self.clip_processor(
                 text=text_description,
-                images=image, 
-                return_tensors="pt", 
+                images=image,
+                return_tensors="pt",
                 padding=True,
-                truncation=True
+                truncation=True,
             ).to(self.device)
-            
+
             # 获取图像和文本特征
             with torch.no_grad():
-                image_features = self.clip_model.get_image_features(pixel_values=inputs['pixel_values'])
-                text_features = self.clip_model.get_text_features(
-                    input_ids=inputs['input_ids'],
-                    attention_mask=inputs['attention_mask']
+                image_features = self.clip_model.get_image_features(
+                    pixel_values=inputs["pixel_values"]
                 )
-            
+                text_features = self.clip_model.get_text_features(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"],
+                )
+
             # 多模态特征融合 - 使用加权平均
             # 图像特征权重0.7，文本特征权重0.3（可根据实际效果调整）
             image_weight = 0.7
             text_weight = 0.3
-            
+
             # 确保特征是tensor格式，处理可能的BaseModelOutputWithPooling对象
-            if hasattr(image_features, 'last_hidden_state'):
+            if hasattr(image_features, "last_hidden_state"):
                 # Take the pooled output if available, otherwise take the CLS token
-                if hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                if (
+                    hasattr(image_features, "pooler_output")
+                    and image_features.pooler_output is not None
+                ):
                     image_features = image_features.pooler_output
                 else:
-                    image_features = image_features.last_hidden_state[:, 0, :]  # Take the CLS token
-            elif hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                    image_features = image_features.last_hidden_state[
+                        :, 0, :
+                    ]  # Take the CLS token
+            elif (
+                hasattr(image_features, "pooler_output")
+                and image_features.pooler_output is not None
+            ):
                 image_features = image_features.pooler_output
             elif torch.is_tensor(image_features):
                 # Already a tensor, use as-is
@@ -529,14 +656,22 @@ class MushroomImageEncoder:
             else:
                 # Fallback: assume it's a tensor-like object
                 image_features = image_features
-            
-            if hasattr(text_features, 'last_hidden_state'):
+
+            if hasattr(text_features, "last_hidden_state"):
                 # Take the pooled output if available, otherwise take the CLS token
-                if hasattr(text_features, 'pooler_output') and text_features.pooler_output is not None:
+                if (
+                    hasattr(text_features, "pooler_output")
+                    and text_features.pooler_output is not None
+                ):
                     text_features = text_features.pooler_output
                 else:
-                    text_features = text_features.last_hidden_state[:, 0, :]  # Take the CLS token
-            elif hasattr(text_features, 'pooler_output') and text_features.pooler_output is not None:
+                    text_features = text_features.last_hidden_state[
+                        :, 0, :
+                    ]  # Take the CLS token
+            elif (
+                hasattr(text_features, "pooler_output")
+                and text_features.pooler_output is not None
+            ):
                 text_features = text_features.pooler_output
             elif torch.is_tensor(text_features):
                 # Already a tensor, use as-is
@@ -544,60 +679,73 @@ class MushroomImageEncoder:
             else:
                 # Fallback: assume it's a tensor-like object
                 text_features = text_features
-            
+
             # 归一化各自的特征
-            image_features_norm = image_features / image_features.norm(dim=-1, keepdim=True)
-            text_features_norm = text_features / text_features.norm(dim=-1, keepdim=True)
-            
+            image_features_norm = image_features / image_features.norm(
+                dim=-1, keepdim=True
+            )
+            text_features_norm = text_features / text_features.norm(
+                dim=-1, keepdim=True
+            )
+
             # 加权融合
-            multimodal_features = (image_weight * image_features_norm + 
-                                 text_weight * text_features_norm)
-            
+            multimodal_features = (
+                image_weight * image_features_norm + text_weight * text_features_norm
+            )
+
             # 最终归一化
             embedding = multimodal_features.cpu().numpy()[0]
             embedding = embedding / np.linalg.norm(embedding)
-            
-            logger.trace(f"Generated multimodal embedding for text: '{text_description[:50]}...'")
+
+            logger.trace(
+                f"Generated multimodal embedding for text: '{text_description[:50]}...'"
+            )
             return embedding.tolist()
-            
+
         except Exception as e:
             logger.error(f"Failed to get multimodal embedding: {e}")
             return None
-    
-    def get_image_embedding(self, image: Image.Image) -> Optional[List[float]]:
+
+    def get_image_embedding(self, image: Image.Image) -> list[float] | None:
         """
         获取纯图像的CLIP向量编码（保留作为备用方法）
-        
+
         Args:
             image: PIL图像对象
-            
+
         Returns:
             512维向量列表，失败返回None
         """
         try:
             # 确保图像为RGB格式
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
+            if image.mode != "RGB":
+                image = image.convert("RGB")
+
             # 预处理图像
             inputs = self.clip_processor(
-                images=image, 
-                return_tensors="pt", 
-                padding=True
+                images=image, return_tensors="pt", padding=True
             ).to(self.device)
-            
+
             # 获取图像特征
             with torch.no_grad():
                 image_features = self.clip_model.get_image_features(**inputs)
-            
+
             # 确保特征是tensor格式，处理可能的BaseModelOutputWithPooling对象
-            if hasattr(image_features, 'last_hidden_state'):
+            if hasattr(image_features, "last_hidden_state"):
                 # Take the pooled output if available, otherwise take the CLS token
-                if hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                if (
+                    hasattr(image_features, "pooler_output")
+                    and image_features.pooler_output is not None
+                ):
                     image_features = image_features.pooler_output
                 else:
-                    image_features = image_features.last_hidden_state[:, 0, :]  # Take the CLS token
-            elif hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                    image_features = image_features.last_hidden_state[
+                        :, 0, :
+                    ]  # Take the CLS token
+            elif (
+                hasattr(image_features, "pooler_output")
+                and image_features.pooler_output is not None
+            ):
                 image_features = image_features.pooler_output
             elif torch.is_tensor(image_features):
                 # Already a tensor, use as-is
@@ -605,109 +753,124 @@ class MushroomImageEncoder:
             else:
                 # Fallback: assume it's a tensor-like object
                 image_features = image_features
-            
+
             # 归一化向量（对余弦相似度很重要）
             embedding = image_features.cpu().numpy()[0]
             embedding = embedding / np.linalg.norm(embedding)
-            
+
             return embedding.tolist()
-            
+
         except Exception as e:
             logger.error(f"Failed to get image embedding: {e}")
             return None
-    
-    def parse_time_from_path(self, image_info: MushroomImageInfo) -> Dict[str, datetime]:
+
+    def parse_time_from_path(
+        self, image_info: MushroomImageInfo
+    ) -> dict[str, datetime]:
         """
         从图像路径信息中解析时间
-        
+
         Args:
             image_info: 蘑菇图像信息对象
-            
+
         Returns:
             包含各种时间信息的字典
         """
         time_info = {
-            'collection_datetime': image_info.collection_datetime,
-            'collection_date': datetime.strptime(image_info.collection_date, '%Y%m%d'),
-            'detailed_time': datetime.strptime(image_info.detailed_time, '%Y%m%d%H%M%S'),
-            'date_folder': datetime.strptime(image_info.date_folder, '%Y%m%d')
+            "collection_datetime": image_info.collection_datetime,
+            "collection_date": datetime.strptime(image_info.collection_date, "%Y%m%d"),
+            "detailed_time": datetime.strptime(
+                image_info.detailed_time, "%Y%m%d%H%M%S"
+            ),
+            "date_folder": datetime.strptime(image_info.date_folder, "%Y%m%d"),
         }
-        
+
         # 添加时间范围（用于查询环境参数）
-        collection_time = time_info['collection_datetime']
-        time_info['query_start'] = collection_time - timedelta(minutes=30)  # 前30分钟
-        time_info['query_end'] = collection_time + timedelta(minutes=30)    # 后30分钟
-        
+        collection_time = time_info["collection_datetime"]
+        time_info["query_start"] = collection_time - timedelta(minutes=30)  # 前30分钟
+        time_info["query_end"] = collection_time + timedelta(minutes=30)  # 后30分钟
+
         return time_info
-    
-    def get_environmental_data(self, mushroom_id: str, time_info: Dict[str, datetime]) -> Optional[Dict]:
+
+    def get_environmental_data(
+        self, mushroom_id: str, time_info: dict[str, datetime]
+    ) -> dict | None:
         """
         根据蘑菇库号和时间信息获取环境参数
-        
+
         Args:
             mushroom_id: 蘑菇库号
             time_info: 时间信息字典
-            
+
         Returns:
             结构化的环境参数字典，失败返回None
         """
         if not self.env_processor:
-            logger.warning("Environment data processor not initialized, skipping environment data retrieval")
+            logger.warning(
+                "Environment data processor not initialized, skipping environment data retrieval"
+            )
             return None
-        
+
         try:
-            collection_time = time_info['collection_datetime']
+            collection_time = time_info["collection_datetime"]
             # 构建临时图像路径用于记录
-            temp_image_path = f"{mushroom_id}/{collection_time.strftime('%Y%m%d')}/temp_image.jpg"
-            
+            temp_image_path = (
+                f"{mushroom_id}/{collection_time.strftime('%Y%m%d')}/temp_image.jpg"
+            )
+
             # 映射库房号：MinIO中的库房号 -> 环境配置中的库房号
             mapped_room_id = self._map_room_id(mushroom_id)
-            
-            logger.trace(f"Querying environment data for room {mushroom_id} (mapped to {mapped_room_id}) at time {collection_time}")
-            
+
+            logger.trace(
+                f"Querying environment data for room {mushroom_id} (mapped to {mapped_room_id}) at time {collection_time}"
+            )
+
             # 使用映射后的库房号查询环境数据
             env_data = self.env_processor.get_environment_data(
                 room_id=mapped_room_id,
                 collection_time=collection_time,
                 image_path=temp_image_path,
-                time_window_minutes=1  # 查询前后1分钟的数据
+                time_window_minutes=1,  # 查询前后1分钟的数据
             )
-            
+
             if env_data:
                 logger.trace(f"获取环境数据成功: 库房{mushroom_id}")
                 return env_data
             else:
                 logger.trace(f"未找到环境数据: 库房{mushroom_id}")
                 return None
-                
+
         except Exception as e:
             logger.error(f"Failed to get environment data for room {mushroom_id}: {e}")
             return None
-    
-    def get_growth_stage_analysis(self, image: Image.Image) -> Dict[str, Any]:
+
+    def get_growth_stage_analysis(self, image: Image.Image) -> dict[str, Any]:
         """
         获取图像的生长阶段分析（公开接口）
-        
+
         Args:
             image: PIL图像对象
-            
+
         Returns:
             包含growth_stage_description和image_quality_score的字典
         """
         return self._get_llama_description(image)
 
-    def process_single_image(self, image_info: MushroomImageInfo, 
-                           save_to_db: bool = True,
-                           precomputed_analysis: Optional[Dict] = None) -> Optional[Dict]:
+    def process_single_image(
+        self,
+        image_info: MushroomImageInfo,
+        save_to_db: bool = True,
+        precomputed_analysis: dict | None = None,
+    ) -> dict | None:
         """
         处理单个图像：解析时间、获取环境参数、多模态编码
         只有在获取到完整数据（图像+环境数据）时才存储到数据库
-        
+
         Args:
             image_info: 蘑菇图像信息
             save_to_db: 是否保存到数据库
             precomputed_analysis: 预计算的分析结果（可选），包含growth_stage_description和image_quality_score
-            
+
         Returns:
             处理结果字典
         """
@@ -717,191 +880,275 @@ class MushroomImageEncoder:
             if image is None:
                 logger.warning(f"[IMG-010] 获取图像失败 | 文件: {image_info.file_name}")
                 return None
-            
+
             # 2. 解析时间信息
             time_info = self.parse_time_from_path(image_info)
-            
+
             # 3. 获取环境参数和语义描述
             env_data = self.get_environmental_data(image_info.mushroom_id, time_info)
-            
+
             # 4. 检查是否获取到完整环境数据
             if env_data is None:
                 logger.debug(f"无环境数据，使用纯图像编码: {image_info.file_name}")
                 # 如果没有环境数据，使用纯图像编码
                 embedding = self.get_image_embedding(image)
                 if embedding is None:
-                    logger.error(f"[IMG-011] 图像编码失败 | 文件: {image_info.file_name}")
+                    logger.error(
+                        f"[IMG-011] 图像编码失败 | 文件: {image_info.file_name}"
+                    )
                     return None
-                
+
                 return {
-                    'image_info': image_info,
-                    'embedding': embedding,
-                    'time_info': time_info,
-                    'environmental_data': None,
-                    'processed_at': datetime.now(),
-                    'saved_to_db': False,
-                    'skip_reason': 'no_environment_data'
+                    "image_info": image_info,
+                    "embedding": embedding,
+                    "time_info": time_info,
+                    "environmental_data": None,
+                    "processed_at": datetime.now(),
+                    "saved_to_db": False,
+                    "skip_reason": "no_environment_data",
                 }
-            
+
             # 5. LLaMA服务可用性检查 (Strict Mode)
             if not self.llama_client:
-                logger.warning(f"[IMG-SKIP] LLaMA服务不可用，跳过处理 | 文件: {image_info.file_name}")
+                logger.warning(
+                    f"[IMG-SKIP] LLaMA服务不可用，跳过处理 | 文件: {image_info.file_name}"
+                )
                 return None
 
             # 6. 使用LLaMA模型获取蘑菇生长情况描述和图像质量评分
             if precomputed_analysis:
                 llama_result = precomputed_analysis
-                logger.trace(f"使用预计算的分析结果: score={llama_result.get('image_quality_score')}")
+                logger.trace(
+                    f"使用预计算的分析结果: score={llama_result.get('image_quality_score')}"
+                )
             else:
                 llama_result = self._get_llama_description(image)
-            
+
             # 提取growth_stage_description和image_quality_score
-            growth_stage_description = llama_result.get('growth_stage_description', '')
-            llama_quality_score = llama_result.get('image_quality_score', None)
-            
+            growth_stage_description = llama_result.get("growth_stage_description", "")
+            llama_quality_score = llama_result.get("image_quality_score", None)
+
             # 7. 验证LLaMA结果 (No Degradation)
             if not growth_stage_description:
-                logger.warning(f"[IMG-SKIP] LLaMA未能生成描述，跳过处理 | 文件: {image_info.file_name}")
+                logger.warning(
+                    f"[IMG-SKIP] LLaMA未能生成描述，跳过处理 | 文件: {image_info.file_name}"
+                )
                 return None
 
             # 7.1 质量评分筛选
             if self.quality_threshold > 0:
-                if llama_quality_score is not None and llama_quality_score < self.quality_threshold:
-                    logger.warning(f"[IMG-SKIP-QUALITY] 质量评分过低 ({llama_quality_score} < {self.quality_threshold}) | 文件: {image_info.file_name}")
-                    return None
+                if (
+                    llama_quality_score is not None
+                    and llama_quality_score < self.quality_threshold
+                ):
+                    if self._allow_low_quality(growth_stage_description):
+                        logger.info(
+                            f"[IMG-QUALITY-OVERRIDE] 低质量但为早期生长阶段，继续处理 | 文件: {image_info.file_name}"
+                        )
+                    else:
+                        logger.warning(
+                            f"[IMG-SKIP-QUALITY] 质量评分过低 ({llama_quality_score} < {self.quality_threshold}) | 文件: {image_info.file_name}"
+                        )
+                        return None
 
             # 7.2 关键词内容筛选 (如蘑菇特征)
             if self.required_keywords:
                 desc_lower = growth_stage_description.lower()
                 if not any(k.lower() in desc_lower for k in self.required_keywords):
-                    logger.warning(f"[IMG-SKIP-CONTENT] 未检测到相关特征 ({self.required_keywords}) | 描述: {growth_stage_description[:30]}... | 文件: {image_info.file_name}")
+                    logger.warning(
+                        f"[IMG-SKIP-CONTENT] 未检测到相关特征 ({self.required_keywords}) | 描述: {growth_stage_description[:30]}... | 文件: {image_info.file_name}"
+                    )
                     return None
-            
+
             # 8. 构建完整的文本描述：身份元数据 + LLaMA生长阶段描述
-            identity_metadata = env_data.get('semantic_description', f"Mushroom Room {image_info.mushroom_id}, unknown stage, Day 0.")
-            
+            identity_metadata = env_data.get(
+                "semantic_description",
+                f"Mushroom Room {image_info.mushroom_id}, unknown stage, Day 0.",
+            )
+
             # 结合身份元数据和LLaMA生长阶段描述
             full_text_description = f"{identity_metadata} {growth_stage_description}"
-            logger.trace(f"使用组合描述: 身份+LLaMA")
-            
+            logger.trace("使用组合描述: 身份+LLaMA")
+
             # 9. 使用多模态编码（图像 + 完整文本描述）
+            if not self.clip_model or not self.clip_processor:
+                if save_to_db:
+                    saved = self._save_text_quality_only(
+                        image_info,
+                        time_info,
+                        growth_stage_description,
+                        llama_quality_score,
+                    )
+                else:
+                    saved = False
+
+                return {
+                    "image_info": image_info,
+                    "embedding": None,
+                    "time_info": time_info,
+                    "environmental_data": env_data,
+                    "processed_at": datetime.now(),
+                    "saved_to_db": saved,
+                    "skip_reason": "clip_disabled",
+                }
+
             embedding = self.get_multimodal_embedding(image, full_text_description)
-            
+
             if embedding is None:
                 logger.error(f"[IMG-012] 多模态编码失败 | 文件: {image_info.file_name}")
                 return None
-            
+
             # 8. 将描述和质量评分保存到环境数据中
-            env_data['full_text_description'] = full_text_description
-            env_data['llama_description'] = growth_stage_description if growth_stage_description else "N/A"
-            env_data['image_quality_score'] = llama_quality_score  # 使用LLaMA返回的质量评分
-            
+            env_data["full_text_description"] = full_text_description
+            env_data["llama_description"] = (
+                growth_stage_description if growth_stage_description else "N/A"
+            )
+            env_data["image_quality_score"] = (
+                llama_quality_score  # 使用LLaMA返回的质量评分
+            )
+
             # 9. 构建结果
             result = {
-                'image_info': image_info,
-                'embedding': embedding,
-                'time_info': time_info,
-                'environmental_data': env_data,
-                'processed_at': datetime.now()
+                "image_info": image_info,
+                "embedding": embedding,
+                "time_info": time_info,
+                "environmental_data": env_data,
+                "processed_at": datetime.now(),
             }
-            
+
             # 10. 只有在获取到完整数据时才保存到数据库
             if save_to_db:
                 success = self._save_to_database(result)
-                result['saved_to_db'] = success
+                result["saved_to_db"] = success
                 if not success:
-                    logger.error(f"[IMG-013] 保存数据库失败 | 文件: {image_info.file_name}")
+                    logger.error(
+                        f"[IMG-013] 保存数据库失败 | 文件: {image_info.file_name}"
+                    )
             else:
-                result['saved_to_db'] = False
-            
+                result["saved_to_db"] = False
+
             return result
-            
+
         except Exception as e:
-            logger.error(f"[IMG-014] 处理异常 | 文件: {image_info.file_name}, 错误: {e}")
+            logger.error(
+                f"[IMG-014] 处理异常 | 文件: {image_info.file_name}, 错误: {e}"
+            )
             return None
-    
-    def process_image_batch(self, images_data: List[Dict], save_to_db: bool = True) -> List[Dict]:
+
+    def process_image_batch(
+        self, images_data: list[dict], save_to_db: bool = True
+    ) -> list[dict]:
         """
         批处理多个图像：优化的批量处理方法
-        
+
         Args:
             images_data: 图像数据列表，每个元素包含 {'image': PIL.Image, 'image_info': MushroomImageInfo, 'img_meta': dict}
             save_to_db: 是否保存到数据库
-            
+
         Returns:
             处理结果列表
         """
         if not images_data:
             return []
-        
+
         logger.info(f"[IMG-BATCH] 开始批处理 | 图片数: {len(images_data)}")
         batch_results = []
-        
+
         try:
             # 1. 批量准备数据
             batch_data = []
             for img_data in images_data:
-                image = img_data['image']
-                image_info = img_data['image_info']
-                
+                image = img_data["image"]
+                image_info = img_data["image_info"]
+
                 # 解析时间信息
                 time_info = self.parse_time_from_path(image_info)
-                
+
                 # 获取环境参数
-                env_data = self.get_environmental_data(image_info.mushroom_id, time_info)
-                
-                batch_data.append({
-                    'image': image,
-                    'image_info': image_info,
-                    'time_info': time_info,
-                    'env_data': env_data,
-                    'precomputed_analysis': img_data.get('img_meta', {}).get('_precomputed_analysis')
-                })
-            
+                env_data = self.get_environmental_data(
+                    image_info.mushroom_id, time_info
+                )
+
+                batch_data.append(
+                    {
+                        "image": image,
+                        "image_info": image_info,
+                        "time_info": time_info,
+                        "env_data": env_data,
+                        "precomputed_analysis": img_data.get("img_meta", {}).get(
+                            "_precomputed_analysis"
+                        ),
+                    }
+                )
+
             # 2. 分离有环境数据和无环境数据的图片
-            with_env_data = [item for item in batch_data if item['env_data'] is not None]
-            without_env_data = [item for item in batch_data if item['env_data'] is None]
-            
-            logger.debug(f"[IMG-BATCH] 数据分类 | 有环境数据: {len(with_env_data)}, 无环境数据: {len(without_env_data)}")
-            
+            with_env_data = [
+                item for item in batch_data if item["env_data"] is not None
+            ]
+            without_env_data = [item for item in batch_data if item["env_data"] is None]
+
+            logger.debug(
+                f"[IMG-BATCH] 数据分类 | 有环境数据: {len(with_env_data)}, 无环境数据: {len(without_env_data)}"
+            )
+
             # 3. 批量处理有环境数据的图片
             if with_env_data:
-                batch_results.extend(self._process_batch_with_env_data(with_env_data, save_to_db))
-            
+                batch_results.extend(
+                    self._process_batch_with_env_data(with_env_data, save_to_db)
+                )
+
             # 4. 批量处理无环境数据的图片（纯图像编码）
             if without_env_data:
-                batch_results.extend(self._process_batch_without_env_data(without_env_data, save_to_db))
-            
-            logger.info(f"[IMG-BATCH] 批处理完成 | 成功: {sum(1 for r in batch_results if r['success'])}, "
-                       f"失败: {sum(1 for r in batch_results if not r['success'])}")
-            
+                batch_results.extend(
+                    self._process_batch_without_env_data(without_env_data, save_to_db)
+                )
+
+            logger.info(
+                f"[IMG-BATCH] 批处理完成 | 成功: {sum(1 for r in batch_results if r['success'])}, "
+                f"失败: {sum(1 for r in batch_results if not r['success'])}"
+            )
+
             return batch_results
-            
+
         except Exception as e:
             logger.error(f"[IMG-BATCH] 批处理异常: {e}")
             # 回退到单张处理
             for img_data in images_data:
                 try:
-                    result = self.process_single_image(img_data['image_info'], save_to_db=save_to_db)
-                    success = result is not None and (not save_to_db or result.get('saved_to_db', False))
-                    batch_results.append({'success': success, 'image_info': img_data['image_info']})
+                    result = self.process_single_image(
+                        img_data["image_info"], save_to_db=save_to_db
+                    )
+                    success = result is not None and (
+                        not save_to_db or result.get("saved_to_db", False)
+                    )
+                    batch_results.append(
+                        {"success": success, "image_info": img_data["image_info"]}
+                    )
                 except Exception as e2:
-                    logger.error(f"[IMG-BATCH] 回退处理失败: {img_data['image_info'].file_name}, 错误: {e2}")
-                    batch_results.append({'success': False, 'image_info': img_data['image_info']})
-            
+                    logger.error(
+                        f"[IMG-BATCH] 回退处理失败: {img_data['image_info'].file_name}, 错误: {e2}"
+                    )
+                    batch_results.append(
+                        {"success": False, "image_info": img_data["image_info"]}
+                    )
+
             return batch_results
-    
-    def _process_batch_with_env_data(self, batch_data: List[Dict], save_to_db: bool) -> List[Dict]:
+
+    def _process_batch_with_env_data(
+        self, batch_data: list[dict], save_to_db: bool
+    ) -> list[dict]:
         """批量处理有环境数据的图片"""
         results = []
-        
+
         try:
             # 0. Strict Check: LLaMA必须可用
             if not self.llama_client:
-                 logger.warning("[IMG-BATCH-SKIP] LLaMA服务不可用，跳过所有有环境数据的图片")
-                 for item in batch_data:
-                     results.append({'success': False, 'image_info': item['image_info']})
-                 return results
+                logger.warning(
+                    "[IMG-BATCH-SKIP] LLaMA服务不可用，跳过所有有环境数据的图片"
+                )
+                for item in batch_data:
+                    results.append({"success": False, "image_info": item["image_info"]})
+                return results
 
             # 1. 批量获取LLaMA描述 (混合 Precomputed 和 Computed)
             llama_results = [None] * len(batch_data)
@@ -909,210 +1156,275 @@ class MushroomImageEncoder:
             need_compute_indices = []
 
             for i, item in enumerate(batch_data):
-                if item.get('precomputed_analysis'):
-                    llama_results[i] = item['precomputed_analysis']
+                if item.get("precomputed_analysis"):
+                    llama_results[i] = item["precomputed_analysis"]
                 else:
-                    need_compute_images.append(item['image'])
+                    need_compute_images.append(item["image"])
                     need_compute_indices.append(i)
-            
+
             # 对缺失的进行计算
             if need_compute_images:
-                computed_results = self._get_llama_descriptions_batch(need_compute_images)
+                computed_results = self._get_llama_descriptions_batch(
+                    need_compute_images
+                )
                 for idx, res in zip(need_compute_indices, computed_results):
                     llama_results[idx] = res
-            
+
             # 2. 准备批量CLIP编码的数据
             clip_inputs = []
-            valid_items = [] # (original_index, item, llama_result)
-            
+            valid_items = []  # (original_index, item, llama_result)
+
             for i, item in enumerate(batch_data):
                 llama_result = llama_results[i] if i < len(llama_results) else {}
-                growth_stage_description = llama_result.get('growth_stage_description', '')
-                llama_quality_score = llama_result.get('image_quality_score', 0)
-                
+                growth_stage_description = llama_result.get(
+                    "growth_stage_description", ""
+                )
+                llama_quality_score = llama_result.get("image_quality_score", 0)
+
                 # Strict Check: LLaMA描述必须存在
                 if not growth_stage_description:
-                    logger.warning(f"[IMG-BATCH-SKIP] LLaMA描述为空: {item['image_info'].file_name}")
-                    results.append({'success': False, 'image_info': item['image_info']})
+                    logger.warning(
+                        f"[IMG-BATCH-SKIP] LLaMA描述为空: {item['image_info'].file_name}"
+                    )
+                    results.append({"success": False, "image_info": item["image_info"]})
                     continue
-                
+
                 # Quality Check
                 if self.quality_threshold > 0:
-                    if llama_quality_score is not None and llama_quality_score < self.quality_threshold:
-                        logger.warning(f"[IMG-BATCH-SKIP-QUALITY] 质量评分过低 ({llama_quality_score}) | {item['image_info'].file_name}")
-                        results.append({'success': False, 'image_info': item['image_info']})
-                        continue
+                    if (
+                        llama_quality_score is not None
+                        and llama_quality_score < self.quality_threshold
+                    ):
+                        if self._allow_low_quality(growth_stage_description):
+                            logger.info(
+                                f"[IMG-BATCH-QUALITY-OVERRIDE] 低质量但为早期生长阶段，继续处理 | {item['image_info'].file_name}"
+                            )
+                        else:
+                            logger.warning(
+                                f"[IMG-BATCH-SKIP-QUALITY] 质量评分过低 ({llama_quality_score}) | {item['image_info'].file_name}"
+                            )
+                            results.append(
+                                {"success": False, "image_info": item["image_info"]}
+                            )
+                            continue
 
                 # Content Check
                 if self.required_keywords:
                     desc_lower = growth_stage_description.lower()
                     if not any(k.lower() in desc_lower for k in self.required_keywords):
-                        logger.warning(f"[IMG-BATCH-SKIP-CONTENT] 未检测到相关特征 | {item['image_info'].file_name}")
-                        results.append({'success': False, 'image_info': item['image_info']})
+                        logger.warning(
+                            f"[IMG-BATCH-SKIP-CONTENT] 未检测到相关特征 | {item['image_info'].file_name}"
+                        )
+                        results.append(
+                            {"success": False, "image_info": item["image_info"]}
+                        )
                         continue
 
-                env_data = item['env_data']
-                identity_metadata = env_data.get('semantic_description', f"Mushroom Room {item['image_info'].mushroom_id}, unknown stage, Day 0.")
-                
-                full_text_description = f"{identity_metadata} {growth_stage_description}"
-                
-                clip_inputs.append({
-                    'image': item['image'],
-                    'text': full_text_description,
-                    'index': i
-                })
+                env_data = item["env_data"]
+                identity_metadata = env_data.get(
+                    "semantic_description",
+                    f"Mushroom Room {item['image_info'].mushroom_id}, unknown stage, Day 0.",
+                )
+
+                full_text_description = (
+                    f"{identity_metadata} {growth_stage_description}"
+                )
+
+                clip_inputs.append(
+                    {"image": item["image"], "text": full_text_description, "index": i}
+                )
                 valid_items.append((i, item, llama_result))
-            
+
             # 如果没有有效项，直接返回
             if not clip_inputs:
                 return results
 
             # 3. 批量CLIP编码
             embeddings = self._get_multimodal_embeddings_batch(clip_inputs)
-            
+
             # 4. 构建结果并保存
             for k, (original_idx, item, llama_result) in enumerate(valid_items):
                 try:
                     embedding = embeddings[k] if k < len(embeddings) else None
-                    
+
                     if embedding is None:
-                        logger.error(f"[IMG-BATCH] 编码失败: {item['image_info'].file_name}")
-                        results.append({'success': False, 'image_info': item['image_info']})
+                        logger.error(
+                            f"[IMG-BATCH] 编码失败: {item['image_info'].file_name}"
+                        )
+                        results.append(
+                            {"success": False, "image_info": item["image_info"]}
+                        )
                         continue
-                    
+
                     # 构建完整结果
-                    env_data = item['env_data'].copy()
-                    
+                    env_data = item["env_data"].copy()
+
                     # 添加描述和质量评分
-                    env_data['llama_description'] = llama_result.get('growth_stage_description', 'N/A')
-                    env_data['image_quality_score'] = llama_result.get('image_quality_score')
-                    
+                    env_data["llama_description"] = llama_result.get(
+                        "growth_stage_description", "N/A"
+                    )
+                    env_data["image_quality_score"] = llama_result.get(
+                        "image_quality_score"
+                    )
+
                     result = {
-                        'image_info': item['image_info'],
-                        'embedding': embedding,
-                        'time_info': item['time_info'],
-                        'environmental_data': env_data,
-                        'processed_at': datetime.now()
+                        "image_info": item["image_info"],
+                        "embedding": embedding,
+                        "time_info": item["time_info"],
+                        "environmental_data": env_data,
+                        "processed_at": datetime.now(),
                     }
-                    
+
                     # 保存到数据库
                     if save_to_db:
                         success = self._save_to_database(result)
-                        result['saved_to_db'] = success
+                        result["saved_to_db"] = success
                     else:
-                        result['saved_to_db'] = False
+                        result["saved_to_db"] = False
                         success = True
-                    
-                    results.append({'success': success, 'image_info': item['image_info']})
-                    
+
+                    results.append(
+                        {"success": success, "image_info": item["image_info"]}
+                    )
+
                 except Exception as e:
-                    logger.error(f"[IMG-BATCH] 处理单项失败: {item['image_info'].file_name}, 错误: {e}")
-                    results.append({'success': False, 'image_info': item['image_info']})
-            
+                    logger.error(
+                        f"[IMG-BATCH] 处理单项失败: {item['image_info'].file_name}, 错误: {e}"
+                    )
+                    results.append({"success": False, "image_info": item["image_info"]})
+
         except Exception as e:
             logger.error(f"[IMG-BATCH] 批量处理有环境数据失败: {e}")
             # 回退到单张处理
             for item in batch_data:
                 try:
-                    result = self.process_single_image(item['image_info'], save_to_db=save_to_db)
-                    success = result is not None and (not save_to_db or result.get('saved_to_db', False))
-                    results.append({'success': success, 'image_info': item['image_info']})
+                    result = self.process_single_image(
+                        item["image_info"], save_to_db=save_to_db
+                    )
+                    success = result is not None and (
+                        not save_to_db or result.get("saved_to_db", False)
+                    )
+                    results.append(
+                        {"success": success, "image_info": item["image_info"]}
+                    )
                 except Exception as e2:
-                    logger.error(f"[IMG-BATCH] 回退处理失败: {item['image_info'].file_name}, 错误: {e2}")
-                    results.append({'success': False, 'image_info': item['image_info']})
-        
+                    logger.error(
+                        f"[IMG-BATCH] 回退处理失败: {item['image_info'].file_name}, 错误: {e2}"
+                    )
+                    results.append({"success": False, "image_info": item["image_info"]})
+
         return results
-    
-    def _process_batch_without_env_data(self, batch_data: List[Dict], save_to_db: bool) -> List[Dict]:
+
+    def _process_batch_without_env_data(
+        self, batch_data: list[dict], save_to_db: bool
+    ) -> list[dict]:
         """批量处理无环境数据的图片（纯图像编码）"""
         results = []
-        
+
         try:
             # 批量图像编码
-            images = [item['image'] for item in batch_data]
+            images = [item["image"] for item in batch_data]
             embeddings = self._get_image_embeddings_batch(images)
-            
+
             for i, item in enumerate(batch_data):
                 embedding = embeddings[i] if i < len(embeddings) else None
-                
+
                 if embedding is None:
-                    logger.error(f"[IMG-BATCH] 纯图像编码失败: {item['image_info'].file_name}")
-                    results.append({'success': False, 'image_info': item['image_info']})
+                    logger.error(
+                        f"[IMG-BATCH] 纯图像编码失败: {item['image_info'].file_name}"
+                    )
+                    results.append({"success": False, "image_info": item["image_info"]})
                     continue
-                
+
                 # 构建结果（无环境数据）
                 result = {
-                    'image_info': item['image_info'],
-                    'embedding': embedding,
-                    'time_info': item['time_info'],
-                    'environmental_data': None,
-                    'processed_at': datetime.now(),
-                    'saved_to_db': False,
-                    'skip_reason': 'no_environment_data'
+                    "image_info": item["image_info"],
+                    "embedding": embedding,
+                    "time_info": item["time_info"],
+                    "environmental_data": None,
+                    "processed_at": datetime.now(),
+                    "saved_to_db": False,
+                    "skip_reason": "no_environment_data",
                 }
-                
-                results.append({'success': True, 'image_info': item['image_info']})
-                
+
+                results.append({"success": True, "image_info": item["image_info"]})
+
         except Exception as e:
             logger.error(f"[IMG-BATCH] 批量纯图像编码失败: {e}")
             # 回退到单张处理
             for item in batch_data:
                 try:
-                    embedding = self.get_image_embedding(item['image'])
+                    embedding = self.get_image_embedding(item["image"])
                     success = embedding is not None
-                    results.append({'success': success, 'image_info': item['image_info']})
+                    results.append(
+                        {"success": success, "image_info": item["image_info"]}
+                    )
                 except Exception as e2:
-                    logger.error(f"[IMG-BATCH] 回退纯图像编码失败: {item['image_info'].file_name}, 错误: {e2}")
-                    results.append({'success': False, 'image_info': item['image_info']})
-        
+                    logger.error(
+                        f"[IMG-BATCH] 回退纯图像编码失败: {item['image_info'].file_name}, 错误: {e2}"
+                    )
+                    results.append({"success": False, "image_info": item["image_info"]})
+
         return results
-    
-    def _get_multimodal_embeddings_batch(self, clip_inputs: List[Dict]) -> List[Optional[List[float]]]:
+
+    def _get_multimodal_embeddings_batch(
+        self, clip_inputs: list[dict]
+    ) -> list[list[float] | None]:
         """批量获取多模态CLIP编码"""
         try:
             if not clip_inputs:
                 return []
-            
+
             # 准备批量输入
-            images = [item['image'] for item in clip_inputs]
-            texts = [item['text'] for item in clip_inputs]
-            
+            images = [item["image"] for item in clip_inputs]
+            texts = [item["text"] for item in clip_inputs]
+
             # 确保所有图像为RGB格式
             processed_images = []
             for image in images:
-                if image.mode != 'RGB':
-                    image = image.convert('RGB')
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
                 processed_images.append(image)
-            
+
             # 批量预处理
             inputs = self.clip_processor(
                 text=texts,
-                images=processed_images, 
-                return_tensors="pt", 
+                images=processed_images,
+                return_tensors="pt",
                 padding=True,
-                truncation=True
+                truncation=True,
             ).to(self.device)
-            
+
             # 批量获取特征
             with torch.no_grad():
-                image_features = self.clip_model.get_image_features(pixel_values=inputs['pixel_values'])
-                text_features = self.clip_model.get_text_features(
-                    input_ids=inputs['input_ids'],
-                    attention_mask=inputs['attention_mask']
+                image_features = self.clip_model.get_image_features(
+                    pixel_values=inputs["pixel_values"]
                 )
-            
+                text_features = self.clip_model.get_text_features(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"],
+                )
+
             # 批量融合特征
             image_weight = 0.7
             text_weight = 0.3
-            
+
             # 确保特征是tensor格式，处理可能的BaseModelOutputWithPooling对象
-            if hasattr(image_features, 'last_hidden_state'):
+            if hasattr(image_features, "last_hidden_state"):
                 # Take the pooled output if available, otherwise take the CLS token
-                if hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                if (
+                    hasattr(image_features, "pooler_output")
+                    and image_features.pooler_output is not None
+                ):
                     image_features = image_features.pooler_output
                 else:
-                    image_features = image_features.last_hidden_state[:, 0, :]  # Take the CLS token
-            elif hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                    image_features = image_features.last_hidden_state[
+                        :, 0, :
+                    ]  # Take the CLS token
+            elif (
+                hasattr(image_features, "pooler_output")
+                and image_features.pooler_output is not None
+            ):
                 image_features = image_features.pooler_output
             elif torch.is_tensor(image_features):
                 # Already a tensor, use as-is
@@ -1120,14 +1432,22 @@ class MushroomImageEncoder:
             else:
                 # Fallback: assume it's a tensor-like object
                 image_features = image_features
-            
-            if hasattr(text_features, 'last_hidden_state'):
+
+            if hasattr(text_features, "last_hidden_state"):
                 # Take the pooled output if available, otherwise take the CLS token
-                if hasattr(text_features, 'pooler_output') and text_features.pooler_output is not None:
+                if (
+                    hasattr(text_features, "pooler_output")
+                    and text_features.pooler_output is not None
+                ):
                     text_features = text_features.pooler_output
                 else:
-                    text_features = text_features.last_hidden_state[:, 0, :]  # Take the CLS token
-            elif hasattr(text_features, 'pooler_output') and text_features.pooler_output is not None:
+                    text_features = text_features.last_hidden_state[
+                        :, 0, :
+                    ]  # Take the CLS token
+            elif (
+                hasattr(text_features, "pooler_output")
+                and text_features.pooler_output is not None
+            ):
                 text_features = text_features.pooler_output
             elif torch.is_tensor(text_features):
                 # Already a tensor, use as-is
@@ -1135,58 +1455,72 @@ class MushroomImageEncoder:
             else:
                 # Fallback: assume it's a tensor-like object
                 text_features = text_features
-            
-            image_features_norm = image_features / image_features.norm(dim=-1, keepdim=True)
-            text_features_norm = text_features / text_features.norm(dim=-1, keepdim=True)
-            
-            multimodal_features = (image_weight * image_features_norm + 
-                                 text_weight * text_features_norm)
-            
+
+            image_features_norm = image_features / image_features.norm(
+                dim=-1, keepdim=True
+            )
+            text_features_norm = text_features / text_features.norm(
+                dim=-1, keepdim=True
+            )
+
+            multimodal_features = (
+                image_weight * image_features_norm + text_weight * text_features_norm
+            )
+
             # 最终归一化并转换为列表
             embeddings = []
             for i in range(multimodal_features.shape[0]):
                 embedding = multimodal_features[i].cpu().numpy()
                 embedding = embedding / np.linalg.norm(embedding)
                 embeddings.append(embedding.tolist())
-            
+
             logger.debug(f"[IMG-BATCH] 批量多模态编码完成: {len(embeddings)}个")
             return embeddings
-            
+
         except Exception as e:
             logger.error(f"[IMG-BATCH] 批量多模态编码失败: {e}")
             return [None] * len(clip_inputs)
-    
-    def _get_image_embeddings_batch(self, images: List[Image.Image]) -> List[Optional[List[float]]]:
+
+    def _get_image_embeddings_batch(
+        self, images: list[Image.Image]
+    ) -> list[list[float] | None]:
         """批量获取纯图像CLIP编码"""
         try:
             if not images:
                 return []
-            
+
             # 确保所有图像为RGB格式
             processed_images = []
             for image in images:
-                if image.mode != 'RGB':
-                    image = image.convert('RGB')
+                if image.mode != "RGB":
+                    image = image.convert("RGB")
                 processed_images.append(image)
-            
+
             # 批量预处理
             inputs = self.clip_processor(
-                images=processed_images, 
-                return_tensors="pt"
+                images=processed_images, return_tensors="pt"
             ).to(self.device)
-            
+
             # 批量获取图像特征
             with torch.no_grad():
                 image_features = self.clip_model.get_image_features(**inputs)
-            
+
             # 确保特征是tensor格式，处理可能的BaseModelOutputWithPooling对象
-            if hasattr(image_features, 'last_hidden_state'):
+            if hasattr(image_features, "last_hidden_state"):
                 # Take the pooled output if available, otherwise take the CLS token
-                if hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                if (
+                    hasattr(image_features, "pooler_output")
+                    and image_features.pooler_output is not None
+                ):
                     image_features = image_features.pooler_output
                 else:
-                    image_features = image_features.last_hidden_state[:, 0, :]  # Take the CLS token
-            elif hasattr(image_features, 'pooler_output') and image_features.pooler_output is not None:
+                    image_features = image_features.last_hidden_state[
+                        :, 0, :
+                    ]  # Take the CLS token
+            elif (
+                hasattr(image_features, "pooler_output")
+                and image_features.pooler_output is not None
+            ):
                 image_features = image_features.pooler_output
             elif torch.is_tensor(image_features):
                 # Already a tensor, use as-is
@@ -1194,27 +1528,27 @@ class MushroomImageEncoder:
             else:
                 # Fallback: assume it's a tensor-like object
                 image_features = image_features
-            
+
             # 归一化并转换为列表
             embeddings = []
             for i in range(image_features.shape[0]):
                 embedding = image_features[i].cpu().numpy()
                 embedding = embedding / np.linalg.norm(embedding)
                 embeddings.append(embedding.tolist())
-            
+
             logger.debug(f"[IMG-BATCH] 批量图像编码完成: {len(embeddings)}个")
             return embeddings
-            
+
         except Exception as e:
             logger.error(f"[IMG-BATCH] 批量图像编码失败: {e}")
             return [None] * len(images)
-    
-    def _get_llama_descriptions_batch(self, images: List[Image.Image]) -> List[Dict]:
+
+    def _get_llama_descriptions_batch(self, images: list[Image.Image]) -> list[dict]:
         """批量获取LLaMA描述"""
         try:
             if not images:
                 return []
-            
+
             # 当前LLaMA API可能不支持批量处理，逐个处理但优化调用
             results = []
             for image in images:
@@ -1223,25 +1557,29 @@ class MushroomImageEncoder:
                     results.append(result)
                 except Exception as e:
                     logger.warning(f"[IMG-BATCH] LLaMA描述失败: {e}")
-                    results.append({"growth_stage_description": "", "image_quality_score": None})
-            
+                    results.append(
+                        {"growth_stage_description": "", "image_quality_score": None}
+                    )
+
             logger.debug(f"[IMG-BATCH] 批量LLaMA描述完成: {len(results)}个")
             return results
-            
+
         except Exception as e:
             logger.error(f"[IMG-BATCH] 批量LLaMA描述失败: {e}")
-            return [{"growth_stage_description": "", "image_quality_score": None}] * len(images)
+            return [
+                {"growth_stage_description": "", "image_quality_score": None}
+            ] * len(images)
 
     def _insert_text_quality_record(
         self,
         session,
         image_path: str,
         embedding_id,
-        room_id: Optional[str],
+        room_id: str | None,
         in_date,
-        collection_datetime: Optional[datetime],
-        llama_description: Optional[str],
-        image_quality_score: Optional[float],
+        collection_datetime: datetime | None,
+        llama_description: str | None,
+        image_quality_score: float | None,
     ) -> None:
         session.add(
             ImageTextQuality(
@@ -1254,84 +1592,98 @@ class MushroomImageEncoder:
                 image_quality_score=image_quality_score,
             )
         )
-    
-    def _save_to_database(self, result: Dict) -> bool:
+
+    def _save_to_database(self, result: dict) -> bool:
         """
         保存处理结果到数据库
         只有在获取到完整环境数据时才保存
-        
+
         Args:
             result: 处理结果字典
-            
+
         Returns:
             是否保存成功
         """
         session = self.Session()
         try:
-            image_info = result['image_info']
-            env_data = result['environmental_data']
-            
+            image_info = result["image_info"]
+            env_data = result["environmental_data"]
+
             # 确保有环境数据才保存
             if not env_data:
                 logger.debug(f"无环境数据，跳过保存: {image_info.file_name}")
                 return False
-            
+
             # 检查是否已存在
-            existing = session.query(MushroomImageEmbedding).filter_by(
-                image_path=image_info.file_path
-            ).first()
-            
+            existing = (
+                session.query(MushroomImageEmbedding)
+                .filter_by(image_path=image_info.file_path)
+                .first()
+            )
+
             if existing:
                 # 更新现有记录
-                existing.embedding = result['embedding']
-                existing.collection_datetime = result['time_info']['collection_datetime']
-                
+                existing.embedding = result["embedding"]
+                existing.collection_datetime = result["time_info"][
+                    "collection_datetime"
+                ]
+
                 # 更新环境数据字段
-                existing.room_id = env_data.get('room_id', image_info.mushroom_id)
-                existing.in_date = env_data.get('in_date', result['time_info']['collection_datetime'].date())
-                existing.in_num = env_data.get('in_num', 0)
-                existing.growth_day = env_data.get('growth_day', 0)
-                existing.air_cooler_config = env_data.get('air_cooler_config', '{}')
-                existing.fresh_fan_config = env_data.get('fresh_fan_config', '{}')
-                existing.light_count = env_data.get('light_count', 0)
-                existing.light_config = env_data.get('light_config', '{}')
-                existing.humidifier_count = env_data.get('humidifier_count', 0)
-                existing.humidifier_config = env_data.get('humidifier_config', '{}')
-                existing.env_sensor_status = env_data.get('env_sensor_status', '{}')
-                existing.semantic_description = env_data.get('semantic_description', '无环境数据。')
+                existing.room_id = env_data.get("room_id", image_info.mushroom_id)
+                existing.in_date = env_data.get(
+                    "in_date", result["time_info"]["collection_datetime"].date()
+                )
+                existing.in_num = env_data.get("in_num", 0)
+                existing.growth_day = env_data.get("growth_day", 0)
+                existing.air_cooler_config = env_data.get("air_cooler_config", "{}")
+                existing.fresh_fan_config = env_data.get("fresh_fan_config", "{}")
+                existing.light_count = env_data.get("light_count", 0)
+                existing.light_config = env_data.get("light_config", "{}")
+                existing.humidifier_count = env_data.get("humidifier_count", 0)
+                existing.humidifier_config = env_data.get("humidifier_config", "{}")
+                existing.env_sensor_status = env_data.get("env_sensor_status", "{}")
+                existing.semantic_description = env_data.get(
+                    "semantic_description", "无环境数据。"
+                )
                 existing.updated_at = datetime.now()
-                
+
                 logger.trace(f"更新数据库记录: {image_info.file_name}")
             else:
                 # 创建新记录
                 new_record = MushroomImageEmbedding(
                     image_path=image_info.file_path,
-                    collection_datetime=result['time_info']['collection_datetime'],
-                    embedding=result['embedding'],
-                    room_id=env_data.get('room_id', image_info.mushroom_id),
-                    in_date=env_data.get('in_date', result['time_info']['collection_datetime'].date()),
-                    in_num=env_data.get('in_num', 0),
-                    growth_day=env_data.get('growth_day', 0),
-                    air_cooler_config=env_data.get('air_cooler_config', '{}'),
-                    fresh_fan_config=env_data.get('fresh_fan_config', '{}'),
-                    light_count=env_data.get('light_count', 0),
-                    light_config=env_data.get('light_config', '{}'),
-                    humidifier_count=env_data.get('humidifier_count', 0),
-                    humidifier_config=env_data.get('humidifier_config', '{}'),
-                    env_sensor_status=env_data.get('env_sensor_status', '{}'),
-                    semantic_description=env_data.get('semantic_description', '无环境数据。')
+                    collection_datetime=result["time_info"]["collection_datetime"],
+                    embedding=result["embedding"],
+                    room_id=env_data.get("room_id", image_info.mushroom_id),
+                    in_date=env_data.get(
+                        "in_date", result["time_info"]["collection_datetime"].date()
+                    ),
+                    in_num=env_data.get("in_num", 0),
+                    growth_day=env_data.get("growth_day", 0),
+                    air_cooler_config=env_data.get("air_cooler_config", "{}"),
+                    fresh_fan_config=env_data.get("fresh_fan_config", "{}"),
+                    light_count=env_data.get("light_count", 0),
+                    light_config=env_data.get("light_config", "{}"),
+                    humidifier_count=env_data.get("humidifier_count", 0),
+                    humidifier_config=env_data.get("humidifier_config", "{}"),
+                    env_sensor_status=env_data.get("env_sensor_status", "{}"),
+                    semantic_description=env_data.get(
+                        "semantic_description", "无环境数据。"
+                    ),
                 )
-                
+
                 session.add(new_record)
                 logger.trace(f"创建数据库记录: {image_info.file_name}")
-            
+
             session.flush()
 
             embedding_id = existing.id if existing else new_record.id
-            room_id = env_data.get('room_id', image_info.mushroom_id)
-            in_date = env_data.get('in_date', result['time_info']['collection_datetime'].date())
-            llama_description = env_data.get('llama_description', None)
-            image_quality_score = env_data.get('image_quality_score', None)
+            room_id = env_data.get("room_id", image_info.mushroom_id)
+            in_date = env_data.get(
+                "in_date", result["time_info"]["collection_datetime"].date()
+            )
+            llama_description = env_data.get("llama_description", None)
+            image_quality_score = env_data.get("image_quality_score", None)
 
             self._insert_text_quality_record(
                 session,
@@ -1339,96 +1691,103 @@ class MushroomImageEncoder:
                 embedding_id,
                 room_id,
                 in_date,
-                result['time_info']['collection_datetime'],
+                result["time_info"]["collection_datetime"],
                 llama_description,
                 image_quality_score,
             )
 
             session.commit()
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to save to database: {e}")
             session.rollback()
             return False
         finally:
             session.close()
-    
-    def batch_process_images(self, mushroom_id: Optional[str] = None, 
-                           date_filter: Optional[str] = None,
-                           start_time: Optional[datetime] = None,
-                           end_time: Optional[datetime] = None,
-                           batch_size: int = 10) -> Dict[str, int]:
+
+    def batch_process_images(
+        self,
+        mushroom_id: str | None = None,
+        date_filter: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        batch_size: int = 10,
+    ) -> dict[str, int]:
         """
         批量处理图像
-        
+
         Args:
             mushroom_id: 蘑菇库号过滤
             date_filter: 日期过滤 (YYYYMMDD)
             start_time: 开始时间过滤 (含)
             end_time: 结束时间过滤 (不含)
             batch_size: 批处理大小
-            
+
         Returns:
             处理统计结果
         """
         time_msg = f"[{start_time} ~ {end_time}]" if start_time or end_time else ""
         logger.info(f"🚀 开始批量处理图像 {time_msg}")
-        
+
         # 获取所有蘑菇图像
         all_images = self.processor.get_mushroom_images(
             mushroom_id=mushroom_id,
             date_filter=date_filter,
             start_time=start_time,
-            end_time=end_time
+            end_time=end_time,
         )
-        
+
         if not all_images:
             logger.warning(f"⚠️ 未找到符合条件的图像 {time_msg}")
-            return {'total': 0, 'success': 0, 'failed': 0, 'skipped': 0}
-        
+            return {"total": 0, "success": 0, "failed": 0, "skipped": 0}
+
         logger.info(f"📊 找到 {len(all_images)} 张图像待处理")
-        
-        stats = {'total': len(all_images), 'success': 0, 'failed': 0, 'skipped': 0}
-        
+
+        stats = {"total": len(all_images), "success": 0, "failed": 0, "skipped": 0}
+
         # 分批处理
         for i in range(0, len(all_images), batch_size):
-            batch = all_images[i:i + batch_size]
-            logger.info(f"🔄 处理批次 {i//batch_size + 1}/{(len(all_images)-1)//batch_size + 1}")
-            
+            batch = all_images[i : i + batch_size]
+            logger.info(
+                f"🔄 处理批次 {i // batch_size + 1}/{(len(all_images) - 1) // batch_size + 1}"
+            )
+
             for image_info in batch:
                 try:
                     # 检查是否已处理过
                     if self._is_already_processed(image_info.file_path):
                         logger.info(f"⏭️ 跳过已处理图像: {image_info.file_name}")
-                        stats['skipped'] += 1
+                        stats["skipped"] += 1
                         continue
-                    
+
                     # 处理图像
                     result = self.process_single_image(image_info, save_to_db=True)
-                    
-                    if result and result.get('saved_to_db', False):
-                        stats['success'] += 1
+
+                    if result and result.get("saved_to_db", False):
+                        stats["success"] += 1
                     else:
-                        stats['failed'] += 1
-                        
+                        stats["failed"] += 1
+
                 except Exception as e:
                     logger.error(f"❌ 批处理中处理图像失败 {image_info.file_name}: {e}")
-                    stats['failed'] += 1
-        
-        logger.info(f"✅ 批量处理完成 - 总计: {stats['total']}, "
-                   f"成功: {stats['success']}, 失败: {stats['failed']}, 跳过: {stats['skipped']}")
-        
+                    stats["failed"] += 1
+
+        logger.info(
+            f"✅ 批量处理完成 - 总计: {stats['total']}, "
+            f"成功: {stats['success']}, 失败: {stats['failed']}, 跳过: {stats['skipped']}"
+        )
+
         return stats
 
     def batch_process_text_quality(
         self,
-        mushroom_id: Optional[str] = None,
-        start_time: Optional[datetime] = None,
-        end_time: Optional[datetime] = None,
+        mushroom_id: str | None = None,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
         batch_size: int = 10,
         reprocess: bool = False,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """仅计算文本描述和图像质量评分并落库（不做图像编码）"""
         time_msg = f"[{start_time} ~ {end_time}]" if start_time or end_time else ""
         logger.info(f"📝 开始批量文本/质量分析 {time_msg}")
@@ -1442,14 +1801,14 @@ class MushroomImageEncoder:
 
         if not all_images:
             logger.warning(f"⚠️ 未找到符合条件的图像 {time_msg}")
-            return {'total': 0, 'success': 0, 'failed': 0, 'skipped': 0}
+            return {"total": 0, "success": 0, "failed": 0, "skipped": 0}
 
-        stats = {'total': len(all_images), 'success': 0, 'failed': 0, 'skipped': 0}
+        stats = {"total": len(all_images), "success": 0, "failed": 0, "skipped": 0}
 
         session = self.Session()
         try:
             for i in range(0, len(all_images), batch_size):
-                batch = all_images[i:i + batch_size]
+                batch = all_images[i : i + batch_size]
                 for image_info in batch:
                     try:
                         if not reprocess:
@@ -1464,26 +1823,32 @@ class MushroomImageEncoder:
                                 and existing.llama_description
                                 and existing.image_quality_score is not None
                             ):
-                                stats['skipped'] += 1
+                                stats["skipped"] += 1
                                 continue
 
                         image = self.minio_client.get_image(image_info.file_path)
                         if image is None:
-                            stats['failed'] += 1
+                            stats["failed"] += 1
                             continue
 
                         llama_result = self._get_llama_description(image)
-                        growth_stage_description = llama_result.get('growth_stage_description', '')
-                        quality_score = llama_result.get('image_quality_score', None)
+                        growth_stage_description = llama_result.get(
+                            "growth_stage_description", ""
+                        )
+                        quality_score = llama_result.get("image_quality_score", None)
 
                         time_info = self.parse_time_from_path(image_info)
-                        in_date = time_info['collection_datetime'].date()
+                        in_date = time_info["collection_datetime"].date()
                         room_id = self._map_room_id(image_info.mushroom_id)
 
-                        existing_embedding = session.query(MushroomImageEmbedding).filter_by(
-                            image_path=image_info.file_path
-                        ).first()
-                        embedding_id = existing_embedding.id if existing_embedding else None
+                        existing_embedding = (
+                            session.query(MushroomImageEmbedding)
+                            .filter_by(image_path=image_info.file_path)
+                            .first()
+                        )
+                        embedding_id = (
+                            existing_embedding.id if existing_embedding else None
+                        )
 
                         self._insert_text_quality_record(
                             session,
@@ -1491,14 +1856,18 @@ class MushroomImageEncoder:
                             embedding_id,
                             room_id,
                             in_date,
-                            time_info['collection_datetime'],
-                            growth_stage_description if growth_stage_description else None,
+                            time_info["collection_datetime"],
+                            growth_stage_description
+                            if growth_stage_description
+                            else None,
                             quality_score,
                         )
-                        stats['success'] += 1
+                        stats["success"] += 1
                     except Exception as e:
-                        logger.error(f"❌ 文本/质量处理失败 {image_info.file_name}: {e}")
-                        stats['failed'] += 1
+                        logger.error(
+                            f"❌ 文本/质量处理失败 {image_info.file_name}: {e}"
+                        )
+                        stats["failed"] += 1
 
                 session.commit()
 
@@ -1519,12 +1888,12 @@ class MushroomImageEncoder:
         target_date,
         top_k: int = 5,
         batch_size: int = 10,
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """按库房/日期选取Top-K质量图像进行编码"""
         from global_const.const_config import MUSHROOM_ROOM_IDS
 
         logger.info(f"📌 开始处理 {target_date} Top-{top_k} 质量图像")
-        stats = {'total': 0, 'success': 0, 'failed': 0, 'skipped': 0}
+        stats = {"total": 0, "success": 0, "failed": 0, "skipped": 0}
 
         session = self.Session()
         try:
@@ -1548,7 +1917,7 @@ class MushroomImageEncoder:
                     img.file_path: img
                     for img in self.processor.get_mushroom_images(
                         mushroom_id=room_id,
-                        date_filter=target_date.strftime('%Y%m%d'),
+                        date_filter=target_date.strftime("%Y%m%d"),
                     )
                 }
 
@@ -1559,18 +1928,18 @@ class MushroomImageEncoder:
                     seen_paths.add(row.image_path)
                     image_info = image_map.get(row.image_path)
                     if not image_info:
-                        stats['failed'] += 1
+                        stats["failed"] += 1
                         continue
 
                     if self._is_already_processed(image_info.file_path):
-                        stats['skipped'] += 1
+                        stats["skipped"] += 1
                         continue
 
                     precomputed = None
                     if row.llama_description:
                         precomputed = {
-                            'growth_stage_description': row.llama_description,
-                            'image_quality_score': row.image_quality_score,
+                            "growth_stage_description": row.llama_description,
+                            "image_quality_score": row.image_quality_score,
                         }
 
                     result = self.process_single_image(
@@ -1578,12 +1947,12 @@ class MushroomImageEncoder:
                         save_to_db=True,
                         precomputed_analysis=precomputed,
                     )
-                    if result and result.get('saved_to_db', False):
-                        stats['success'] += 1
+                    if result and result.get("saved_to_db", False):
+                        stats["success"] += 1
                     else:
-                        stats['failed'] += 1
+                        stats["failed"] += 1
 
-                    stats['total'] += 1
+                    stats["total"] += 1
                     if len(seen_paths) >= top_k:
                         break
 
@@ -1594,225 +1963,274 @@ class MushroomImageEncoder:
             return stats
         finally:
             session.close()
-    
+
     def _is_already_processed(self, image_path: str) -> bool:
         """检查图像是否已经处理过"""
         session = self.Session()
         try:
-            existing = session.query(MushroomImageEmbedding).filter_by(
-                image_path=image_path
-            ).first()
+            existing = (
+                session.query(MushroomImageEmbedding)
+                .filter_by(image_path=image_path)
+                .first()
+            )
             return existing is not None
         except Exception as e:
             logger.error(f"❌ 检查处理状态失败: {e}")
             return False
         finally:
             session.close()
-    
-    def get_processing_statistics(self) -> Dict:
+
+    def get_processing_statistics(self) -> dict:
         """获取处理统计信息"""
         session = self.Session()
         try:
             from sqlalchemy import func
-            
+
             # 总处理数量
             total_count = session.query(MushroomImageEmbedding).count()
-            
+
             # 按库房分组统计
-            room_stats = session.query(
-                MushroomImageEmbedding.room_id,
-                func.count(MushroomImageEmbedding.id).label('count')
-            ).group_by(MushroomImageEmbedding.room_id).all()
-            
+            room_stats = (
+                session.query(
+                    MushroomImageEmbedding.room_id,
+                    func.count(MushroomImageEmbedding.id).label("count"),
+                )
+                .group_by(MushroomImageEmbedding.room_id)
+                .all()
+            )
+
             # 按生长天数分组统计（替代growth_stage）
-            growth_day_stats = session.query(
-                MushroomImageEmbedding.growth_day,
-                func.count(MushroomImageEmbedding.id).label('count')
-            ).group_by(MushroomImageEmbedding.growth_day).all()
-            
+            growth_day_stats = (
+                session.query(
+                    MushroomImageEmbedding.growth_day,
+                    func.count(MushroomImageEmbedding.id).label("count"),
+                )
+                .group_by(MushroomImageEmbedding.growth_day)
+                .all()
+            )
+
             # 按日期分组统计
-            date_stats = session.query(
-                MushroomImageEmbedding.in_date,
-                func.count(MushroomImageEmbedding.id).label('count')
-            ).group_by(MushroomImageEmbedding.in_date).all()
-            
+            date_stats = (
+                session.query(
+                    MushroomImageEmbedding.in_date,
+                    func.count(MushroomImageEmbedding.id).label("count"),
+                )
+                .group_by(MushroomImageEmbedding.in_date)
+                .all()
+            )
+
             # 有环境控制策略的记录数
-            with_env_control = session.query(MushroomImageEmbedding).filter(
-                MushroomImageEmbedding.semantic_description != '无环境数据。'
-            ).count()
-            
+            with_env_control = (
+                session.query(MushroomImageEmbedding)
+                .filter(MushroomImageEmbedding.semantic_description != "无环境数据。")
+                .count()
+            )
+
             # 补光灯使用统计
-            light_usage = session.query(
-                MushroomImageEmbedding.light_count,
-                func.count(MushroomImageEmbedding.id).label('count')
-            ).group_by(MushroomImageEmbedding.light_count).all()
-            
+            light_usage = (
+                session.query(
+                    MushroomImageEmbedding.light_count,
+                    func.count(MushroomImageEmbedding.id).label("count"),
+                )
+                .group_by(MushroomImageEmbedding.light_count)
+                .all()
+            )
+
             return {
-                'total_processed': total_count,
-                'with_environmental_control': with_env_control,
-                'room_distribution': {str(room_id): count for room_id, count in room_stats},
-                'growth_day_distribution': {day: count for day, count in growth_day_stats},
-                'date_distribution': {str(date): count for date, count in date_stats},
-                'light_usage_distribution': {f'light_{count}': usage for count, usage in light_usage},
-                'processing_time': datetime.now().isoformat()
+                "total_processed": total_count,
+                "with_environmental_control": with_env_control,
+                "room_distribution": {
+                    str(room_id): count for room_id, count in room_stats
+                },
+                "growth_day_distribution": {
+                    day: count for day, count in growth_day_stats
+                },
+                "date_distribution": {str(date): count for date, count in date_stats},
+                "light_usage_distribution": {
+                    f"light_{count}": usage for count, usage in light_usage
+                },
+                "processing_time": datetime.now().isoformat(),
             }
-            
+
         except Exception as e:
             logger.error(f"❌ 获取统计信息失败: {e}")
             return {}
         finally:
             session.close()
 
-    def validate_system_with_limited_samples(self, max_per_mushroom: int = 3) -> Dict[str, Any]:
+    def validate_system_with_limited_samples(
+        self, max_per_mushroom: int = 3
+    ) -> dict[str, Any]:
         """
         验证系统功能，每个蘑菇库房最多处理指定数量的图像
         只有在获取到完整数据时才存储到数据库
-        
+
         Args:
             max_per_mushroom: 每个蘑菇库房最多处理的图像数量
-            
+
         Returns:
             验证结果统计
         """
-        logger.info(f"Starting system validation with max {max_per_mushroom} images per room")
-        
+        logger.info(
+            f"Starting system validation with max {max_per_mushroom} images per room"
+        )
+
         # 获取所有图像并按库房分组
         all_images = self.processor.get_mushroom_images()
         mushroom_groups = {}
-        
+
         for img in all_images:
             if img.mushroom_id not in mushroom_groups:
                 mushroom_groups[img.mushroom_id] = []
             mushroom_groups[img.mushroom_id].append(img)
-        
-        logger.info(f"Found {len(mushroom_groups)} rooms: {sorted(mushroom_groups.keys())}")
-        
+
+        logger.info(
+            f"Found {len(mushroom_groups)} rooms: {sorted(mushroom_groups.keys())}"
+        )
+
         validation_results = {
-            'mushroom_ids': sorted(mushroom_groups.keys()),
-            'total_mushrooms': len(mushroom_groups),
-            'processed_per_mushroom': {},
-            'total_processed': 0,
-            'total_success': 0,
-            'total_failed': 0,
-            'total_skipped': 0,
-            'total_no_env_data': 0
+            "mushroom_ids": sorted(mushroom_groups.keys()),
+            "total_mushrooms": len(mushroom_groups),
+            "processed_per_mushroom": {},
+            "total_processed": 0,
+            "total_success": 0,
+            "total_failed": 0,
+            "total_skipped": 0,
+            "total_no_env_data": 0,
         }
-        
+
         # 对每个库房处理有限数量的图像
         for mushroom_id in sorted(mushroom_groups.keys()):
             logger.info(f"Validating room {mushroom_id}...")
-            
+
             images = mushroom_groups[mushroom_id]
             processed_count = 0
             success_count = 0
             failed_count = 0
             skipped_count = 0
             no_env_data_count = 0
-            
+
             # 找到未处理的图像
             for img in images:
                 if processed_count >= max_per_mushroom:
                     break
-                
+
                 try:
                     # 检查是否已处理
                     if self._is_already_processed(img.file_path):
                         skipped_count += 1
-                        logger.info(f"Skipping already processed image: {img.file_name}")
+                        logger.info(
+                            f"Skipping already processed image: {img.file_name}"
+                        )
                         continue
-                    
+
                     # 处理图像
                     logger.info(f"Processing image: {img.file_name}")
                     result = self.process_single_image(img, save_to_db=True)
-                    
+
                     if result:
-                        if result.get('saved_to_db', False):
+                        if result.get("saved_to_db", False):
                             success_count += 1
-                            logger.info(f"Successfully processed and saved: {img.file_name}")
-                        elif result.get('skip_reason') == 'no_environment_data':
+                            logger.info(
+                                f"Successfully processed and saved: {img.file_name}"
+                            )
+                        elif result.get("skip_reason") == "no_environment_data":
                             no_env_data_count += 1
-                            logger.warning(f"Processed but no environment data: {img.file_name}")
+                            logger.warning(
+                                f"Processed but no environment data: {img.file_name}"
+                            )
                         else:
                             failed_count += 1
                             logger.error(f"Processing failed: {img.file_name}")
                     else:
                         failed_count += 1
                         logger.error(f"Processing returned None: {img.file_name}")
-                    
+
                     processed_count += 1
-                    
+
                 except Exception as e:
                     failed_count += 1
                     logger.error(f"Exception processing {img.file_name}: {e}")
                     processed_count += 1
-            
+
             # 记录该库房的结果
-            validation_results['processed_per_mushroom'][mushroom_id] = {
-                'processed': processed_count,
-                'success': success_count,
-                'failed': failed_count,
-                'skipped': skipped_count,
-                'no_env_data': no_env_data_count,
-                'total_images': len(images)
+            validation_results["processed_per_mushroom"][mushroom_id] = {
+                "processed": processed_count,
+                "success": success_count,
+                "failed": failed_count,
+                "skipped": skipped_count,
+                "no_env_data": no_env_data_count,
+                "total_images": len(images),
             }
-            
-            validation_results['total_processed'] += processed_count
-            validation_results['total_success'] += success_count
-            validation_results['total_failed'] += failed_count
-            validation_results['total_skipped'] += skipped_count
-            validation_results['total_no_env_data'] += no_env_data_count
-            
-            logger.info(f"Room {mushroom_id} results: processed={processed_count}, success={success_count}, "
-                       f"failed={failed_count}, skipped={skipped_count}, no_env_data={no_env_data_count}")
-        
-        logger.info(f"System validation completed - total_processed: {validation_results['total_processed']}, "
-                   f"success: {validation_results['total_success']}, failed: {validation_results['total_failed']}, "
-                   f"skipped: {validation_results['total_skipped']}, no_env_data: {validation_results['total_no_env_data']}")
-        
+
+            validation_results["total_processed"] += processed_count
+            validation_results["total_success"] += success_count
+            validation_results["total_failed"] += failed_count
+            validation_results["total_skipped"] += skipped_count
+            validation_results["total_no_env_data"] += no_env_data_count
+
+            logger.info(
+                f"Room {mushroom_id} results: processed={processed_count}, success={success_count}, "
+                f"failed={failed_count}, skipped={skipped_count}, no_env_data={no_env_data_count}"
+            )
+
+        logger.info(
+            f"System validation completed - total_processed: {validation_results['total_processed']}, "
+            f"success: {validation_results['total_success']}, failed: {validation_results['total_failed']}, "
+            f"skipped: {validation_results['total_skipped']}, no_env_data: {validation_results['total_no_env_data']}"
+        )
+
         return validation_results
 
 
-def create_mushroom_encoder() -> MushroomImageEncoder:
+def create_mushroom_encoder(load_clip: bool = True) -> MushroomImageEncoder:
     """创建蘑菇图像编码器实例"""
-    return MushroomImageEncoder()
+    return MushroomImageEncoder(load_clip=load_clip)
 
 
 if __name__ == "__main__":
-
-
     try:
         # Initialize encoder
         encoder = create_mushroom_encoder()
-        print('✅ Encoder initialized successfully')
+        print("✅ Encoder initialized successfully")
 
         # Test system validation with limited samples
-        print('🔍 Running system validation with limited samples...')
-        validation_results = encoder.validate_system_with_limited_samples(max_per_mushroom=2)
+        print("🔍 Running system validation with limited samples...")
+        validation_results = encoder.validate_system_with_limited_samples(
+            max_per_mushroom=2
+        )
 
-        print('📊 Validation Results:')
-        print(f'   Total mushrooms: {validation_results["total_mushrooms"]}')
-        print(f'   Mushroom IDs: {validation_results["mushroom_ids"]}')
-        print(f'   Total processed: {validation_results["total_processed"]}')
-        print(f'   Total success: {validation_results["total_success"]}')
-        print(f'   Total failed: {validation_results["total_failed"]}')
-        print(f'   Total skipped: {validation_results["total_skipped"]}')
-        print(f'   No env data: {validation_results["total_no_env_data"]}')
+        print("📊 Validation Results:")
+        print(f"   Total mushrooms: {validation_results['total_mushrooms']}")
+        print(f"   Mushroom IDs: {validation_results['mushroom_ids']}")
+        print(f"   Total processed: {validation_results['total_processed']}")
+        print(f"   Total success: {validation_results['total_success']}")
+        print(f"   Total failed: {validation_results['total_failed']}")
+        print(f"   Total skipped: {validation_results['total_skipped']}")
+        print(f"   No env data: {validation_results['total_no_env_data']}")
 
-        print('\n📈 Per-mushroom breakdown:')
-        for mushroom_id, stats in validation_results['processed_per_mushroom'].items():
-            print(f'   Room {mushroom_id}: processed={stats["processed"]}, success={stats["success"]}, failed={stats["failed"]}, no_env_data={stats["no_env_data"]}')
+        print("\n📈 Per-mushroom breakdown:")
+        for mushroom_id, stats in validation_results["processed_per_mushroom"].items():
+            print(
+                f"   Room {mushroom_id}: processed={stats['processed']}, success={stats['success']}, failed={stats['failed']}, no_env_data={stats['no_env_data']}"
+            )
 
         # Get processing statistics
-        print('\n📋 Getting processing statistics...')
+        print("\n📋 Getting processing statistics...")
         processing_stats = encoder.get_processing_statistics()
-        print(f'   Total records in database: {processing_stats.get("total_processed", 0)}')
-        print(f'   Records with environmental control: {processing_stats.get("with_environmental_control", 0)}')
+        print(
+            f"   Total records in database: {processing_stats.get('total_processed', 0)}"
+        )
+        print(
+            f"   Records with environmental control: {processing_stats.get('with_environmental_control', 0)}"
+        )
 
-        print('\n✅ Multimodal CLIP encoding system test completed successfully!')
+        print("\n✅ Multimodal CLIP encoding system test completed successfully!")
 
     except Exception as e:
-        print(f'❌ Test failed: {e}')
-        import traceback
+        print(f"❌ Test failed: {e}")
         import sys
+        import traceback
+
         traceback.print_exc()
         sys.exit(1)

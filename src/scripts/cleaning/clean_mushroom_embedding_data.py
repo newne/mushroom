@@ -22,7 +22,7 @@ if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
 from global_const.global_const import BASE_DIR, pgsql_engine
-from utils.create_table import MushroomImageEmbedding, MushroomImageQuality
+from utils.create_table import MushroomImageEmbedding
 from utils.data_preprocessing import query_data_by_batch_time
 from utils.dataframe_utils import get_all_device_configs
 

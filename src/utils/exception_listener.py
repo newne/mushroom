@@ -9,33 +9,33 @@
 # ===================== 常量定义（全大写 + 语义化） =====================
 # 时区配置（与调度器统一使用 UTC）
 import os
+
 # ===================== 标准库导入（按字母序） =====================
 import threading
 from dataclasses import dataclass
-from datetime import datetime
-from datetime import timezone
-from typing import Dict, List, Optional, Final, Any
+from datetime import UTC, datetime, timezone
+from typing import Any, Final
 
 # ===================== 第三方库导入（按字母序） =====================
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import APIRouter, Response
-from fastapi.openapi.utils import get_openapi
 from loguru import logger
 from typing_extensions import TypedDict
 
 # ===================== 本地模块导入（按字母序） =====================
 
 # 获取系统时区，如果获取不到则使用UTC
-LOCAL_TZ_STR = os.environ.get('TZ')
+LOCAL_TZ_STR = os.environ.get("TZ")
 if LOCAL_TZ_STR:
     import pytz
+
     try:
         LOCAL_TZ = pytz.timezone(LOCAL_TZ_STR)
     except:
-        LOCAL_TZ = datetime.now().astimezone().tzinfo or timezone.utc
+        LOCAL_TZ = datetime.now().astimezone().tzinfo or UTC
 else:
-    LOCAL_TZ = datetime.now().astimezone().tzinfo or timezone.utc
+    LOCAL_TZ = datetime.now().astimezone().tzinfo or UTC
 
 DEFAULT_TIMEZONE: Final[timezone] = LOCAL_TZ
 # 默认超时阈值（秒）
@@ -51,25 +51,30 @@ HTTP_200_OK: Final[int] = 200
 HTTP_503_UNAVAILABLE: Final[int] = 503
 HTTP_500_INTERNAL_ERROR: Final[int] = 500
 
+
 # ===================== 类型定义（结构化 + 可读性） =====================
 class JobStatus(TypedDict):
     """任务状态结构化类型（强制键存在性）"""
+
     status: str  # success/error
     last_execution: datetime
-    exception: Optional[str]
+    exception: str | None
+
 
 # 全局任务状态存储（线程安全）
-_JOB_STATUS: Dict[str, JobStatus] = {}
+_JOB_STATUS: dict[str, JobStatus] = {}
 _JOB_STATUS_LOCK: threading.Lock = threading.Lock()
 
 # 调度器实例存储（线程安全）
-_SCHEDULER_INSTANCE: Optional[Any] = None
+_SCHEDULER_INSTANCE: Any | None = None
 _SCHEDULER_LOCK: threading.Lock = threading.Lock()
+
 
 # ===================== 配置数据类（中心化管理） =====================
 @dataclass(frozen=True)
 class HealthCheckConfig:
     """健康检查核心配置"""
+
     default_timeout_sec: int = DEFAULT_TIMEOUT_SEC
     max_timeout_sec: int = MAX_TIMEOUT_SEC
     min_timeout_sec: int = MIN_TIMEOUT_SEC
@@ -78,6 +83,7 @@ class HealthCheckConfig:
 
 # 配置实例化（统一入口，便于测试替换）
 HEALTH_CHECK_CONFIG: Final[HealthCheckConfig] = HealthCheckConfig()
+
 
 # ===================== 调度器实例管理（线程安全） =====================
 def set_scheduler_instance(scheduler: Any) -> None:
@@ -92,7 +98,7 @@ def set_scheduler_instance(scheduler: Any) -> None:
         logger.debug("[HEALTH-011] 调度器实例已注册到健康检查模块")
 
 
-def get_scheduler_instance() -> Optional[Any]:
+def get_scheduler_instance() -> Any | None:
     """获取调度器实例（线程安全）
 
     Returns:
@@ -101,12 +107,30 @@ def get_scheduler_instance() -> Optional[Any]:
     with _SCHEDULER_LOCK:
         return _SCHEDULER_INSTANCE
 
+
 # ===================== 超时阈值计算（职责单一） =====================
 def _is_field_static(field: Any) -> bool:
     """判断 Cron 字段是否为静态值（单个数字）"""
     if field is None:
         return False
     return str(field).isdigit()
+
+
+def _extract_static_values(field: Any) -> list[int] | None:
+    """解析 Cron 字段中的静态数值列表（如 "1,3,5"）"""
+    if field is None:
+        return None
+
+    field_str = str(field)
+    if field_str.isdigit():
+        return [int(field_str)]
+
+    try:
+        values = [int(part) for part in field_str.split(",") if part.isdigit()]
+        return values if values else None
+    except Exception:
+        return None
+
 
 def _calculate_cron_timeout(trigger: CronTrigger, job_id: str) -> int:
     """解析 CronTrigger 计算任务超时阈值（秒）
@@ -123,15 +147,49 @@ def _calculate_cron_timeout(trigger: CronTrigger, job_id: str) -> int:
     hour_field = next((f for f in fields if f.name == "hour"), None)
 
     # 天级任务（固定小时/分钟）
-    if hour_field and _is_field_static(hour_field) and minute_field and _is_field_static(minute_field):
+    if (
+        hour_field
+        and _is_field_static(hour_field)
+        and minute_field
+        and _is_field_static(minute_field)
+    ):
         timeout_sec = 25 * 3600  # 25小时
         logger.debug(
             f"[HEALTH-020] 任务 {job_id} 为天级 Cron 任务 | 超时阈值 {timeout_sec} 秒"
         )
         return timeout_sec
 
+    # 多时点天级任务（小时/分钟均为静态列表）
+    hour_values = _extract_static_values(hour_field)
+    minute_values = _extract_static_values(minute_field)
+    if hour_values and minute_values:
+        time_points = sorted({h * 60 + m for h in hour_values for m in minute_values})
+        if len(time_points) > 0:
+            gaps = []
+            for i, current in enumerate(time_points):
+                next_point = time_points[(i + 1) % len(time_points)]
+                gap = (
+                    next_point - current
+                    if next_point > current
+                    else (24 * 60 - current + next_point)
+                )
+                gaps.append(gap)
+            max_gap_sec = max(gaps) * 60
+            timeout_sec = int(min(max_gap_sec * 3, HEALTH_CHECK_CONFIG.max_timeout_sec))
+            timeout_sec = max(timeout_sec, HEALTH_CHECK_CONFIG.min_timeout_sec)
+            logger.debug(
+                f"[HEALTH-025] 任务 {job_id} 为多时点天级 Cron 任务 | "
+                f"最大间隔 {max_gap_sec} 秒 | 超时阈值 {timeout_sec} 秒"
+            )
+            return timeout_sec
+
     # 小时级任务（分钟固定，小时动态）
-    if hour_field and not _is_field_static(hour_field) and minute_field and _is_field_static(minute_field):
+    if (
+        hour_field
+        and not _is_field_static(hour_field)
+        and minute_field
+        and _is_field_static(minute_field)
+    ):
         timeout_sec = 2 * 3600  # 2小时
         logger.debug(
             f"[HEALTH-021] 任务 {job_id} 为小时级 Cron 任务 | 超时阈值 {timeout_sec} 秒"
@@ -168,7 +226,7 @@ def _calculate_cron_timeout(trigger: CronTrigger, job_id: str) -> int:
     return timeout_sec
 
 
-def calculate_job_timeout(job_id: str) -> Optional[int]:
+def calculate_job_timeout(job_id: str) -> int | None:
     """根据任务ID动态计算超时阈值（线程安全）
 
     规则：
@@ -204,7 +262,7 @@ def calculate_job_timeout(job_id: str) -> Optional[int]:
         logger.warning(
             f"[HEALTH-014] 获取任务 {job_id} 失败 | 错误: {str(e)} | "
             f"使用默认超时 {HEALTH_CHECK_CONFIG.default_timeout_sec} 秒",
-            exc_info=True
+            exc_info=True,
         )
         return HEALTH_CHECK_CONFIG.default_timeout_sec
 
@@ -222,7 +280,7 @@ def calculate_job_timeout(job_id: str) -> Optional[int]:
             # 限制上下限
             timeout_sec = max(
                 min(timeout_sec, HEALTH_CHECK_CONFIG.max_timeout_sec),
-                HEALTH_CHECK_CONFIG.min_timeout_sec
+                HEALTH_CHECK_CONFIG.min_timeout_sec,
             )
             logger.debug(
                 f"[HEALTH-016] 任务 {job_id} 为间隔触发器 | 周期 {interval_sec} 秒 | "
@@ -233,7 +291,7 @@ def calculate_job_timeout(job_id: str) -> Optional[int]:
             logger.warning(
                 f"[HEALTH-017] 解析 IntervalTrigger 失败 | 任务 {job_id} | 错误: {str(e)} | "
                 f"使用默认超时 1800 秒",
-                exc_info=True
+                exc_info=True,
             )
             return 1800
 
@@ -245,7 +303,7 @@ def calculate_job_timeout(job_id: str) -> Optional[int]:
             logger.warning(
                 f"[HEALTH-018] 解析 CronTrigger 失败 | 任务 {job_id} | 错误: {str(e)} | "
                 f"使用默认超时 1800 秒",
-                exc_info=True
+                exc_info=True,
             )
             return 1800
 
@@ -256,8 +314,9 @@ def calculate_job_timeout(job_id: str) -> Optional[int]:
     )
     return HEALTH_CHECK_CONFIG.default_timeout_sec
 
+
 # ===================== 任务状态管理（线程安全） =====================
-def get_job_status_copy() -> Dict[str, JobStatus]:
+def get_job_status_copy() -> dict[str, JobStatus]:
     """获取任务状态的深拷贝（线程安全，避免外部修改）
 
     Returns:
@@ -267,11 +326,11 @@ def get_job_status_copy() -> Dict[str, JobStatus]:
     """
     with _JOB_STATUS_LOCK:
         # 深拷贝确保嵌套结构不可变
-        status_copy: Dict[str, JobStatus] = {
+        status_copy: dict[str, JobStatus] = {
             job_id: {
                 "status": status["status"],
                 "last_execution": status["last_execution"],
-                "exception": status["exception"]
+                "exception": status["exception"],
             }
             for job_id, status in _JOB_STATUS.items()
             # 校验键完整性，过滤无效条目
@@ -280,11 +339,7 @@ def get_job_status_copy() -> Dict[str, JobStatus]:
     return status_copy
 
 
-def update_job_status(
-    job_id: str,
-    status: str,
-    exception: Optional[str] = None
-) -> None:
+def update_job_status(job_id: str, status: str, exception: str | None = None) -> None:
     """更新任务状态（线程安全）
 
     Args:
@@ -297,12 +352,13 @@ def update_job_status(
         _JOB_STATUS[job_id] = {
             "status": status,
             "last_execution": current_time,
-            "exception": exception
+            "exception": exception,
         }
     logger.debug(
         f"[HEALTH-010] 更新任务状态 | 任务 {job_id} | 状态 {status} | "
         f"时间 {current_time.isoformat()}"
     )
+
 
 # ===================== 异常监听器（标准化） =====================
 def exception_listener(event: Any) -> None:
@@ -329,9 +385,7 @@ def exception_listener(event: Any) -> None:
 
 
 def _check_single_job_health(
-    job_id: str,
-    job_status: JobStatus,
-    current_time: datetime
+    job_id: str, job_status: JobStatus, current_time: datetime
 ) -> bool:
     """校验单个任务的健康状态
 
@@ -374,7 +428,7 @@ def _check_single_job_health(
     return True
 
 
-def get_health_details() -> Dict[str, Any]:
+def get_health_details() -> dict[str, Any]:
     """获取完整的健康检查结果（一次性计算，避免重复逻辑）
 
     Returns:
@@ -387,7 +441,7 @@ def get_health_details() -> Dict[str, Any]:
     # 获取线程安全的任务状态副本
     job_status_copy = get_job_status_copy()
     current_time = datetime.now(HEALTH_CHECK_CONFIG.timezone)
-    unhealthy_jobs: List[str] = []
+    unhealthy_jobs: list[str] = []
 
     # 无任务记录时默认健康
     if not job_status_copy:
@@ -396,7 +450,7 @@ def get_health_details() -> Dict[str, Any]:
             "overall_healthy": True,
             "job_status": job_status_copy,
             "unhealthy_jobs": [],
-            "timestamp": current_time.isoformat()
+            "timestamp": current_time.isoformat(),
         }
 
     # 校验每个任务的健康状态
@@ -418,7 +472,7 @@ def get_health_details() -> Dict[str, Any]:
         "overall_healthy": overall_healthy,
         "job_status": job_status_copy,
         "unhealthy_jobs": unhealthy_jobs,
-        "timestamp": current_time.isoformat()
+        "timestamp": current_time.isoformat(),
     }
 
 
@@ -431,7 +485,7 @@ def is_healthy() -> bool:
     return get_health_details()["overall_healthy"]
 
 
-def health_check() -> Dict[str, JobStatus]:
+def health_check() -> dict[str, JobStatus]:
     """获取所有任务的当前状态副本（兼容原有接口）
 
     Returns:
@@ -439,21 +493,20 @@ def health_check() -> Dict[str, JobStatus]:
     """
     return get_job_status_copy()
 
+
 # ===================== FastAPI 接口（标准化） =====================
 # 初始化路由（遵循 FastAPI 最佳实践 + Google 规范）
 router = APIRouter(
-    prefix="/health",
-    tags=["health"],
-    responses={404: {"description": "接口未找到"}}
+    prefix="/health", tags=["health"], responses={404: {"description": "接口未找到"}}
 )
 
 
 @router.get(
     "",
     summary="获取详细健康状态（根路径）",
-    description="返回所有调度任务的详细健康状态（含超时/异常信息）"
+    description="返回所有调度任务的详细健康状态（含超时/异常信息）",
 )
-async def get_root_health_status() -> Dict[str, Any]:
+async def get_root_health_status() -> dict[str, Any]:
     """获取详细健康状态接口（根路径，避免重定向）
 
     Returns:
@@ -467,10 +520,12 @@ async def get_root_health_status() -> Dict[str, Any]:
     try:
         health_details = get_health_details()
         return {
-            "status": HEALTHY_STATUS if health_details["overall_healthy"] else UNHEALTHY_STATUS,
+            "status": HEALTHY_STATUS
+            if health_details["overall_healthy"]
+            else UNHEALTHY_STATUS,
             "jobs": health_details["job_status"],
             "unhealthy_jobs": health_details["unhealthy_jobs"],
-            "timestamp": health_details["timestamp"]
+            "timestamp": health_details["timestamp"],
         }
     except Exception as e:
         error_msg = f"健康检查接口异常: {str(e)}"
@@ -478,16 +533,16 @@ async def get_root_health_status() -> Dict[str, Any]:
         return {
             "status": ERROR_STATUS,
             "message": error_msg,
-            "timestamp": datetime.now(HEALTH_CHECK_CONFIG.timezone).isoformat()
+            "timestamp": datetime.now(HEALTH_CHECK_CONFIG.timezone).isoformat(),
         }
 
 
 @router.get(
     "/",
     summary="获取详细健康状态",
-    description="返回所有调度任务的详细健康状态（含超时/异常信息）"
+    description="返回所有调度任务的详细健康状态（含超时/异常信息）",
 )
-async def get_detailed_health_status() -> Dict[str, Any]:
+async def get_detailed_health_status() -> dict[str, Any]:
     """获取详细健康状态接口
 
     Returns:
@@ -501,10 +556,12 @@ async def get_detailed_health_status() -> Dict[str, Any]:
     try:
         health_details = get_health_details()
         return {
-            "status": HEALTHY_STATUS if health_details["overall_healthy"] else UNHEALTHY_STATUS,
+            "status": HEALTHY_STATUS
+            if health_details["overall_healthy"]
+            else UNHEALTHY_STATUS,
             "jobs": health_details["job_status"],
             "unhealthy_jobs": health_details["unhealthy_jobs"],
-            "timestamp": health_details["timestamp"]
+            "timestamp": health_details["timestamp"],
         }
     except Exception as e:
         error_msg = f"健康检查接口异常: {str(e)}"
@@ -512,16 +569,16 @@ async def get_detailed_health_status() -> Dict[str, Any]:
         return {
             "status": ERROR_STATUS,
             "message": error_msg,
-            "timestamp": datetime.now(HEALTH_CHECK_CONFIG.timezone).isoformat()
+            "timestamp": datetime.now(HEALTH_CHECK_CONFIG.timezone).isoformat(),
         }
 
 
 @router.get(
     "/status",
     summary="获取简化健康状态",
-    description="返回简化健康状态（适配负载均衡/监控系统）"
+    description="返回简化健康状态（适配负载均衡/监控系统）",
 )
-async def get_simple_health_status(response: Response) -> Dict[str, str]:
+async def get_simple_health_status(response: Response) -> dict[str, str]:
     """获取简化健康状态接口（HTTP状态码适配监控系统）
 
     Args:
