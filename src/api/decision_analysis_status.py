@@ -40,12 +40,10 @@ class BatchStatusCreate(BatchStatusBase):
 
 
 class BatchStatusUpdate(BaseModel):
-    status: int | None = Field(
-        None,
+    status: int = Field(
+        ...,
         description="状态：0=pending(未处理), 1=采纳建议, 2=手动调整, 3=忽略建议",
     )
-    operator: str | None = Field(None, description="操作者：人/系统")
-    comment: str | None = Field(None, description="备注说明")
 
 
 class BatchStatusResponse(BatchStatusBase):
@@ -119,11 +117,11 @@ def get_batch_status(batch_id: str, db: Session = Depends(get_db)):
     return record
 
 
-@router.put(
+@router.patch(
     "/{batch_id}",
     response_model=BatchStatusResponse,
     summary="更新批次状态",
-    description="按批次ID更新状态、操作者或备注。",
+    description="按批次ID仅更新状态。",
 )
 def update_batch_status(
     batch_id: str,
@@ -138,9 +136,7 @@ def update_batch_status(
     if not record:
         raise HTTPException(status_code=404, detail="Record not found")
 
-    update_data = payload.model_dump(exclude_unset=True)
-    for key, value in update_data.items():
-        setattr(record, key, value)
+    record.status = payload.status
 
     db.commit()
     db.refresh(record)
