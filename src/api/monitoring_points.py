@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from global_const.global_const import pgsql_engine, static_settings
 from utils.create_table import (
+    DecisionAnalysisBatchStatus,
     DecisionAnalysisDynamicResult,
     DecisionAnalysisStaticConfig,
 )
@@ -41,7 +42,6 @@ def _build_dynamic_point_map(
             "new": result.new,
             "level": result.level or "medium",
             "change": bool(result.change),
-            "status": result.status,
         }
 
     return point_map
@@ -120,6 +120,7 @@ def _build_monitoring_config(
     static_configs: list[DecisionAnalysisStaticConfig],
     dynamic_results: list[DecisionAnalysisDynamicResult],
     instruction_time: datetime | None,
+    batch_status: int | None,
 ) -> dict:
     dynamic_point_map = _build_dynamic_point_map(dynamic_results)
     device_remark_map = _build_device_remark_map()
@@ -160,7 +161,6 @@ def _build_monitoring_config(
             "old": old_value,
             "new": new_value,
             "level": dynamic_point.get("level", "medium"),
-            "status": dynamic_point.get("status", 0),
         }
         device_entry["point_list"].append(point_entry)
 
@@ -174,6 +174,7 @@ def _build_monitoring_config(
     return {
         "room_id": room_id,
         "time": instruction_time.isoformat() if instruction_time else None,
+        "status": batch_status if batch_status is not None else 0,
         "devices": devices,
         "metadata": {
             "generated_at": datetime.now().isoformat(),
@@ -251,12 +252,19 @@ def list_monitoring_points_by_time_range(
             .filter(DecisionAnalysisDynamicResult.batch_id == latest_dynamic.batch_id)
             .all()
         )
+        batch_status_record = (
+            db.query(DecisionAnalysisBatchStatus)
+            .filter(DecisionAnalysisBatchStatus.batch_id == latest_dynamic.batch_id)
+            .first()
+        )
+        batch_status = batch_status_record.status if batch_status_record else 0
 
         config = _build_monitoring_config(
             room_id,
             static_configs,
             dynamic_results,
             instruction_time,
+            batch_status,
         )
         config["metadata"]["batch_id"] = latest_dynamic.batch_id
         return config
@@ -308,6 +316,7 @@ def list_monitoring_points_by_time_range(
                 static_configs,
                 [],
                 None,
+                0,
             )
             config["metadata"]["batch_id"] = None
             config["confidence"] = None
@@ -327,6 +336,12 @@ def list_monitoring_points_by_time_range(
     response: list[dict] = []
     for batch_id, results in batch_groups.items():
         instruction_time = batch_time.get(batch_id)
+        batch_status_record = (
+            db.query(DecisionAnalysisBatchStatus)
+            .filter(DecisionAnalysisBatchStatus.batch_id == batch_id)
+            .first()
+        )
+        batch_status = batch_status_record.status if batch_status_record else 0
 
         static_query = (
             db.query(DecisionAnalysisStaticConfig)
@@ -365,6 +380,7 @@ def list_monitoring_points_by_time_range(
             static_configs,
             results,
             instruction_time,
+            batch_status,
         )
         config["metadata"]["batch_id"] = batch_id
         response.append(config)
@@ -412,6 +428,12 @@ def get_monitoring_points(
     response: list[dict] = []
     for batch_id, results in batch_groups.items():
         instruction_time = batch_time.get(batch_id)
+        batch_status_record = (
+            db.query(DecisionAnalysisBatchStatus)
+            .filter(DecisionAnalysisBatchStatus.batch_id == batch_id)
+            .first()
+        )
+        batch_status = batch_status_record.status if batch_status_record else 0
 
         static_query = (
             db.query(DecisionAnalysisStaticConfig)
@@ -450,12 +472,13 @@ def get_monitoring_points(
             static_configs,
             results,
             instruction_time,
+            batch_status,
         )
         config["metadata"]["batch_id"] = batch_id
 
         confidence_values = [r.confidence for r in results if r.confidence is not None]
         config["confidence"] = max(confidence_values) if confidence_values else None
-        config["processed"] = any(r.status and r.status != 0 for r in results)
+        config["processed"] = bool(batch_status) and batch_status != 0
         response.append(config)
 
     return response

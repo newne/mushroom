@@ -87,20 +87,6 @@ def format_dynamic_result_summary(result) -> str:
         格式化的摘要字符串
     """
     change_icon = "🔄" if result.change else "➖"
-    status_labels = {
-        0: "pending",
-        1: "accepted",
-        2: "manual",
-        3: "ignored",
-    }
-    status_icons = {
-        0: "⏳",
-        1: "✅",
-        2: "🛠️",
-        3: "🚫",
-    }
-    status_icon = status_icons.get(result.status, "❓")
-    status_label = status_labels.get(result.status, str(result.status))
 
     summary_lines = [
         f"📋 Result ID: {result.id}",
@@ -111,10 +97,8 @@ def format_dynamic_result_summary(result) -> str:
         f"{change_icon} Change: {'Yes' if result.change else 'No'}",
         f"🔄 Values: {result.old} → {result.new}",
         f"📊 Level: {result.level}",
-        f"{status_icon} Status: {status_label}",
         f"🕒 Time: {result.time.strftime('%Y-%m-%d %H:%M:%S') if result.time else 'N/A'}",
     ]
-
     if result.reason:
         summary_lines.append(f"💭 Reason: {result.reason}")
 
@@ -202,7 +186,6 @@ def query_and_display_dynamic_results(args):
             device_alias=args.device_alias,
             point_alias=args.point_alias,
             change_only=args.changes_only,
-            status=args.status,
             start_time=start_time,
             end_time=end_time,
             limit=args.limit,
@@ -218,7 +201,6 @@ def query_and_display_dynamic_results(args):
         # 统计信息
         batch_stats = {}
         change_stats = {"total": 0, "changes": 0}
-        status_stats = {}
         device_stats = {}
 
         for i, result in enumerate(results, 1):
@@ -228,18 +210,9 @@ def query_and_display_dynamic_results(args):
                 print("-" * 40)
             else:
                 change_icon = "🔄" if result.change else "➖"
-                status_icon = {0: "⏳", 1: "✅", 2: "🛠️", 3: "🚫"}.get(
-                    result.status, "❓"
-                )
                 time_str = result.time.strftime("%m-%d %H:%M") if result.time else "N/A"
-                status_label = {
-                    0: "pending",
-                    1: "accepted",
-                    2: "manual",
-                    3: "ignored",
-                }.get(result.status, str(result.status))
                 print(
-                    f"{i:3d}. {result.room_id} | {time_str} | {result.device_type:12s} | {result.point_alias:12s} | {change_icon} {result.old}→{result.new} | {status_icon} {status_label}"
+                    f"{i:3d}. {result.room_id} | {time_str} | {result.device_type:12s} | {result.point_alias:12s} | {change_icon} {result.old}→{result.new}"
                 )
 
             # 收集统计信息
@@ -247,7 +220,6 @@ def query_and_display_dynamic_results(args):
             change_stats["total"] += 1
             if result.change:
                 change_stats["changes"] += 1
-            status_stats[result.status] = status_stats.get(result.status, 0) + 1
             device_stats[result.device_type] = (
                 device_stats.get(result.device_type, 0) + 1
             )
@@ -264,10 +236,6 @@ def query_and_display_dynamic_results(args):
         if len(batch_stats) <= 5:  # 只显示少量批次的详情
             for batch_id, count in sorted(batch_stats.items()):
                 print(f"     - {batch_id}: {count} results")
-
-        print("   Status Distribution:")
-        for status, count in sorted(status_stats.items()):
-            print(f"     - {status}: {count}")
 
         print("   Device Types:")
         for device_type, count in sorted(device_stats.items()):
@@ -320,12 +288,6 @@ def main():
         "--changes-only",
         action="store_true",
         help="Show only records with changes (dynamic only)",
-    )
-    parser.add_argument(
-        "--status",
-        type=int,
-        choices=[0, 1, 2, 3],
-        help="Status filter (dynamic only): 0=pending,1=accepted,2=manual,3=ignored",
     )
     parser.add_argument(
         "--hours", type=int, help="Show results from last N hours (dynamic only)"

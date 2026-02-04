@@ -363,10 +363,8 @@ class DecisionAnalysisDynamicResult(Base):
         Index("idx_decision_batch_id", "batch_id"),
         Index("idx_decision_time", "time"),
         Index("idx_decision_dynamic_device_point", "device_alias", "point_alias"),
-        Index("idx_decision_change_status", "change", "status"),
         Index("idx_decision_room_time", "room_id", "time"),
         Index("idx_decision_dynamic_device_type", "device_type"),
-        Index("idx_decision_dynamic_status", "status"),
         Index("idx_decision_dynamic_apply_time", "apply_time"),
         {
             "comment": "决策分析动态结果表：存储模型每次输出的调节结果，高频写入用于回溯对比"
@@ -417,12 +415,6 @@ class DecisionAnalysisDynamicResult(Base):
     rule_hit = Column(JSON, nullable=True, comment="命中规则列表")
 
     # (4) 控制闭环
-    status = Column(
-        Integer,
-        nullable=False,
-        default=0,
-        comment="状态：0=pending, 1=采纳建议, 2=手动调整, 3=忽略建议",
-    )
     apply_time = Column(DateTime, nullable=True, comment="实际下发时间")
     apply_result = Column(Text, nullable=True, comment="下发结果：成功/失败原因")
     operator = Column(String(100), nullable=True, comment="操作者：人/系统")
@@ -444,6 +436,108 @@ class DecisionAnalysisDynamicResult(Base):
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
     )
+
+
+class DecisionAnalysisBatchStatus(Base):
+    """决策分析批次人工响应状态表"""
+
+    __tablename__ = "decision_analysis_batch_status"
+
+    __table_args__ = (
+        Index("uq_decision_batch_status_batch", "batch_id", unique=True),
+        Index("idx_decision_batch_status_room", "room_id"),
+        Index("idx_decision_batch_status_status", "status"),
+        {"comment": "决策分析批次状态表：记录每个batch_id的人工响应状态"},
+    )
+
+    id = Column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+        comment="自增主键 (BIGINT)",
+    )
+    batch_id = Column(String(100), nullable=False, comment="批次ID")
+    room_id = Column(String(10), nullable=False, comment="库房编号")
+    status = Column(
+        Integer,
+        nullable=False,
+        default=0,
+        comment="状态：0=pending, 1=采纳建议, 2=手动调整, 3=忽略建议",
+    )
+    operator = Column(String(100), nullable=True, comment="操作者：人/系统")
+    comment = Column(Text, nullable=True, comment="备注说明")
+    created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
+    )
+
+
+def migrate_dynamic_status_to_batch_status():
+    """
+    将 decision_analysis_dynamic_result 中的批次信息迁移到批次状态表。
+
+    迁移策略：
+    - 若 dynamic_result 存在 status 字段：按 batch_id + room_id 聚合，status 取最大值
+    - 若仅有 batch_id：status 统一填充为 0（pending）
+    """
+    try:
+        with pgsql_engine.connect() as conn:
+            status_column = conn.execute(
+                text(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_name = 'decision_analysis_dynamic_result'
+                      AND column_name = 'status'
+                    """
+                )
+            ).fetchone()
+
+            if status_column:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO decision_analysis_batch_status (batch_id, room_id, status, operator, comment)
+                        SELECT
+                            batch_id,
+                            room_id,
+                            MAX(status) AS status,
+                            MAX(operator) AS operator,
+                            'migrated from decision_analysis_dynamic_result' AS comment
+                        FROM decision_analysis_dynamic_result
+                        WHERE batch_id IS NOT NULL
+                        GROUP BY batch_id, room_id
+                        ON CONFLICT (batch_id) DO NOTHING
+                        """
+                    )
+                )
+                conn.commit()
+                logger.info("[Migration] Migrated dynamic status to batch status table")
+                return
+
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO decision_analysis_batch_status (batch_id, room_id, status, operator, comment)
+                    SELECT DISTINCT
+                        batch_id,
+                        room_id,
+                        0 AS status,
+                        'system' AS operator,
+                        'migrated from decision_analysis_dynamic_result (status defaulted)' AS comment
+                    FROM decision_analysis_dynamic_result
+                    WHERE batch_id IS NOT NULL
+                    ON CONFLICT (batch_id) DO NOTHING
+                    """
+                )
+            )
+            conn.commit()
+            logger.info(
+                "[Migration] Migrated dynamic batch_ids to batch status table with status=0"
+            )
+    except Exception as e:
+        logger.error(f"[Migration] Failed to migrate dynamic status: {e}")
+        raise
 
 
 def init_database_extensions():
@@ -913,6 +1007,12 @@ def create_tables():
     except Exception as e:
         logger.error(f"[0.1.3] Failed to add image_text_quality fields: {str(e)}")
 
+    # 4.2 迁移 dynamic status 到批次状态表（如果 status 列存在）
+    try:
+        migrate_dynamic_status_to_batch_status()
+    except Exception as e:
+        logger.error(f"[0.1.3] Failed to migrate dynamic status: {str(e)}")
+
     # 5. 确保mushroom_embedding.id自增
     ensure_mushroom_embedding_id_autoincrement()
 
@@ -957,24 +1057,17 @@ def extract_static_config_from_json(json_data: dict) -> list:
     try:
         static_configs = []
 
-        # 处理不同的JSON格式（优先使用monitoring_points结构）
-        if "monitoring_points" in json_data:
+        # 处理不同的JSON格式
+        if "enhanced_decision" in json_data:
+            # enhanced格式
+            enhanced_data = json_data["enhanced_decision"]
+            room_id = enhanced_data.get("room_id")
+            devices = enhanced_data.get("device_recommendations", {})
+        elif "monitoring_points" in json_data:
             # both格式
             monitoring_data = json_data["monitoring_points"]
             room_id = monitoring_data.get("room_id")
             devices = monitoring_data.get("devices", {})
-        elif "enhanced_decision" in json_data:
-            # enhanced格式
-            enhanced_data = json_data["enhanced_decision"]
-            room_id = enhanced_data.get("room_id")
-            device_recommendations = enhanced_data.get("device_recommendations", {})
-            if (
-                isinstance(device_recommendations, dict)
-                and "devices" in device_recommendations
-            ):
-                devices = device_recommendations.get("devices", {})
-            else:
-                devices = device_recommendations
         elif "devices" in json_data:
             # monitoring格式
             room_id = json_data.get("room_id")
@@ -1122,7 +1215,6 @@ def extract_dynamic_results_from_json(
                         "point_name": point.get("point_name"),
                         "remark": point.get("remark"),
                         "model_name": "enhanced_decision_analysis",
-                        "status": 0,
                     }
                     dynamic_results.append(result)
 
@@ -1229,6 +1321,26 @@ def store_decision_analysis_dynamic_results(results: list) -> int:
             for result in results:
                 new_result = DecisionAnalysisDynamicResult(**result)
                 session.add(new_result)
+
+            if results:
+                batch_id = results[0].get("batch_id")
+                room_id = results[0].get("room_id")
+                if batch_id and room_id:
+                    existing = (
+                        session.query(DecisionAnalysisBatchStatus)
+                        .filter(DecisionAnalysisBatchStatus.batch_id == batch_id)
+                        .first()
+                    )
+                    if not existing:
+                        session.add(
+                            DecisionAnalysisBatchStatus(
+                                batch_id=batch_id,
+                                room_id=room_id,
+                                status=0,
+                                operator="system",
+                                comment="auto-created on dynamic results insert",
+                            )
+                        )
 
             session.commit()
             logger.info(
@@ -1348,6 +1460,29 @@ def store_decision_analysis_results(
             else 0
         )
 
+        if batch_id:
+            Session = sessionmaker(bind=pgsql_engine)
+            session = Session()
+            try:
+                existing = (
+                    session.query(DecisionAnalysisBatchStatus)
+                    .filter(DecisionAnalysisBatchStatus.batch_id == batch_id)
+                    .first()
+                )
+                if not existing:
+                    session.add(
+                        DecisionAnalysisBatchStatus(
+                            batch_id=batch_id,
+                            room_id=room_id,
+                            status=0,
+                            operator="system",
+                            comment="auto-created on batch storage",
+                        )
+                    )
+                    session.commit()
+            finally:
+                session.close()
+
         result_stats = {
             "batch_id": batch_id,
             "room_id": room_id,
@@ -1451,7 +1586,6 @@ def query_decision_analysis_dynamic_results(
     device_alias: str = None,
     point_alias: str = None,
     change_only: bool = False,
-    status: int | None = None,
     start_time: datetime = None,
     end_time: datetime = None,
     limit: int = 1000,
@@ -1465,7 +1599,6 @@ def query_decision_analysis_dynamic_results(
         device_alias: 设备别名过滤
         point_alias: 点位别名过滤
         change_only: 是否只查询有变更的记录
-        status: 状态过滤 (0=pending, 1=采纳建议, 2=手动调整, 3=忽略建议)
         start_time: 开始时间过滤
         end_time: 结束时间过滤
         limit: 结果数量限制
@@ -1498,8 +1631,6 @@ def query_decision_analysis_dynamic_results(
                 )
             if change_only:
                 query = query.filter(DecisionAnalysisDynamicResult.change == True)
-            if status is not None:
-                query = query.filter(DecisionAnalysisDynamicResult.status == status)
             if start_time:
                 query = query.filter(DecisionAnalysisDynamicResult.time >= start_time)
             if end_time:

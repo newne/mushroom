@@ -271,7 +271,6 @@ def verify_storage_results(batch_id: str, room_id: str) -> bool:
             logger.info(f"    点位: {result.point_alias}")
             logger.info(f"    变更: {result.change} ({result.old} -> {result.new})")
             logger.info(f"    级别: {result.level}")
-            logger.info(f"    状态: {result.status}")
 
         # 统计变更情况
         change_count = sum(1 for r in dynamic_results if r.change)
