@@ -20,7 +20,6 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy_utils import create_database, database_exists
 
 from global_const.global_const import pgsql_engine
-from utils.model_inference_storage import create_inference_tables
 
 # 向量维度配置，建议放到 settings 中
 EMBEDDING_DIM = 512
@@ -164,6 +163,8 @@ class ImageTextQuality(Base):
         Text, nullable=True, comment="LLaMA生成的蘑菇生长情况描述"
     )
     image_quality_score = Column(Float, nullable=True, comment="图像质量评分 (0-100)")
+    human_evaluation = Column(Text, nullable=True, comment="人工评估结果或备注")
+    chinese_description = Column(Text, nullable=True, comment="中文描述文本")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     updated_at = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
@@ -417,10 +418,10 @@ class DecisionAnalysisDynamicResult(Base):
 
     # (4) 控制闭环
     status = Column(
-        String(20),
+        Integer,
         nullable=False,
-        default="pending",
-        comment="状态：pending/applied/rejected/failed",
+        default=0,
+        comment="状态：0=pending, 1=采纳建议, 2=手动调整, 3=忽略建议",
     )
     apply_time = Column(DateTime, nullable=True, comment="实际下发时间")
     apply_result = Column(Text, nullable=True, comment="下发结果：成功/失败原因")
@@ -534,6 +535,85 @@ def add_collection_ip_field():
 
     except Exception as e:
         logger.error(f"[Migration] Failed to add collection_ip field: {e}")
+        raise
+
+
+def add_image_text_quality_fields():
+    """
+    添加 human_evaluation 和 chinese_description 字段到现有的 image_text_quality 表
+
+    这个函数会：
+    1. 检查字段是否已存在
+    2. 如果不存在，添加字段
+    3. 添加字段注释
+    """
+    try:
+        with pgsql_engine.connect() as conn:
+            check_columns_sql = text(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'image_text_quality'
+                  AND column_name IN ('human_evaluation', 'chinese_description')
+                """
+            )
+
+            existing_columns = {row[0] for row in conn.execute(check_columns_sql)}
+
+            if "human_evaluation" not in existing_columns:
+                logger.info(
+                    "[Migration] Adding human_evaluation field to image_text_quality table..."
+                )
+                conn.execute(
+                    text(
+                        """
+                        ALTER TABLE image_text_quality
+                        ADD COLUMN human_evaluation TEXT NULL
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        COMMENT ON COLUMN image_text_quality.human_evaluation
+                        IS '人工评估结果或备注'
+                        """
+                    )
+                )
+
+            if "chinese_description" not in existing_columns:
+                logger.info(
+                    "[Migration] Adding chinese_description field to image_text_quality table..."
+                )
+                conn.execute(
+                    text(
+                        """
+                        ALTER TABLE image_text_quality
+                        ADD COLUMN chinese_description TEXT NULL
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        COMMENT ON COLUMN image_text_quality.chinese_description
+                        IS '中文描述文本'
+                        """
+                    )
+                )
+
+            if existing_columns and (
+                "human_evaluation" in existing_columns
+                and "chinese_description" in existing_columns
+            ):
+                logger.info(
+                    "[Migration] image_text_quality fields already exist, skipping migration"
+                )
+
+            conn.commit()
+
+    except Exception as e:
+        logger.error(f"[Migration] Failed to add image_text_quality fields: {e}")
         raise
 
 
@@ -821,19 +901,22 @@ def create_tables():
         logger.error(f"[0.1.2] Failed to create tables: {str(e)}")
         return
 
-    # 4. 创建推理结果表
-    create_inference_tables()
-
-    # 5. 添加collection_ip字段（如果不存在）
+    # 4. 添加collection_ip字段（如果不存在）
     try:
         add_collection_ip_field()
     except Exception as e:
         logger.error(f"[0.1.3] Failed to add collection_ip field: {str(e)}")
 
-    # 6. 确保mushroom_embedding.id自增
+    # 4.1 添加 image_text_quality 新字段（如果不存在）
+    try:
+        add_image_text_quality_fields()
+    except Exception as e:
+        logger.error(f"[0.1.3] Failed to add image_text_quality fields: {str(e)}")
+
+    # 5. 确保mushroom_embedding.id自增
     ensure_mushroom_embedding_id_autoincrement()
 
-    # 7. 创建向量索引
+    # 6. 创建向量索引
     # 向量索引不需要在建表时立即完成，且 DDL 语句较长，分离出来管理更清晰
     # create_vector_index()
 
@@ -874,17 +957,24 @@ def extract_static_config_from_json(json_data: dict) -> list:
     try:
         static_configs = []
 
-        # 处理不同的JSON格式
-        if "enhanced_decision" in json_data:
-            # enhanced格式
-            enhanced_data = json_data["enhanced_decision"]
-            room_id = enhanced_data.get("room_id")
-            devices = enhanced_data.get("device_recommendations", {})
-        elif "monitoring_points" in json_data:
+        # 处理不同的JSON格式（优先使用monitoring_points结构）
+        if "monitoring_points" in json_data:
             # both格式
             monitoring_data = json_data["monitoring_points"]
             room_id = monitoring_data.get("room_id")
             devices = monitoring_data.get("devices", {})
+        elif "enhanced_decision" in json_data:
+            # enhanced格式
+            enhanced_data = json_data["enhanced_decision"]
+            room_id = enhanced_data.get("room_id")
+            device_recommendations = enhanced_data.get("device_recommendations", {})
+            if (
+                isinstance(device_recommendations, dict)
+                and "devices" in device_recommendations
+            ):
+                devices = device_recommendations.get("devices", {})
+            else:
+                devices = device_recommendations
         elif "devices" in json_data:
             # monitoring格式
             room_id = json_data.get("room_id")
@@ -1007,12 +1097,18 @@ def extract_dynamic_results_from_json(
                         )
                         continue
 
+                    if not bool(point.get("change", False)):
+                        logger.debug(
+                            f"[Dynamic Results] No change for {device_type}.{point_alias}, skipping"
+                        )
+                        continue
+
                     result = {
                         "room_id": room_id,
                         "device_type": device_type,
                         "device_alias": device_alias,
                         "point_alias": point_alias,
-                        "change": bool(point.get("change", False)),
+                        "change": True,
                         "old": str(point.get("old"))
                         if point.get("old") is not None
                         else "0",
@@ -1026,7 +1122,7 @@ def extract_dynamic_results_from_json(
                         "point_name": point.get("point_name"),
                         "remark": point.get("remark"),
                         "model_name": "enhanced_decision_analysis",
-                        "status": "pending",
+                        "status": 0,
                     }
                     dynamic_results.append(result)
 
@@ -1355,7 +1451,7 @@ def query_decision_analysis_dynamic_results(
     device_alias: str = None,
     point_alias: str = None,
     change_only: bool = False,
-    status: str = None,
+    status: int | None = None,
     start_time: datetime = None,
     end_time: datetime = None,
     limit: int = 1000,
@@ -1369,7 +1465,7 @@ def query_decision_analysis_dynamic_results(
         device_alias: 设备别名过滤
         point_alias: 点位别名过滤
         change_only: 是否只查询有变更的记录
-        status: 状态过滤
+        status: 状态过滤 (0=pending, 1=采纳建议, 2=手动调整, 3=忽略建议)
         start_time: 开始时间过滤
         end_time: 结束时间过滤
         limit: 结果数量限制
@@ -1402,7 +1498,7 @@ def query_decision_analysis_dynamic_results(
                 )
             if change_only:
                 query = query.filter(DecisionAnalysisDynamicResult.change == True)
-            if status:
+            if status is not None:
                 query = query.filter(DecisionAnalysisDynamicResult.status == status)
             if start_time:
                 query = query.filter(DecisionAnalysisDynamicResult.time >= start_time)
@@ -1498,9 +1594,5 @@ def test_decision_analysis_tables():
 
 if __name__ == "__main__":
     create_tables()
-
-    # 可选：测试增强决策分析表功能
     # test_enhanced_decision_analysis_table()
-
-    # 可选：测试IoT表功能
     # test_iot_tables()
