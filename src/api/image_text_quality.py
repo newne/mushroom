@@ -1,11 +1,13 @@
 from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session, sessionmaker
 
 from global_const.global_const import pgsql_engine
 from utils.create_table import ImageTextQuality
+from utils.time_utils import DATETIME_FORMAT, format_datetime, parse_datetime
 
 router = APIRouter(
     prefix="/image_text_quality",
@@ -91,6 +93,10 @@ class ImageTextQualityResponse(ImageTextQualityBase):
             setattr(data, "is_evaluation", bool(getattr(data, "human_evaluation")))
         return data
 
+    @field_serializer("collection_datetime", "created_at", "updated_at")
+    def serialize_datetime(self, value: datetime | None):
+        return format_datetime(value)
+
 
 @router.post(
     "",
@@ -144,6 +150,57 @@ def list_image_text_quality(
 
     query = query.order_by(ImageTextQuality.created_at.desc())
     return query.offset(offset).limit(limit).all()
+
+
+@router.get(
+    "/best_by_room_time",
+    response_model=ImageTextQualityResponse,
+    summary="按库房与结束时间获取当天最高评分记录",
+    description="返回指定库房在当天0点至给定结束时间之前的最高评分记录。",
+    response_model_exclude_none=False,
+)
+def get_best_by_room_and_time(
+    room_id: str = Query(..., description="库房编号"),
+    end_time: str = Query(..., description="结束时间 (YYYY-MM-DD HH:MM:SS)"),
+    db: Session = Depends(get_db),
+):
+    try:
+        parsed_end_time = parse_datetime(end_time)
+    except ValueError:
+        raise HTTPException(
+            status_code=400, detail=f"time format must be {DATETIME_FORMAT}"
+        )
+
+    start_time = datetime.combine(parsed_end_time.date(), datetime.min.time())
+
+    time_filter = or_(
+        and_(
+            ImageTextQuality.collection_datetime.isnot(None),
+            ImageTextQuality.collection_datetime >= start_time,
+            ImageTextQuality.collection_datetime <= parsed_end_time,
+        ),
+        and_(
+            ImageTextQuality.collection_datetime.is_(None),
+            ImageTextQuality.created_at >= start_time,
+            ImageTextQuality.created_at <= parsed_end_time,
+        ),
+    )
+
+    record = (
+        db.query(ImageTextQuality)
+        .filter(ImageTextQuality.room_id == room_id)
+        .filter(time_filter)
+        .order_by(
+            ImageTextQuality.image_quality_score.desc().nullslast(),
+            ImageTextQuality.collection_datetime.desc().nullslast(),
+            ImageTextQuality.created_at.desc(),
+        )
+        .first()
+    )
+
+    if not record:
+        raise HTTPException(status_code=404, detail="Record not found")
+    return record
 
 
 @router.get(

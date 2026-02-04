@@ -3,7 +3,7 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import desc
+from sqlalchemy import and_, desc, or_
 from sqlalchemy.orm import Session, sessionmaker
 
 from global_const.global_const import pgsql_engine, static_settings
@@ -11,8 +11,10 @@ from utils.create_table import (
     DecisionAnalysisBatchStatus,
     DecisionAnalysisDynamicResult,
     DecisionAnalysisStaticConfig,
+    ImageTextQuality,
 )
 from utils.data_preprocessing import query_realtime_data
+from utils.time_utils import DATETIME_FORMAT, format_datetime, parse_datetime
 
 router = APIRouter(
     prefix="/decision_analysis",
@@ -173,16 +175,68 @@ def _build_monitoring_config(
 
     return {
         "room_id": room_id,
-        "time": instruction_time.isoformat() if instruction_time else None,
+        "time": format_datetime(instruction_time),
         "status": batch_status if batch_status is not None else 0,
         "devices": devices,
         "metadata": {
-            "generated_at": datetime.now().isoformat(),
+            "generated_at": format_datetime(datetime.now()),
             "room_id": room_id,
             "source": "enhanced_decision_analysis",
             "total_points": total_points,
         },
     }
+
+
+def _serialize_image_text_quality(record: ImageTextQuality | None) -> dict | None:
+    if not record:
+        return None
+
+    return {
+        "id": record.id,
+        "mushroom_embedding_id": record.mushroom_embedding_id,
+        "image_path": record.image_path,
+        "room_id": record.room_id,
+        "in_date": record.in_date.isoformat() if record.in_date else None,
+        "collection_datetime": format_datetime(record.collection_datetime),
+        "llama_description": record.llama_description,
+        "image_quality_score": record.image_quality_score,
+        "human_evaluation": record.human_evaluation,
+        "chinese_description": record.chinese_description,
+        "is_evaluation": bool(record.human_evaluation),
+        "created_at": format_datetime(record.created_at),
+        "updated_at": format_datetime(record.updated_at),
+    }
+
+
+def _query_best_image_text_quality(
+    room_id: str, end_time: datetime, db: Session
+) -> ImageTextQuality | None:
+    start_time = end_time.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    time_filter = or_(
+        and_(
+            ImageTextQuality.collection_datetime.isnot(None),
+            ImageTextQuality.collection_datetime >= start_time,
+            ImageTextQuality.collection_datetime <= end_time,
+        ),
+        and_(
+            ImageTextQuality.collection_datetime.is_(None),
+            ImageTextQuality.created_at >= start_time,
+            ImageTextQuality.created_at <= end_time,
+        ),
+    )
+
+    return (
+        db.query(ImageTextQuality)
+        .filter(ImageTextQuality.room_id == room_id)
+        .filter(time_filter)
+        .order_by(
+            ImageTextQuality.image_quality_score.desc().nullslast(),
+            ImageTextQuality.collection_datetime.desc().nullslast(),
+            ImageTextQuality.created_at.desc(),
+        )
+        .first()
+    )
 
 
 @router.get(
@@ -195,20 +249,29 @@ def _build_monitoring_config(
 )
 def list_monitoring_points_by_time_range(
     room_id: str = Query(..., description="库房编号"),
-    end_time: datetime = Query(..., description="结束时间 (ISO 8601)"),
-    start_time: datetime | None = Query(None, description="起始时间 (ISO 8601)"),
+    end_time: str = Query(..., description="结束时间 (YYYY-MM-DD HH:MM:SS)"),
+    start_time: str | None = Query(None, description="起始时间 (YYYY-MM-DD HH:MM:SS)"),
     db: Session = Depends(get_db),
 ):
-    if start_time and start_time > end_time:
+    try:
+        parsed_end_time = parse_datetime(end_time)
+        parsed_start_time = parse_datetime(start_time) if start_time else None
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"time format must be {DATETIME_FORMAT}",
+        )
+
+    if parsed_start_time and parsed_start_time > parsed_end_time:
         raise HTTPException(
             status_code=400, detail="start_time cannot be greater than end_time"
         )
 
-    if start_time is None:
+    if parsed_start_time is None:
         latest_dynamic = (
             db.query(DecisionAnalysisDynamicResult)
             .filter(DecisionAnalysisDynamicResult.room_id == room_id)
-            .filter(DecisionAnalysisDynamicResult.time <= end_time)
+            .filter(DecisionAnalysisDynamicResult.time <= parsed_end_time)
             .order_by(desc(DecisionAnalysisDynamicResult.time))
             .first()
         )
@@ -272,8 +335,8 @@ def list_monitoring_points_by_time_range(
     dynamic_results = (
         db.query(DecisionAnalysisDynamicResult)
         .filter(DecisionAnalysisDynamicResult.room_id == room_id)
-        .filter(DecisionAnalysisDynamicResult.time >= start_time)
-        .filter(DecisionAnalysisDynamicResult.time <= end_time)
+        .filter(DecisionAnalysisDynamicResult.time >= parsed_start_time)
+        .filter(DecisionAnalysisDynamicResult.time <= parsed_end_time)
         .order_by(desc(DecisionAnalysisDynamicResult.time))
         .all()
     )
@@ -480,5 +543,43 @@ def get_monitoring_points(
         config["confidence"] = max(confidence_values) if confidence_values else None
         config["processed"] = bool(batch_status) and batch_status != 0
         response.append(config)
+
+    return response
+
+
+@router.get(
+    "/{room_id}/with_image_text_quality",
+    summary="获取监控点配置及图文质量最佳记录",
+    description=(
+        "基于 /decision_analysis/{room_id} 的监控点配置结果，"
+        "以每条记录的 time 作为 end_time，返回当天0点至该 time 之间评分最高的图文质量记录。"
+    ),
+)
+def get_monitoring_points_with_image_text_quality(
+    room_id: str,
+    db: Session = Depends(get_db),
+):
+    configs = get_monitoring_points(room_id, db)
+    response: list[dict] = []
+
+    for config in configs:
+        time_str = config.get("time")
+        end_time: datetime | None = None
+        if isinstance(time_str, str) and time_str:
+            try:
+                end_time = parse_datetime(time_str)
+            except ValueError:
+                end_time = None
+
+        best_record = (
+            _query_best_image_text_quality(room_id, end_time, db) if end_time else None
+        )
+
+        response.append(
+            {
+                "decision_analysis": config,
+                "best_image_text_quality": _serialize_image_text_quality(best_record),
+            }
+        )
 
     return response

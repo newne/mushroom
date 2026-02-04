@@ -1,11 +1,12 @@
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from sqlalchemy.orm import Session, sessionmaker
 
 from global_const.global_const import pgsql_engine
 from utils.create_table import DecisionAnalysisBatchStatus
+from utils.time_utils import format_datetime
 
 router = APIRouter(
     prefix="/decision_analysis_status",
@@ -52,6 +53,10 @@ class BatchStatusResponse(BatchStatusBase):
     updated_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_serializer("created_at", "updated_at")
+    def serialize_datetime(self, value: datetime | None):
+        return format_datetime(value)
 
 
 @router.post(
