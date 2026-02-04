@@ -1214,6 +1214,8 @@ def extract_dynamic_results_from_json(
                         "device_name": device_name,
                         "point_name": point.get("point_name"),
                         "remark": point.get("remark"),
+                        "reason": point.get("reason"),
+                        "confidence": point.get("confidence"),
                         "model_name": "enhanced_decision_analysis",
                     }
                     dynamic_results.append(result)

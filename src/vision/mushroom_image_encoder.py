@@ -18,6 +18,7 @@ import requests
 import torch
 from loguru import logger
 from PIL import Image
+from sqlalchemy import func
 from sqlalchemy.orm import sessionmaker
 from transformers import CLIPModel, CLIPProcessor
 
@@ -151,6 +152,7 @@ class MushroomImageEncoder:
         image_info: MushroomImageInfo,
         time_info: dict,
         growth_stage_description: str,
+        chinese_description: str | None,
         llama_quality_score: float | None,
     ) -> bool:
         """仅保存文本描述与质量评分"""
@@ -173,6 +175,7 @@ class MushroomImageEncoder:
                 in_date,
                 time_info["collection_datetime"],
                 growth_stage_description if growth_stage_description else None,
+                chinese_description,
                 llama_quality_score,
             )
             session.commit()
@@ -405,11 +408,13 @@ class MushroomImageEncoder:
                         return {
                             "growth_stage_description": "",
                             "image_quality_score": None,
+                            "chinese_description": None,
                         }
 
                     # 验证数据类型
                     description = str(llama_result["growth_stage_description"])
                     quality_score = llama_result["image_quality_score"]
+                    chinese_description = llama_result.get("chinese_description", None)
 
                     # 验证质量评分范围
                     if not isinstance(quality_score, (int, float)):
@@ -423,11 +428,12 @@ class MushroomImageEncoder:
                         )
                         quality_score = max(0, min(100, quality_score))
 
-                    logger.trace(f"LLaMA解析成功: 质量评分={quality_score}")
+                    logger.trace(f"LLaMA解析成功: 质量评分={quality_score}, 中文描述={chinese_description}")
                     status = "success"
                     return {
                         "growth_stage_description": description,
                         "image_quality_score": quality_score,
+                        "chinese_description": chinese_description,
                     }
 
                 except json.JSONDecodeError as e:
@@ -436,19 +442,19 @@ class MushroomImageEncoder:
                     logger.error(
                         f"[LLAMA-004] JSON解析失败 | 错误: {e} | 内容: {content[:100]}..."
                     )
-                    return {"growth_stage_description": "", "image_quality_score": None}
+                    return {"growth_stage_description": "", "image_quality_score": None, "chinese_description": None}
                 except KeyError as e:
                     status = "failed"
                     error_details = f"Missing key: {str(e)}"
                     logger.error(f"[LLAMA-005] 响应缺少键 | 键: {e}")
-                    return {"growth_stage_description": "", "image_quality_score": None}
+                    return {"growth_stage_description": "", "image_quality_score": None, "chinese_description": None}
             else:
                 status = "failed"
                 error_details = f"HTTP {resp.status_code}: {resp.text[:200]}"
                 logger.error(
                     f"[LLAMA-006] API调用失败 | 状态码: {resp.status_code} | 响应: {resp.text[:200]}"
                 )
-                return {"growth_stage_description": "", "image_quality_score": None}
+                return {"growth_stage_description": "", "image_quality_score": None, "chinese_description": None}
 
         except requests.exceptions.Timeout:
             status = "failed"
@@ -456,17 +462,17 @@ class MushroomImageEncoder:
             logger.warning(
                 f"[LLAMA-007] API超时 | 超时时间: {getattr(self.llama_config, 'timeout', 600)}秒"
             )
-            return {"growth_stage_description": "", "image_quality_score": None}
+            return {"growth_stage_description": "", "image_quality_score": None, "chinese_description": None}
         except requests.exceptions.ConnectionError as e:
             status = "failed"
             error_details = f"Connection error: {str(e)}"
             logger.warning(f"[LLAMA-008] 连接错误 | 错误: {e}")
-            return {"growth_stage_description": "", "image_quality_score": None}
+            return {"growth_stage_description": "", "image_quality_score": None, "chinese_description": None}
         except Exception as e:
             status = "failed"
             error_details = f"Unexpected error: {str(e)}"
             logger.error(f"[LLAMA-009] 调用异常 | 错误: {e}")
-            return {"growth_stage_description": "", "image_quality_score": None}
+            return {"growth_stage_description": "", "image_quality_score": None, "chinese_description": None}
 
         finally:
             # [性能监控] 记录与写入
@@ -560,14 +566,18 @@ class MushroomImageEncoder:
             image: PIL图像对象
 
         Returns:
-            包含growth_stage_description和image_quality_score的字典
-            格式: {"growth_stage_description": str, "image_quality_score": float or None}
+            包含growth_stage_description、image_quality_score、chinese_description的字典
+            格式: {"growth_stage_description": str, "image_quality_score": float or None, "chinese_description": str or None}
         """
         if not self.llama_client:
             logger.warning(
                 "LLaMA client not available, skipping description generation"
             )
-            return {"growth_stage_description": "", "image_quality_score": None}
+            return {
+                "growth_stage_description": "",
+                "image_quality_score": None,
+                "chinese_description": None,
+            }
 
         try:
             # 为LLaMA处理缩放图像（减少运算量）
@@ -589,7 +599,11 @@ class MushroomImageEncoder:
 
         except Exception as e:
             logger.error(f"Failed to get LLaMA description: {e}")
-            return {"growth_stage_description": "", "image_quality_score": None}
+            return {
+                "growth_stage_description": "",
+                "image_quality_score": None,
+                "chinese_description": None,
+            }
 
     def get_multimodal_embedding(
         self, image: Image.Image, text_description: str
@@ -924,8 +938,9 @@ class MushroomImageEncoder:
             else:
                 llama_result = self._get_llama_description(image)
 
-            # 提取growth_stage_description和image_quality_score
+            # 提取growth_stage_description、image_quality_score、chinese_description
             growth_stage_description = llama_result.get("growth_stage_description", "")
+            chinese_description = llama_result.get("chinese_description", None)
             llama_quality_score = llama_result.get("image_quality_score", None)
 
             # 7. 验证LLaMA结果 (No Degradation)
@@ -977,6 +992,7 @@ class MushroomImageEncoder:
                         image_info,
                         time_info,
                         growth_stage_description,
+                        chinese_description,
                         llama_quality_score,
                     )
                 else:
@@ -1003,6 +1019,7 @@ class MushroomImageEncoder:
             env_data["llama_description"] = (
                 growth_stage_description if growth_stage_description else "N/A"
             )
+            env_data["chinese_description"] = chinese_description
             env_data["image_quality_score"] = (
                 llama_quality_score  # 使用LLaMA返回的质量评分
             )
@@ -1558,7 +1575,11 @@ class MushroomImageEncoder:
                 except Exception as e:
                     logger.warning(f"[IMG-BATCH] LLaMA描述失败: {e}")
                     results.append(
-                        {"growth_stage_description": "", "image_quality_score": None}
+                        {
+                            "growth_stage_description": "",
+                            "image_quality_score": None,
+                            "chinese_description": None,
+                        }
                     )
 
             logger.debug(f"[IMG-BATCH] 批量LLaMA描述完成: {len(results)}个")
@@ -1567,7 +1588,11 @@ class MushroomImageEncoder:
         except Exception as e:
             logger.error(f"[IMG-BATCH] 批量LLaMA描述失败: {e}")
             return [
-                {"growth_stage_description": "", "image_quality_score": None}
+                {
+                    "growth_stage_description": "",
+                    "image_quality_score": None,
+                    "chinese_description": None,
+                }
             ] * len(images)
 
     def _insert_text_quality_record(
@@ -1579,6 +1604,7 @@ class MushroomImageEncoder:
         in_date,
         collection_datetime: datetime | None,
         llama_description: str | None,
+        chinese_description: str | None,
         image_quality_score: float | None,
     ) -> None:
         session.add(
@@ -1589,6 +1615,7 @@ class MushroomImageEncoder:
                 in_date=in_date,
                 collection_datetime=collection_datetime,
                 llama_description=llama_description,
+                chinese_description=chinese_description,
                 image_quality_score=image_quality_score,
             )
         )
@@ -1683,6 +1710,7 @@ class MushroomImageEncoder:
                 "in_date", result["time_info"]["collection_datetime"].date()
             )
             llama_description = env_data.get("llama_description", None)
+            chinese_description = env_data.get("chinese_description", None)
             image_quality_score = env_data.get("image_quality_score", None)
 
             self._insert_text_quality_record(
@@ -1693,6 +1721,7 @@ class MushroomImageEncoder:
                 in_date,
                 result["time_info"]["collection_datetime"],
                 llama_description,
+                chinese_description,
                 image_quality_score,
             )
 
@@ -1811,6 +1840,7 @@ class MushroomImageEncoder:
                 batch = all_images[i : i + batch_size]
                 for image_info in batch:
                     try:
+                        existing = None
                         if not reprocess:
                             existing = (
                                 session.query(ImageTextQuality)
@@ -1822,6 +1852,7 @@ class MushroomImageEncoder:
                                 existing
                                 and existing.llama_description
                                 and existing.image_quality_score is not None
+                                and existing.chinese_description
                             ):
                                 stats["skipped"] += 1
                                 continue
@@ -1834,6 +1865,9 @@ class MushroomImageEncoder:
                         llama_result = self._get_llama_description(image)
                         growth_stage_description = llama_result.get(
                             "growth_stage_description", ""
+                        )
+                        chinese_description = llama_result.get(
+                            "chinese_description", None
                         )
                         quality_score = llama_result.get("image_quality_score", None)
 
@@ -1850,6 +1884,17 @@ class MushroomImageEncoder:
                             existing_embedding.id if existing_embedding else None
                         )
 
+                        if existing:
+                            if not existing.chinese_description and chinese_description:
+                                existing.chinese_description = chinese_description
+                            if not existing.llama_description and growth_stage_description:
+                                existing.llama_description = growth_stage_description
+                            if existing.image_quality_score is None and quality_score is not None:
+                                existing.image_quality_score = quality_score
+                            existing.updated_at = func.now()
+                            stats["success"] += 1
+                            continue
+
                         self._insert_text_quality_record(
                             session,
                             image_info.file_path,
@@ -1860,6 +1905,7 @@ class MushroomImageEncoder:
                             growth_stage_description
                             if growth_stage_description
                             else None,
+                            chinese_description,
                             quality_score,
                         )
                         stats["success"] += 1
