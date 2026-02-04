@@ -7,11 +7,11 @@ from sqlalchemy import desc
 from sqlalchemy.orm import Session, sessionmaker
 
 from global_const.global_const import pgsql_engine, static_settings
-from utils.data_preprocessing import query_realtime_data
 from utils.create_table import (
     DecisionAnalysisDynamicResult,
     DecisionAnalysisStaticConfig,
 )
+from utils.data_preprocessing import query_realtime_data
 
 router = APIRouter(
     prefix="/decision_analysis",
@@ -41,6 +41,7 @@ def _build_dynamic_point_map(
             "new": result.new,
             "level": result.level or "medium",
             "change": bool(result.change),
+            "status": result.status,
         }
 
     return point_map
@@ -159,6 +160,7 @@ def _build_monitoring_config(
             "old": old_value,
             "new": new_value,
             "level": dynamic_point.get("level", "medium"),
+            "status": dynamic_point.get("status", 0),
         }
         device_entry["point_list"].append(point_entry)
 
@@ -185,7 +187,10 @@ def _build_monitoring_config(
 @router.get(
     "/query",
     summary="按时间区间查询监控点配置",
-    description="基于时间区间与room_id查询动态结果并对齐静态配置",
+    description=(
+        "基于时间区间与room_id查询动态结果并对齐静态配置。"
+        "status 枚举含义：0=pending(未处理), 1=采纳建议, 2=手动调整, 3=忽略建议。"
+    ),
 )
 def list_monitoring_points_by_time_range(
     room_id: str = Query(..., description="库房编号"),
@@ -370,7 +375,10 @@ def list_monitoring_points_by_time_range(
 @router.get(
     "/{room_id}",
     summary="获取监控点配置",
-    description="基于 DecisionAnalysisStaticConfig 与 DecisionAnalysisDynamicResult 生成监控点配置",
+    description=(
+        "基于 DecisionAnalysisStaticConfig 与 DecisionAnalysisDynamicResult 生成监控点配置。"
+        "status 枚举含义：0=pending(未处理), 1=采纳建议, 2=手动调整, 3=忽略建议。"
+    ),
 )
 def get_monitoring_points(
     room_id: str,
