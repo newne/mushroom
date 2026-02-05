@@ -458,10 +458,20 @@ def get_realtime_setpoint_data(
             return pd.DataFrame()
 
         # 只保留静态配置中定义的测点
-        config_point_aliases = {config["point_alias"] for config in room_configs}
-        setpoint_df = all_query_df[
-            all_query_df["point_alias"].isin(config_point_aliases)
-        ].copy()
+        if (
+            "device_alias" not in all_query_df.columns
+            and "device_name" in all_query_df.columns
+        ):
+            all_query_df = all_query_df.rename(columns={"device_name": "device_alias"})
+
+        config_keys_df = (
+            pd.DataFrame(room_configs)[["device_alias", "point_alias"]]
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+        setpoint_df = all_query_df.merge(
+            config_keys_df, on=["device_alias", "point_alias"], how="inner"
+        )
 
         if setpoint_df.empty:
             logger.warning(f"[REALTIME_DATA] 库房 {room_id} 无匹配的设定点数据")
@@ -469,8 +479,17 @@ def get_realtime_setpoint_data(
 
         # 查询历史数据
         df = (
-            setpoint_df.groupby("device_alias", group_keys=False)
-            .apply(query_data_by_batch_time, start_time, end_time)
+            setpoint_df.groupby(
+                "device_alias", group_keys=False, sort=False, observed=True
+            )
+            .apply(
+                lambda group: query_data_by_batch_time(
+                    group.assign(device_alias=group.name),
+                    start_time,
+                    end_time,
+                ),
+                include_groups=False,
+            )
             .reset_index(drop=True)
             .sort_values("time")
         )
@@ -478,6 +497,10 @@ def get_realtime_setpoint_data(
         if df.empty:
             logger.warning(f"[REALTIME_DATA] 库房 {room_id} 无历史数据")
             return pd.DataFrame()
+
+        # 添加别名列，保持与查询返回结构一致
+        df["device_alias"] = df["device_name"]
+        df["point_alias"] = df["point_name"]
 
         # 添加库房信息
         df["room_id"] = room_id
@@ -507,79 +530,126 @@ def detect_changes_with_static_configs(
     if realtime_data.empty:
         return []
 
-    changes = []
-
     try:
-        # 构建配置映射表
-        config_mapping = {}
-        config_mapping_by_name = {}
-        for config in room_configs:
-            alias_key = f"{config['device_alias']}_{config['point_alias']}"
-            name_key = f"{config['device_name']}_{config['point_name']}"
-            config_mapping[alias_key] = config
-            config_mapping_by_name[name_key] = config
-
-        # 检查数据结构
-        logger.debug(f"[CHANGE_DETECT] 实时数据列: {list(realtime_data.columns)}")
-        logger.debug(
-            f"[CHANGE_DETECT] 数据样例: {realtime_data.head(1).to_dict('records') if not realtime_data.empty else 'Empty'}"
-        )
-
-        # 根据实际数据结构选择分组字段
+        realtime_df = realtime_data.copy()
         if (
-            "device_alias" in realtime_data.columns
-            and "point_name" in realtime_data.columns
+            "device_alias" not in realtime_df.columns
+            and "device_name" in realtime_df.columns
         ):
-            # 按设备和测点分组检测变更
-            grouped_data = realtime_data.groupby(["device_alias", "point_name"])
-            group_key_format = "device_alias_point_name"
-        elif (
-            "device_name" in realtime_data.columns
-            and "point_name" in realtime_data.columns
+            realtime_df["device_alias"] = realtime_df["device_name"]
+        if (
+            "point_alias" not in realtime_df.columns
+            and "point_name" in realtime_df.columns
         ):
-            # 备用分组方式
-            grouped_data = realtime_data.groupby(["device_name", "point_name"])
-            group_key_format = "device_name_point_name"
-        else:
+            realtime_df["point_alias"] = realtime_df["point_name"]
+
+        config_df = pd.DataFrame(room_configs)
+        required_cols = {"device_alias", "point_alias"}
+        if not required_cols.issubset(realtime_df.columns) or config_df.empty:
             logger.error("[CHANGE_DETECT] 数据结构不匹配，无法进行分组")
             return []
 
-        logger.debug(f"[CHANGE_DETECT] 使用分组方式: {group_key_format}")
+        merged = realtime_df.merge(
+            config_df,
+            on=["device_alias", "point_alias"],
+            how="inner",
+            suffixes=("", "_cfg"),
+        )
 
-        for group_key, group in grouped_data:
-            if len(group) < 2:
-                continue  # 至少需要2个数据点才能检测变更
+        if merged.empty:
+            logger.debug("[CHANGE_DETECT] 无匹配配置数据")
+            return []
 
-            # 根据分组方式构建配置键
-            if group_key_format == "device_alias_point_name":
-                device_alias, point_name = group_key
-                config_key = (
-                    f"{device_alias}_{point_name}"  # point_name实际是point_alias
+        merged = merged.sort_values("time")
+        group_keys = ["device_alias", "point_alias"]
+        merged["previous_value"] = merged.groupby(group_keys)["value"].shift(1)
+
+        valid_mask = merged["value"].notna() & merged["previous_value"].notna()
+        if not valid_mask.any():
+            return []
+
+        value_num = pd.to_numeric(merged["value"], errors="coerce")
+        prev_num = pd.to_numeric(merged["previous_value"], errors="coerce")
+        value_int = value_num.round().astype("Int64")
+        prev_int = prev_num.round().astype("Int64")
+        delta = (value_num - prev_num).abs()
+        threshold = merged["threshold"].fillna(0.0)
+
+        digital_mask = (merged["change_type"] == "digital_on_off") & (
+            value_int != prev_int
+        )
+        analog_mask = (merged["change_type"] == "analog_value") & (delta >= threshold)
+        enum_mask = (merged["change_type"] == "enum_state") & (value_int != prev_int)
+
+        change_mask = valid_mask & (digital_mask | analog_mask | enum_mask)
+        if not change_mask.any():
+            return []
+
+        changes_df = merged.loc[change_mask].copy()
+
+        changes_df["change_magnitude"] = delta.loc[change_mask]
+        changes_df["change_detail"] = ""
+
+        digital_rows = change_mask & digital_mask
+        if digital_rows.any():
+            changes_df.loc[digital_rows, "change_detail"] = (
+                prev_int.loc[digital_rows].astype(str)
+                + " -> "
+                + value_int.loc[digital_rows].astype(str)
+            )
+
+        analog_rows = change_mask & analog_mask
+        if analog_rows.any():
+            changes_df.loc[analog_rows, "change_detail"] = (
+                merged.loc[analog_rows, "previous_value"].map(lambda x: f"{x:.2f}")
+                + " -> "
+                + merged.loc[analog_rows, "value"].map(lambda x: f"{x:.2f}")
+            )
+
+        enum_rows = change_mask & enum_mask
+        if enum_rows.any():
+
+            def _enum_detail(row: pd.Series) -> str:
+                mapping = row.get("enum_mapping") or {}
+                prev = mapping.get(
+                    str(int(row["previous_value"])), str(int(row["previous_value"]))
                 )
-                config = config_mapping.get(config_key)
-            else:
-                device_name, point_name = group_key
-                # 先尝试把 realtime 的 device_name 当作 alias 使用
-                alias_key = f"{device_name}_{point_name}"
-                config = config_mapping.get(alias_key)
-                if not config:
-                    name_key = f"{device_name}_{point_name}"
-                    config = config_mapping_by_name.get(name_key)
+                curr = mapping.get(str(int(row["value"])), str(int(row["value"])))
+                return f"{prev} -> {curr}"
 
-            if not config:
-                logger.debug(f"[CHANGE_DETECT] 未找到匹配配置: {group_key}")
-                continue
+            changes_df.loc[enum_rows, "change_detail"] = changes_df.loc[
+                enum_rows
+            ].apply(_enum_detail, axis=1)
 
-            # 按时间排序
-            group = group.sort_values("time").reset_index(drop=True)
+        changes_df["detection_time"] = datetime.now()
 
-            # 检测变更
-            group_changes = detect_point_changes(group, config)
-            changes.extend(group_changes)
+        result_df = changes_df[
+            [
+                "room_id",
+                "device_type",
+                "device_name_cfg",
+                "point_name_cfg",
+                "remark",
+                "time",
+                "previous_value",
+                "value",
+                "change_type",
+                "change_detail",
+                "change_magnitude",
+                "detection_time",
+            ]
+        ].rename(
+            columns={
+                "device_name_cfg": "device_name",
+                "point_name_cfg": "point_name",
+                "remark": "point_description",
+                "time": "change_time",
+                "value": "current_value",
+            }
+        )
 
-        logger.debug(f"[CHANGE_DETECT] 检测到 {len(changes)} 个变更")
-
-        return changes
+        logger.debug(f"[CHANGE_DETECT] 检测到 {len(result_df)} 个变更")
+        return result_df.to_dict("records")
 
     except Exception as e:
         logger.error(f"[CHANGE_DETECT] 变更检测失败: {e}")
@@ -634,8 +704,9 @@ def detect_point_changes(
                     }
 
             elif change_type == "analog_value":
-                # 模拟量变化检测
-                if threshold and abs(current_value - previous_value) >= threshold:
+                # 模拟量变化检测（无阈值时默认记录任意变化）
+                effective_threshold = 0.0 if threshold is None else threshold
+                if abs(current_value - previous_value) >= effective_threshold:
                     change_detected = True
                     change_info = {
                         "change_detail": f"{previous_value:.2f} -> {current_value:.2f}",
