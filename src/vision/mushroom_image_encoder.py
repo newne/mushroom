@@ -23,6 +23,7 @@ from sqlalchemy.orm import sessionmaker
 from transformers import CLIPModel, CLIPProcessor
 
 from environment.processor import create_env_data_processor
+from global_const.const_config import ROOM_ID_MAPPING
 from global_const.global_const import pgsql_engine, settings
 from utils.create_table import (
     ImageTextQuality,
@@ -71,14 +72,7 @@ class MushroomImageEncoder:
         self._init_llama_client()
 
         # 库房号映射：MinIO中的库房号 -> 环境配置中的库房号
-        self.room_id_mapping = {
-            "7": "607",  # MinIO中的7对应环境配置中的607
-            "8": "608",  # MinIO中的8对应环境配置中的608
-            "607": "607",
-            "608": "608",
-            "611": "611",
-            "612": "612",
-        }
+        self.room_id_mapping = dict(ROOM_ID_MAPPING)
 
         # 质量控制参数 (默认宽松)
         self.quality_threshold = 0
@@ -428,7 +422,9 @@ class MushroomImageEncoder:
                         )
                         quality_score = max(0, min(100, quality_score))
 
-                    logger.trace(f"LLaMA解析成功: 质量评分={quality_score}, 中文描述={chinese_description}")
+                    logger.trace(
+                        f"LLaMA解析成功: 质量评分={quality_score}, 中文描述={chinese_description}"
+                    )
                     status = "success"
                     return {
                         "growth_stage_description": description,
@@ -442,19 +438,31 @@ class MushroomImageEncoder:
                     logger.error(
                         f"[LLAMA-004] JSON解析失败 | 错误: {e} | 内容: {content[:100]}..."
                     )
-                    return {"growth_stage_description": "", "image_quality_score": None, "chinese_description": None}
+                    return {
+                        "growth_stage_description": "",
+                        "image_quality_score": None,
+                        "chinese_description": None,
+                    }
                 except KeyError as e:
                     status = "failed"
                     error_details = f"Missing key: {str(e)}"
                     logger.error(f"[LLAMA-005] 响应缺少键 | 键: {e}")
-                    return {"growth_stage_description": "", "image_quality_score": None, "chinese_description": None}
+                    return {
+                        "growth_stage_description": "",
+                        "image_quality_score": None,
+                        "chinese_description": None,
+                    }
             else:
                 status = "failed"
                 error_details = f"HTTP {resp.status_code}: {resp.text[:200]}"
                 logger.error(
                     f"[LLAMA-006] API调用失败 | 状态码: {resp.status_code} | 响应: {resp.text[:200]}"
                 )
-                return {"growth_stage_description": "", "image_quality_score": None, "chinese_description": None}
+                return {
+                    "growth_stage_description": "",
+                    "image_quality_score": None,
+                    "chinese_description": None,
+                }
 
         except requests.exceptions.Timeout:
             status = "failed"
@@ -462,17 +470,29 @@ class MushroomImageEncoder:
             logger.warning(
                 f"[LLAMA-007] API超时 | 超时时间: {getattr(self.llama_config, 'timeout', 600)}秒"
             )
-            return {"growth_stage_description": "", "image_quality_score": None, "chinese_description": None}
+            return {
+                "growth_stage_description": "",
+                "image_quality_score": None,
+                "chinese_description": None,
+            }
         except requests.exceptions.ConnectionError as e:
             status = "failed"
             error_details = f"Connection error: {str(e)}"
             logger.warning(f"[LLAMA-008] 连接错误 | 错误: {e}")
-            return {"growth_stage_description": "", "image_quality_score": None, "chinese_description": None}
+            return {
+                "growth_stage_description": "",
+                "image_quality_score": None,
+                "chinese_description": None,
+            }
         except Exception as e:
             status = "failed"
             error_details = f"Unexpected error: {str(e)}"
             logger.error(f"[LLAMA-009] 调用异常 | 错误: {e}")
-            return {"growth_stage_description": "", "image_quality_score": None, "chinese_description": None}
+            return {
+                "growth_stage_description": "",
+                "image_quality_score": None,
+                "chinese_description": None,
+            }
 
         finally:
             # [性能监控] 记录与写入
@@ -1887,9 +1907,15 @@ class MushroomImageEncoder:
                         if existing:
                             if not existing.chinese_description and chinese_description:
                                 existing.chinese_description = chinese_description
-                            if not existing.llama_description and growth_stage_description:
+                            if (
+                                not existing.llama_description
+                                and growth_stage_description
+                            ):
                                 existing.llama_description = growth_stage_description
-                            if existing.image_quality_score is None and quality_score is not None:
+                            if (
+                                existing.image_quality_score is None
+                                and quality_score is not None
+                            ):
                                 existing.image_quality_score = quality_score
                             existing.updated_at = func.now()
                             stats["success"] += 1

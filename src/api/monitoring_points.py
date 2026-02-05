@@ -44,6 +44,8 @@ def _build_dynamic_point_map(
             "new": result.new,
             "level": result.level or "medium",
             "change": bool(result.change),
+            "reason": result.reason,
+            "confidence": result.confidence,
         }
 
     return point_map
@@ -163,6 +165,8 @@ def _build_monitoring_config(
             "old": old_value,
             "new": new_value,
             "level": dynamic_point.get("level", "medium"),
+            "reason": dynamic_point.get("reason"),
+            "confidence": dynamic_point.get("confidence"),
         }
         device_entry["point_list"].append(point_entry)
 
@@ -562,6 +566,16 @@ def get_monitoring_points_with_image_text_quality(
     configs = get_monitoring_points(room_id, db)
     response: list[dict] = []
 
+    if not configs:
+        end_time = datetime.now()
+        best_record = _query_best_image_text_quality(room_id, end_time, db)
+        return [
+            {
+                "decision_analysis": None,
+                "best_image_text_quality": _serialize_image_text_quality(best_record),
+            }
+        ]
+
     for config in configs:
         time_str = config.get("time")
         end_time: datetime | None = None
@@ -571,9 +585,10 @@ def get_monitoring_points_with_image_text_quality(
             except ValueError:
                 end_time = None
 
-        best_record = (
-            _query_best_image_text_quality(room_id, end_time, db) if end_time else None
-        )
+        if end_time is None:
+            end_time = datetime.now()
+
+        best_record = _query_best_image_text_quality(room_id, end_time, db)
 
         response.append(
             {
