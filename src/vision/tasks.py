@@ -55,13 +55,25 @@ def safe_hourly_text_quality_inference() -> None:
             from vision.mushroom_image_encoder import create_mushroom_encoder
 
             encoder = create_mushroom_encoder(load_clip=False)
+            minio_rooms = set(encoder.minio_client.list_rooms())
+            env_to_minio: dict[str, list[str]] = {}
+            for minio_id, env_id in encoder.room_id_mapping.items():
+                env_to_minio.setdefault(env_id, []).append(minio_id)
 
             total_stats = {"total": 0, "success": 0, "failed": 0, "skipped": 0}
 
             for room_id in MUSHROOM_ROOM_IDS:
                 try:
+                    candidate_ids = env_to_minio.get(room_id, [room_id])
+                    minio_room_id = next(
+                        (cid for cid in candidate_ids if cid in minio_rooms), room_id
+                    )
+                    if minio_room_id != room_id:
+                        logger.info(
+                            f"[TEXT_QUALITY_TASK] 映射库房号: {room_id} -> {minio_room_id}"
+                        )
                     stats = encoder.batch_process_text_quality(
-                        mushroom_id=room_id,
+                        mushroom_id=minio_room_id,
                         start_time=start_time_filter,
                         end_time=end_time,
                         batch_size=CLIP_INFERENCE_BATCH_SIZE,

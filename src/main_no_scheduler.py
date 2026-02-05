@@ -10,6 +10,7 @@ from loguru import logger
 from api.decision_analysis_status import router as decision_analysis_status_router
 from api.image_text_quality import router as image_text_quality_router
 from api.monitoring_points import router as monitoring_points_router
+from api.mushroom_batch_yield import router as mushroom_batch_yield_router
 from utils.exception_listener import router as health_router
 from utils.loguru_setting import loguru_setting
 
@@ -22,9 +23,9 @@ async def lifespan(app: FastAPI):
     logger.info("[MAIN] 应用启动，跳过调度器初始化...")
     logger.info("[MAIN] 调度器初始化已禁用")
     logger.info("[MAIN] 后台定时任务已禁用")
-    
+
     yield
-    
+
     logger.info("[MAIN] 应用关闭")
 
 
@@ -69,6 +70,7 @@ app.include_router(health_router)
 
 # 注册业务路由
 app.include_router(image_text_quality_router)
+app.include_router(mushroom_batch_yield_router)
 app.include_router(monitoring_points_router)
 app.include_router(decision_analysis_status_router)
 

@@ -171,6 +171,47 @@ class ImageTextQuality(Base):
     )
 
 
+class MushroomBatchYield(Base):
+    """每批次产量统计表"""
+
+    __tablename__ = "mushroom_batch_yield"
+
+    __table_args__ = (
+        Index("idx_batch_yield_room_in_date", "room_id", "in_date"),
+        Index("idx_batch_yield_stat_date", "stat_date"),
+        Index("idx_batch_yield_harvest_time", "harvest_time"),
+        Index(
+            "uq_batch_yield_room_in_stat",
+            "room_id",
+            "in_date",
+            "stat_date",
+            unique=True,
+        ),
+        {"comment": "每批次产量统计表（鲜菇/干菇重量）"},
+    )
+
+    id = Column(
+        BigInteger, primary_key=True, autoincrement=True, comment="自增主键 (BIGINT)"
+    )
+    room_id = Column(String(10), nullable=False, comment="库房编号")
+    in_date = Column(Date, nullable=False, comment="进库日期 (YYYY-MM-DD)")
+    stat_date = Column(Date, nullable=False, comment="统计日期 (YYYY-MM-DD)")
+    harvest_time = Column(DateTime, nullable=True, comment="采收时间")
+
+    fresh_weight = Column(
+        Float, nullable=True, comment="鲜菇重量 (斤)"
+    )
+    dried_weight = Column(
+        Float, nullable=True, comment="干菇重量 (斤)"
+    )
+
+    human_evaluation = Column(Text, nullable=True, comment="人工评价/备注")
+    create_time = Column(DateTime, server_default=func.now(), comment="创建时间")
+    update_time = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
+    )
+
+
 class MushroomEnvDailyStats(Base):
     """蘑菇房环境统计（日级）"""
 

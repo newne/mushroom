@@ -9,6 +9,7 @@ optionally outputting monitoring-points formatted JSON for dynamic storage.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,7 @@ from global_const.global_const import (
     settings,
     static_settings,
 )
+from utils.time_utils import format_datetime
 
 ensure_src_path()
 
@@ -75,7 +77,9 @@ def _load_json(path: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
-def _build_monitoring_points_output(enhanced_output, room_id: str) -> Dict[str, Any]:
+def _build_monitoring_points_output(
+    enhanced_output, room_id: str, analysis_time: datetime
+) -> Dict[str, Any]:
     monitoring_config_path = BASE_DIR / "configs" / "monitoring_points_config.json"
     static_config_path = BASE_DIR / "configs" / "static_config.json"
 
@@ -86,8 +90,19 @@ def _build_monitoring_points_output(enhanced_output, room_id: str) -> Dict[str, 
     static_datapoint = static_config.get("mushroom", {}).get("datapoint", {})
 
     device_recs = enhanced_output.device_recommendations.devices
+    confidence_score = None
+    metadata = getattr(enhanced_output, "metadata", None)
+    if metadata and getattr(metadata, "device_config_metadata", None):
+        confidence_score = metadata.device_config_metadata.get("decision_confidence")
+    if confidence_score is None and getattr(
+        enhanced_output, "multi_image_analysis", None
+    ):
+        confidence_score = enhanced_output.multi_image_analysis.confidence_score
 
     devices_output: Dict[str, list] = {}
+
+    def _base_alias(alias: str) -> str:
+        return re.sub(r"_\d+$", "", alias)
 
     for device_type, template_devices in monitoring_devices.items():
         point_template = []
@@ -108,6 +123,12 @@ def _build_monitoring_points_output(enhanced_output, room_id: str) -> Dict[str, 
             device_alias = device.get("device_alias")
             device_name = device.get("device_name")
             device_rec = device_recs.get(device_alias) or device_recs.get(device_type)
+            if not device_rec and device_alias:
+                alias_base = _base_alias(device_alias)
+                for key, rec in device_recs.items():
+                    if _base_alias(key) == alias_base:
+                        device_rec = rec
+                        break
 
             point_list = []
             for point in point_template:
@@ -126,6 +147,9 @@ def _build_monitoring_points_output(enhanced_output, room_id: str) -> Dict[str, 
                     new_value = float(param.recommended_value)
                     level = str(param.priority or "low")
                     action = param.action
+                    reason = param.change_reason
+                else:
+                    reason = None
 
                 threshold = point.get("threshold")
                 if action == "adjust":
@@ -149,6 +173,8 @@ def _build_monitoring_points_output(enhanced_output, room_id: str) -> Dict[str, 
                         "old": old_value,
                         "new": new_value,
                         "level": level,
+                        "reason": reason,
+                        "confidence": confidence_score,
                     }
                 )
 
@@ -163,6 +189,7 @@ def _build_monitoring_points_output(enhanced_output, room_id: str) -> Dict[str, 
     return {
         "monitoring_points": {
             "room_id": room_id,
+            "time": format_datetime(analysis_time),
             "devices": devices_output,
         }
     }
@@ -212,7 +239,9 @@ def execute_enhanced_decision_analysis(
         enhanced_output = analyzer.analyze_enhanced(room_id, analysis_datetime)
 
         enhanced_dict = _serialize(asdict(enhanced_output))
-        monitoring_dict = _build_monitoring_points_output(enhanced_output, room_id)
+        monitoring_dict = _build_monitoring_points_output(
+            enhanced_output, room_id, analysis_datetime
+        )
 
         if output_format == "enhanced":
             data = {"enhanced_decision": enhanced_dict}

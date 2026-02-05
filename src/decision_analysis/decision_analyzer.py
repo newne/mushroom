@@ -10,6 +10,7 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
+from statistics import mean, pstdev
 from typing import Dict
 
 from dynaconf import Dynaconf
@@ -18,7 +19,13 @@ from sqlalchemy import Engine
 
 from decision_analysis.clip_matcher import CLIPMatcher
 from decision_analysis.data_extractor import DataExtractor
-from decision_analysis.data_models import DecisionOutput, MultiImageAnalysis
+from decision_analysis.data_models import (
+    DecisionOutput,
+    EnhancedDecisionOutput,
+    EnhancedDeviceRecommendations,
+    MultiImageAnalysis,
+    SimilarCase,
+)
 from decision_analysis.llm_client import LLMClient
 from decision_analysis.output_handler import OutputHandler
 from decision_analysis.template_renderer import TemplateRenderer
@@ -89,6 +96,25 @@ class DecisionAnalyzer:
         except Exception as e:
             logger.error(f"[DecisionAnalyzer] 加载监控点配置失败: {e}")
             self.monitoring_points_config = {}
+
+        # Load setpoint thresholds config for confidence scoring
+        try:
+            threshold_path = (
+                Path(__file__).parent.parent
+                / "configs"
+                / "setpoint_monitor_config.json"
+            )
+            if threshold_path.exists():
+                with open(threshold_path, "r", encoding="utf-8") as f:
+                    threshold_config = json.load(f)
+                self.setpoint_thresholds = threshold_config.get("thresholds", {})
+                logger.info(f"[DecisionAnalyzer] 已加载阈值配置: {threshold_path}")
+            else:
+                logger.warning(f"[DecisionAnalyzer] 未找到阈值配置: {threshold_path}")
+                self.setpoint_thresholds = {}
+        except Exception as e:
+            logger.error(f"[DecisionAnalyzer] 加载阈值配置失败: {e}")
+            self.setpoint_thresholds = {}
 
         # Initialize all components with error handling
         try:
@@ -205,6 +231,13 @@ class DecisionAnalyzer:
 
                 # Extract environmental sensor status
                 env_sensor_status = latest_record.get("env_sensor_status", {})
+                if isinstance(env_sensor_status, str):
+                    try:
+                        import json
+
+                        env_sensor_status = json.loads(env_sensor_status)
+                    except Exception:
+                        env_sensor_status = {}
 
                 # Build current_data dictionary
                 current_data = {
@@ -337,8 +370,9 @@ class DecisionAnalyzer:
                     in_date=current_data.get("in_date"),
                     growth_day=current_data.get("growth_day", 0),
                     top_k=3,
-                    date_window_days=7,
+                    date_window_days=3,
                     growth_day_window=3,
+                    analysis_datetime=analysis_datetime,
                 )
 
                 if similar_cases:
@@ -650,17 +684,34 @@ class DecisionAnalyzer:
         step1_start = time.time()
 
         try:
-            # Extract current embedding data with multi-image aggregation
-            logger.info("[DecisionAnalyzer] Extracting multi-image embedding data...")
-            embedding_df = self.data_extractor.extract_embedding_data(
+            # Prefer best-quality image from today's 00:00 to analysis time
+            logger.info(
+                "[DecisionAnalyzer] Extracting best-quality embedding from today..."
+            )
+            embedding_df = self.data_extractor.extract_best_quality_embedding_today(
                 room_id=room_id,
                 target_datetime=analysis_datetime,
-                time_window_days=7,
-                growth_day_window=3,
-                image_aggregation_window_minutes=self.decision_config[
-                    "image_aggregation_window"
-                ],
             )
+
+            if not embedding_df.empty:
+                metadata["image_aggregation_method"] = "best_quality_today"
+                logger.info(
+                    "[DecisionAnalyzer] Using best-quality image from today's window"
+                )
+            else:
+                # Fallback to multi-image aggregation
+                logger.info(
+                    "[DecisionAnalyzer] Falling back to multi-image embedding data..."
+                )
+                embedding_df = self.data_extractor.extract_embedding_data(
+                    room_id=room_id,
+                    target_datetime=analysis_datetime,
+                    time_window_days=7,
+                    growth_day_window=3,
+                    image_aggregation_window_minutes=self.decision_config[
+                        "image_aggregation_window"
+                    ],
+                )
 
             if embedding_df.empty:
                 error_msg = f"No embedding data found for room {room_id}"
@@ -678,6 +729,13 @@ class DecisionAnalyzer:
 
                 # Extract environmental sensor status
                 env_sensor_status = latest_record.get("env_sensor_status", {})
+                if isinstance(env_sensor_status, str):
+                    try:
+                        import json
+
+                        env_sensor_status = json.loads(env_sensor_status)
+                    except Exception:
+                        env_sensor_status = {}
 
                 # Build current_data dictionary
                 current_data = {
@@ -712,35 +770,39 @@ class DecisionAnalyzer:
                 }
 
                 # Create multi-image analysis summary
+                quality_scores = [
+                    float(row.get("image_quality_score", 0.0))
+                    for _, row in embedding_df.iterrows()
+                ]
 
-                # Calculate consistency score once to avoid multiple calls
-                consistency_score = self._calculate_image_consistency(embedding_df)
-                view_consistency = (
-                    "high"
-                    if consistency_score >= 0.8
-                    else "medium"
-                    if consistency_score >= 0.6
-                    else "low"
-                )
+                if metadata["image_aggregation_method"] == "best_quality_today":
+                    best_quality = max(quality_scores) if quality_scores else 0.0
+                    confidence_score = max(0.0, min(best_quality / 100.0, 1.0))
+                    view_consistency = "single"
+                    key_observations = [f"Best quality image score: {best_quality:.2f}"]
+                else:
+                    # Calculate consistency score once to avoid multiple calls
+                    consistency_score = self._calculate_image_consistency(embedding_df)
+                    confidence_score = consistency_score
+                    view_consistency = (
+                        "high"
+                        if consistency_score >= 0.8
+                        else "medium"
+                        if consistency_score >= 0.6
+                        else "low"
+                    )
+                    key_observations = [
+                        f"Camera {i + 1}: Quality {score:.2f}"
+                        for i, score in enumerate(quality_scores)
+                    ]
 
                 multi_image_analysis = MultiImageAnalysis(
                     total_images_analyzed=metadata["multi_image_count"],
-                    image_quality_scores=[
-                        float(row.get("image_quality_score", 0.0))
-                        for _, row in embedding_df.iterrows()
-                    ],
+                    image_quality_scores=quality_scores,
                     aggregation_method=metadata["image_aggregation_method"],
-                    confidence_score=consistency_score,
+                    confidence_score=confidence_score,
                     view_consistency=view_consistency,
-                    key_observations=[
-                        f"Camera {i + 1}: Quality {score:.2f}"
-                        for i, score in enumerate(
-                            [
-                                float(row.get("image_quality_score", 0.0))
-                                for _, row in embedding_df.iterrows()
-                            ]
-                        )
-                    ],
+                    key_observations=key_observations,
                 )
 
                 metadata["data_sources"]["embedding_records"] = len(embedding_df)
@@ -845,10 +907,11 @@ class DecisionAnalyzer:
                     in_date=current_data.get("in_date"),
                     growth_day=current_data.get("growth_day", 0),
                     top_k=3,
-                    date_window_days=7,
+                    date_window_days=3,
                     growth_day_window=3,
                     multi_image_boost=True,
                     image_count=metadata["multi_image_count"],
+                    analysis_datetime=analysis_datetime,
                 )
 
                 if similar_cases:
@@ -1238,6 +1301,25 @@ class DecisionAnalyzer:
             enhanced_decision_output.metadata.warnings.extend(metadata["warnings"])
             enhanced_decision_output.metadata.errors.extend(metadata["errors"])
 
+            # Calculate stage-alignment confidence based on dynamic recommendations
+            confidence_score, confidence_details = (
+                self._calculate_stage_alignment_confidence(
+                    device_recommendations=enhanced_decision_output.device_recommendations,
+                    similar_cases=similar_cases,
+                )
+            )
+            confidence_score = round(max(0.0, min(confidence_score * 100.0, 100.0)), 2)
+            if not hasattr(enhanced_decision_output.metadata, "device_config_metadata"):
+                enhanced_decision_output.metadata.device_config_metadata = {}
+            if enhanced_decision_output.metadata.device_config_metadata is None:
+                enhanced_decision_output.metadata.device_config_metadata = {}
+            enhanced_decision_output.metadata.device_config_metadata.update(
+                {
+                    "decision_confidence": confidence_score,
+                    "decision_confidence_details": confidence_details,
+                }
+            )
+
             step5_time = time.time() - step5_start
             logger.info(f"[DecisionAnalyzer] STEP 5 completed in {step5_time:.2f}s")
 
@@ -1282,6 +1364,165 @@ class DecisionAnalyzer:
         logger.info("[DecisionAnalyzer] ==========================================")
 
         return enhanced_decision_output
+
+    def _calculate_stage_alignment_confidence(
+        self,
+        device_recommendations: EnhancedDeviceRecommendations,
+        similar_cases: list[SimilarCase],
+    ) -> tuple[float, Dict]:
+        """
+        Calculate confidence based on how well dynamic recommendations align
+        with growth-stage needs inferred from similar historical cases.
+        """
+        if not similar_cases or not device_recommendations:
+            return 0.0, {"reason": "insufficient_reference_data"}
+
+        if not getattr(device_recommendations, "devices", None):
+            return 0.0, {"reason": "no_device_recommendations"}
+
+        ref_values: Dict[str, Dict[str, list[float]]] = {}
+        for case in similar_cases:
+            for device_type, raw_config in [
+                ("air_cooler", case.air_cooler_params),
+                ("fresh_air_fan", case.fresh_air_params),
+                ("humidifier", case.humidifier_params),
+                ("grow_light", case.grow_light_params),
+            ]:
+                config = self._normalize_device_config(raw_config)
+                if not config:
+                    continue
+                for point_alias, value in config.items():
+                    num_value = self._to_float(value)
+                    if num_value is None:
+                        continue
+                    ref_values.setdefault(device_type, {}).setdefault(
+                        point_alias, []
+                    ).append(num_value)
+
+        if not ref_values:
+            return 0.0, {"reason": "no_reference_values"}
+
+        total_weight = 0.0
+        total_score = 0.0
+        matched_params = 0
+        evaluated_params = 0
+
+        for device_key, device_rec in device_recommendations.devices.items():
+            device_type = self._infer_device_type(device_key)
+            if not device_type or device_type not in ref_values:
+                continue
+
+            for point_alias, param in device_rec.parameters.items():
+                if not hasattr(param, "recommended_value"):
+                    continue
+                evaluated_params += 1
+                rec_value = self._to_float(param.recommended_value)
+                if rec_value is None:
+                    continue
+
+                values = ref_values.get(device_type, {}).get(point_alias, [])
+                if not values:
+                    continue
+
+                threshold = (
+                    self.setpoint_thresholds.get(device_type, {}).get(point_alias)
+                    if isinstance(self.setpoint_thresholds, dict)
+                    else None
+                )
+                score = self._score_against_reference(rec_value, values, threshold)
+                weight = self._priority_weight(getattr(param, "priority", "low"))
+                total_score += score * weight
+                total_weight += weight
+                matched_params += 1
+
+        if total_weight == 0.0:
+            return 0.0, {
+                "reason": "no_comparable_parameters",
+                "evaluated_params": evaluated_params,
+                "matched_params": matched_params,
+                "reference_cases": len(similar_cases),
+            }
+
+        confidence = total_score / total_weight
+        return round(max(0.0, min(confidence, 1.0)), 4), {
+            "evaluated_params": evaluated_params,
+            "matched_params": matched_params,
+            "reference_cases": len(similar_cases),
+        }
+
+    def _normalize_device_config(self, raw_config) -> Dict:
+        if raw_config is None:
+            return {}
+        if isinstance(raw_config, dict):
+            return raw_config
+        if isinstance(raw_config, str):
+            try:
+                parsed = json.loads(raw_config)
+                return parsed if isinstance(parsed, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    def _to_float(self, value) -> float | None:
+        try:
+            if value is None:
+                return None
+            if isinstance(value, bool):
+                return float(int(value))
+            return float(value)
+        except Exception:
+            return None
+
+    def _infer_device_type(self, device_key: str) -> str | None:
+        if not isinstance(device_key, str):
+            return None
+        for device_type in [
+            "air_cooler",
+            "fresh_air_fan",
+            "humidifier",
+            "grow_light",
+        ]:
+            if device_key == device_type or device_key.startswith(f"{device_type}_"):
+                return device_type
+        return None
+
+    def _priority_weight(self, priority: str) -> float:
+        mapping = {
+            "low": 1.0,
+            "medium": 1.5,
+            "high": 2.0,
+            "critical": 3.0,
+        }
+        return mapping.get(str(priority).lower(), 1.0)
+
+    def _score_against_reference(
+        self, value: float, values: list[float], threshold: float | None
+    ) -> float:
+        if not values:
+            return 0.0
+
+        try:
+            unique_vals = {int(v) if float(v).is_integer() else v for v in values}
+            is_enum = (
+                all(float(v).is_integer() for v in values) and len(unique_vals) <= 5
+            )
+            if is_enum:
+                from collections import Counter
+
+                mode_val = Counter(int(v) for v in values).most_common(1)[0][0]
+                return 1.0 if int(round(value)) == mode_val else 0.0
+
+            avg = mean(values)
+            std = pstdev(values) if len(values) > 1 else 0.0
+            base_tol = float(threshold) if threshold not in (None, 0) else 0.0
+            rel_tol = abs(avg) * 0.05
+            tol = max(std * 2.0, base_tol, rel_tol, 1.0)
+            if tol <= 0:
+                return 0.0
+            score = 1.0 - abs(value - avg) / tol
+            return max(0.0, min(score, 1.0))
+        except Exception:
+            return 0.0
 
     def _map_parameter_to_point_alias(
         self, device_type: str, parameter_name: str

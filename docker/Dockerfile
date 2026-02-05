@@ -39,7 +39,6 @@ ENV VIRTUAL_ENV=/opt/venv \
 COPY pyproject.toml uv.lock ./
 
 # 安装依赖，使用持久化缓存
-# 使用专用的缓存挂载点，提高缓存命中率
 RUN --mount=type=cache,target=/opt/uv-cache,uid=0,gid=0,sharing=locked \
     --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0,sharing=locked \
     --mount=from=uv-tool,source=/uv,target=./uv \

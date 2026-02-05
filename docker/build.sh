@@ -25,6 +25,12 @@ VERSION=$(date +%Y%m%d%H%M%S)
 # 清理旧的构建信息
 [ -f build_info.json ] && rm build_info.json
 
+# 修复可能残留的 pyproject.toml 备份
+if [ ! -f "pyproject.toml" ] && [ -f "pyproject.toml.backup" ]; then
+    echo "Restoring pyproject.toml from backup"
+    mv pyproject.toml.backup pyproject.toml
+fi
+
 # ============================================================================
 # 代码准备阶段
 # ============================================================================
@@ -213,11 +219,20 @@ if [ "${BUILD_IMAGE}" = "true" ]; then
     echo "Use Cache: ${USE_CACHE}"
     echo "============================================================================"
 
-    # 启用 BuildKit（若 buildx 不可用则自动降级）
+    # 启用 BuildKit 与 buildx
+    USE_BUILDX=false
     if docker buildx version >/dev/null 2>&1; then
+        USE_BUILDX=true
+    fi
+
+    if [ "${DOCKER_BUILDKIT:-}" = "1" ] || [ "${USE_BUILDX}" = "true" ]; then
         export DOCKER_BUILDKIT=1
         export BUILDKIT_PROGRESS=plain
-        echo "BuildKit enabled (buildx detected)"
+        if [ "${USE_BUILDX}" = "true" ]; then
+            echo "BuildKit enabled (buildx detected)"
+        else
+            echo "BuildKit enabled (forced by env)"
+        fi
     else
         export DOCKER_BUILDKIT=0
         unset BUILDKIT_PROGRESS
@@ -261,7 +276,13 @@ if [ "${BUILD_IMAGE}" = "true" ]; then
     
     # 执行构建
     echo "Starting Docker build..."
-    if ! docker build "${BUILD_ARGS[@]}" .; then
+    if [ "${USE_BUILDX}" = "true" ]; then
+        BUILD_CMD=(docker buildx build --load)
+    else
+        BUILD_CMD=(docker build)
+    fi
+
+    if ! "${BUILD_CMD[@]}" "${BUILD_ARGS[@]}" .; then
         echo "Error: Docker image build failed" >&2
         exit 1
     fi
