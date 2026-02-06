@@ -1,0 +1,13 @@
+{
+    "project": "mushroom_solution",
+    "version": "0.1.0-20260205161252-72b68b3",
+    "git_hash": "72b68b3",
+    "build_date": "2026-02-05T08:12:52Z",
+    "encrypted": true,
+    "use_cache": true,
+    "obfuscation_tool": "codeenigma",
+    "expiration_date": "null",
+    "registry": "registry.cn-beijing.aliyuncs.com/ncgnewne",
+    "cache_strategy": "optimized",
+    "build_optimization": "enabled"
+}

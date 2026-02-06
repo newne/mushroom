@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_serializer
 from sqlalchemy.orm import Session, sessionmaker
 
 from global_const.global_const import pgsql_engine
-from utils.create_table import MushroomBatchYield
+from utils.create_table import ImageTextQuality, MushroomBatchYield
 from utils.time_utils import format_datetime
 
 router = APIRouter(
@@ -43,6 +43,13 @@ class MushroomBatchYieldUpdate(BaseModel):
     room_id: str | None = None
     in_date: date | None = None
     stat_date: date | None = None
+    harvest_time: datetime | None = None
+    fresh_weight: float | None = Field(None, ge=0)
+    dried_weight: float | None = Field(None, ge=0)
+    human_evaluation: str | None = None
+
+
+class MushroomBatchYieldBatchUpdate(BaseModel):
     harvest_time: datetime | None = None
     fresh_weight: float | None = Field(None, ge=0)
     dried_weight: float | None = Field(None, ge=0)
@@ -134,6 +141,41 @@ def list_batch_yields(
 
 
 @router.get(
+    "/rooms",
+    response_model=list[str],
+    summary="查询库房列表",
+    description="从图文质量表中查询并返回已有记录的库房编号列表。",
+)
+def list_rooms(db: Session = Depends(get_db)):
+    rooms = (
+        db.query(ImageTextQuality.room_id)
+        .filter(ImageTextQuality.room_id.isnot(None))
+        .distinct()
+        .order_by(ImageTextQuality.room_id)
+        .all()
+    )
+    return [room_id for (room_id,) in rooms]
+
+
+@router.get(
+    "/rooms/{room_id}/batches",
+    response_model=list[date],
+    summary="按库房查询批次信息",
+    description="根据库房编号查询批次列表（返回 in_date 作为批次信息）。",
+)
+def list_room_batches(room_id: str, db: Session = Depends(get_db)):
+    batches = (
+        db.query(ImageTextQuality.in_date)
+        .filter(ImageTextQuality.room_id == room_id)
+        .filter(ImageTextQuality.in_date.isnot(None))
+        .distinct()
+        .order_by(ImageTextQuality.in_date.desc())
+        .all()
+    )
+    return [in_date for (in_date,) in batches]
+
+
+@router.get(
     "/{record_id}",
     response_model=MushroomBatchYieldResponse,
     summary="获取批次产量记录",
@@ -166,6 +208,46 @@ def update_batch_yield(
     if not record:
         raise HTTPException(status_code=404, detail="Record not found")
 
+    update_data = payload.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(record, key, value)
+
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+@router.put(
+    "/rooms/{room_id}/batches/{in_date}",
+    response_model=MushroomBatchYieldResponse,
+    summary="按库房与批次更新产量记录",
+    description="根据库房编号与批次（in_date）更新产量记录部分字段。",
+    response_model_exclude_none=True,
+)
+def update_batch_yield_by_batch(
+    room_id: str,
+    in_date: date,
+    payload: MushroomBatchYieldBatchUpdate,
+    db: Session = Depends(get_db),
+    stat_date: date | None = Query(None, description="统计日期 (YYYY-MM-DD)"),
+):
+    query = db.query(MushroomBatchYield).filter(
+        MushroomBatchYield.room_id == room_id,
+        MushroomBatchYield.in_date == in_date,
+    )
+    if stat_date:
+        query = query.filter(MushroomBatchYield.stat_date == stat_date)
+
+    records = query.all()
+    if not records:
+        raise HTTPException(status_code=404, detail="Record not found")
+    if len(records) > 1:
+        raise HTTPException(
+            status_code=409,
+            detail="Multiple records found for batch, please specify stat_date",
+        )
+
+    record = records[0]
     update_data = payload.model_dump(exclude_unset=True)
     for key, value in update_data.items():
         setattr(record, key, value)
