@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 from loguru import logger
-from sqlalchemy import func
+from sqlalchemy import func, text
 from sqlalchemy.orm import sessionmaker
 
 current_file = Path(__file__).resolve()
@@ -22,10 +22,9 @@ if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
 from global_const.global_const import BASE_DIR, pgsql_engine
-from utils.create_table import MushroomImageEmbedding
+from utils.create_table import ImageTextQuality, MushroomImageEmbedding
 from utils.data_preprocessing import query_data_by_batch_time
 from utils.dataframe_utils import get_all_device_configs
-
 
 IMAGE_PATH_PATTERN = re.compile(
     r"^(?P<room>[^_]+)_(?P<ip>[^_]+)_(?P<date>\d{6,8})_(?P<time>\d{14})",
@@ -47,9 +46,58 @@ class MushroomEmbeddingDataCleaner:
         self.null_in_num_records: List[Dict[str, Any]] = []
         self.null_growth_day_records: List[Dict[str, Any]] = []
         self.zero_in_num_fixed_records: List[Dict[str, Any]] = []
-        self.history_in_day_num_cache: Dict[Tuple[str, datetime.date], Optional[int]] = {}
+        self.history_in_day_num_cache: Dict[
+            Tuple[str, datetime.date], Optional[int]
+        ] = {}
 
-    def _normalize_collection_date(self, collection_date: str, detailed_time: str) -> str:
+        self.text_quality_update_count = 0
+        self.text_quality_candidate_count = 0
+        self.text_quality_path_update_count = 0
+        self.text_quality_path_candidate_count = 0
+
+        self._text_quality_count_sql = text(
+            """
+            SELECT COUNT(*)
+            FROM image_text_quality t
+            JOIN mushroom_embedding m
+              ON (
+                    t.mushroom_embedding_id = m.id
+                    OR (t.mushroom_embedding_id IS NULL AND t.image_path = m.image_path)
+                 )
+            WHERE m.in_date IS NOT NULL
+              AND (t.in_date IS NULL OR t.in_date <> m.in_date)
+            """
+        )
+        self._text_quality_update_sql = text(
+            """
+            UPDATE image_text_quality t
+            SET in_date = m.in_date,
+                updated_at = NOW()
+            FROM mushroom_embedding m
+            WHERE (
+                    t.mushroom_embedding_id = m.id
+                    OR (t.mushroom_embedding_id IS NULL AND t.image_path = m.image_path)
+                  )
+              AND m.in_date IS NOT NULL
+              AND (t.in_date IS NULL OR t.in_date <> m.in_date)
+            """
+        )
+        self._text_quality_path_select_sql = text(
+            """
+            SELECT t.id, t.image_path, t.in_date
+            FROM image_text_quality t
+            LEFT JOIN mushroom_embedding m
+              ON (
+                    t.mushroom_embedding_id = m.id
+                    OR (t.mushroom_embedding_id IS NULL AND t.image_path = m.image_path)
+                 )
+            WHERE m.id IS NULL
+            """
+        )
+
+    def _normalize_collection_date(
+        self, collection_date: str, detailed_time: str
+    ) -> str:
         """
         标准化采集日期格式，使用详细时间进行推断验证
         """
@@ -106,7 +154,9 @@ class MushroomEmbeddingDataCleaner:
         best_candidate = max(valid_candidates, key=lambda x: x)
         return best_candidate.strftime("%Y%m%d")
 
-    def _extract_date_from_path(self, image_path: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    def _extract_date_from_path(
+        self, image_path: str
+    ) -> Tuple[Optional[str], Optional[str], Optional[str]]:
         if not image_path:
             return None, None, None
 
@@ -116,6 +166,41 @@ class MushroomEmbeddingDataCleaner:
             return None, None, None
 
         return match.group("date"), match.group("time"), match.group("ip")
+
+    def _extract_env_in_date(self, env_info: Dict[str, Any]) -> Optional[datetime.date]:
+        if not env_info:
+            return None
+
+        raw_in_date = env_info.get("in_date")
+        if isinstance(raw_in_date, datetime):
+            return raw_in_date.date()
+        if hasattr(raw_in_date, "date"):
+            try:
+                return raw_in_date.date()
+            except Exception:
+                pass
+
+        if isinstance(raw_in_date, (int, float)):
+            raw_in_date = str(int(raw_in_date))
+
+        if isinstance(raw_in_date, str):
+            raw_in_date = raw_in_date.strip()
+            if raw_in_date.isdigit() and len(raw_in_date) == 8:
+                try:
+                    return datetime.strptime(raw_in_date, "%Y%m%d").date()
+                except ValueError:
+                    return None
+
+        in_year = env_info.get("in_year")
+        in_month = env_info.get("in_month")
+        in_day = env_info.get("in_day")
+        if in_year and in_month and in_day:
+            try:
+                return datetime(int(in_year), int(in_month), int(in_day)).date()
+            except (ValueError, TypeError):
+                return None
+
+        return None
 
     def _parse_env_sensor_status(self, env_sensor_status: Any) -> Dict[str, Any]:
         if env_sensor_status is None:
@@ -129,7 +214,9 @@ class MushroomEmbeddingDataCleaner:
                 return {}
         return {}
 
-    def _record_error(self, record_id: str, error_type: str, reason: str, image_path: str):
+    def _record_error(
+        self, record_id: str, error_type: str, reason: str, image_path: str
+    ):
         self.error_records.append(
             {
                 "id": record_id,
@@ -149,12 +236,11 @@ class MushroomEmbeddingDataCleaner:
         df = pd.read_sql(query.statement, session.bind)
         if df.empty:
             return {}
-        stats = (
-            df.groupby("room_id")["in_num"]
-            .agg(["mean", "std"])
-            .fillna(0)
-        )
-        return {row[0]: (row[1], row[2]) for row in stats.reset_index().itertuples(index=False)}
+        stats = df.groupby("room_id")["in_num"].agg(["mean", "std"]).fillna(0)
+        return {
+            row[0]: (row[1], row[2])
+            for row in stats.reset_index().itertuples(index=False)
+        }
 
     def _load_historical_in_num(self, session) -> Dict[Tuple[str, datetime.date], int]:
         query = (
@@ -170,11 +256,13 @@ class MushroomEmbeddingDataCleaner:
         if df.empty:
             return {}
 
-        grouped = (
-            df.groupby(["room_id", "in_date"])["in_num"]
-            .agg(lambda s: s.value_counts().idxmax())
+        grouped = df.groupby(["room_id", "in_date"])["in_num"].agg(
+            lambda s: s.value_counts().idxmax()
         )
-        return {(row[0], row[1]): int(row[2]) for row in grouped.reset_index().itertuples(index=False)}
+        return {
+            (row[0], row[1]): int(row[2])
+            for row in grouped.reset_index().itertuples(index=False)
+        }
 
     def _fetch_history_in_day_num(self, room_id: str, in_date) -> Optional[int]:
         cache_key = (room_id, in_date)
@@ -183,9 +271,15 @@ class MushroomEmbeddingDataCleaner:
 
         try:
             configs = get_all_device_configs(room_id)
-            all_query_df = pd.concat(configs.values(), ignore_index=True) if configs else pd.DataFrame()
+            all_query_df = (
+                pd.concat(configs.values(), ignore_index=True)
+                if configs
+                else pd.DataFrame()
+            )
         except Exception as exc:
-            self._record_error("", "history_query_failed", f"设备配置获取失败: {exc}", "")
+            self._record_error(
+                "", "history_query_failed", f"设备配置获取失败: {exc}", ""
+            )
             self.history_in_day_num_cache[cache_key] = None
             return None
 
@@ -196,7 +290,9 @@ class MushroomEmbeddingDataCleaner:
         if "point_alias" in all_query_df.columns:
             query_df = all_query_df[all_query_df["point_alias"] == "in_day_num"].copy()
         else:
-            query_df = all_query_df[all_query_df["point_name"].isin(["InDayNum", "in_day_num"])].copy()
+            query_df = all_query_df[
+                all_query_df["point_name"].isin(["InDayNum", "in_day_num"])
+            ].copy()
 
         if query_df.empty:
             self.history_in_day_num_cache[cache_key] = None
@@ -213,7 +309,9 @@ class MushroomEmbeddingDataCleaner:
                 if not data.empty:
                     frames.append(data)
             except Exception as exc:
-                self._record_error("", "history_query_failed", f"历史数据接口失败: {exc}", "")
+                self._record_error(
+                    "", "history_query_failed", f"历史数据接口失败: {exc}", ""
+                )
                 continue
 
         if not frames:
@@ -235,32 +333,45 @@ class MushroomEmbeddingDataCleaner:
         self.history_in_day_num_cache[cache_key] = mode_value
         return mode_value
 
-    def clean_in_date_field(self, record, updates: Dict[str, Any]):
-        collection_date, detailed_time, collection_ip = self._extract_date_from_path(record.image_path)
-        if not collection_date or not detailed_time:
-            self._record_error(
-                str(record.id),
-                "path_parse",
-                "image_path格式不符合规范",
-                record.image_path,
-            )
-            return
+    def clean_in_date_field(
+        self, record, env_info: Dict[str, Any], updates: Dict[str, Any]
+    ):
+        env_in_date = self._extract_env_in_date(env_info)
+        collection_date, detailed_time, collection_ip = self._extract_date_from_path(
+            record.image_path
+        )
 
-        try:
-            normalized = self._normalize_collection_date(collection_date, detailed_time)
-            normalized_date = datetime.strptime(normalized, "%Y%m%d").date()
-        except ValueError as exc:
-            self._record_error(
-                str(record.id),
-                "date_parse",
-                str(exc),
-                record.image_path,
-            )
-            return
+        if env_in_date is None:
+            if not collection_date or not detailed_time:
+                self._record_error(
+                    str(record.id),
+                    "path_parse",
+                    "image_path格式不符合规范",
+                    record.image_path,
+                )
+                return
 
-        if record.in_date != normalized_date:
-            updates["in_date"] = normalized_date
-            self.field_fix_counts["in_date"] += 1
+            try:
+                normalized = self._normalize_collection_date(
+                    collection_date, detailed_time
+                )
+                normalized_date = datetime.strptime(normalized, "%Y%m%d").date()
+            except ValueError as exc:
+                self._record_error(
+                    str(record.id),
+                    "date_parse",
+                    str(exc),
+                    record.image_path,
+                )
+                return
+
+            if record.in_date != normalized_date:
+                updates["in_date"] = normalized_date
+                self.field_fix_counts["in_date"] += 1
+        else:
+            if record.in_date != env_in_date:
+                updates["in_date"] = env_in_date
+                self.field_fix_counts["in_date"] += 1
 
         if collection_ip and record.collection_ip != collection_ip:
             updates["collection_ip"] = collection_ip
@@ -310,7 +421,9 @@ class MushroomEmbeddingDataCleaner:
                     history_mode = historical_in_num.get(hist_key)
                     actual_mode = None
                     if record.in_date is not None and record.room_id is not None:
-                        actual_mode = self._fetch_history_in_day_num(record.room_id, record.in_date)
+                        actual_mode = self._fetch_history_in_day_num(
+                            record.room_id, record.in_date
+                        )
 
                     if history_mode is None:
                         self._record_error(
@@ -424,7 +537,9 @@ class MushroomEmbeddingDataCleaner:
                 record.image_path,
             )
 
-    def identify_and_fix_errors(self, record, env_info: Dict[str, Any], updates: Dict[str, Any]):
+    def identify_and_fix_errors(
+        self, record, env_info: Dict[str, Any], updates: Dict[str, Any]
+    ):
         # env date consistency
         in_year = env_info.get("in_year")
         in_month = env_info.get("in_month")
@@ -543,10 +658,20 @@ class MushroomEmbeddingDataCleaner:
             "null_in_num_count": len(self.null_in_num_records),
             "null_growth_day_count": len(self.null_growth_day_records),
             "zero_in_num_fixed_count": len(self.zero_in_num_fixed_records),
-            "error_type_counts": {k.replace("error_", ""): v for k, v in self.stats.items() if k.startswith("error_")},
+            "text_quality_candidate_count": self.text_quality_candidate_count,
+            "text_quality_updated_count": self.text_quality_update_count,
+            "text_quality_path_candidate_count": self.text_quality_path_candidate_count,
+            "text_quality_path_updated_count": self.text_quality_path_update_count,
+            "error_type_counts": {
+                k.replace("error_", ""): v
+                for k, v in self.stats.items()
+                if k.startswith("error_")
+            },
         }
         summary_file = output_dir / "summary.json"
-        summary_file.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        summary_file.write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
 
         logger.info(f"[Cleaner] Summary saved to {summary_file}")
         logger.info(f"[Cleaner] Errors saved to {error_file}")
@@ -561,7 +686,9 @@ class MushroomEmbeddingDataCleaner:
         with self.Session() as session:
             stats_by_room = self._load_in_num_stats(session)
             historical_in_num = self._load_historical_in_num(session)
-            total_records = session.query(func.count(MushroomImageEmbedding.id)).scalar() or 0
+            total_records = (
+                session.query(func.count(MushroomImageEmbedding.id)).scalar() or 0
+            )
             self.stats["total_records"] = int(total_records)
 
             offset = 0
@@ -581,7 +708,7 @@ class MushroomEmbeddingDataCleaner:
                     update_payload: Dict[str, Any] = {"id": record.id}
                     env_info = self._parse_env_sensor_status(record.env_sensor_status)
 
-                    self.clean_in_date_field(record, update_payload)
+                    self.clean_in_date_field(record, env_info, update_payload)
                     self.clean_in_num_and_growth_day(
                         record,
                         env_info,
@@ -613,8 +740,112 @@ class MushroomEmbeddingDataCleaner:
             if quality_metrics:
                 logger.info(f"[Cleaner] Data quality metrics: {quality_metrics}")
 
-        output_dir = BASE_DIR / "reports" / "cleaning" / datetime.now().strftime("%Y%m%d_%H%M%S")
+            self._backfill_text_quality_in_date(session)
+            self._backfill_text_quality_in_date_from_path(session)
+
+        output_dir = (
+            BASE_DIR / "reports" / "cleaning" / datetime.now().strftime("%Y%m%d_%H%M%S")
+        )
         self.generate_report(output_dir)
+
+    def _backfill_text_quality_in_date(self, session) -> None:
+        try:
+            self.text_quality_candidate_count = (
+                session.execute(self._text_quality_count_sql).scalar() or 0
+            )
+            logger.info(
+                "[Cleaner] ImageTextQuality candidates: "
+                f"{self.text_quality_candidate_count}"
+            )
+
+            if self.text_quality_candidate_count == 0:
+                return
+
+            if self.dry_run:
+                logger.info("[Cleaner] Dry run: skip ImageTextQuality update")
+                return
+
+            result = session.execute(self._text_quality_update_sql)
+            self.text_quality_update_count = result.rowcount or 0
+            logger.info(
+                f"[Cleaner] ImageTextQuality updated: {self.text_quality_update_count}"
+            )
+        except Exception as exc:
+            logger.error(f"[Cleaner] ImageTextQuality backfill failed: {exc}")
+
+    def _backfill_text_quality_in_date_from_path(self, session) -> None:
+        try:
+            rows = session.execute(self._text_quality_path_select_sql).mappings().all()
+            self.text_quality_path_candidate_count = len(rows)
+            logger.info(
+                "[Cleaner] ImageTextQuality path candidates: "
+                f"{self.text_quality_path_candidate_count}"
+            )
+
+            if not rows:
+                return
+
+            updates: List[Dict[str, Any]] = []
+            for row in rows:
+                image_path = row.get("image_path")
+                record_id = row.get("id")
+                if not image_path or not record_id:
+                    continue
+
+                collection_date, detailed_time, _ = self._extract_date_from_path(
+                    image_path
+                )
+                if not collection_date or not detailed_time:
+                    self._record_error(
+                        str(record_id),
+                        "path_parse",
+                        "image_path格式不符合规范",
+                        image_path,
+                    )
+                    continue
+
+                try:
+                    normalized = self._normalize_collection_date(
+                        collection_date, detailed_time
+                    )
+                    normalized_date = datetime.strptime(normalized, "%Y%m%d").date()
+                except ValueError as exc:
+                    self._record_error(
+                        str(record_id),
+                        "date_parse",
+                        str(exc),
+                        image_path,
+                    )
+                    continue
+
+                if row.get("in_date") != normalized_date:
+                    updates.append(
+                        {
+                            "id": record_id,
+                            "in_date": normalized_date,
+                            "updated_at": datetime.now(),
+                        }
+                    )
+
+            if not updates:
+                return
+
+            if self.dry_run:
+                logger.info(
+                    "[Cleaner] Dry run: skip ImageTextQuality path update "
+                    f"({len(updates)} candidates)"
+                )
+                return
+
+            session.bulk_update_mappings(ImageTextQuality, updates)
+            session.commit()
+            self.text_quality_path_update_count = len(updates)
+            logger.info(
+                "[Cleaner] ImageTextQuality path updated: "
+                f"{self.text_quality_path_update_count}"
+            )
+        except Exception as exc:
+            logger.error(f"[Cleaner] ImageTextQuality path backfill failed: {exc}")
 
     def _flush_updates(self, session, updates: List[Dict[str, Any]]):
         if self.dry_run:
@@ -628,7 +859,9 @@ def setup_logging(log_dir: Path):
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "clean_mushroom_embedding_data.log"
     logger.remove()
-    logger.add(log_file, rotation="50 MB", retention="7 days", level="INFO", encoding="utf-8")
+    logger.add(
+        log_file, rotation="50 MB", retention="7 days", level="INFO", encoding="utf-8"
+    )
     logger.add(lambda msg: print(msg, end=""), level="INFO")
 
 

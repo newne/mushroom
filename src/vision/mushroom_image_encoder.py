@@ -153,7 +153,7 @@ class MushroomImageEncoder:
         session = self.Session()
         try:
             room_id = self._map_room_id(image_info.mushroom_id)
-            in_date = time_info["collection_datetime"].date()
+            in_date = time_info["collection_date"].date()
             existing_embedding = (
                 session.query(MushroomImageEmbedding)
                 .filter_by(image_path=image_info.file_path)
@@ -1678,7 +1678,7 @@ class MushroomImageEncoder:
                 # 更新环境数据字段
                 existing.room_id = env_data.get("room_id", image_info.mushroom_id)
                 existing.in_date = env_data.get(
-                    "in_date", result["time_info"]["collection_datetime"].date()
+                    "in_date", result["time_info"]["collection_date"].date()
                 )
                 existing.in_num = env_data.get("in_num", 0)
                 existing.growth_day = env_data.get("growth_day", 0)
@@ -1703,7 +1703,7 @@ class MushroomImageEncoder:
                     embedding=result["embedding"],
                     room_id=env_data.get("room_id", image_info.mushroom_id),
                     in_date=env_data.get(
-                        "in_date", result["time_info"]["collection_datetime"].date()
+                        "in_date", result["time_info"]["collection_date"].date()
                     ),
                     in_num=env_data.get("in_num", 0),
                     growth_day=env_data.get("growth_day", 0),
@@ -1727,7 +1727,7 @@ class MushroomImageEncoder:
             embedding_id = existing.id if existing else new_record.id
             room_id = env_data.get("room_id", image_info.mushroom_id)
             in_date = env_data.get(
-                "in_date", result["time_info"]["collection_datetime"].date()
+                "in_date", result["time_info"]["collection_date"].date()
             )
             llama_description = env_data.get("llama_description", None)
             chinese_description = env_data.get("chinese_description", None)
@@ -1892,7 +1892,7 @@ class MushroomImageEncoder:
                         quality_score = llama_result.get("image_quality_score", None)
 
                         time_info = self.parse_time_from_path(image_info)
-                        in_date = time_info["collection_datetime"].date()
+                        in_date = time_info["collection_date"].date()
                         room_id = self._map_room_id(image_info.mushroom_id)
 
                         existing_embedding = (

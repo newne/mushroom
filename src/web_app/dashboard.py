@@ -1,3 +1,4 @@
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -206,19 +207,144 @@ def build_device_remark_map() -> dict:
 def load_env_stats(room_ids=None, date_range=None):
     """Load environmental daily stats"""
     with Session() as session:
-        query = session.query(MushroomEnvDailyStats)
+        from sqlalchemy import inspect, text
+
+        inspector = inspect(session.bind)
+        available_columns = {
+            col["name"] for col in inspector.get_columns("mushroom_env_daily_stats")
+        }
+        desired_columns = [
+            "id",
+            "room_id",
+            "stat_date",
+            "in_day_num",
+            "is_growth_phase",
+            "temp_median",
+            "temp_min",
+            "temp_max",
+            "temp_q25",
+            "temp_q75",
+            "temp_count",
+            "humidity_median",
+            "humidity_min",
+            "humidity_max",
+            "humidity_q25",
+            "humidity_q75",
+            "humidity_count",
+            "co2_median",
+            "co2_min",
+            "co2_max",
+            "co2_q25",
+            "co2_q75",
+            "co2_count",
+            "batch_date",
+            "remark",
+            "created_at",
+            "updated_at",
+        ]
+        selected_columns = [col for col in desired_columns if col in available_columns]
+
+        query = f"SELECT {', '.join(selected_columns)} FROM mushroom_env_daily_stats WHERE 1=1"
+        params = {}
 
         if room_ids:
-            query = query.filter(MushroomEnvDailyStats.room_id.in_(room_ids))
+            query += " AND room_id = ANY(:room_ids)"
+            params["room_ids"] = list(room_ids)
 
         if date_range:
-            query = query.filter(MushroomEnvDailyStats.stat_date >= date_range[0])
-            query = query.filter(MushroomEnvDailyStats.stat_date <= date_range[1])
+            query += " AND stat_date >= :start_date AND stat_date <= :end_date"
+            params["start_date"] = date_range[0]
+            params["end_date"] = date_range[1]
 
-        query = query.order_by(MushroomEnvDailyStats.stat_date)
+        query += " ORDER BY stat_date"
 
-        df = pd.read_sql(query.statement, session.bind)
+        df = pd.read_sql(text(query), session.bind, params=params)
         return df
+
+
+def parse_growth_day_from_remark(remark, max_day=365):
+    if not remark or not isinstance(remark, str):
+        return None
+
+    text = remark.strip()
+    if not text:
+        return None
+
+    patterns = [
+        r"第\s*(\d{1,3})\s*天",
+        r"生长\s*第\s*(\d{1,3})\s*天",
+        r"\bD\s*(\d{1,3})\b",
+        r"\bDay\s*(\d{1,3})\b",
+        r"\b(\d{1,3})\s*天\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        day = int(match.group(1))
+        if 0 < day <= max_day:
+            return day
+
+    return None
+
+
+def extract_growth_day_from_remarks(device_remark, point_remark):
+    day = parse_growth_day_from_remark(point_remark)
+    if day is not None:
+        return day
+    return parse_growth_day_from_remark(device_remark)
+
+
+def format_value_for_summary(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    if isinstance(value, float):
+        return f"{value:.2f}"
+    return str(value)
+
+
+def build_action_signature(row):
+    device = row.get("device_display") or row.get("device_name") or "unknown_device"
+    point = row.get("point_display") or row.get("point_name") or "unknown_point"
+    change_type = row.get("change_type") or "unknown"
+    return f"{device}/{point} · {change_type}"
+
+
+def build_action_summary(row):
+    device = row.get("device_display") or row.get("device_name") or "unknown_device"
+    point = row.get("point_display") or row.get("point_name") or "unknown_point"
+    change_type = row.get("change_type") or "unknown"
+    prev_value = format_value_for_summary(row.get("previous_value"))
+    curr_value = format_value_for_summary(row.get("current_value"))
+    detail = row.get("change_detail") or ""
+    parts = [f"{device}/{point}", change_type, f"{prev_value} -> {curr_value}"]
+    if detail:
+        parts.append(detail)
+    return " | ".join(parts)
+
+
+def aggregate_hourly_actions(change_df):
+    if change_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    hourly_counts = change_df.groupby("change_hour").size().reset_index(name="count")
+    hourly_signature = (
+        change_df.groupby(["change_hour", "action_signature"])
+        .size()
+        .reset_index(name="count")
+        .sort_values(["change_hour", "count"], ascending=[True, False])
+    )
+    top_actions = hourly_signature.groupby("change_hour").head(1).copy()
+    top_actions["main_action"] = top_actions.apply(
+        lambda row: f"{row['action_signature']} ({row['count']}次)", axis=1
+    )
+    hourly_summary = hourly_counts.merge(
+        top_actions[["change_hour", "main_action"]],
+        on="change_hour",
+        how="left",
+    )
+    hourly_summary["main_action"] = hourly_summary["main_action"].fillna("无")
+    return hourly_summary, hourly_signature
 
 
 def show():
@@ -449,11 +575,6 @@ def show():
                     change_df["change_time"], errors="coerce"
                 )
 
-            # Filter by Magnitude Threshold
-            mag_threshold = st.slider(
-                "变更幅度告警阈值", 0.0, 50.0, 5.0, 0.5, key="dashboard_tab2_mag_slider"
-            )
-
             if change_df.empty:
                 st.info("无变更记录。")
             else:
@@ -488,6 +609,19 @@ def show():
                 )
                 change_df["timeline_label"] = (
                     change_df["device_display"] + " · " + change_df["point_display"]
+                )
+
+                change_df["growth_day"] = change_df.apply(
+                    lambda row: extract_growth_day_from_remarks(
+                        row.get("device_remark"), row.get("point_remark")
+                    ),
+                    axis=1,
+                )
+                change_df["action_signature"] = change_df.apply(
+                    build_action_signature, axis=1
+                )
+                change_df["action_summary"] = change_df.apply(
+                    build_action_summary, axis=1
                 )
 
                 if selected_batch_ids:
@@ -525,14 +659,12 @@ def show():
 
                 # Stats
                 total_changes = len(change_df)
-                abnormal_changes = len(
-                    change_df[change_df["change_magnitude"] > mag_threshold]
-                )
+                device_count = change_df["device_display"].nunique()
                 recent_change = change_df["change_time"].max()
 
                 m1, m2, m3 = st.columns(3)
                 m1.metric("总变更次数", total_changes)
-                m2.metric("大幅度变更 (>阈值)", abnormal_changes, delta_color="inverse")
+                m2.metric("涉及设备数", device_count)
                 m3.metric(
                     "最近变更时间",
                     recent_change.strftime("%Y-%m-%d %H:%M")
@@ -564,51 +696,166 @@ def show():
                 # 2.1 Timeline View
                 st.subheader("⏱️ 变更历史时间轴")
 
-                # Mark abnormal points
-                change_df["is_abnormal"] = change_df["change_magnitude"] > mag_threshold
-                change_df["color_col"] = change_df.apply(
-                    lambda x: "Abnormal (>Thres)"
-                    if x["is_abnormal"]
-                    else x["device_type"],
-                    axis=1,
+                change_type_options = sorted(
+                    [t for t in change_df["change_type"].dropna().unique()]
+                )
+                selected_change_types = st.multiselect(
+                    "过滤操作类型",
+                    change_type_options,
+                    default=change_type_options,
+                    key="dashboard_tab2_change_type_select",
                 )
 
-                fig_change_timeline = px.scatter(
-                    change_df,
-                    x="change_time",
-                    y="device_type",
-                    color="device_type",
-                    symbol="is_abnormal",
-                    size="change_magnitude",
-                    hover_data=[
-                        "device_display",
-                        "point_display",
-                        "previous_value",
-                        "current_value",
-                        "change_detail",
-                        "batch_label",
-                    ],
-                    title="设备变更时间分布 (按设备类型)",
+                filtered_change_df = change_df.copy()
+                if selected_change_types:
+                    filtered_change_df = filtered_change_df[
+                        filtered_change_df["change_type"].isin(selected_change_types)
+                    ]
+
+                growth_days = (
+                    filtered_change_df["growth_day"].dropna().astype(int).tolist()
                 )
-                st.plotly_chart(fig_change_timeline, width="stretch")
+                if growth_days:
+                    min_day = int(min(growth_days))
+                    max_day = int(max(growth_days))
+                    growth_day_range = st.slider(
+                        "生长天数范围",
+                        min_day,
+                        max_day,
+                        (min_day, max_day),
+                        key="dashboard_tab2_growth_day_range",
+                    )
+                    filtered_change_df = filtered_change_df[
+                        filtered_change_df["growth_day"].between(
+                            growth_day_range[0], growth_day_range[1]
+                        )
+                    ]
+                else:
+                    st.info("未从设备或点位备注中解析到生长天数，时间轴暂不可用。")
+
+                timeline_df = filtered_change_df.dropna(subset=["growth_day"]).copy()
+                if timeline_df.empty:
+                    st.info("时间轴暂无可展示数据，请调整筛选条件。")
+                else:
+                    size_col = (
+                        "change_magnitude"
+                        if timeline_df["change_magnitude"].notna().any()
+                        else None
+                    )
+                    fig_change_timeline = px.scatter(
+                        timeline_df,
+                        x="growth_day",
+                        y="device_type",
+                        color="device_type",
+                        symbol="change_type",
+                        size=size_col,
+                        hover_data=[
+                            "device_display",
+                            "point_display",
+                            "change_type",
+                            "previous_value",
+                            "current_value",
+                            "change_detail",
+                            "batch_label",
+                        ],
+                        title="设备变更时间轴 (生长天数)",
+                    )
+                    fig_change_timeline.update_layout(
+                        xaxis_title="生长第几天",
+                        yaxis_title="设备类型",
+                    )
+                    st.plotly_chart(fig_change_timeline, width="stretch")
+
+                    day_options = sorted(timeline_df["growth_day"].unique())
+                    selected_day = st.selectbox(
+                        "选择生长天数查看详情",
+                        options=day_options,
+                        key="dashboard_tab2_timeline_day_select",
+                    )
+                    day_detail_df = timeline_df[
+                        timeline_df["growth_day"] == selected_day
+                    ].copy()
+                    st.dataframe(
+                        day_detail_df[
+                            [
+                                "change_time",
+                                "device_type",
+                                "device_display",
+                                "point_display",
+                                "change_type",
+                                "previous_value",
+                                "current_value",
+                                "change_detail",
+                            ]
+                        ],
+                        width="stretch",
+                    )
 
                 st.subheader("📈 操作模式概览")
-                change_df["change_hour"] = change_df["change_time"].dt.hour
-                hourly_counts = (
-                    change_df.groupby("change_hour").size().reset_index(name="count")
+                filtered_change_df["change_hour"] = filtered_change_df[
+                    "change_time"
+                ].dt.hour
+                hourly_summary, hourly_signature = aggregate_hourly_actions(
+                    filtered_change_df
                 )
-                if not hourly_counts.empty:
+                if not hourly_summary.empty:
                     fig_hour = px.bar(
-                        hourly_counts,
+                        hourly_summary,
                         x="change_hour",
                         y="count",
+                        text="main_action",
                         title="操作时间分布 (小时)",
                         labels={"change_hour": "小时", "count": "变更次数"},
                     )
-                    st.plotly_chart(fig_hour, width="stretch")
+                    fig_hour.update_traces(textposition="outside")
+                    st.caption("点击柱形查看该小时的操作详情")
+                    selection = None
+                    try:
+                        selection = st.plotly_chart(
+                            fig_hour,
+                            width="stretch",
+                            on_select="rerun",
+                            selection_mode="points",
+                        )
+                    except TypeError:
+                        st.plotly_chart(fig_hour, width="stretch")
+
+                    selected_hour = None
+                    if isinstance(selection, dict):
+                        points = selection.get("selection", {}).get("points", [])
+                        if points:
+                            selected_hour = points[0].get("x")
+                    if selected_hour is None:
+                        selected_hour = st.selectbox(
+                            "选择小时查看详情",
+                            options=sorted(hourly_summary["change_hour"].unique()),
+                            key="dashboard_tab2_hour_select",
+                        )
+
+                    hour_detail_df = filtered_change_df[
+                        filtered_change_df["change_hour"] == selected_hour
+                    ].copy()
+                    hour_detail_df = hour_detail_df.sort_values(
+                        "change_time", ascending=False
+                    )
+                    st.dataframe(
+                        hour_detail_df[
+                            [
+                                "change_time",
+                                "device_type",
+                                "device_display",
+                                "point_display",
+                                "change_type",
+                                "previous_value",
+                                "current_value",
+                                "change_detail",
+                            ]
+                        ],
+                        width="stretch",
+                    )
 
                 top_points = (
-                    change_df.groupby(["device_display", "point_display"])
+                    filtered_change_df.groupby(["device_display", "point_display"])
                     .size()
                     .reset_index(name="count")
                     .sort_values("count", ascending=False)
@@ -630,7 +877,7 @@ def show():
                 # 2.2 Heatmap
                 st.subheader("🔥 变更频率热力图")
                 heatmap_data = (
-                    change_df.groupby(["room_id", "device_type"])
+                    filtered_change_df.groupby(["room_id", "device_type"])
                     .size()
                     .reset_index(name="count")
                 )
@@ -651,13 +898,6 @@ def show():
 
                 display_df = change_df.head(1000).copy()
 
-                # Highlight magnitude
-                def highlight_abnormal(s):
-                    return [
-                        "background-color: #ffcccc" if v > mag_threshold else ""
-                        for v in s
-                    ]
-
                 st.dataframe(
                     display_df[
                         [
@@ -674,16 +914,7 @@ def show():
                             "change_magnitude",
                             "change_detail",
                         ]
-                    ].style.apply(
-                        lambda x: [
-                            "background-color: #ff4b4b; color: white"
-                            if x["change_magnitude"] > mag_threshold
-                            else ""
-                            for i in x
-                        ],
-                        axis=1,
-                        subset=["change_magnitude"],
-                    ),
+                    ],
                     width="stretch",
                 )
 

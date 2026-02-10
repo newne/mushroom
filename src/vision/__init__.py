@@ -18,6 +18,7 @@ from .clip_inference import *
 from .clip_inference_scheduler import *
 from .clip_app import *
 from .get_env_status import *
+from .fine_tuning import *
 
 # 导入图像处理组件（从utils迁移过来）
 try:
@@ -34,6 +35,7 @@ __all__ = [
     'clip_inference_scheduler', 
     'clip_app',
     'get_env_status',
+    'fine_tuning',
     
     # 图像处理相关
     'mushroom_image_encoder',

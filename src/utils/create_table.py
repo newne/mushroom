@@ -198,18 +198,39 @@ class MushroomBatchYield(Base):
     stat_date = Column(Date, nullable=False, comment="统计日期 (YYYY-MM-DD)")
     harvest_time = Column(DateTime, nullable=True, comment="采收时间")
 
-    fresh_weight = Column(
-        Float, nullable=True, comment="鲜菇重量 (斤)"
-    )
-    dried_weight = Column(
-        Float, nullable=True, comment="干菇重量 (斤)"
-    )
+    fresh_weight = Column(Float, nullable=True, comment="鲜菇重量 (斤)")
+    dried_weight = Column(Float, nullable=True, comment="干菇重量 (斤)")
 
     human_evaluation = Column(Text, nullable=True, comment="人工评价/备注")
+    version = Column(Integer, nullable=False, default=1, comment="乐观锁版本号")
     create_time = Column(DateTime, server_default=func.now(), comment="创建时间")
     update_time = Column(
         DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
     )
+
+
+class MushroomBatchYieldAudit(Base):
+    """批次产量变更审计日志"""
+
+    __tablename__ = "mushroom_batch_yield_audit"
+
+    __table_args__ = (
+        Index("idx_batch_yield_audit_record", "record_id"),
+        Index("idx_batch_yield_audit_room_date", "room_id", "in_date"),
+        Index("idx_batch_yield_audit_time", "created_at"),
+        {"comment": "批次产量变更审计日志"},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True, comment="自增主键")
+    record_id = Column(BigInteger, nullable=False, comment="批次产量记录ID")
+    room_id = Column(String(10), nullable=False, comment="库房编号")
+    in_date = Column(Date, nullable=False, comment="进库日期 (YYYY-MM-DD)")
+    stat_date = Column(Date, nullable=False, comment="统计日期 (YYYY-MM-DD)")
+    before_snapshot = Column(JSON, nullable=False, comment="修改前数据快照")
+    after_snapshot = Column(JSON, nullable=False, comment="修改后数据快照")
+    operator = Column(String(100), nullable=True, comment="操作者")
+    request_id = Column(String(100), nullable=True, comment="请求ID")
+    created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
 
 
 class MushroomEnvDailyStats(Base):
@@ -258,6 +279,7 @@ class MushroomEnvDailyStats(Base):
 
     # light_hours_est = Column(Float, nullable=False, default=0.0)
     batch_date = Column(Date, nullable=True, comment="关联批次日期")
+    remark = Column(Text, nullable=True, comment="数据备注")
 
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

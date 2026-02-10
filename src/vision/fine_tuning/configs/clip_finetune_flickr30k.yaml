@@ -1,0 +1,66 @@
+model:
+  model_name_or_path: openai/clip-vit-base-patch32
+  use_lora: true
+  lora_r: 8
+  lora_alpha: 16
+  lora_dropout: 0.1
+  lora_target_modules: ["q_proj", "k_proj", "v_proj", "out_proj"]
+  freeze_vision: false
+  freeze_text: false
+  freeze_projection: false
+
+data:
+  train_annotations: data/flickr30k/train.jsonl
+  val_annotations: data/flickr30k/val.jsonl
+  test_annotations: data/flickr30k/test.jsonl
+  image_root: data/flickr30k/images
+  batch_size: 64
+  num_workers: 4
+  max_text_length: 77
+
+augment:
+  image_size: 224
+  random_crop_scale: [0.8, 1.0]
+  color_jitter: [0.2, 0.2, 0.2]
+  hflip_prob: 0.5
+  text_synonym_prob: 0.1
+  text_max_replacements: 2
+
+optim:
+  lr: 5e-6
+  weight_decay: 0.01
+  betas: [0.9, 0.98]
+
+scheduler:
+  warmup_steps: 200
+  total_steps: 10000
+  cosine_min_lr: 1e-7
+
+train:
+  epochs: 10
+  grad_accum_steps: 1
+  amp: true
+  seed: 42
+  output_dir: outputs/flickr30k_finetune
+  log_interval: 10
+  eval_interval: 1
+  early_stopping_patience: 3
+  save_every: 1
+
+eval:
+  batch_size: 128
+  num_workers: 4
+  recall_k: [1, 5, 10]
+  zero_shot_prompts: ["a photo of {label}"]
+  classification_labels: []
+  tsne_samples: 500
+  complexity_num_runs: 30
+
+distributed:
+  backend: nccl
+
+visualization:
+  tsne_perplexity: 30
+  tsne_random_state: 42
+  attention_output_dir: outputs/flickr30k_finetune/attention
+  tsne_output_dir: outputs/flickr30k_finetune/tsne
