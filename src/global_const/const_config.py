@@ -27,6 +27,9 @@ ROOM_ID_MAPPING: dict[str, str] = {
     "612": "612",
 }
 
+# MinIO Bucket Name
+MINIO_BUCKET_NAME: str = "mogu"
+
 # 任务重试配置
 TABLE_CREATION_MAX_RETRIES: int = 3
 TABLE_CREATION_RETRY_DELAY: int = 5

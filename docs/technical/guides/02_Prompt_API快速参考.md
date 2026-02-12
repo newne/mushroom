@@ -1,4 +1,4 @@
-# 提示词API快速参考
+# 提示词获取快速参考
 
 ## 快速开始
 
@@ -25,27 +25,31 @@ if not prompt:
     prompt = settings.llama.mushroom_descripe_prompt
 ```
 
-## API配置
+## 配置
 
-### URL
-```
-http://10.77.77.39/prompt/api/v1/prompts/role-instruction/active
-```
+### prompt_mushroom_description
+支持两种来源（二选一）：
+- **MLflow Prompt Registry（推荐）**：`prompts:/growth_stage_describe/4`
+- **Prompt API（兼容旧链路）**：`http://{host}/prompt/api/v1/prompts/role-instruction/active`
 
-### 认证
+### 认证（仅 Prompt API）
 ```
 Authorization: Bearer 4525d65ec96c4e3abade57493ac3a171
 ```
 
 ### 配置位置
-- URL: `src/configs/settings.toml` → `[default.data_source_url].prompt_mushroom_description`
-- Token: `src/configs/.secrets.toml` → `[development.prompt].backend_token`
+- Prompt URI / URL: `src/configs/settings.toml` → `[default.data_source_url].prompt_mushroom_description`
+- Prompt API Token: `src/configs/.secrets.toml` → `[development.prompt].backend_token`
+- MLflow Tracking: `src/configs/settings.toml` → `[development.mlflow]`
 
 ## 测试命令
 
 ```bash
-# 测试API功能
+# 测试 Prompt API 功能
 python scripts/test_prompt_api.py
+
+# 测试 MLflow Prompt Registry 加载（会打印 role 列表）
+python -c "from global_const.global_const import settings; from utils.get_data import GetData; g=GetData(settings.data_source_url, settings.host.host, settings.host.port); print(type(g.get_mushroom_prompt()), g.get_mushroom_prompt())"
 
 # 查看使用示例
 python examples/prompt_api_usage_example.py
@@ -90,7 +94,7 @@ API返回以下JSON格式：
 
 ## 关键特性
 
-- ✅ **缓存机制**: 首次从API获取，后续使用缓存
+- ✅ **缓存机制**: 首次从 MLflow / API 获取，后续使用缓存（默认 1 小时 TTL）
 - ✅ **自动降级**: API失败时自动使用配置文件默认值
 - ✅ **超时控制**: 10秒超时，避免长时间等待
 - ✅ **详细日志**: 完整的请求和错误日志

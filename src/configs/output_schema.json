@@ -1,0 +1,39 @@
+{
+  "name": "lyophyllum_decastes_morphology_assessment",
+  "schema": {
+    "type": "object",
+    "properties": {
+      "growth_stage_description": {
+        "type": "string",
+        "description": "English-only noun-chain (<=30 words), NO verbs. Prioritize observable traits: cap size (small/medium/large or diameter range) and thickness (thin/moderate/thick); cap shape (hemispherical/flattened/irregular), margin (thin/wavy/lobed), surface (smooth/glossy/matte). Stipe length (short/medium/long or length range), thickness ratio vs cap (thin/moderate/thick), slenderness (slender/moderately slender/thick), uniformity (uniform/non-uniform). Cluster density (sparse/moderate/dense radial cluster). Overall grayscale response (light/medium/dark; cap vs stipe contrast). Use standard terms: cap, stipe, dense radial cluster, hemispherical, flattened, thin wavy margin, smooth glossy surface, slender uniform stipe. For absence, use 'no X'.",
+        "minLength": 5,
+        "maxLength": 300,
+        "pattern": "^[A-Za-z0-9,;:/\\-() ]+$",
+        "examples": [
+          "mid-stage dense radial cluster, cap 20–35 mm thick hemispherical thin wavy margin smooth glossy surface, stipe 25–45 mm long slender uniform stipe, medium-dark reflectance matte stipe vs glossy cap",
+          "early-stage sparse cluster, small thin cap flattened thin margin matte surface, short slender stipe, light reflectance low contrast"
+        ]
+      },
+      "chinese_description": {
+        "type": "string",
+        "description": "对 growth_stage_description 的忠实中文翻译，使用专业真菌学术语；需明确：菌盖大小与厚薄、形状与菌缘与表面，菌柄长短与与菌盖的粗细比例、细长度与均匀性，簇生密度（稀/中/致密辐射簇），以及灰度明暗与盖/柄反差。不可添加超出英文原句的推断。",
+        "minLength": 2,
+        "maxLength": 500
+      },
+      "image_quality_score": {
+        "type": "integer",
+        "description": "0–100. Score strictly by focus sharpness, illumination uniformity, noise, occlusion, angle, and lens condition. If mushrooms are not captured due to framing/blur/darkness/obstruction, the score MUST be low. If the bottle is truly early-stage without formed fruiting bodies (only sterile substrate or initial mycelium), do NOT penalize absence itself—score by technical quality only.",
+        "minimum": 0,
+        "maximum": 100,
+        "examples": [18, 37, 62, 85]
+      }
+    },
+    "required": [
+      "growth_stage_description",
+      "chinese_description",
+      "image_quality_score"
+    ],
+    "additionalProperties": false
+  },
+  "strict": true
+}

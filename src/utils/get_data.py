@@ -8,6 +8,7 @@
 """
 
 import json
+import time
 from typing import Optional
 
 import pandas as pd
@@ -24,17 +25,107 @@ class GetData(SendRequest):
         self.host = host
         self.port = port
         self.urls = urls
-        self._cached_prompt = None  # 缓存提示词，避免频繁请求
+        self._cached_prompt = None
+        self._cached_prompt_expires_at = 0.0
+        self._cached_prompt_source = None
+        self._cached_prompt_version = None
 
-    def get_mushroom_prompt(self) -> Optional[str]:
+    def _get_prompt_cache_ttl_seconds(self) -> int:
+        ttl = getattr(settings, "prompt_cache_ttl_seconds", None)
+        try:
+            ttl_int = int(ttl)
+            if ttl_int > 0:
+                return ttl_int
+        except Exception:
+            pass
+        return 3600
+
+    def _get_mlflow_tracking_uri(self) -> Optional[str]:
+        try:
+            mlflow_cfg = getattr(settings, "mlflow", None)
+            host = getattr(mlflow_cfg, "host", None)
+            port = getattr(mlflow_cfg, "port", None)
+            if host and port:
+                return f"http://{host}:{port}"
+        except Exception:
+            return None
+        return None
+
+    def _load_prompt_from_mlflow(self, prompt_uri: str):
+        try:
+            import mlflow
+        except Exception as e:
+            logger.warning(f"[Prompt MLflow] MLflow不可用: {e}")
+            return None
+
+        tracking_uri = self._get_mlflow_tracking_uri()
+        if tracking_uri:
+            mlflow.set_tracking_uri(tracking_uri)
+
+        try:
+            prompt_obj = mlflow.genai.load_prompt(prompt_uri)
+        except Exception as e:
+            logger.warning(f"[Prompt MLflow] 加载失败: {prompt_uri} | {e}")
+            return None
+
+        expected_version = None
+        parts = str(prompt_uri).replace("prompts:/", "").strip("/").split("/")
+        if len(parts) >= 2 and parts[1].isdigit():
+            expected_version = int(parts[1])
+
+        try:
+            actual_version = int(getattr(prompt_obj, "version", -1))
+        except Exception:
+            actual_version = None
+
+        if (
+            expected_version is not None
+            and actual_version is not None
+            and expected_version != actual_version
+        ):
+            logger.error(
+                f"[Prompt MLflow] 版本不匹配: uri={prompt_uri} | expected={expected_version} actual={actual_version}"
+            )
+            return None
+
+        try:
+            variables = getattr(prompt_obj, "variables", set()) or set()
+            if "image_input" in variables:
+                prompt_value = prompt_obj.format(image_input="[image attached]")
+            else:
+                prompt_value = prompt_obj.template
+        except Exception as e:
+            logger.warning(f"[Prompt MLflow] 格式化失败: {prompt_uri} | {e}")
+            prompt_value = getattr(prompt_obj, "template", None)
+
+        if prompt_value is None:
+            return None
+
+        self._cached_prompt = prompt_value
+        self._cached_prompt_source = prompt_uri
+        self._cached_prompt_version = actual_version
+        self._cached_prompt_expires_at = time.time() + self._get_prompt_cache_ttl_seconds()
+
+        logger.info(
+            f"[Prompt MLflow] 已加载并缓存提示词: {prompt_uri} | version={actual_version} | ttl={self._get_prompt_cache_ttl_seconds()}s"
+        )
+        return prompt_value
+
+    def get_cached_prompt_meta(self) -> dict:
+        return {
+            "source": self._cached_prompt_source,
+            "version": self._cached_prompt_version,
+            "expires_at": self._cached_prompt_expires_at,
+        }
+
+    def get_mushroom_prompt(self):
         """
         从API动态获取蘑菇描述提示词
         
         Returns:
-            str: 获取到的提示词内容，如果失败则返回None
+            str | list[dict]: 获取到的提示词内容，如果失败则返回None
         """
-        # 如果已有缓存，直接返回
-        if self._cached_prompt:
+        if self._cached_prompt and time.time() < float(self._cached_prompt_expires_at or 0.0):
             return self._cached_prompt
             
         try:
@@ -53,6 +144,14 @@ class GetData(SendRequest):
             
             # 格式化URL
             prompt_url = prompt_url.format(host=self.host)
+
+            if str(prompt_url).startswith("prompts:/"):
+                prompt_value = self._load_prompt_from_mlflow(str(prompt_url))
+                if prompt_value is not None:
+                    return prompt_value
+                logger.warning("[Prompt MLflow] 获取失败，使用默认提示词")
+                fallback_prompt = getattr(settings.llama, "mushroom_descripe_prompt", None)
+                return fallback_prompt
             
             # 检查是否有prompt配置
             if not hasattr(settings, 'prompt'):
@@ -117,6 +216,8 @@ class GetData(SendRequest):
                     
                     if prompt_content:
                         self._cached_prompt = prompt_content
+                        self._cached_prompt_source = prompt_url
+                        self._cached_prompt_expires_at = time.time() + self._get_prompt_cache_ttl_seconds()
                         logger.info(f"[Prompt API] 成功获取提示词，长度: {len(prompt_content)} 字符")
                         return prompt_content
                     else:

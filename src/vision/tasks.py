@@ -45,12 +45,44 @@ def safe_hourly_text_quality_inference() -> None:
     retry_delay = CLIP_INFERENCE_RETRY_DELAY
 
     for attempt in range(1, max_retries + 1):
+        mlflow_run = None
         try:
             logger.info(
                 f"[TEXT_QUALITY_TASK] 开始执行每小时文本/质量任务 (尝试 {attempt}/{max_retries})"
             )
             end_time = datetime.now()
             start_time_filter = end_time - timedelta(hours=CLIP_INFERENCE_HOUR_LOOKBACK)
+
+            try:
+                import mlflow
+                from global_const.global_const import settings
+
+                tracking_uri = None
+                try:
+                    host = getattr(getattr(settings, "mlflow", None), "host", None)
+                    port = getattr(getattr(settings, "mlflow", None), "port", None)
+                    if host and port:
+                        tracking_uri = f"http://{host}:{port}"
+                except Exception:
+                    tracking_uri = None
+
+                if tracking_uri:
+                    mlflow.set_tracking_uri(tracking_uri)
+
+                mlflow.set_experiment("Mushroom_Text_Quality_Task")
+                mlflow_run = mlflow.start_run(
+                    run_name=f"text_quality_{end_time.strftime('%Y%m%d_%H%M%S')}"
+                )
+                try:
+                    mlflow.log_param("lookback_hours", CLIP_INFERENCE_HOUR_LOOKBACK)
+                    mlflow.log_param("batch_size", CLIP_INFERENCE_BATCH_SIZE)
+                    prompt_src = getattr(settings.data_source_url, "prompt_mushroom_description", None)
+                    if prompt_src:
+                        mlflow.log_param("prompt_source", str(prompt_src))
+                except Exception:
+                    pass
+            except Exception as e:
+                logger.warning(f"[TEXT_QUALITY_TASK] MLflow 初始化失败，将继续无 Traces 运行: {e}")
 
             from vision.mushroom_image_encoder import create_mushroom_encoder
 
@@ -88,12 +120,30 @@ def safe_hourly_text_quality_inference() -> None:
                 f"[TEXT_QUALITY_TASK] 任务完成: 总计={total_stats['total']}, 成功={total_stats['success']}, "
                 f"失败={total_stats['failed']}, 跳过={total_stats['skipped']}"
             )
+            try:
+                if mlflow_run is not None:
+                    import mlflow
+
+                    mlflow.log_metric("total", float(total_stats["total"]))
+                    mlflow.log_metric("success", float(total_stats["success"]))
+                    mlflow.log_metric("failed", float(total_stats["failed"]))
+                    mlflow.log_metric("skipped", float(total_stats["skipped"]))
+                    mlflow.end_run(status="FINISHED")
+            except Exception as e:
+                logger.warning(f"[TEXT_QUALITY_TASK] MLflow 指标/Traces flush 失败: {e}")
             return
         except Exception as e:
             error_msg = str(e)
             logger.error(
                 f"[TEXT_QUALITY_TASK] 任务失败 (尝试 {attempt}/{max_retries}): {error_msg}"
             )
+            try:
+                if mlflow_run is not None:
+                    import mlflow
+
+                    mlflow.end_run(status="FAILED")
+            except Exception:
+                pass
             if _is_connection_error(error_msg) and attempt < max_retries:
                 logger.warning(
                     f"[TEXT_QUALITY_TASK] 检测到连接类错误，将在 {retry_delay} 秒后重试..."

@@ -89,6 +89,12 @@ notebooks/*.html
 logs/
 Logs/
 src/Logs/*.log
+mlruns/
+data/
+output/
+dist/
+.trae/
+.python-version
 
 # Temporary files
 *.tmp

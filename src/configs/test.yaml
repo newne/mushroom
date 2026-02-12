@@ -5,10 +5,10 @@ x-base: &base
   environment:
     - TZ=Asia/Shanghai
     - ENVIRONMENT=${ENVIRONMENT:-production}
+    - RAW_PASS=
+    - PASS_URLENC=
+    - ARTIFACTS_DESTINATION=${MLFLOW_ARTIFACTS_DESTINATION:-s3://mlflow/}
   restart: unless-stopped
-  volumes:
-    - /etc/localtime:/etc/localtime:ro  # 只读挂载主机时区
-    - /etc/timezone:/etc/timezone:ro
   logging:
     driver: "json-file"
     options:
@@ -112,35 +112,31 @@ services:
     depends_on:
       postgres_db:
         condition: service_healthy
-    # 核心：所有环境变量从 .env 读取
     environment:
-      # PostgreSQL 配置（从 .env 读取）
       - POSTGRES_HOST=${POSTGRES_HOST:-postgres_db}
       - POSTGRES_PORT=${POSTGRES_PORT:-5432}
       - POSTGRES_USER=${MLFLOW_DB_USER:-mlflow}
-      - POSTGRES_PASSWORD=${MLFLOW_DB_PASSWORD:-eSePSPgpDQMMLtta}
       - POSTGRES_DB=${MLFLOW_DB:-mlflow_db}
-      # MinIO/S3 配置（从 .env 读取，指向 mlflow-artifacts 桶）
       - MLFLOW_S3_ENDPOINT_URL=${MLFLOW_S3_ENDPOINT_URL}
       - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER}
       - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD}
       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-us-east-1}
       - AWS_S3_VERIFY_SSL=${AWS_S3_VERIFY_SSL:-false}
-      # MLflow 核心配置（从 .env 读取）
       - MLFLOW_HOST=${MLFLOW_HOST:-0.0.0.0}
       - MLFLOW_PORT=${MLFLOW_PORT:-5000}
-      - MLFLOW_BACKEND_STORE_URI=${MLFLOW_BACKEND_STORE_URI}
-      - MLFLOW_ARTIFACTS_DESTINATION=${MLFLOW_ARTIFACTS_DESTINATION}
-      # 时区/编码兜底
-      - LC_ALL=zh_CN.UTF-8
-      - LANG=zh_CN.UTF-8
-      - PYTHONIOENCODING=utf-8
+      - MLFLOW_ARTIFACTS_DESTINATION=${MLFLOW_ARTIFACTS_DESTINATION:-s3://mlflow/}
     secrets:
       - postgres_password
       - mlflow_db_password
-    command: ["/app/start-mlflow.sh"]
-
-     
+    # 终极极简脚本：无换行、无复杂语法、兼容所有shell
+    command: >
+      mlflow server 
+      --backend-store-uri postgresql://mlflow:eSePSPgpDQMMLtta@postgres_db:5432/mlflow_db 
+      --serve-artifacts 
+      --artifacts-destination s3://mlflow/ 
+      --host 0.0.0.0 
+      --port 5000 
+      --gunicorn-opts "--timeout 120 --workers 3 --threads 2"
     ports:
       - "${MLFLOW_PORT:-5000}:5000"
     healthcheck:

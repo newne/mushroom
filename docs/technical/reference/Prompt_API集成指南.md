@@ -1,23 +1,31 @@
-# 提示词API集成指南
+# 提示词获取集成指南（Prompt API / MLflow）
 
 ## 概述
 
-本文档说明如何使用动态API获取蘑菇描述提示词，替代原有的静态配置方式。
+本文档说明如何获取蘑菇描述提示词，支持两种来源：
+- Prompt API（兼容旧链路）
+- MLflow Prompt Registry（推荐）
 
 ## 功能特性
 
-- ✅ 从远程API动态获取提示词
+- ✅ 从 Prompt API 或 MLflow Prompt Registry 动态获取提示词
 - ✅ 自动缓存机制，避免频繁请求
 - ✅ 完善的错误处理和日志记录
 - ✅ 自动降级到配置文件中的默认提示词
-- ✅ 配置化的API地址和认证信息
+- ✅ 配置化的 Prompt URI / API 地址和认证信息
 
 ## 配置说明
 
-### 1. API配置 (settings.toml)
+### 1. Prompt 配置 (settings.toml)
 
-在 `src/configs/settings.toml` 中添加API URL配置：
+在 `src/configs/settings.toml` 中配置提示词来源（推荐 MLflow）：
 
+```toml
+[default.data_source_url]
+prompt_mushroom_description="prompts:/growth_stage_describe/4"
+```
+
+如果需要回退到 Prompt API，可使用：
 ```toml
 [default.data_source_url]
 prompt_mushroom_description="http://{host}/prompt/api/v1/prompts/role-instruction/active"

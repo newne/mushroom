@@ -42,7 +42,7 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/opt/uv-cache,uid=0,gid=0,sharing=locked \
     --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0,sharing=locked \
     --mount=from=uv-tool,source=/uv,target=./uv \
-    ./uv sync --frozen --extra cpu --no-install-project --no-dev --no-build-isolation -v && \
+    ./uv sync --frozen --no-install-project --no-dev --no-build-isolation -v && \
     cp -r .venv/* /opt/venv/
 
 # 清理不必要的文件，减少镜像大小

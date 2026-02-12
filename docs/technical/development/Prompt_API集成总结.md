@@ -1,8 +1,15 @@
-# 提示词API动态获取功能实现总结
+# 提示词获取功能实现总结
+
+## 最新变更（MLflow Prompt Registry）
+
+当前 `safe_hourly_text_quality_inference` 相关链路的提示词默认来源已切换为 **MLflow Prompt Registry**：
+- `prompts:/growth_stage_describe/4`
+
+实现方式为：`GetData.get_mushroom_prompt()` 支持识别 `prompts:/...` URI 并从 MLflow 拉取 chat prompt（system+user），同时启用版本校验与 TTL 缓存；若 MLflow 获取失败则回退到原 Prompt API / 配置默认值。
 
 ## 修改概述
 
-成功将蘑菇描述提示词的获取方式从静态配置改为通过API动态获取，提高了系统的灵活性和可维护性。
+成功将蘑菇描述提示词的获取方式从静态配置改为可通过 **Prompt API 或 MLflow Prompt Registry** 动态获取，提高了系统的灵活性和可维护性。
 
 ## 修改文件清单
 
@@ -24,7 +31,7 @@ def get_mushroom_prompt(self) -> Optional[str]:
     # 4. 错误处理和降级
 ```
 
-#### `src/utils/mushroom_image_encoder.py`
+#### `src/vision/mushroom_image_encoder.py`
 - ✅ 导入 `GetData` 类
 - ✅ 在 `__init__` 中初始化 `GetData` 实例
 - ✅ 在 `_call_llama_api` 方法中使用动态获取的提示词
@@ -47,10 +54,9 @@ def get_mushroom_prompt(self) -> Optional[str]:
 
 ### 3. 测试和文档
 
-#### `scripts/test_prompt_api.py` (新建)
-- ✅ 测试API获取提示词功能
-- ✅ 验证缓存机制
-- ✅ 显示配置信息
+#### `src/scripts/processing/test_text_quality_prompt_mlflow.py`
+- ✅ 测试从 MLflow Prompt Registry 加载提示词并完成一次图文推理（本地数据集图片）
+- ✅ 验证 chat prompt 注入与 JSON 输出字段完整性
 
 #### `docs/prompt_api_integration_guide.md` (新建)
 - ✅ 完整的使用指南
@@ -62,9 +68,14 @@ def get_mushroom_prompt(self) -> Optional[str]:
 
 ### API配置
 
-**URL格式**:
+**URL格式（Prompt API 兼容）**:
 ```
 http://{host}/prompt/api/v1/prompts/role-instruction/active
+```
+
+**MLflow Prompt Registry（推荐）**:
+```
+prompts:/growth_stage_describe/4
 ```
 
 **请求头**:

@@ -119,7 +119,7 @@ FROM python:3.12.12-slim AS app-builder
 ```dockerfile
 RUN --mount=type=cache,target=/opt/uv-cache,uid=0,gid=0 \
     --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
-    uv sync --frozen --extra cpu
+    uv sync --frozen
 ```
 
 **验证结果**:

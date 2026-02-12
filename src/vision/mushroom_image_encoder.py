@@ -315,22 +315,49 @@ class MushroomImageEncoder:
             max_tokens = getattr(self.llama_config, "max_tokens", 1024)
             top_p = getattr(self.llama_config, "top_p", 0.9)
 
+            messages = []
+            last_user_index = None
+            if isinstance(prompt, list):
+                for msg in prompt:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if role == "system":
+                        messages.append({"role": "system", "content": str(content)})
+                    elif role == "user":
+                        messages.append({"role": "user", "content": str(content)})
+                        last_user_index = len(messages) - 1
+                    elif role == "assistant":
+                        messages.append({"role": "assistant", "content": str(content)})
+                    else:
+                        messages.append({"role": str(role), "content": str(content)})
+                        if role == "user":
+                            last_user_index = len(messages) - 1
+            else:
+                messages.append({"role": "system", "content": str(prompt)})
+                messages.append({"role": "user", "content": ""})
+                last_user_index = 1
+
+            if last_user_index is None:
+                messages.append({"role": "user", "content": ""})
+                last_user_index = len(messages) - 1
+
+            user_content = messages[last_user_index].get("content", "")
+            if isinstance(user_content, list):
+                typed_user_content = user_content
+            else:
+                typed_user_content = [{"type": "text", "text": str(user_content)}] if str(user_content).strip() else []
+
+            typed_user_content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_data}"},
+                }
+            )
+            messages[last_user_index]["content"] = typed_user_content
+
             payload = {
                 "model": model,
-                "messages": [
-                    {"role": "system", "content": prompt},
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{image_data}"
-                                },
-                            }
-                        ],
-                    },
-                ],
+                "messages": messages,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "top_p": top_p,
@@ -372,9 +399,49 @@ class MushroomImageEncoder:
             timeout = getattr(self.llama_config, "timeout", 600)
 
             # 使用requests直接发送请求，使用配置的超时时间
-            resp = requests.post(
-                base_url, json=payload, headers=headers, timeout=timeout
-            )
+            linked_prompt_tag_value = None
+            try:
+                prompt_source = None
+                if hasattr(self.get_data, "get_cached_prompt_meta"):
+                    prompt_source = self.get_data.get_cached_prompt_meta().get("source")
+                if not prompt_source:
+                    prompt_source = getattr(settings.data_source_url, "prompt_mushroom_description", None)
+
+                if isinstance(prompt_source, str) and prompt_source.startswith("prompts:/"):
+                    parts = prompt_source[len("prompts:/") :].strip("/").split("/")
+                    if len(parts) >= 2:
+                        linked_prompt_tag_value = json.dumps(
+                            [{"name": parts[0], "version": str(parts[1])}],
+                            ensure_ascii=False,
+                        )
+            except Exception:
+                linked_prompt_tag_value = None
+
+            resp = None
+            try:
+                import mlflow
+                from mlflow.tracing.utils.prompt import TraceTagKey
+
+                with mlflow.start_span(name="llama_chat_completions", span_type="LLM"):
+                    trace_id = None
+                    try:
+                        trace_id = mlflow.get_active_trace_id()
+                    except Exception:
+                        trace_id = None
+
+                    if trace_id and linked_prompt_tag_value is not None:
+                        try:
+                            mlflow.set_trace_tag(trace_id, TraceTagKey.LINKED_PROMPTS, linked_prompt_tag_value)
+                        except Exception:
+                            pass
+
+                    resp = requests.post(
+                        base_url, json=payload, headers=headers, timeout=timeout
+                    )
+            except Exception:
+                resp = requests.post(
+                    base_url, json=payload, headers=headers, timeout=timeout
+                )
 
             if resp.status_code == 200:
                 response_data = resp.json()
