@@ -150,3 +150,10 @@ dynamic_results_*.csv
 # Demo and temporary scripts
 *_demo.py
 *_temp.py
+
+# MLflow local database
+mlflow.db
+build_info.json
+
+# MLflow docker data
+docker/mlflow_data/

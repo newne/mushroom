@@ -292,6 +292,8 @@ class DeviceSetpointChange(Base):
 
     __table_args__ = (
         Index("idx_room_change_time", "room_id", "change_time"),
+        Index("idx_room_in_date", "room_id", "in_date"),
+        Index("idx_room_growth_day", "room_id", "growth_day"),
         Index("idx_device_point", "device_name", "point_name"),
         Index("idx_change_time", "change_time"),
         Index("idx_device_type", "device_type"),
@@ -315,9 +317,12 @@ class DeviceSetpointChange(Base):
     previous_value = Column(Float, nullable=False, comment="变更前值")
     current_value = Column(Float, nullable=False, comment="变更后值")
 
+    in_date = Column(Date, nullable=True, comment="进库日期 (YYYY-MM-DD)")
+    growth_day = Column(Integer, nullable=True, comment="生长天数")
+    in_num = Column(Integer, nullable=True, comment="进库包数")
+    batch_id = Column(String(50), nullable=True, comment="批次ID (room_id+in_date)")
+
     change_type = Column(String(50), nullable=False, comment="变更类型")
-    change_detail = Column(String(200), nullable=True, comment="变更详情")
-    change_magnitude = Column(Float, nullable=True, comment="变更幅度")
 
     detection_time = Column(DateTime, nullable=False, comment="检测时间")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
@@ -774,6 +779,143 @@ def add_image_text_quality_fields():
         raise
 
 
+def update_device_setpoint_change_schema() -> None:
+    """
+    同步 device_setpoint_changes 表结构：新增批次字段并移除旧字段
+    """
+    try:
+        with pgsql_engine.connect() as conn:
+            existing_columns = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_name = 'device_setpoint_changes'
+                        """
+                    )
+                )
+            }
+
+            if "in_date" not in existing_columns:
+                conn.execute(
+                    text(
+                        """
+                        ALTER TABLE device_setpoint_changes
+                        ADD COLUMN in_date DATE NULL
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        COMMENT ON COLUMN device_setpoint_changes.in_date
+                        IS '进库日期 (YYYY-MM-DD)'
+                        """
+                    )
+                )
+
+            if "growth_day" not in existing_columns:
+                conn.execute(
+                    text(
+                        """
+                        ALTER TABLE device_setpoint_changes
+                        ADD COLUMN growth_day INTEGER NULL
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        COMMENT ON COLUMN device_setpoint_changes.growth_day
+                        IS '生长天数'
+                        """
+                    )
+                )
+
+            if "in_num" not in existing_columns:
+                conn.execute(
+                    text(
+                        """
+                        ALTER TABLE device_setpoint_changes
+                        ADD COLUMN in_num INTEGER NULL
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        COMMENT ON COLUMN device_setpoint_changes.in_num
+                        IS '进库包数'
+                        """
+                    )
+                )
+
+            if "batch_id" not in existing_columns:
+                conn.execute(
+                    text(
+                        """
+                        ALTER TABLE device_setpoint_changes
+                        ADD COLUMN batch_id VARCHAR(50) NULL
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        COMMENT ON COLUMN device_setpoint_changes.batch_id
+                        IS '批次ID (room_id+in_date)'
+                        """
+                    )
+                )
+
+            if "change_detail" in existing_columns:
+                conn.execute(
+                    text(
+                        """
+                        ALTER TABLE device_setpoint_changes
+                        DROP COLUMN IF EXISTS change_detail
+                        """
+                    )
+                )
+
+            if "change_magnitude" in existing_columns:
+                conn.execute(
+                    text(
+                        """
+                        ALTER TABLE device_setpoint_changes
+                        DROP COLUMN IF EXISTS change_magnitude
+                        """
+                    )
+                )
+
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_room_in_date
+                    ON device_setpoint_changes (room_id, in_date)
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_room_growth_day
+                    ON device_setpoint_changes (room_id, growth_day)
+                    """
+                )
+            )
+            conn.commit()
+            logger.info("[Migration] device_setpoint_changes schema updated")
+
+    except Exception as e:
+        logger.error(
+            f"[Migration] Failed to update device_setpoint_changes schema: {e}"
+        )
+        raise
+
+
 def update_existing_collection_ip_data():
     """
     更新现有记录的collection_ip字段
@@ -1070,7 +1212,15 @@ def create_tables():
     except Exception as e:
         logger.error(f"[0.1.3] Failed to add image_text_quality fields: {str(e)}")
 
-    # 4.2 迁移 dynamic status 到批次状态表（如果 status 列存在）
+    # 4.2 更新 device_setpoint_changes 表结构
+    try:
+        update_device_setpoint_change_schema()
+    except Exception as e:
+        logger.error(
+            f"[0.1.3] Failed to update device_setpoint_changes schema: {str(e)}"
+        )
+
+    # 4.3 迁移 dynamic status 到批次状态表（如果 status 列存在）
     try:
         migrate_dynamic_status_to_batch_status()
     except Exception as e:

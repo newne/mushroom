@@ -17,11 +17,12 @@ import numpy as np
 # Input Data Models
 # ============================================================================
 
+
 @dataclass
 class CurrentStateData:
     """
     Current state data extracted from MushroomImageEmbedding table
-    
+
     Attributes:
         room_id: Room number (607/608/611/612)
         collection_datetime: Data collection timestamp
@@ -40,23 +41,24 @@ class CurrentStateData:
         humidifier_config: Humidifier device configuration JSON
         light_config: Grow light device configuration JSON
     """
+
     room_id: str
     collection_datetime: datetime
     in_date: date
     in_num: int
     growth_day: int
-    
+
     # Environmental sensor status
     temperature: float
     humidity: float
     co2: float
-    
+
     # Image embedding
     embedding: np.ndarray  # shape: (512,)
     semantic_description: str
     llama_description: Optional[str] = None
     image_quality_score: Optional[float] = None
-    
+
     # Device configurations
     air_cooler_config: Dict = field(default_factory=dict)
     fresh_fan_config: Dict = field(default_factory=dict)
@@ -68,7 +70,7 @@ class CurrentStateData:
 class EnvStatsData:
     """
     Environmental statistics data from MushroomEnvDailyStats table
-    
+
     Attributes:
         room_id: Room number
         stat_date: Statistics date
@@ -90,25 +92,26 @@ class EnvStatsData:
         co2_q25: 25th percentile CO2 concentration (ppm)
         co2_q75: 75th percentile CO2 concentration (ppm)
     """
+
     room_id: str
     stat_date: date
     in_day_num: int
     is_growth_phase: bool
-    
+
     # Temperature statistics
     temp_median: Optional[float] = None
     temp_min: Optional[float] = None
     temp_max: Optional[float] = None
     temp_q25: Optional[float] = None
     temp_q75: Optional[float] = None
-    
+
     # Humidity statistics
     humidity_median: Optional[float] = None
     humidity_min: Optional[float] = None
     humidity_max: Optional[float] = None
     humidity_q25: Optional[float] = None
     humidity_q75: Optional[float] = None
-    
+
     # CO2 statistics
     co2_median: Optional[float] = None
     co2_min: Optional[float] = None
@@ -121,7 +124,7 @@ class EnvStatsData:
 class DeviceChangeRecord:
     """
     Device setpoint change record from DeviceSetpointChange table
-    
+
     Attributes:
         room_id: Room number
         device_type: Device type (e.g., air_cooler, fresh_air_fan)
@@ -130,9 +133,13 @@ class DeviceChangeRecord:
         change_time: Timestamp of the change
         previous_value: Value before change
         current_value: Value after change
-        change_magnitude: Magnitude of change
         change_type: Type of change (increase/decrease/toggle)
+        in_date: Batch entry date
+        growth_day: Days since batch entry
+        in_num: Batch entry number
+        batch_id: Batch identifier
     """
+
     room_id: str
     device_type: str
     device_name: str
@@ -140,15 +147,18 @@ class DeviceChangeRecord:
     change_time: datetime
     previous_value: float
     current_value: float
-    change_magnitude: float
     change_type: str
+    in_date: Optional[date] = None
+    growth_day: Optional[int] = None
+    in_num: Optional[int] = None
+    batch_id: Optional[str] = None
 
 
 @dataclass
 class SimilarCase:
     """
     Similar historical case found by CLIP matching
-    
+
     Attributes:
         similarity_score: Similarity score 0-100
         confidence_level: Confidence level (high/medium/low)
@@ -163,18 +173,19 @@ class SimilarCase:
         humidifier_params: Humidifier parameters
         grow_light_params: Grow light parameters
     """
+
     similarity_score: float  # 0-100
     confidence_level: str  # "high" | "medium" | "low"
-    
+
     room_id: str
     growth_day: int
     collection_time: datetime
-    
+
     # Environmental parameters
     temperature: float
     humidity: float
     co2: float
-    
+
     # Device configurations
     air_cooler_params: Dict = field(default_factory=dict)
     fresh_air_params: Dict = field(default_factory=dict)
@@ -186,17 +197,19 @@ class SimilarCase:
 # Enhanced Output Data Models for Optimized Decision Analysis
 # ============================================================================
 
+
 @dataclass
 class RiskAssessment:
     """
     Risk assessment for parameter adjustment
-    
+
     Attributes:
         adjustment_risk: Risk level of making the adjustment
         no_action_risk: Risk level of not making the adjustment
         impact_scope: Scope of impact (e.g., temperature_stability, growth_rate)
         mitigation_measures: Suggested risk mitigation measures
     """
+
     adjustment_risk: str  # "low" | "medium" | "high" | "critical"
     no_action_risk: str  # "low" | "medium" | "high" | "critical"
     impact_scope: str
@@ -207,7 +220,7 @@ class RiskAssessment:
 class ParameterAdjustment:
     """
     Individual parameter adjustment recommendation
-    
+
     Attributes:
         current_value: Current parameter value
         recommended_value: Recommended parameter value
@@ -218,6 +231,7 @@ class ParameterAdjustment:
         risk_assessment: Risk assessment for this parameter
         monitoring_threshold: Threshold for monitoring (if action is "monitor")
     """
+
     current_value: float
     recommended_value: float
     action: str  # "maintain" | "adjust" | "monitor"
@@ -233,6 +247,7 @@ class DynamicDeviceRecommendation:
     """
     Dynamic device parameter recommendations
     """
+
     parameters: Dict[str, ParameterAdjustment] = field(default_factory=dict)
     rationale: List[str] = field(default_factory=list)
     multi_image_analysis: str = ""
@@ -243,9 +258,10 @@ class EnhancedDeviceRecommendations:
     """
     Enhanced device parameter recommendations with detailed adjustment info
     """
+
     # Dynamic dictionary of devices: device_type -> DynamicDeviceRecommendation
     devices: Dict[str, DynamicDeviceRecommendation] = field(default_factory=dict)
-    
+
     # Backward compatibility properties (optional, if needed for existing code access)
     @property
     def air_cooler(self) -> Optional[DynamicDeviceRecommendation]:
@@ -268,7 +284,7 @@ class EnhancedDeviceRecommendations:
 class MultiImageAnalysis:
     """
     Multi-image analysis results
-    
+
     Attributes:
         total_images_analyzed: Total number of images analyzed
         image_quality_scores: Quality scores for each image
@@ -277,6 +293,7 @@ class MultiImageAnalysis:
         view_consistency: Consistency between different camera views
         key_observations: Key observations from multiple views
     """
+
     total_images_analyzed: int
     image_quality_scores: List[float] = field(default_factory=list)
     aggregation_method: str = "weighted_average"
@@ -290,20 +307,22 @@ class EnhancedDecisionOutput:
     """
     Enhanced decision output with detailed parameter adjustments
     """
+
     status: str  # "success" | "error"
     room_id: str
     analysis_time: datetime
-    strategy: 'ControlStrategy'
+    strategy: "ControlStrategy"
     device_recommendations: EnhancedDeviceRecommendations
-    monitoring_points: 'MonitoringPoints'
+    monitoring_points: "MonitoringPoints"
     multi_image_analysis: MultiImageAnalysis
-    metadata: 'DecisionMetadata'
+    metadata: "DecisionMetadata"
+
 
 @dataclass
 class AirCoolerRecommendation:
     """
     Air cooler parameter recommendations
-    
+
     Attributes:
         tem_set: Temperature setpoint (°C)
         tem_diff_set: Temperature difference setpoint (°C)
@@ -314,6 +333,7 @@ class AirCoolerRecommendation:
         hum_on_off: Humidifier linkage (0/1)
         rationale: List of reasoning statements
     """
+
     tem_set: float
     tem_diff_set: float
     cyc_on_off: int
@@ -328,7 +348,7 @@ class AirCoolerRecommendation:
 class FreshAirFanRecommendation:
     """
     Fresh air fan parameter recommendations
-    
+
     Attributes:
         model: Mode (0:off, 1:auto, 2:manual)
         control: Control method (0:time, 1:CO2)
@@ -338,6 +358,7 @@ class FreshAirFanRecommendation:
         off: Off time (minutes, for time control mode)
         rationale: List of reasoning statements
     """
+
     model: int
     control: int
     co2_on: int
@@ -351,7 +372,7 @@ class FreshAirFanRecommendation:
 class HumidifierRecommendation:
     """
     Humidifier parameter recommendations
-    
+
     Attributes:
         model: Mode (0:off, 1:auto, 2:manual)
         on: Start humidity threshold (%)
@@ -359,6 +380,7 @@ class HumidifierRecommendation:
         left_right_strategy: Left/right side strategy description
         rationale: List of reasoning statements
     """
+
     model: int
     on: int
     off: int
@@ -370,7 +392,7 @@ class HumidifierRecommendation:
 class GrowLightRecommendation:
     """
     Grow light parameter recommendations
-    
+
     Attributes:
         model: Mode (0:off, 1:auto, 2:manual)
         on_mset: On duration (minutes)
@@ -385,6 +407,7 @@ class GrowLightRecommendation:
         choose_4: Light #4 color selection (0:white, 1:blue)
         rationale: List of reasoning statements
     """
+
     model: int
     on_mset: int
     off_mset: int
@@ -403,13 +426,14 @@ class GrowLightRecommendation:
 class DeviceRecommendations:
     """
     All device parameter recommendations
-    
+
     Attributes:
         air_cooler: Air cooler recommendations
         fresh_air_fan: Fresh air fan recommendations
         humidifier: Humidifier recommendations
         grow_light: Grow light recommendations
     """
+
     air_cooler: AirCoolerRecommendation
     fresh_air_fan: FreshAirFanRecommendation
     humidifier: HumidifierRecommendation
@@ -420,12 +444,13 @@ class DeviceRecommendations:
 class ControlStrategy:
     """
     Overall control strategy
-    
+
     Attributes:
         core_objective: Core objective of the control strategy
         priority_ranking: Priority ranking of control actions
         key_risk_points: Key risk points to monitor
     """
+
     core_objective: str
     priority_ranking: List[str] = field(default_factory=list)
     key_risk_points: List[str] = field(default_factory=list)
@@ -435,12 +460,13 @@ class ControlStrategy:
 class MonitoringPoints:
     """
     24-hour monitoring points
-    
+
     Attributes:
         key_time_periods: Key time periods to monitor
         warning_thresholds: Warning thresholds for parameters
         emergency_measures: Emergency measures to take
     """
+
     key_time_periods: List[str] = field(default_factory=list)
     warning_thresholds: Dict[str, float] = field(default_factory=dict)
     emergency_measures: List[str] = field(default_factory=list)
@@ -450,7 +476,7 @@ class MonitoringPoints:
 class DecisionMetadata:
     """
     Decision metadata
-    
+
     Attributes:
         data_sources: Data sources and record counts
         similar_cases_count: Number of similar cases found
@@ -464,6 +490,7 @@ class DecisionMetadata:
         multi_image_count: Number of images analyzed (for enhanced analysis)
         image_aggregation_method: Method used for image aggregation (for enhanced analysis)
     """
+
     data_sources: Dict[str, int] = field(default_factory=dict)
     similar_cases_count: int = 0
     avg_similarity_score: float = 0.0
@@ -481,7 +508,7 @@ class DecisionMetadata:
 class DecisionOutput:
     """
     Complete decision output
-    
+
     Attributes:
         status: Status (success/error)
         room_id: Room number
@@ -491,6 +518,7 @@ class DecisionOutput:
         monitoring_points: Monitoring points
         metadata: Decision metadata
     """
+
     status: str  # "success" | "error"
     room_id: str
     analysis_time: datetime
@@ -504,11 +532,12 @@ class DecisionOutput:
 # Configuration Data Models
 # ============================================================================
 
+
 @dataclass
 class DevicePointConfig:
     """
     Device measurement point configuration
-    
+
     Attributes:
         point_name: Point name/code
         point_alias: Point display name
@@ -516,6 +545,7 @@ class DevicePointConfig:
         enum: Enumeration value mapping (optional)
         value_range: Value range (min, max) (optional)
     """
+
     point_name: str
     point_alias: str
     remark: str
@@ -527,7 +557,7 @@ class DevicePointConfig:
 class DeviceConfig:
     """
     Device configuration
-    
+
     Attributes:
         device_type: Device type
         device_name: Device name/code
@@ -535,6 +565,7 @@ class DeviceConfig:
         remark: Description/remark
         point_list: List of measurement point configurations
     """
+
     device_type: str
     device_name: str
     device_alias: str

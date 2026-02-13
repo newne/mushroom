@@ -171,6 +171,14 @@ def _set_cache(params: dict[str, Any], payload: list[dict[str, Any]]) -> None:
 def create_batch_yield(
     payload: MushroomBatchYieldCreate, db: Session = Depends(get_db)
 ):
+    if payload.stat_date != payload.in_date:
+        raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "BUSINESS_ERROR",
+            "stat_date must match in_date",
+            {"stat_date": payload.stat_date, "in_date": payload.in_date},
+        )
+
     active_rooms = get_active_rooms(db)
     if payload.room_id not in active_rooms:
         raise_api_error(
@@ -247,6 +255,16 @@ def init_batch_yields(
     stat_date: date | None = Query(None, description="统计日期 (YYYY-MM-DD)"),
 ):
     try:
+        if stat_date and in_date and stat_date != in_date:
+            raise_api_error(
+                status.HTTP_400_BAD_REQUEST,
+                "BUSINESS_ERROR",
+                "stat_date must match in_date",
+                {"stat_date": stat_date, "in_date": in_date},
+            )
+        if stat_date and not in_date:
+            in_date = stat_date
+
         if room_id:
             active_rooms = get_active_rooms(db)
             if room_id not in active_rooms:
@@ -313,6 +331,16 @@ def list_batch_yields(
             "BUSINESS_ERROR",
             "start_harvest_time cannot be later than end_harvest_time",
         )
+
+    if stat_date and in_date and stat_date != in_date:
+        raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "BUSINESS_ERROR",
+            "stat_date must match in_date",
+            {"stat_date": stat_date, "in_date": in_date},
+        )
+    if stat_date and not in_date:
+        in_date = stat_date
 
     cache_params = {
         "room_id": room_id,
@@ -633,6 +661,14 @@ def update_batch_yield_by_batch(
     db: Session = Depends(get_db),
     stat_date: date | None = Query(None, description="统计日期 (YYYY-MM-DD)"),
 ):
+    if stat_date and stat_date != in_date:
+        raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "BUSINESS_ERROR",
+            "stat_date must match in_date",
+            {"stat_date": stat_date, "in_date": in_date},
+        )
+
     query = db.query(MushroomBatchYield).filter(
         MushroomBatchYield.room_id == room_id,
         MushroomBatchYield.in_date == in_date,

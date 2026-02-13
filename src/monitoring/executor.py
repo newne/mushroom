@@ -11,6 +11,8 @@ import pandas as pd
 
 from global_const.const_config import MUSHROOM_ROOM_IDS
 from global_const.global_const import pgsql_engine
+from sqlalchemy.orm import sessionmaker
+from utils.batch_yield_service import resolve_setpoint_batch_info
 from tasks.base_task import BaseTask
 from utils.create_table import (
     DecisionAnalysisStaticConfig,
@@ -294,6 +296,9 @@ class SetpointMonitoringTask(BaseTask):
                 realtime_data, room_configs
             )
 
+            # 3. 绑定批次信息
+            changes = self._enrich_changes_with_batch_info(changes)
+
             logger.debug(
                 f"[{self.task_name}] 库房 {room_id} 检测到 {len(changes)} 个变更"
             )
@@ -303,6 +308,23 @@ class SetpointMonitoringTask(BaseTask):
         except Exception as e:
             logger.error(f"[{self.task_name}] 库房 {room_id} 监控失败: {e}")
             return []
+
+    def _enrich_changes_with_batch_info(
+        self, changes: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        if not changes:
+            return changes
+
+        Session = sessionmaker(bind=pgsql_engine)
+        with Session() as session:
+            for change in changes:
+                info = resolve_setpoint_batch_info(
+                    change.get("room_id"),
+                    change.get("change_time"),
+                    db=session,
+                )
+                change.update(info)
+        return changes
 
     def _get_realtime_setpoint_data(
         self,
@@ -514,19 +536,13 @@ class SetpointMonitoringTask(BaseTask):
                     # 数字量开关变化检测
                     if int(current_value) != int(previous_value):
                         change_detected = True
-                        change_info = {
-                            "change_detail": f"{int(previous_value)} -> {int(current_value)}",
-                            "change_magnitude": abs(current_value - previous_value),
-                        }
+                        change_info = f"{int(previous_value)} -> {int(current_value)}"
 
                 elif change_type == "analog_value":
                     # 模拟量变化检测
                     if threshold and abs(current_value - previous_value) >= threshold:
                         change_detected = True
-                        change_info = {
-                            "change_detail": f"{previous_value:.2f} -> {current_value:.2f}",
-                            "change_magnitude": abs(current_value - previous_value),
-                        }
+                        change_info = f"{previous_value:.2f} -> {current_value:.2f}"
 
                 elif change_type == "enum_state":
                     # 枚举状态变化检测
@@ -539,10 +555,7 @@ class SetpointMonitoringTask(BaseTask):
                         curr_desc = enum_mapping.get(
                             str(int(current_value)), str(int(current_value))
                         )
-                        change_info = {
-                            "change_detail": f"{prev_desc} -> {curr_desc}",
-                            "change_magnitude": abs(current_value - previous_value),
-                        }
+                        change_info = f"{prev_desc} -> {curr_desc}"
 
                 if change_detected:
                     change_record = {
@@ -555,14 +568,12 @@ class SetpointMonitoringTask(BaseTask):
                         "previous_value": float(previous_value),
                         "current_value": float(current_value),
                         "change_type": change_type,
-                        "change_detail": change_info.get("change_detail", ""),
-                        "change_magnitude": change_info.get("change_magnitude", 0.0),
                         "detection_time": datetime.now(),
                     }
                     changes.append(change_record)
 
                     logger.debug(
-                        f"[{self.task_name}] {config['device_name']}.{config['point_name']}: {change_info.get('change_detail', '')}"
+                        f"[{self.task_name}] {config['device_name']}.{config['point_name']}: {change_info}"
                     )
 
             return changes

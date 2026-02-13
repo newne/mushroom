@@ -20,6 +20,8 @@ FROM python:3.12.5-slim AS dependency-builder
 # 设置工作目录
 WORKDIR /app
 
+ARG TORCH_EXTRA=cpu
+
 # 设置UV环境变量
 ENV UV_CACHE_DIR=/opt/uv-cache \
     UV_HTTP_TIMEOUT=300 \
@@ -42,7 +44,7 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/opt/uv-cache,uid=0,gid=0,sharing=locked \
     --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0,sharing=locked \
     --mount=from=uv-tool,source=/uv,target=./uv \
-    ./uv sync --frozen --no-install-project --no-dev --no-build-isolation -v && \
+    ./uv sync --frozen --no-install-project --no-dev --no-build-isolation --extra ${TORCH_EXTRA} -v && \
     cp -r .venv/* /opt/venv/
 
 # 清理不必要的文件，减少镜像大小
@@ -89,18 +91,18 @@ COPY dist/src/ ./
 
 # 验证运行时文件是否存在（加密构建必须包含 runtime）
 RUN if [ "$ENCRYPTED" = "true" ]; then \
-        if [ -f codeenigma_runtime.cpython-312-x86_64-linux-gnu.so ]; then \
-            echo "✓ CodeEnigma runtime file found and copied"; \
-        else \
-            echo "Error: CodeEnigma runtime file not found for encrypted build"; \
-            exit 1; \
-        fi; \
+    if [ -f codeenigma_runtime.cpython-312-x86_64-linux-gnu.so ]; then \
+    echo "✓ CodeEnigma runtime file found and copied"; \
     else \
-        if [ -f codeenigma_runtime.cpython-312-x86_64-linux-gnu.so ]; then \
-            echo "Note: runtime present in unencrypted build"; \
-        else \
-            echo "Info: runtime not required for unencrypted build"; \
-        fi; \
+    echo "Error: CodeEnigma runtime file not found for encrypted build"; \
+    exit 1; \
+    fi; \
+    else \
+    if [ -f codeenigma_runtime.cpython-312-x86_64-linux-gnu.so ]; then \
+    echo "Note: runtime present in unencrypted build"; \
+    else \
+    echo "Info: runtime not required for unencrypted build"; \
+    fi; \
     fi
 
 # 配置文件目录（运行时通过挂载提供）
@@ -124,11 +126,11 @@ ARG ENCRYPTED=false
 
 # 设置标签
 LABEL maintainer="mushroom-solution-team" \
-      version="${VERSION}" \
-      git_hash="${GIT_HASH}" \
-      build_date="${BUILD_DATE}" \
-      encrypted="${ENCRYPTED}" \
-      description="Mushroom Solution - AI-powered mushroom growth monitoring system"
+    version="${VERSION}" \
+    git_hash="${GIT_HASH}" \
+    build_date="${BUILD_DATE}" \
+    encrypted="${ENCRYPTED}" \
+    description="Mushroom Solution - AI-powered mushroom growth monitoring system"
 
 # 健康检查 - 检查主要服务是否正常运行
 HEALTHCHECK --interval=600s --timeout=10s --start-period=120s --retries=3 \

@@ -1692,9 +1692,11 @@ class DataExtractor:
             - change_time: Change timestamp
             - previous_value: Value before change
             - current_value: Value after change
-            - change_magnitude: Magnitude of change
             - change_type: Type of change
-            - change_detail: Change details
+            - in_date: Batch entry date
+            - growth_day: Days since batch entry
+            - in_num: Batch entry number
+            - batch_id: Batch identifier
 
         Requirements: 3.1, 3.2, 3.3, 3.4, 3.5
         """
@@ -1737,9 +1739,11 @@ class DataExtractor:
                         DeviceSetpointChange.change_time,
                         DeviceSetpointChange.previous_value,
                         DeviceSetpointChange.current_value,
-                        DeviceSetpointChange.change_magnitude,
                         DeviceSetpointChange.change_type,
-                        DeviceSetpointChange.change_detail,
+                        DeviceSetpointChange.in_date,
+                        DeviceSetpointChange.growth_day,
+                        DeviceSetpointChange.in_num,
+                        DeviceSetpointChange.batch_id,
                     )
                     .where(and_(*conditions))
                     .order_by(
@@ -1770,9 +1774,11 @@ class DataExtractor:
                         "change_time",
                         "previous_value",
                         "current_value",
-                        "change_magnitude",
                         "change_type",
-                        "change_detail",
+                        "in_date",
+                        "growth_day",
+                        "in_num",
+                        "batch_id",
                     ],
                 )
 

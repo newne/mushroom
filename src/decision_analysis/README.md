@@ -585,7 +585,8 @@ max_tokens = -1             # 最大token数
 设备变更记录，包含：
 - 设备信息：device_type, device_name, point_name
 - 变更信息：change_time, previous_value, current_value
-- 变更幅度：change_magnitude, change_type
+- 变更类型：change_type
+- 批次信息：in_date, growth_day, in_num, batch_id
 
 #### SimilarCase
 相似案例，包含：

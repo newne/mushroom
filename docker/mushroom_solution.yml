@@ -70,7 +70,7 @@ services:
   # 业务应用服务
   mushroom_solution:
     <<: [*app-service, *db-deps]
-    image: "registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:0.1.0-20260210095152-6caa407"
+    image: "registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:0.1.0-20260212182106-ed98d57"
     container_name: mushroom_solution
     environment:
       - PYTHONUNBUFFERED=1
@@ -107,7 +107,7 @@ services:
       context: ./mlflow_data
       dockerfile: Dockerfile
       args:
-        - MLFLOW_VERSION=${MLFLOW_VERSION:-latest}
+        - MLFLOW_VERSION=${MLFLOW_VERSION:-v3.9.0}
     container_name: mlflow
     depends_on:
       postgres_db:
@@ -129,8 +129,7 @@ services:
       # MLflow 核心配置（从 .env 读取）
       - MLFLOW_HOST=${MLFLOW_HOST:-0.0.0.0}
       - MLFLOW_PORT=${MLFLOW_PORT:-5000}
-      - MLFLOW_BACKEND_STORE_URI=${MLFLOW_BACKEND_STORE_URI}
-      - MLFLOW_ARTIFACTS_DESTINATION=${MLFLOW_ARTIFACTS_DESTINATION}
+      - MLFLOW_ARTIFACTS_DESTINATION=${MLFLOW_ARTIFACTS_DESTINATION:-s3://mlflow-artifacts}
       # 时区/编码兜底
       - LC_ALL=zh_CN.UTF-8
       - LANG=zh_CN.UTF-8
@@ -138,7 +137,7 @@ services:
     secrets:
       - postgres_password
       - mlflow_db_password
-    command: ["/app/start-mlflow.sh"]
+    command: ["/app/start_mlflow.sh"]
 
      
     ports:

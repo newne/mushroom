@@ -286,7 +286,7 @@ def _safe_mode_value(values: pd.Series) -> Optional[int]:
 def derive_in_day_num_from_info(
     info_df: pd.DataFrame, stat_date: date
 ) -> Dict[str, Any]:
-    result: Dict[str, Any] = {"in_day_num": None, "in_date": None}
+    result: Dict[str, Any] = {"in_day_num": None, "in_date": None, "in_num": None}
     if info_df is None or info_df.empty:
         return result
 
@@ -301,6 +301,8 @@ def derive_in_day_num_from_info(
     mapper = {
         "InDayNum": "in_day_num",
         "in_day_num": "in_day_num",
+        "InNum": "in_num",
+        "in_num": "in_num",
         "InYear": "in_year",
         "in_year": "in_year",
         "InMonth": "in_month",
@@ -315,11 +317,11 @@ def derive_in_day_num_from_info(
     if info_df.empty:
         return result
 
-    for key in ["in_day_num", "in_year", "in_month", "in_day"]:
+    for key in ["in_day_num", "in_num", "in_year", "in_month", "in_day"]:
         values = pd.to_numeric(
             info_df.loc[info_df["point_key"] == key, "value"], errors="coerce"
         ).dropna()
-        if key == "in_day_num":
+        if key in {"in_day_num", "in_num"}:
             values = values[values > 0]
         mode_val = _safe_mode_value(values)
         if mode_val is not None:
@@ -349,14 +351,14 @@ def get_room_mushroom_info(room_id: str, stat_date: date) -> Dict[str, Any]:
 
         device_configs = get_all_device_configs(room_id=room_id)
         if not device_configs or "mushroom_info" not in device_configs:
-            return {"in_day_num": None, "in_date": None}
+            return {"in_day_num": None, "in_date": None, "in_num": None}
 
         info_config = device_configs["mushroom_info"]
         if "device_alias" not in info_config.columns:
             if info_config.index.name == "device_alias":
                 info_config = info_config.reset_index()
             else:
-                return {"in_day_num": None, "in_date": None}
+                return {"in_day_num": None, "in_date": None, "in_num": None}
 
         start_time = datetime.combine(stat_date, datetime.min.time())
         end_time = start_time + timedelta(days=1)
@@ -368,14 +370,14 @@ def get_room_mushroom_info(room_id: str, stat_date: date) -> Dict[str, Any]:
                 results.append(res)
 
         if not results:
-            return {"in_day_num": None, "in_date": None}
+            return {"in_day_num": None, "in_date": None, "in_num": None}
 
         info_df = pd.concat(results).reset_index(drop=True)
         return derive_in_day_num_from_info(info_df, stat_date)
 
     except Exception as exc:
         logger.error(f"[ENV_PROCESSOR] 获取mushroom_info失败: {exc}")
-        return {"in_day_num": None, "in_date": None}
+        return {"in_day_num": None, "in_date": None, "in_num": None}
 
 
 def fill_in_day_num_sequence(

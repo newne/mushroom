@@ -12,6 +12,7 @@ real_time_batch="http://{host}/scada-service/edge/real/query/batch"
 write_cmd="http://{}:9277/edge/device/point/cmd/private" # 发送指令
 llama_completions="http://{host}:{port}/chat/completions"
 prompt_mushroom_description="prompts:/growth_stage_describe/4"
+prompt_mushroom_description_bak="http://{host}/prompt/api/v1/prompts/role-instruction/active"
 prompt_login="http://{host}/prompt/api/v1/auth/login"
 
 [development]
@@ -108,7 +109,7 @@ mlflow_default_artifact_root = "s3://mogu"
 minio_bucket_name = "mogu"
 
 [production.mlflow]
-host = "172.17.0.1"
+host = "mlflow"
 port="5000"
 
 [production.llama]

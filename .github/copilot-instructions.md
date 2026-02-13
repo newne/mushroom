@@ -35,6 +35,15 @@
 - 环境切换: 通过环境变量 `prod` 或配置文件控制（见 `tests` 中的环境切换示例），AI 应尊重代码中对环境的读取方式。
 - 决策分析输出: 结构化JSON格式，包含设备参数调整建议，必须符合 `configs/static_config.json` 中的设备规范。
 
+# 代码生成与性能优化规范（生成代码时必须遵循）
+
+- 遵循 Google Python 风格：命名清晰、函数短小、单一职责；必要时补充简洁注释，避免冗余解释。
+- 优先向量化：pandas/numpy 的 `assign`、`groupby/agg`、`np.where`、`np.select`、`Series.str.*` 等替代 `apply`、`iterrows`、`for` 循环。
+- 避免逐行处理：除非确有必要，不使用 `apply(axis=1)`；若必须使用，需给出原因并控制范围。
+- 批量拼接与计算：字符串拼接用 `Series.str.cat`，分类/标签用 `np.select`，日期/文本解析用 `str.extract` 或 `to_datetime`。
+- 减少重复计算：共享中间列、一次性派生字段，避免在循环或多次分支里重复计算。
+- 复杂逻辑拆分：先向量化生成原子列，再组合输出；必要时将逻辑拆成可测试的小函数。
+
 # 关键文件与定位示例（快速打开）
 核心服务入口: [src/main.py](src/main.py)
 - CLI 工具: [src/scripts/mushroom_cli.py](src/

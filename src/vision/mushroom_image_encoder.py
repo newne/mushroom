@@ -109,8 +109,9 @@ class MushroomImageEncoder:
                     rotation="10 MB",
                     retention="30 days",
                     compression="zip",
-                    filter=lambda record: record["extra"].get("type")
-                    == "llama_performance",
+                    filter=lambda record: (
+                        record["extra"].get("type") == "llama_performance"
+                    ),
                     format="{message}",  # 使用 JSON 格式或者自定义格式，这里我们把 message 构造成 JSON 字符串
                     level="INFO",
                     enqueue=True,
@@ -345,7 +346,11 @@ class MushroomImageEncoder:
             if isinstance(user_content, list):
                 typed_user_content = user_content
             else:
-                typed_user_content = [{"type": "text", "text": str(user_content)}] if str(user_content).strip() else []
+                typed_user_content = (
+                    [{"type": "text", "text": str(user_content)}]
+                    if str(user_content).strip()
+                    else []
+                )
 
             typed_user_content.append(
                 {
@@ -405,9 +410,13 @@ class MushroomImageEncoder:
                 if hasattr(self.get_data, "get_cached_prompt_meta"):
                     prompt_source = self.get_data.get_cached_prompt_meta().get("source")
                 if not prompt_source:
-                    prompt_source = getattr(settings.data_source_url, "prompt_mushroom_description", None)
+                    prompt_source = getattr(
+                        settings.data_source_url, "prompt_mushroom_description", None
+                    )
 
-                if isinstance(prompt_source, str) and prompt_source.startswith("prompts:/"):
+                if isinstance(prompt_source, str) and prompt_source.startswith(
+                    "prompts:/"
+                ):
                     parts = prompt_source[len("prompts:/") :].strip("/").split("/")
                     if len(parts) >= 2:
                         linked_prompt_tag_value = json.dumps(
@@ -431,7 +440,11 @@ class MushroomImageEncoder:
 
                     if trace_id and linked_prompt_tag_value is not None:
                         try:
-                            mlflow.set_trace_tag(trace_id, TraceTagKey.LINKED_PROMPTS, linked_prompt_tag_value)
+                            mlflow.set_trace_tag(
+                                trace_id,
+                                TraceTagKey.LINKED_PROMPTS,
+                                linked_prompt_tag_value,
+                            )
                         except Exception:
                             pass
 
@@ -1928,6 +1941,10 @@ class MushroomImageEncoder:
                 for image_info in batch:
                     try:
                         existing = None
+                        time_info = self.parse_time_from_path(image_info)
+                        in_date = time_info["collection_date"].date()
+                        room_id = self._map_room_id(image_info.mushroom_id)
+
                         if not reprocess:
                             existing = (
                                 session.query(ImageTextQuality)
@@ -1935,6 +1952,23 @@ class MushroomImageEncoder:
                                 .order_by(ImageTextQuality.created_at.desc())
                                 .first()
                             )
+                            if existing:
+                                updated = False
+                                if existing.in_date != in_date:
+                                    existing.in_date = in_date
+                                    updated = True
+                                if existing.room_id is None and room_id:
+                                    existing.room_id = room_id
+                                    updated = True
+                                if existing.collection_datetime is None:
+                                    existing.collection_datetime = time_info[
+                                        "collection_datetime"
+                                    ]
+                                    updated = True
+                                if updated:
+                                    existing.updated_at = func.now()
+                                    stats["success"] += 1
+                                    continue
                             if (
                                 existing
                                 and existing.llama_description
@@ -1957,10 +1991,6 @@ class MushroomImageEncoder:
                             "chinese_description", None
                         )
                         quality_score = llama_result.get("image_quality_score", None)
-
-                        time_info = self.parse_time_from_path(image_info)
-                        in_date = time_info["collection_date"].date()
-                        room_id = self._map_room_id(image_info.mushroom_id)
 
                         existing_embedding = (
                             session.query(MushroomImageEmbedding)

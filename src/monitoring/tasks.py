@@ -15,8 +15,10 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 import pandas as pd
+from sqlalchemy.orm import sessionmaker
 
 from global_const.global_const import pgsql_engine
+from utils.batch_yield_service import resolve_setpoint_batch_info
 from utils.create_table import (
     DecisionAnalysisStaticConfig,
     query_decision_analysis_static_configs,
@@ -24,6 +26,24 @@ from utils.create_table import (
 from utils.loguru_setting import logger
 
 _DEVICE_CONFIGS_CACHE: Dict[str, Dict[str, pd.DataFrame]] = {}
+
+
+def _enrich_changes_with_batch_info(
+    changes: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if not changes:
+        return changes
+
+    Session = sessionmaker(bind=pgsql_engine)
+    with Session() as session:
+        for change in changes:
+            info = resolve_setpoint_batch_info(
+                change.get("room_id"),
+                change.get("change_time"),
+                db=session,
+            )
+            change.update(info)
+    return changes
 
 
 def safe_hourly_setpoint_monitoring() -> None:
@@ -404,6 +424,9 @@ def monitor_room_with_static_configs(
         # 2. 检测变更
         changes = detect_changes_with_static_configs(realtime_data, room_configs)
 
+        # 3. 绑定批次信息
+        changes = _enrich_changes_with_batch_info(changes)
+
         logger.debug(f"[ROOM_MONITOR] 库房 {room_id} 检测到 {len(changes)} 个变更")
 
         return changes
@@ -587,40 +610,6 @@ def detect_changes_with_static_configs(
 
         changes_df = merged.loc[change_mask].copy()
 
-        changes_df["change_magnitude"] = delta.loc[change_mask]
-        changes_df["change_detail"] = ""
-
-        digital_rows = change_mask & digital_mask
-        if digital_rows.any():
-            changes_df.loc[digital_rows, "change_detail"] = (
-                prev_int.loc[digital_rows].astype(str)
-                + " -> "
-                + value_int.loc[digital_rows].astype(str)
-            )
-
-        analog_rows = change_mask & analog_mask
-        if analog_rows.any():
-            changes_df.loc[analog_rows, "change_detail"] = (
-                merged.loc[analog_rows, "previous_value"].map(lambda x: f"{x:.2f}")
-                + " -> "
-                + merged.loc[analog_rows, "value"].map(lambda x: f"{x:.2f}")
-            )
-
-        enum_rows = change_mask & enum_mask
-        if enum_rows.any():
-
-            def _enum_detail(row: pd.Series) -> str:
-                mapping = row.get("enum_mapping") or {}
-                prev = mapping.get(
-                    str(int(row["previous_value"])), str(int(row["previous_value"]))
-                )
-                curr = mapping.get(str(int(row["value"])), str(int(row["value"])))
-                return f"{prev} -> {curr}"
-
-            changes_df.loc[enum_rows, "change_detail"] = changes_df.loc[
-                enum_rows
-            ].apply(_enum_detail, axis=1)
-
         changes_df["detection_time"] = datetime.now()
 
         result_df = changes_df[
@@ -634,8 +623,6 @@ def detect_changes_with_static_configs(
                 "previous_value",
                 "value",
                 "change_type",
-                "change_detail",
-                "change_magnitude",
                 "detection_time",
             ]
         ].rename(
@@ -698,20 +685,14 @@ def detect_point_changes(
                 # 数字量开关变化检测
                 if int(current_value) != int(previous_value):
                     change_detected = True
-                    change_info = {
-                        "change_detail": f"{int(previous_value)} -> {int(current_value)}",
-                        "change_magnitude": abs(current_value - previous_value),
-                    }
+                    change_info = f"{int(previous_value)} -> {int(current_value)}"
 
             elif change_type == "analog_value":
                 # 模拟量变化检测（无阈值时默认记录任意变化）
                 effective_threshold = 0.0 if threshold is None else threshold
                 if abs(current_value - previous_value) >= effective_threshold:
                     change_detected = True
-                    change_info = {
-                        "change_detail": f"{previous_value:.2f} -> {current_value:.2f}",
-                        "change_magnitude": abs(current_value - previous_value),
-                    }
+                    change_info = f"{previous_value:.2f} -> {current_value:.2f}"
 
             elif change_type == "enum_state":
                 # 枚举状态变化检测
@@ -724,10 +705,7 @@ def detect_point_changes(
                     curr_desc = enum_mapping.get(
                         str(int(current_value)), str(int(current_value))
                     )
-                    change_info = {
-                        "change_detail": f"{prev_desc} -> {curr_desc}",
-                        "change_magnitude": abs(current_value - previous_value),
-                    }
+                    change_info = f"{prev_desc} -> {curr_desc}"
 
             if change_detected:
                 change_record = {
@@ -740,14 +718,12 @@ def detect_point_changes(
                     "previous_value": float(previous_value),
                     "current_value": float(current_value),
                     "change_type": change_type,
-                    "change_detail": change_info.get("change_detail", ""),
-                    "change_magnitude": change_info.get("change_magnitude", 0.0),
                     "detection_time": datetime.now(),
                 }
                 changes.append(change_record)
 
                 logger.debug(
-                    f"[POINT_CHANGE] {config['device_name']}.{config['point_name']}: {change_info.get('change_detail', '')}"
+                    f"[POINT_CHANGE] {config['device_name']}.{config['point_name']}: {change_info}"
                 )
 
         return changes

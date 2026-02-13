@@ -13,7 +13,7 @@ st.set_page_config(
     page_title="食用菌种植监控系统",
     page_icon="🍄",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # Use global_const for path management if needed, though running from src usually handles it
