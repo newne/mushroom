@@ -57,7 +57,7 @@ uvicorn main:app --host 0.0.0.0 --port 5000 --workers 1
 **功能**: 提供健康检查API端点
 **端口**: 5000
 **日志**: `/app/Logs/fastapi.log`
-**端点**: `http://localhost:5000/health`
+**端点**: `http://localhost:5001/health`
 
 ### 3. 定时任务服务
 ```bash

@@ -1,0 +1,94 @@
+# ================================================
+# Caddy 配置文件 - 所有端口转发
+# ================================================
+# 架构说明：
+# - 7002: llama.cpp 
+# - 5000: MLflow Docker容器
+# - 7005: mushroom_solution Docker容器
+# - 7009: mushroom_solution Docker容器内部5000
+# ================================================
+
+# MLflow 服务 - 端口 5000
+:5000 {
+    # IP访问控制
+    @notAllowed not remote_ip 127.0.0.1 ::1 192.168.1.0/24 10.77.77.0/24
+    respond @notAllowed "Forbidden" 403
+
+    # 健康检查
+    handle /healthz {
+        respond "ok" 200
+    }
+
+    # 反向代理到 mlflow 容器
+    reverse_proxy mlflow:5000 {
+        flush_interval -1
+        header_up X-Real-IP {remote_host}
+        header_up Host {host}
+    }
+}
+
+# llama.cpp 主服务 - 端口 7002
+:7002 {
+    # IP访问控制
+    @notAllowed not remote_ip 127.0.0.1 ::1 192.168.1.0/24 10.77.77.0/24
+    respond @notAllowed "Forbidden" 403
+
+    # 健康检查
+    handle /healthz {
+        respond "ok" 200
+    }
+
+    # /vl-light 路径转发到实体机 7006
+    handle_path /vl-light/* {
+        reverse_proxy llama-mushroom-vl-light:7006 {
+            flush_interval -1
+            header_up X-Real-IP {remote_host}
+            header_up Host {host}
+        }
+    }
+
+    # 默认转发到实体机的 7004
+    reverse_proxy llama-mushroom-light:7004 {
+        flush_interval -1
+        header_up X-Real-IP {remote_host}
+        header_up Host {host}
+    }
+}
+
+# mushroom_solution API (Streamlit) - 端口 7005
+:7005 {
+    # IP访问控制
+    @notAllowed not remote_ip 127.0.0.1 ::1 192.168.1.0/24 10.77.77.0/24
+    respond @notAllowed "Forbidden" 403
+
+    # 健康检查
+    handle /healthz {
+        respond "ok" 200
+    }
+
+    # 默认转发到 mushroom_solution 容器的 7005 端口
+    reverse_proxy mushroom_solution:7005 {
+        flush_interval -1
+        header_up X-Real-IP {remote_host}
+        header_up Host {host}
+    }
+}
+
+# mushroom_solution 内部5000端口映射 - 端口 7009
+:7009 {
+    # IP访问控制
+    @notAllowed not remote_ip 127.0.0.1 ::1 192.168.1.0/24 10.77.77.0/24
+    respond @notAllowed "Forbidden" 403
+
+    # 健康检查
+    handle /healthz {
+        respond "ok" 200
+    }
+
+    # 转发到 mushroom_solution 容器的 5000 端口
+    reverse_proxy mushroom_solution:5000 {
+        flush_interval -1
+        header_up X-Real-IP {remote_host}
+        header_up Host {host}
+    }
+}

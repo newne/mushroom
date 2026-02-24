@@ -105,6 +105,6 @@ app.include_router(decision_analysis_status_router)
 if __name__ == "__main__":
     # 无论在开发环境还是容器环境，都使用 uvicorn 启动
     # 这将触发 lifespan 事件，从而启动调度器
-    logger.info("[MAIN] 启动 Web 服务 (端口 5000)...")
+    logger.info("[MAIN] 启动 Web 服务 (端口 5001)...")
     workers = int(os.getenv("UVICORN_WORKERS", "1"))
-    uvicorn.run(app, host="0.0.0.0", port=5000, workers=workers)
+    uvicorn.run(app, host="0.0.0.0", port=5001, workers=workers)

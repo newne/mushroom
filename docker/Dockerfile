@@ -134,7 +134,7 @@ LABEL maintainer="mushroom-solution-team" \
 
 # 健康检查 - 检查主要服务是否正常运行
 HEALTHCHECK --interval=600s --timeout=10s --start-period=120s --retries=3 \
-    CMD curl -f http://localhost:5000/health || exit 1
+    CMD curl -f http://localhost:5001/health || exit 1
 
 # 暴露端口
 EXPOSE 5000 7002

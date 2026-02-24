@@ -76,7 +76,7 @@ app.include_router(decision_analysis_status_router)
 
 
 if __name__ == "__main__":
-    # 启动 Web 服务 (端口 5000)，不启动调度器
-    logger.info("[MAIN] 启动 Web 服务 (端口 5000)...")
+    # 启动 Web 服务 (端口 5001)，不启动调度器
+    logger.info("[MAIN] 启动 Web 服务 (端口 5001)...")
     workers = int(os.getenv("UVICORN_WORKERS", "1"))
-    uvicorn.run(app, host="0.0.0.0", port=5000, workers=workers)
+    uvicorn.run(app, host="0.0.0.0", port=5001, workers=workers)

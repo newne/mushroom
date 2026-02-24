@@ -85,7 +85,7 @@ log "线程限制已在环境设置中配置"
 # =============================
 log "启动 Streamlit 应用..."
 STREAMLIT_CMD="$PYTHON -m streamlit run streamlit_app.py \
-    --server.port=7002 \
+    --server.port=7005 \
     --server.address=0.0.0.0 \
     --browser.gatherUsageStats=false \
     --server.enableCORS=false \

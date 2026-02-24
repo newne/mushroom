@@ -21,7 +21,7 @@ x-app-service: &app-service
   <<: *base
   pull_policy: if_not_present
   healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+    test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
     interval: 30s
     timeout: 10s
     retries: 3
@@ -63,14 +63,14 @@ services:
       timeout: 5s
       retries: 5
       start_period: 60s
-    mem_limit: 512m
+    mem_limit: 1g
     cpus: 2.0
     user: "postgres:postgres"
 
   # 业务应用服务
   mushroom_solution:
     <<: [*app-service, *db-deps]
-    image: "registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:0.1.0-20260212182106-ed98d57"
+    image: "registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:0.1.0-20260214094105-a4888c5"
     container_name: mushroom_solution
     environment:
       - PYTHONUNBUFFERED=1
@@ -88,16 +88,16 @@ services:
       - ./Logs:/app/Logs:rw
       - ./models:/models:rw
       - ./data:/app/data:rw
-    ports:
-      - "${STREAMLIT_PORT:-7005}:7005"
-      - 7009:5000
+    #ports:
+      #- "${STREAMLIT_PORT:-7005}:7005"
+      #- 7009:5001
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 120s
-    mem_limit: 2048m
+    mem_limit: 8g
     cpus: 4.0
 
   # MLflow 服务（极简脚本，无解析错误）
@@ -107,7 +107,7 @@ services:
       context: ./mlflow_data
       dockerfile: Dockerfile
       args:
-        - MLFLOW_VERSION=${MLFLOW_VERSION:-v3.9.0}
+        - MLFLOW_VERSION=${MLFLOW_VERSION:-latest}
     container_name: mlflow
     depends_on:
       postgres_db:
@@ -129,7 +129,7 @@ services:
       # MLflow 核心配置（从 .env 读取）
       - MLFLOW_HOST=${MLFLOW_HOST:-0.0.0.0}
       - MLFLOW_PORT=${MLFLOW_PORT:-5000}
-      - MLFLOW_ARTIFACTS_DESTINATION=${MLFLOW_ARTIFACTS_DESTINATION:-s3://mlflow-artifacts}
+      - MLFLOW_ARTIFACTS_DESTINATION=${MLFLOW_ARTIFACTS_DESTINATION}
       # 时区/编码兜底
       - LC_ALL=zh_CN.UTF-8
       - LANG=zh_CN.UTF-8
@@ -140,20 +140,38 @@ services:
     command: ["/app/start_mlflow.sh"]
 
      
-    ports:
-      - "${MLFLOW_PORT:-5000}:5000"
+    #ports:
+      #- "${MLFLOW_PORT:-5000}:5000"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:$$MLFLOW_PORT/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 60s
-    mem_limit: 1024m
+    mem_limit: 2g
     cpus: 2.0
+  caddy:
+    <<: *base
+    image: caddy:2-alpine
+    container_name: caddy_proxy
+    # 端口映射（外部访问）
+    ports:
+      - "5000:5000"    # MLflow
+      - "7002:7002"    # mushroom_llama
+      - "7005:7005"    # streamlit
+      - "7009:7009"    # fastapi 
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 1.0
 
 # 数据卷（根级别，关键修复！）
 volumes:
   postgre_data_v18:
+    driver: local
+  caddy_data:
     driver: local
 
 # 网络（根级别）

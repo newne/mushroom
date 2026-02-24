@@ -1,0 +1,116 @@
+  # 基础配置模板
+x-base: &base
+  networks:
+    - mushroom_service_plant_backend
+  environment:
+    - TZ=Asia/Shanghai
+    - ENVIRONMENT=${ENVIRONMENT:-production}
+  restart: unless-stopped
+  volumes:
+    - /etc/localtime:/etc/localtime:ro  # 只读挂载主机时区
+    - /etc/timezone:/etc/timezone:ro
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "100m"
+      max-file: "5"
+      compress: "true"
+services:
+    # ==========================================
+    # LLaMA.cpp 文本服务
+    # 对应原 systemd: llama-mushroom-light.service
+    # 监听端口: 7004
+    # ==========================================
+    
+    llama-mushroom-light:
+      <<: *base
+      image: ghcr.io/ggml-org/llama.cpp:server
+      container_name: llama-mushroom-light
+      # CPU 绑定: 对应原 CPUAffinity=2 3
+      cpuset: "2,3"
+      # CPU 数量限制
+      cpus: 2.0
+      # 内存限制 (对应原 OOM 调整)
+      mem_limit: 2g
+      environment:
+        # 线程数设置
+        - OMP_NUM_THREADS=2
+        - OPENBLAS_NUM_THREADS=2
+        - MKL_NUM_THREADS=2
+      volumes:
+        # 模型文件挂载
+        - /home/sysadmin/algorithm/models/models:/models:ro
+        # API Key 和模板挂载
+        - /home/sysadmin/algorithm/models/lmstudio:/config:ro
+      command: >
+        -m /models/Qwen3-1.7B-Q4_K_M.gguf
+        --host 0.0.0.0
+        --port 7004
+        --threads 2
+        -c 8192
+        --api-key-file /config/api.key
+        --alias "蘑菇助手"
+        --chat-template-file /config/mushroom_chat_template.jinja
+        --cont-batching
+        --batch-size 64
+        --ubatch-size 16
+        --parallel 1
+        --cache-ram 2048
+        -ngl 0
+      healthcheck:
+        # 检查端口是否存活
+        test: ["CMD-SHELL", "curl -f http://localhost:7004/health || exit 1"]
+        interval: 30s
+        timeout: 10s
+        retries: 3
+        start_period: 30s
+
+    # ==========================================
+    # LLaMA.cpp 视觉语言服务
+    # 对应原 systemd: llama-mushroom-vl-light.service
+    # 监听端口: 7006
+    # ==========================================
+    llama-mushroom-vl-light:
+      <<: *base
+      image: ghcr.io/ggml-org/llama.cpp:server
+      container_name: llama-mushroom-vl-light
+      # CPU 绑定: 对应原 CPUAffinity=0 1
+      cpuset: "0,1"
+      cpus: 2.0
+      mem_limit: 4g
+      environment:
+        - OMP_NUM_THREADS=2
+        - OPENBLAS_NUM_THREADS=2
+        - MKL_NUM_THREADS=2
+      volumes:
+        # 挂载模型目录
+        - /home/sysadmin/algorithm/models/lmstudio:/models:ro
+        # 挂载配置
+        - /home/sysadmin/algorithm/models/lmstudio:/config:ro
+      command: >
+        -m /models/Qwen3VL-2B-Instruct-Q4_K_M.gguf
+        --mmproj /models/mmproj-Qwen3VL-2B-Instruct-F16.gguf
+        --host 0.0.0.0
+        --port 7006
+        --threads 2
+        -c 8192
+        --api-key-file /config/api.key
+        --alias "蘑菇助手"
+        --chat-template-file /config/mushroom_chat_template.jinja
+        --cont-batching
+        --batch-size 64
+        --ubatch-size 16
+        --parallel 1
+        --cache-ram 2048
+        -ngl 0
+      healthcheck:
+        test: ["CMD-SHELL", "curl -f http://localhost:7006/health || exit 1"]
+        interval: 30s
+        timeout: 10s
+        retries: 3
+        start_period: 30s
+
+
+networks:
+  mushroom_service_plant_backend:
+    external: true
