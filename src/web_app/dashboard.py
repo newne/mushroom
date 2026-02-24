@@ -242,16 +242,9 @@ def build_device_remark_map() -> dict:
     for device_type, device_cfg in datapoint_cfg.items():
         if not isinstance(device_cfg, dict):
             continue
-        device_list = device_cfg.get("device_list", [])
-        if not isinstance(device_list, list):
-            continue
-        for device in device_list:
-            if not isinstance(device, dict):
-                continue
-            device_alias = device.get("device_alias")
-            if not device_alias:
-                continue
-            remark_map[(device_type, device_alias)] = device.get("remark")
+        remark = device_cfg.get("remark")
+        if remark:
+            remark_map[device_type] = remark
 
     return remark_map
 
@@ -738,7 +731,7 @@ def show_legacy():
     )
 
     # --- Sidebar Controls ---
-    st.sidebar.title("🔍 筛选控制台")
+    st.sidebar.title("筛选控制台")
 
     all_rooms = load_room_list()
     # Unique key for sidebar ensuring no conflict during re-runs
@@ -785,10 +778,10 @@ def show_legacy():
     st.sidebar.info(f"最后更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     # --- Main Content ---
-    st.title("🍄 食用菌种植监控系统")
+    st.title("鹿茸菇数据分析及可视化")
 
     tab1, tab2, tab3 = st.tabs(
-        ["🏭 库房-批次关联分析", "🔧 监控点变更追踪", "🌡️ 环境温湿度趋势"]
+        ["库房-批次关联分析", "监控点变更追踪", "环境温湿度趋势"]
     )
 
     # ==========================================
@@ -837,7 +830,7 @@ def show_legacy():
                 c4.metric("平均图像评分", f"{batch_df['avg_quality'].mean():.1f}")
 
                 # 1.2 Interactive Table
-                st.subheader("📋 批次详情表")
+                st.subheader("批次详情表")
                 st.dataframe(
                     batch_df.style.format(
                         {"avg_quality": "{:.1f}", "in_num": "{:.0f}"}
@@ -849,7 +842,7 @@ def show_legacy():
                 c_left, c_right = st.columns(2)
 
                 with c_left:
-                    st.subheader("📦 进库包数分布")
+                    st.subheader("进库包数分布")
                     fig_bar = px.bar(
                         batch_df,
                         x="room_id",
@@ -862,7 +855,7 @@ def show_legacy():
                     st.plotly_chart(fig_bar, width="stretch")
 
                 with c_right:
-                    st.subheader("📅 进库日期分布")
+                    st.subheader("进库日期分布")
                     fig_timeline = px.scatter(
                         batch_df,
                         x="in_date",
@@ -876,7 +869,7 @@ def show_legacy():
 
                 # 1.4 Quality Correlation
                 if not quality_df.empty:
-                    st.subheader("🔍 生长天数 vs 图像质量")
+                    st.subheader("生长天数 vs 图像质量")
                     fig_scatter = px.scatter(
                         quality_df,
                         x="growth_day",
@@ -1088,7 +1081,7 @@ def show_legacy():
                     else "N/A",
                 )
 
-                st.subheader("🗓️ 批次每日操作总览")
+                st.subheader("批次每日操作总览")
                 change_df["op_day"] = change_df["change_time"].dt.date
                 daily_counts = (
                     change_df.groupby(["room_id", "op_day"])
@@ -1138,7 +1131,7 @@ def show_legacy():
                     day_ops = day_ops.sort_values("change_time")
 
                 if not daily_counts.empty:
-                    st.subheader("⏱️ 当日操作时间轴")
+                    st.subheader("当日操作时间轴")
                     fig_ops = px.scatter(
                         day_ops,
                         x="change_time",
@@ -1164,7 +1157,7 @@ def show_legacy():
                         config={"scrollZoom": True, "responsive": True},
                     )
 
-                    st.subheader("📝 当日操作明细")
+                    st.subheader("当日操作明细")
                     st.dataframe(
                         day_ops[
                             [
@@ -1184,7 +1177,7 @@ def show_legacy():
 
                     env_ts_for_export = pd.DataFrame()
 
-                    st.subheader("🧪 操作影响分析")
+                    st.subheader("操作影响分析")
                     if day_ops.empty:
                         st.info("当日无操作记录，无法进行影响分析。")
                     else:
@@ -1278,7 +1271,7 @@ def show_legacy():
                             metrics_df = pd.DataFrame(metrics_rows)
                             st.dataframe(metrics_df, width="stretch")
 
-                    st.subheader("📤 数据导出")
+                    st.subheader("数据导出")
                     ops_export = change_df.sort_values("change_time").copy()
                     ops_export = ops_export[
                         [
@@ -1331,7 +1324,7 @@ def show_legacy():
                             key="dashboard_tab2_export_xlsx",
                         )
 
-                st.subheader("📎 批次内全量操作列表（截断预览）")
+                st.subheader("批次内全量操作列表（截断预览）")
                 st.warning(f"显示最近 1000 条记录 (共 {len(change_df)} 条)")
                 display_df = (
                     change_df.sort_values("change_time", ascending=False)
@@ -1388,7 +1381,7 @@ def show_legacy():
                     if room_data.empty:
                         continue
 
-                    st.markdown(f"### 🏠 库房: {room_id}")
+                    st.markdown(f"### 库房: {room_id}")
 
                     # Summary for the latest day
                     latest_day = room_data.iloc[-1]
@@ -1485,19 +1478,13 @@ def show_legacy():
 
 def show():
     from web_app.control_ops_dashboard.analysis import (
-        compute_batch_metrics,
         compute_cooccurrence_matrix,
-        compute_stability_metrics,
     )
     from web_app.control_ops_dashboard.data import (
         attach_batch_and_growth_day,
         load_batch_windows_from_yield,
         load_device_setpoint_changes,
         load_room_list_from_yield,
-    )
-    from web_app.control_ops_dashboard.exporting import (
-        dataframes_to_excel_bytes,
-        dataframe_to_csv_bytes,
     )
 
     st.markdown(
@@ -1552,7 +1539,7 @@ html, body, [class*="css"] {
         unsafe_allow_html=True,
     )
 
-    st.title("📊 调控操作可视化")
+    st.title("调控操作可视化")
 
     @st.cache_data(ttl=300)
     def cached_rooms():
@@ -1713,7 +1700,6 @@ html, body, [class*="css"] {
                 )
 
     if changes.empty:
-        st.warning("当前筛选条件下无调控记录。")
         return
 
     changes = changes[changes["batch_key"].isin(selected_batches)].copy()
@@ -1755,18 +1741,12 @@ html, body, [class*="css"] {
         changes = changes[changes["point_group"].isin(selected_point_groups)].copy()
 
     if changes.empty:
-        st.warning("当前筛选条件下无调控记录。")
         return
 
-    st.subheader("🧭 批次概览")
-    metrics_df = compute_batch_metrics(changes)
-    st.dataframe(metrics_df, width="stretch")
-
-    st.subheader("⏱️ 调控时间轴（按设备类型分项）")
+    st.subheader("调控时间轴（按设备类型分项）")
     for room_id in selected_rooms:
         room_df = changes[changes["room_id"] == room_id].copy()
         if room_df.empty:
-            st.info(f"{room_id} 无调控记录。")
             continue
 
         room_batches = (
@@ -1787,76 +1767,580 @@ html, body, [class*="css"] {
             device_types = ["unknown"]
             room_df["device_type"] = room_df["device_type"].fillna("unknown")
 
-        for device_type in device_types:
-            type_df = room_df[room_df["device_type"] == device_type].copy()
-            if type_df.empty:
-                continue
+        device_remark_map = build_device_remark_map()
+        tab_labels = [device_remark_map.get(dt, dt) for dt in device_types]
+        tabs = st.tabs(tab_labels)
+        for tab, device_type in zip(tabs, device_types):
+            with tab:
+                type_df = room_df[room_df["device_type"] == device_type].copy()
+                if type_df.empty:
+                    continue
 
-            batch_options = ["全部批次"] + unique_batches
-            selected_batch = st.selectbox(
-                f"{room_id} | {device_type} 批次选择",
-                options=batch_options,
-                index=0,
-                key=f"control_ops_batch_filter_{room_id}_{device_type}",
-            )
-            if selected_batch != "全部批次":
-                type_df = type_df[type_df["batch_key"] == selected_batch].copy()
-            if type_df.empty:
-                st.info(f"{room_id} | {device_type} 无可视化数据。")
-                continue
+                batch_options = ["全部批次"] + unique_batches
+                selected_batch = st.selectbox(
+                    f"{room_id} | {device_type} 批次选择",
+                    options=batch_options,
+                    index=0,
+                    key=f"control_ops_batch_filter_{room_id}_{device_type}",
+                )
+                if selected_batch != "全部批次":
+                    type_df = type_df[type_df["batch_key"] == selected_batch].copy()
+                if type_df.empty:
+                    st.info(f"{room_id} | {device_type} 无可视化数据。")
+                    continue
 
-            top_points = (
-                type_df["point_group"].fillna("unknown").value_counts().head(25).index
-            )
-            type_df = type_df[type_df["point_group"].isin(top_points)].copy()
+                top_points = (
+                    type_df["point_group"]
+                    .fillna("unknown")
+                    .value_counts()
+                    .head(25)
+                    .index
+                )
+                type_df = type_df[type_df["point_group"].isin(top_points)].copy()
 
-            prev_vals = type_df["previous_value"].where(
-                type_df["previous_value"].notna(), "N/A"
-            )
-            curr_vals = type_df["current_value"].where(
-                type_df["current_value"].notna(), "N/A"
-            )
-            type_df["change_label"] = prev_vals.astype(str).str.cat(
-                curr_vals.astype(str), sep=" -> "
-            )
-
-            fig = px.scatter(
-                type_df,
-                x="growth_day_num",
-                y="point_group",
-                color="batch_key",
-                facet_row="batch_key" if len(unique_batches) > 1 else None,
-                color_discrete_map=color_map,
-                text="change_label",
-                hover_data=[
-                    "change_time",
+                # 找出重复调节的数据并打印（同一时刻精确到分钟）
+                type_df["change_time_minute"] = type_df["change_time"].dt.floor("min")
+                dedup_keys = [
+                    "batch_key",
                     "device_name",
                     "point_name",
-                    "previous_value",
-                    "current_value",
-                ],
-                title=f"库房 {room_id} | 设备类型: {device_type} 调控明细",
-            )
-            fig.update_traces(
-                textposition="top center",
-                textfont=dict(size=10),
-                marker=dict(size=10, opacity=0.8),
-                hovertemplate=(
-                    "天数 %{x}<br>测点 %{y}<br>时间 %{customdata[0]}"
-                    "<br>设备 %{customdata[1]} | 点位 %{customdata[2]}"
-                    "<br>前值 %{customdata[3]} -> 后值 %{customdata[4]}<extra></extra>"
-                ),
-            )
-            fig.update_layout(
-                height=min(1100, 36 * max(10, type_df["point_group"].nunique())),
-                xaxis_title="生长天数",
-                yaxis_title="测点类型",
-            )
-            st.plotly_chart(
-                fig, width="stretch", config={"scrollZoom": True, "responsive": True}
-            )
+                    "change_time_minute",
+                ]
 
-        st.markdown("### 🧠 操作方式画像")
+                # 如果同一时刻重复调节，图上显示最后的调节即可
+                type_df = type_df.sort_values("change_time").drop_duplicates(
+                    subset=dedup_keys,
+                    keep="last",
+                )
+
+                # 找出同一天内对同一测点的所有不重复调节，并按时间排序
+                type_df = type_df.sort_values(
+                    ["batch_key", "growth_day_num", "change_time"]
+                )
+
+                prev_vals = type_df["previous_value"].where(
+                    type_df["previous_value"].notna(), "N/A"
+                )
+                curr_vals = type_df["current_value"].where(
+                    type_df["current_value"].notna(), "N/A"
+                )
+                type_df["change_label"] = prev_vals.astype(str).str.cat(
+                    curr_vals.astype(str), sep=" -> "
+                )
+
+                overlap_keys = ["batch_key", "growth_day_num", "point_group"]
+                overlap_mask = type_df.duplicated(subset=overlap_keys, keep=False)
+                has_overlap = bool(overlap_mask.any())
+
+                type_df["change_time_hm"] = type_df["change_time"].dt.strftime("%H:%M")
+                type_df["minute_of_day"] = (
+                    type_df["change_time"].dt.hour * 60
+                    + type_df["change_time"].dt.minute
+                )
+                if has_overlap:
+                    type_df["x_plot"] = (
+                        type_df["growth_day_num"] + type_df["minute_of_day"] / 1440.0
+                    )
+                    type_df["text_label"] = np.where(
+                        overlap_mask,
+                        type_df["change_label"]
+                        .astype(str)
+                        .str.cat(type_df["change_time_hm"], sep=" @ "),
+                        type_df["change_label"],
+                    )
+                    x_field = "x_plot"
+                    x_axis_title = "生长天数"
+                else:
+                    type_df["x_plot"] = type_df["growth_day_num"]
+                    type_df["text_label"] = type_df["change_label"]
+                    x_field = "x_plot"
+                    x_axis_title = "生长天数"
+
+                fig = px.scatter(
+                    type_df,
+                    x=x_field,
+                    y="point_group",
+                    color="batch_key",
+                    facet_row="batch_key" if len(unique_batches) > 1 else None,
+                    color_discrete_map=color_map,
+                    text="text_label",
+                    hover_data=[
+                        "growth_day_num",
+                        "change_time_hm",
+                        "change_time",
+                        "device_name",
+                        "point_name",
+                        "previous_value",
+                        "current_value",
+                    ],
+                    title=f"库房 {room_id} | 设备类型: {device_type} 调控明细",
+                )
+                fig.update_traces(
+                    textposition="top center",
+                    textfont=dict(size=9),
+                    marker=dict(size=9, opacity=0.82),
+                    hovertemplate=(
+                        "生长天数 %{customdata[0]}<br>时分 %{customdata[1]}"
+                        "<br>时间 %{customdata[2]}<br>测点 %{y}"
+                        "<br>设备 %{customdata[3]} | 点位 %{customdata[4]}"
+                        "<br>前值 %{customdata[5]} -> 后值 %{customdata[6]}<extra></extra>"
+                    ),
+                )
+
+                num_facets = (
+                    type_df["batch_key"].nunique() if len(unique_batches) > 1 else 1
+                )
+                base_height_per_facet = max(250, 40 * type_df["point_group"].nunique())
+                total_height = base_height_per_facet * num_facets
+
+                fig.update_layout(
+                    height=total_height,
+                    xaxis_title=x_axis_title,
+                    yaxis_title="测点类型",
+                )
+                fig.update_xaxes(tickmode="linear", dtick=1)
+                st.plotly_chart(
+                    fig,
+                    width="stretch",
+                    config={"scrollZoom": True, "responsive": True},
+                )
+
+                st.markdown("#### 参数设定点趋势（按设备类型）")
+                trend_df = type_df.copy().sort_values("change_time")
+                if not trend_df.empty:
+                    trend_df["current_value_num"] = pd.to_numeric(
+                        trend_df["current_value"], errors="coerce"
+                    )
+                    trend_df = trend_df[trend_df["current_value_num"].notna()].copy()
+
+                    if trend_df.empty:
+                        st.info("当前批次的设定值不是数值型，无法绘制变化图。")
+                    else:
+                        point_order = (
+                            trend_df.groupby("point_group")
+                            .size()
+                            .sort_values(ascending=False)
+                            .head(12)
+                            .index.tolist()
+                        )
+                        trend_df = trend_df[
+                            trend_df["point_group"].isin(point_order)
+                        ].copy()
+                        trend_df["growth_day_int"] = pd.to_numeric(
+                            trend_df["growth_day_num"], errors="coerce"
+                        )
+                        trend_df = trend_df[trend_df["growth_day_int"].notna()].copy()
+                        trend_df["growth_day_int"] = trend_df["growth_day_int"].astype(
+                            int
+                        )
+
+                        if trend_df.empty:
+                            st.info("缺少有效生长天数，无法展示生长周期变化。")
+                        else:
+                            cycle_df = (
+                                trend_df.sort_values("change_time")
+                                .groupby(
+                                    ["batch_key", "point_group", "growth_day_int"],
+                                    as_index=False,
+                                )
+                                .agg(
+                                    current_value_num=("current_value_num", "last"),
+                                    first_change_time=("change_time", "min"),
+                                    last_change_time=("change_time", "max"),
+                                )
+                            )
+
+                            batch_keys_for_heat = sorted(
+                                cycle_df["batch_key"].dropna().unique().tolist()
+                            )
+                            if not batch_keys_for_heat:
+                                st.info("当前筛选条件下无可展示的批次热力图。")
+                            else:
+                                heat_tabs = st.tabs(
+                                    [f"批次 {b}" for b in batch_keys_for_heat]
+                                )
+                                for heat_tab, batch_key in zip(
+                                    heat_tabs, batch_keys_for_heat
+                                ):
+                                    with heat_tab:
+                                        batch_cycle_df = cycle_df[
+                                            cycle_df["batch_key"] == batch_key
+                                        ].copy()
+                                        if batch_cycle_df.empty:
+                                            st.info(f"批次 {batch_key} 无有效设定值。")
+                                            continue
+
+                                        day_min = int(
+                                            batch_cycle_df["growth_day_int"].min()
+                                        )
+                                        day_max = int(
+                                            batch_cycle_df["growth_day_int"].max()
+                                        )
+                                        all_days = list(range(day_min, day_max + 1))
+                                        daily_last_df = (
+                                            trend_df[trend_df["batch_key"] == batch_key]
+                                            .sort_values("change_time")
+                                            .groupby(
+                                                ["point_group", "growth_day_int"],
+                                                as_index=False,
+                                            )
+                                            .agg(
+                                                current_value_num=(
+                                                    "current_value_num",
+                                                    "last",
+                                                ),
+                                                value_start_time=(
+                                                    "change_time",
+                                                    "last",
+                                                ),
+                                            )
+                                        )
+
+                                        grid_df = (
+                                            pd.MultiIndex.from_product(
+                                                [point_order, all_days],
+                                                names=["point_group", "growth_day_int"],
+                                            )
+                                            .to_frame(index=False)
+                                            .merge(
+                                                daily_last_df,
+                                                on=["point_group", "growth_day_int"],
+                                                how="left",
+                                            )
+                                            .sort_values(
+                                                ["point_group", "growth_day_int"]
+                                            )
+                                        )
+                                        grid_df["current_value_num"] = grid_df.groupby(
+                                            "point_group"
+                                        )["current_value_num"].ffill()
+                                        grid_df["value_start_time"] = grid_df.groupby(
+                                            "point_group"
+                                        )["value_start_time"].ffill()
+
+                                        unique_start_df = (
+                                            grid_df[["point_group", "value_start_time"]]
+                                            .dropna()
+                                            .drop_duplicates()
+                                            .sort_values(
+                                                ["point_group", "value_start_time"]
+                                            )
+                                        )
+                                        unique_start_df["value_end_time"] = (
+                                            unique_start_df.groupby("point_group")[
+                                                "value_start_time"
+                                            ].shift(-1)
+                                        )
+                                        grid_df = grid_df.merge(
+                                            unique_start_df,
+                                            on=["point_group", "value_start_time"],
+                                            how="left",
+                                        )
+
+                                        heatmap_df = grid_df.pivot(
+                                            index="point_group",
+                                            columns="growth_day_int",
+                                            values="current_value_num",
+                                        ).reindex(point_order)
+                                        start_time_df = grid_df.pivot(
+                                            index="point_group",
+                                            columns="growth_day_int",
+                                            values="value_start_time",
+                                        ).reindex(point_order)
+                                        end_time_df = grid_df.pivot(
+                                            index="point_group",
+                                            columns="growth_day_int",
+                                            values="value_end_time",
+                                        ).reindex(point_order)
+
+                                        start_time_str_df = start_time_df.apply(
+                                            lambda col: col.dt.strftime(
+                                                "%Y-%m-%d %H:%M:%S"
+                                            )
+                                        ).fillna("N/A")
+                                        end_time_str_df = end_time_df.apply(
+                                            lambda col: col.dt.strftime(
+                                                "%Y-%m-%d %H:%M:%S"
+                                            )
+                                        ).fillna("当前仍生效")
+                                        raw_customdata = np.dstack(
+                                            (
+                                                start_time_str_df.to_numpy(),
+                                                end_time_str_df.to_numpy(),
+                                            )
+                                        )
+
+                                        norm_heatmap_df = heatmap_df.copy()
+                                        row_min = norm_heatmap_df.min(axis=1)
+                                        row_max = norm_heatmap_df.max(axis=1)
+                                        row_range = (row_max - row_min).replace(
+                                            0, np.nan
+                                        )
+                                        norm_heatmap_df = norm_heatmap_df.sub(
+                                            row_min, axis=0
+                                        ).div(row_range, axis=0)
+                                        has_value_mask = heatmap_df.notna().any(axis=1)
+                                        constant_mask = (
+                                            row_range.isna() & has_value_mask
+                                        )
+                                        norm_heatmap_df.loc[constant_mask] = (
+                                            norm_heatmap_df.loc[constant_mask].where(
+                                                norm_heatmap_df.loc[
+                                                    constant_mask
+                                                ].isna(),
+                                                0.5,
+                                            )
+                                        )
+
+                                        c_raw, c_norm = st.columns(2)
+                                        with c_raw:
+                                            fig_heat = px.imshow(
+                                                heatmap_df,
+                                                aspect="auto",
+                                                labels={
+                                                    "x": "生长天数",
+                                                    "y": "测点",
+                                                    "color": "设定值",
+                                                },
+                                                title=f"库房 {room_id} | {device_type} | 批次 {batch_key} 生长周期设定值（原值）",
+                                            )
+                                            fig_heat.update_traces(
+                                                customdata=raw_customdata,
+                                                hovertemplate=(
+                                                    "测点 %{y}<br>生长天数 %{x}<br>设定值 %{z}"
+                                                    "<br>开始时间 %{customdata[0]}"
+                                                    "<br>结束时间 %{customdata[1]}<extra></extra>"
+                                                ),
+                                            )
+                                            fig_heat.update_layout(
+                                                height=max(
+                                                    360, 24 * max(8, len(point_order))
+                                                ),
+                                            )
+                                            st.plotly_chart(
+                                                fig_heat,
+                                                width="stretch",
+                                                config={
+                                                    "scrollZoom": True,
+                                                    "responsive": True,
+                                                },
+                                            )
+
+                                        with c_norm:
+                                            fig_heat_norm = px.imshow(
+                                                norm_heatmap_df,
+                                                aspect="auto",
+                                                zmin=0,
+                                                zmax=1,
+                                                labels={
+                                                    "x": "生长天数",
+                                                    "y": "测点",
+                                                    "color": "标准化值",
+                                                },
+                                                title=f"库房 {room_id} | {device_type} | 批次 {batch_key} 生长周期设定值（标准化）",
+                                            )
+                                            fig_heat_norm.update_traces(
+                                                customdata=np.dstack(
+                                                    (
+                                                        heatmap_df.to_numpy(),
+                                                        start_time_str_df.to_numpy(),
+                                                        end_time_str_df.to_numpy(),
+                                                    )
+                                                ),
+                                                hovertemplate=(
+                                                    "测点 %{y}<br>生长天数 %{x}<br>标准化值 %{z:.3f}"
+                                                    "<br>原始设定值 %{customdata[0]}"
+                                                    "<br>开始时间 %{customdata[1]}"
+                                                    "<br>结束时间 %{customdata[2]}<extra></extra>"
+                                                ),
+                                            )
+                                            fig_heat_norm.update_layout(
+                                                height=max(
+                                                    360, 24 * max(8, len(point_order))
+                                                ),
+                                            )
+                                            st.plotly_chart(
+                                                fig_heat_norm,
+                                                width="stretch",
+                                                config={
+                                                    "scrollZoom": True,
+                                                    "responsive": True,
+                                                },
+                                            )
+
+                            selected_point_cycle = st.selectbox(
+                                "查看测点生长周期变化",
+                                options=point_order,
+                                key=f"control_ops_cycle_point_{room_id}_{device_type}",
+                            )
+                            point_cycle_df = cycle_df[
+                                cycle_df["point_group"] == selected_point_cycle
+                            ].sort_values(["batch_key", "growth_day_int"])
+                            fig_point_cycle = go.Figure()
+                            for batch_key in sorted(
+                                point_cycle_df["batch_key"].dropna().unique().tolist()
+                            ):
+                                batch_point_df = point_cycle_df[
+                                    point_cycle_df["batch_key"] == batch_key
+                                ].copy()
+                                if batch_point_df.empty:
+                                    continue
+                                fig_point_cycle.add_trace(
+                                    go.Scatter(
+                                        x=batch_point_df["growth_day_int"],
+                                        y=batch_point_df["current_value_num"],
+                                        mode="lines+markers",
+                                        line_shape="hv",
+                                        name=str(batch_key),
+                                        hovertemplate="生长天数 %{x}<br>设定值 %{y}<extra></extra>",
+                                    )
+                                )
+                            fig_point_cycle.update_layout(
+                                title=f"{selected_point_cycle} 生长周期设定值变化（按天最后值，分批次）",
+                                xaxis_title="生长天数",
+                                yaxis_title="设定值",
+                                legend_title="批次",
+                                height=320,
+                            )
+                            st.plotly_chart(
+                                fig_point_cycle,
+                                width="stretch",
+                                config={"scrollZoom": True, "responsive": True},
+                            )
+
+                with st.expander(f"{room_id} 调控效果反馈", expanded=True):
+                    if not selected_point_cycle:
+                        st.info("当前设备类型下无可评估测点。")
+                    else:
+                        selected_eval_point = selected_point_cycle
+                        st.caption(f"当前评估测点：{selected_eval_point}")
+
+                        ops_df = (
+                            type_df[
+                                type_df["point_group"].fillna("unknown")
+                                == selected_eval_point
+                            ]
+                            .sort_values("change_time", ascending=False)
+                            .head(500)
+                            .reset_index(drop=True)
+                        )
+                        if ops_df.empty:
+                            st.info("该测点下无可评估调控记录。")
+                        else:
+                            growth_days = (
+                                pd.to_numeric(ops_df.get("growth_day"), errors="coerce")
+                                .fillna(0)
+                                .astype(int)
+                            )
+                            adjust_times = pd.to_datetime(
+                                ops_df["change_time"], errors="coerce"
+                            ).dt.strftime("%Y-%m-%d %H:%M:%S")
+                            prev_vals = (
+                                ops_df["previous_value"]
+                                .where(ops_df["previous_value"].notna(), "N/A")
+                                .astype(str)
+                            )
+                            curr_vals = (
+                                ops_df["current_value"]
+                                .where(ops_df["current_value"].notna(), "N/A")
+                                .astype(str)
+                            )
+                            ops_df["op_label"] = (
+                                "生长天数 D"
+                                + growth_days.astype(str)
+                                + " | 调整时间 "
+                                + adjust_times.fillna("N/A").astype(str)
+                                + " | 变化值 "
+                                + prev_vals
+                                + " -> "
+                                + curr_vals
+                            )
+                            selected_op_idx = st.selectbox(
+                                "选择一条调控记录",
+                                options=list(range(len(ops_df))),
+                                format_func=lambda i: ops_df.loc[i, "op_label"],
+                                key=f"control_ops_eval_op_{room_id}_{device_type}",
+                            )
+                            op_row = ops_df.loc[selected_op_idx]
+                            event_time = pd.to_datetime(
+                                op_row["change_time"]
+                            ).to_pydatetime()
+
+                            is_grow_light = str(device_type).lower() == "grow_light"
+                            c_left, c_right = st.columns([2, 1])
+                            with c_left:
+                                if is_grow_light:
+                                    st.info("grow_light 相关设定不分析环境变化。")
+                                else:
+                                    window_minutes = st.selectbox(
+                                        "环境曲线窗口（分钟）",
+                                        options=[30, 60, 180],
+                                        index=1,
+                                        key=f"control_ops_eval_window_{room_id}_{device_type}",
+                                    )
+                                    ts_start = event_time - timedelta(
+                                        minutes=int(window_minutes)
+                                    )
+                                    ts_end = event_time + timedelta(
+                                        minutes=int(window_minutes)
+                                    )
+
+                                    env_ts = load_env_timeseries_window(
+                                        room_id, ts_start, ts_end
+                                    )
+                                    metrics = infer_env_metrics(
+                                        op_row.get("device_type"),
+                                        op_row.get("point_group"),
+                                    )
+
+                                    if env_ts is None or env_ts.empty:
+                                        st.warning("物联环境数据为空或查询失败。")
+                                    else:
+                                        fig_env = go.Figure()
+                                        for m in metrics:
+                                            if (
+                                                m in env_ts.columns
+                                                and env_ts[m].notna().any()
+                                            ):
+                                                fig_env.add_trace(
+                                                    go.Scatter(
+                                                        x=env_ts["time"],
+                                                        y=env_ts[m],
+                                                        mode="lines",
+                                                        name=m,
+                                                    )
+                                                )
+                                        fig_env.add_vline(
+                                            x=event_time,
+                                            line_width=2,
+                                            line_dash="dash",
+                                            line_color="red",
+                                        )
+                                        fig_env.update_layout(
+                                            title="真实环境参数趋势",
+                                            xaxis_title="时间",
+                                            yaxis_title="数值",
+                                        )
+                                        st.plotly_chart(
+                                            fig_env,
+                                            width="stretch",
+                                            config={
+                                                "scrollZoom": True,
+                                                "responsive": True,
+                                            },
+                                        )
+
+                            with c_right:
+                                if is_grow_light:
+                                    st.info("该记录不提供环境影响指标。")
+                                else:
+                                    rows = [
+                                        compute_impact_metrics(env_ts, m, event_time)
+                                        for m in metrics
+                                    ]
+                                    st.dataframe(pd.DataFrame(rows), width="stretch")
+
+        st.markdown("### 操作方式画像")
         room_batch_options = sorted(room_df["batch_key"].dropna().unique().tolist())
         batch_selection = st.selectbox(
             f"{room_id} | 操作方式画像批次",
@@ -1907,21 +2391,22 @@ html, body, [class*="css"] {
                 )
 
         with profile_right:
-            type_counts = (
-                profile_df["device_type"].fillna("unknown").value_counts().head(12)
-            )
+            type_counts = profile_df["device_type"].fillna("unknown").value_counts()
             point_counts = (
                 profile_df["point_group"].fillna("unknown").value_counts().head(15)
             )
 
             type_df = type_counts.reset_index()
             type_df.columns = ["device_type", "count"]
+            type_df["device_type_cn"] = type_df["device_type"].map(
+                lambda dt: device_remark_map.get(dt, dt)
+            )
             fig_device = px.bar(
                 type_df,
-                x="device_type",
+                x="device_type_cn",
                 y="count",
-                title="设备类型调控频次（Top 12）",
-                labels={"device_type": "设备类型", "count": "调控次数"},
+                title="设备类型调控频次",
+                labels={"device_type_cn": "设备类型", "count": "调控次数"},
             )
             st.plotly_chart(
                 fig_device,
@@ -1944,175 +2429,7 @@ html, body, [class*="css"] {
                 config={"scrollZoom": True, "responsive": True},
             )
 
-        st.markdown("### 🧭 关键调整模式")
-        st.caption("聚合展示具体设备/测点的调整方向与可能意图（经验提示）。")
-
-        summary_df = profile_df.copy()
-        summary_df["direction"] = np.select(
-            [summary_df["delta_value"] > 0, summary_df["delta_value"] < 0],
-            ["上调", "下调"],
-            default="不变",
-        )
-        intent_text = (
-            summary_df["device_type"]
-            .fillna("")
-            .astype(str)
-            .str.cat(summary_df["point_group"].fillna("").astype(str), sep=" ")
-            .str.lower()
-        )
-        summary_df["intent"] = np.select(
-            [
-                intent_text.str.contains("temp|温|temperature|tem", regex=True),
-                intent_text.str.contains("hum|湿|humidity", regex=True),
-                intent_text.str.contains("co2|二氧化碳", regex=True),
-                intent_text.str.contains("风|fan|fresh|vent|air", regex=True),
-                intent_text.str.contains("光|light|illum", regex=True),
-                intent_text.str.contains("冷|cool", regex=True),
-            ],
-            ["控制温度", "调湿", "控制 CO2", "通风换气", "补光管理", "制冷/降温"],
-            default="通用调控",
-        )
-        pattern_df = (
-            summary_df.groupby(
-                ["device_type", "point_group", "change_type", "direction", "intent"]
-            )
-            .agg(
-                changes=("change_time", "count"),
-                avg_delta=("delta_value", "mean"),
-            )
-            .reset_index()
-            .sort_values(["changes", "avg_delta"], ascending=[False, False])
-        )
-        if not pattern_df.empty:
-            pattern_df["avg_delta"] = pattern_df["avg_delta"].round(2)
-            st.dataframe(pattern_df.head(40), width="stretch")
-        else:
-            st.info("暂无可用于总结的调整模式。")
-
-        st.subheader(f"📈 {room_id} 参数设定点趋势（批次对比）")
-        top_points = (
-            room_df.groupby("point_group")
-            .size()
-            .sort_values(ascending=False)
-            .head(30)
-            .index.tolist()
-        )
-        selected_point = st.selectbox(
-            "选择参数点位",
-            options=top_points,
-            key=f"control_ops_point_{room_id}",
-        )
-        line_df = (
-            room_df[room_df["point_group"] == selected_point]
-            .copy()
-            .sort_values(["growth_day_num", "change_time"])
-        )
-        fig_line = go.Figure()
-        for b in unique_batches:
-            bdf = line_df[line_df["batch_key"] == b].copy()
-            if bdf.empty:
-                continue
-            fig_line.add_trace(
-                go.Scatter(
-                    x=bdf["growth_day_num"],
-                    y=bdf["current_value"],
-                    mode="lines+markers",
-                    line_shape="hv",
-                    name=b,
-                    hovertemplate="天数 %{x}<br>设定值 %{y}<extra></extra>",
-                )
-            )
-        fig_line.update_layout(
-            title=f"{room_id} | {selected_point}",
-            xaxis_title="生长天数",
-            yaxis_title="设定值",
-            legend_title="批次",
-        )
-        st.plotly_chart(
-            fig_line, width="stretch", config={"scrollZoom": True, "responsive": True}
-        )
-
-        with st.expander(f"🔍 {room_id} 调控效果评估（真实环境参数）", expanded=False):
-            ops_df = (
-                room_df.sort_values("change_time", ascending=False)
-                .head(500)
-                .reset_index(drop=True)
-            )
-            op_times = pd.to_datetime(
-                ops_df["change_time"], errors="coerce"
-            ).dt.strftime("%Y-%m-%d %H:%M:%S")
-            growth_days = (
-                pd.to_numeric(ops_df.get("growth_day"), errors="coerce")
-                .fillna(0)
-                .astype(int)
-            )
-            point_groups = (
-                ops_df["point_group"]
-                if "point_group" in ops_df.columns
-                else pd.Series("", index=ops_df.index)
-            )
-            ops_df["op_label"] = (
-                op_times.fillna("N/A").astype(str)
-                + " | D"
-                + growth_days.astype(str)
-                + " | "
-                + point_groups.fillna("").astype(str)
-            )
-            selected_op_idx = st.selectbox(
-                "选择一条调控记录",
-                options=list(range(len(ops_df))),
-                format_func=lambda i: ops_df.loc[i, "op_label"],
-                key=f"control_ops_eval_op_{room_id}",
-            )
-            op_row = ops_df.loc[selected_op_idx]
-            event_time = pd.to_datetime(op_row["change_time"]).to_pydatetime()
-            window_minutes = st.selectbox(
-                "环境曲线窗口（分钟）",
-                options=[30, 60, 180],
-                index=1,
-                key=f"control_ops_eval_window_{room_id}",
-            )
-            ts_start = event_time - timedelta(minutes=int(window_minutes))
-            ts_end = event_time + timedelta(minutes=int(window_minutes))
-
-            env_ts = load_env_timeseries_window(room_id, ts_start, ts_end)
-            metrics = infer_env_metrics(
-                op_row.get("device_type"),
-                op_row.get("point_group"),
-            )
-
-            c_left, c_right = st.columns([2, 1])
-            with c_left:
-                if env_ts is None or env_ts.empty:
-                    st.warning("物联环境数据为空或查询失败。")
-                else:
-                    fig_env = go.Figure()
-                    for m in metrics:
-                        if m in env_ts.columns and env_ts[m].notna().any():
-                            fig_env.add_trace(
-                                go.Scatter(
-                                    x=env_ts["time"], y=env_ts[m], mode="lines", name=m
-                                )
-                            )
-                    fig_env.add_vline(
-                        x=event_time, line_width=2, line_dash="dash", line_color="red"
-                    )
-                    fig_env.update_layout(
-                        title="真实环境参数趋势",
-                        xaxis_title="时间",
-                        yaxis_title="数值",
-                    )
-                    st.plotly_chart(
-                        fig_env,
-                        width="stretch",
-                        config={"scrollZoom": True, "responsive": True},
-                    )
-
-            with c_right:
-                rows = [compute_impact_metrics(env_ts, m, event_time) for m in metrics]
-                st.dataframe(pd.DataFrame(rows), width="stretch")
-
-    st.subheader("🔗 参数共现分析")
+    st.subheader("参数共现分析")
     co = compute_cooccurrence_matrix(changes, window_minutes=30)
     if not co.empty:
         top_keys = (
@@ -2129,51 +2446,6 @@ html, body, [class*="css"] {
         )
     else:
         st.info("暂无可用共现数据。")
-
-    st.subheader("✅ 调控后稳定性（再调控率）")
-    stab = compute_stability_metrics(changes, post_minutes=30)
-    st.dataframe(stab.head(200), width="stretch")
-
-    st.subheader("📤 导出报表")
-    export_df = changes[
-        [
-            "room_id",
-            "batch_key",
-            "in_date",
-            "growth_day",
-            "change_time",
-            "device_type",
-            "device_name",
-            "point_name",
-            "point_group",
-            "previous_value",
-            "current_value",
-            "change_type",
-            "delta_value",
-            "abs_magnitude",
-        ]
-    ].sort_values(["room_id", "batch_key", "change_time"])
-
-    st.download_button(
-        "导出调控数据（CSV）",
-        data=dataframe_to_csv_bytes(export_df),
-        file_name="control_ops_export.csv",
-        mime="text/csv",
-        key="control_ops_export_csv",
-    )
-    st.download_button(
-        "导出调控数据（Excel）",
-        data=dataframes_to_excel_bytes(
-            {
-                "operations": export_df,
-                "batch_metrics": metrics_df,
-                "stability": stab,
-            }
-        ),
-        file_name="control_ops_export.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        key="control_ops_export_xlsx",
-    )
 
 
 # For compatibility if run directly

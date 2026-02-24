@@ -5,13 +5,13 @@
 # - 7002: llama.cpp 
 # - 5000: MLflow Docker容器
 # - 7005: mushroom_solution Docker容器
-# - 7009: mushroom_solution Docker容器内部5000
+# - 7009: mushroom_solution Docker容器内部5001
 # ================================================
 
 # MLflow 服务 - 端口 5000
 :5000 {
     # IP访问控制
-    @notAllowed not remote_ip 127.0.0.1 ::1 192.168.1.0/24 10.77.77.0/24
+    @notAllowed not remote_ip 127.0.0.1 ::1 192.168.1.0/24 10.77.77.0/24 172.16.0.0/12
     respond @notAllowed "Forbidden" 403
 
     # 健康检查
@@ -23,14 +23,14 @@
     reverse_proxy mlflow:5000 {
         flush_interval -1
         header_up X-Real-IP {remote_host}
-        header_up Host {host}
+        header_up Host mlflow:5000
     }
 }
 
 # llama.cpp 主服务 - 端口 7002
 :7002 {
     # IP访问控制
-    @notAllowed not remote_ip 127.0.0.1 ::1 192.168.1.0/24 10.77.77.0/24
+    @notAllowed not remote_ip 127.0.0.1 ::1 192.168.1.0/24 10.77.77.0/24 172.16.0.0/12
     respond @notAllowed "Forbidden" 403
 
     # 健康检查
@@ -58,7 +58,7 @@
 # mushroom_solution API (Streamlit) - 端口 7005
 :7005 {
     # IP访问控制
-    @notAllowed not remote_ip 127.0.0.1 ::1 192.168.1.0/24 10.77.77.0/24
+    @notAllowed not remote_ip 127.0.0.1 ::1 192.168.1.0/24 10.77.77.0/24 172.16.0.0/12
     respond @notAllowed "Forbidden" 403
 
     # 健康检查
@@ -77,7 +77,7 @@
 # mushroom_solution 内部5000端口映射 - 端口 7009
 :7009 {
     # IP访问控制
-    @notAllowed not remote_ip 127.0.0.1 ::1 192.168.1.0/24 10.77.77.0/24
+    @notAllowed not remote_ip 127.0.0.1 ::1 192.168.1.0/24 10.77.77.0/24 172.16.0.0/12
     respond @notAllowed "Forbidden" 403
 
     # 健康检查
@@ -85,8 +85,8 @@
         respond "ok" 200
     }
 
-    # 转发到 mushroom_solution 容器的 5000 端口
-    reverse_proxy mushroom_solution:5000 {
+    # 转发到 mushroom_solution 容器的 5001 端口
+    reverse_proxy mushroom_solution:5001 {
         flush_interval -1
         header_up X-Real-IP {remote_host}
         header_up Host {host}

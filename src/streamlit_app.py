@@ -10,8 +10,8 @@ import streamlit as st
 
 # Must be the first Streamlit command
 st.set_page_config(
-    page_title="食用菌种植监控系统",
-    page_icon="🍄",
+    page_title="鹿茸菇数据分析及可视化",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -26,6 +26,7 @@ except ImportError:
         sys.path.append(str(current_path))
     from global_const.global_const import BASE_DIR
 
+
 def main():
     # Lazy import to avoid circular dependencies or early execution
     import web_app.dashboard as dashboard
@@ -36,6 +37,7 @@ def main():
         ]
     )
     pg.run()
+
 
 if __name__ == "__main__":
     main()

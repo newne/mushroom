@@ -24,7 +24,7 @@ def compute_batch_metrics(df: pd.DataFrame) -> pd.DataFrame:
                 "batch_key",
                 "changes",
                 "unique_points",
-                "avg_magnitude",
+                # "avg_magnitude",
             ]
         )
 
@@ -38,7 +38,7 @@ def compute_batch_metrics(df: pd.DataFrame) -> pd.DataFrame:
         .agg(
             changes=("change_time", "count"),
             unique_points=("point_group", "nunique"),
-            avg_magnitude=("abs_magnitude", "mean"),
+            # avg_magnitude=("abs_magnitude", "mean"),
         )
         .reset_index()
         .sort_values(["room_id", "changes"], ascending=[True, False])
