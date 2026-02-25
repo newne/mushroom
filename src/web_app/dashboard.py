@@ -1148,6 +1148,15 @@ def show_legacy():
                         ],
                         title=f"{selected_room} | {selected_day} 操作时间轴",
                     )
+                    fig_ops.update_traces(
+                        hovertemplate=(
+                            "时间 %{x|%Y-%m-%d %H:%M:%S}<br>操作点位 %{y}"
+                            "<br>设备 %{customdata[0]} | 测点 %{customdata[1]}"
+                            "<br>操作类型 %{customdata[2]}"
+                            "<br>前值 %{customdata[3]} -> 后值 %{customdata[4]}"
+                            "<br>变化量 %{customdata[5]}<extra></extra>"
+                        )
+                    )
                     fig_ops.update_layout(
                         xaxis_title="操作时间", yaxis_title="操作点位"
                     )
@@ -1797,6 +1806,12 @@ html, body, [class*="css"] {
                     .index
                 )
                 type_df = type_df[type_df["point_group"].isin(top_points)].copy()
+                point_group_order = (
+                    type_df["point_group"]
+                    .fillna("unknown")
+                    .value_counts()
+                    .index.tolist()
+                )
 
                 # 找出重复调节的数据并打印（同一时刻精确到分钟）
                 type_df["change_time_minute"] = type_df["change_time"].dt.floor("min")
@@ -1833,6 +1848,9 @@ html, body, [class*="css"] {
                 has_overlap = bool(overlap_mask.any())
 
                 type_df["change_time_hm"] = type_df["change_time"].dt.strftime("%H:%M")
+                type_df["change_time_fmt"] = type_df["change_time"].dt.strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
                 type_df["minute_of_day"] = (
                     type_df["change_time"].dt.hour * 60
                     + type_df["change_time"].dt.minute
@@ -1862,12 +1880,13 @@ html, body, [class*="css"] {
                     y="point_group",
                     color="batch_key",
                     facet_row="batch_key" if len(unique_batches) > 1 else None,
+                    category_orders={"point_group": point_group_order},
                     color_discrete_map=color_map,
                     text="text_label",
                     hover_data=[
                         "growth_day_num",
                         "change_time_hm",
-                        "change_time",
+                        "change_time_fmt",
                         "device_name",
                         "point_name",
                         "previous_value",
@@ -1899,6 +1918,9 @@ html, body, [class*="css"] {
                     yaxis_title="测点类型",
                 )
                 fig.update_xaxes(tickmode="linear", dtick=1)
+                fig.for_each_yaxis(lambda axis: axis.update(title_text=""))
+                fig.update_yaxes(matches="y")
+                fig.update_layout(yaxis_title="测点类型")
                 st.plotly_chart(
                     fig,
                     width="stretch",
