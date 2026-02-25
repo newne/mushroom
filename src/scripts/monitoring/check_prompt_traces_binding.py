@@ -17,15 +17,23 @@ def _parse_prompt_uri(prompt_uri: str) -> Optional[tuple[str, str]]:
     return parts[0], str(parts[1])
 
 
-def main(prompt_uri: str = "prompts:/growth_stage_describe/4", max_results: int = 200):
+def main(prompt_uri: Optional[str] = None, max_results: int = 200):
+    if prompt_uri is None:
+        prompt_uri = getattr(
+            settings.data_source_url, "prompt_mushroom_description", None
+        )
+        if not prompt_uri:
+            raise ValueError(
+                "prompt_mushroom_description is not configured in settings.toml"
+            )
     host = getattr(getattr(settings, "mlflow", None), "host", None)
     port = getattr(getattr(settings, "mlflow", None), "port", None)
     if host and port:
         mlflow.set_tracking_uri(f"http://{host}:{port}")
 
-    exp = mlflow.get_experiment_by_name("Mushroom_Text_Quality_Task")
+    exp = mlflow.get_experiment_by_name("Default")
     if exp is None:
-        raise RuntimeError("未找到实验: Mushroom_Text_Quality_Task")
+        raise RuntimeError("未找到实验: Default")
     exp_id = str(exp.experiment_id)
 
     parsed = _parse_prompt_uri(prompt_uri)

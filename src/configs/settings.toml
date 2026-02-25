@@ -11,7 +11,7 @@ real_time_batch_bak="http://{host}:9277/edge/real/query/batch"
 real_time_batch="http://{host}/scada-service/edge/real/query/batch"
 write_cmd="http://{}:9277/edge/device/point/cmd/private" # 发送指令
 llama_completions="http://{host}:{port}/chat/completions"
-prompt_mushroom_description="prompts:/growth_stage_describe/4"
+prompt_mushroom_description="prompts:/growth_stage_describe/17"
 prompt_mushroom_description_bak="http://{host}/prompt/api/v1/prompts/role-instruction/active"
 prompt_login="http://{host}/prompt/api/v1/auth/login"
 
@@ -63,7 +63,7 @@ mushroom_descripe_prompt = "" # Loaded from MLflow Prompt Registry: growth_stage
 [development.llama_vl]
 llama_host = "10.77.77.49"
 llama_port = "7001"
-model = "qwen3-vl-2b-instruct"
+model = "qwen3-vl-8b"
 llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）

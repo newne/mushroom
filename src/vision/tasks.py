@@ -39,8 +39,12 @@ def safe_hourly_clip_inference() -> None:
     _safe_hourly()
 
 
-def safe_hourly_text_quality_inference() -> None:
-    """每小时文本编码与图像质量评估任务"""
+def safe_hourly_text_quality_inference(reprocess: bool = False) -> None:
+    """每小时文本编码与图像质量评估任务。
+
+    Args:
+        reprocess: 是否强制重处理已存在记录（用于补跑/回填场景）
+    """
     max_retries = CLIP_INFERENCE_MAX_RETRIES
     retry_delay = CLIP_INFERENCE_RETRY_DELAY
 
@@ -55,6 +59,7 @@ def safe_hourly_text_quality_inference() -> None:
 
             try:
                 import mlflow
+                from mlflow.tracking import MlflowClient
                 from global_const.global_const import settings
 
                 tracking_uri = None
@@ -69,20 +74,36 @@ def safe_hourly_text_quality_inference() -> None:
                 if tracking_uri:
                     mlflow.set_tracking_uri(tracking_uri)
 
-                mlflow.set_experiment("Mushroom_Text_Quality_Task")
+                experiment_name = "Mushroom_Text_Quality_Task"
+                client = MlflowClient()
+                experiment = client.get_experiment_by_name(experiment_name)
+                if experiment is None:
+                    client.create_experiment(experiment_name)
+                elif getattr(experiment, "lifecycle_stage", "active") == "deleted":
+                    client.restore_experiment(experiment.experiment_id)
+                    logger.warning(
+                        f"[TEXT_QUALITY_TASK] 检测到已删除实验，已自动恢复: {experiment_name}"
+                    )
+
+                mlflow.set_experiment(experiment_name)
                 mlflow_run = mlflow.start_run(
                     run_name=f"text_quality_{end_time.strftime('%Y%m%d_%H%M%S')}"
                 )
                 try:
                     mlflow.log_param("lookback_hours", CLIP_INFERENCE_HOUR_LOOKBACK)
                     mlflow.log_param("batch_size", CLIP_INFERENCE_BATCH_SIZE)
-                    prompt_src = getattr(settings.data_source_url, "prompt_mushroom_description", None)
+                    mlflow.log_param("reprocess", bool(reprocess))
+                    prompt_src = getattr(
+                        settings.data_source_url, "prompt_mushroom_description", None
+                    )
                     if prompt_src:
                         mlflow.log_param("prompt_source", str(prompt_src))
                 except Exception:
                     pass
             except Exception as e:
-                logger.warning(f"[TEXT_QUALITY_TASK] MLflow 初始化失败，将继续无 Traces 运行: {e}")
+                logger.warning(
+                    f"[TEXT_QUALITY_TASK] MLflow 初始化失败，将继续无 Traces 运行: {e}"
+                )
 
             from vision.mushroom_image_encoder import create_mushroom_encoder
 
@@ -109,6 +130,7 @@ def safe_hourly_text_quality_inference() -> None:
                         start_time=start_time_filter,
                         end_time=end_time,
                         batch_size=CLIP_INFERENCE_BATCH_SIZE,
+                        reprocess=reprocess,
                     )
                     for key in total_stats:
                         total_stats[key] += stats.get(key, 0)
@@ -130,7 +152,9 @@ def safe_hourly_text_quality_inference() -> None:
                     mlflow.log_metric("skipped", float(total_stats["skipped"]))
                     mlflow.end_run(status="FINISHED")
             except Exception as e:
-                logger.warning(f"[TEXT_QUALITY_TASK] MLflow 指标/Traces flush 失败: {e}")
+                logger.warning(
+                    f"[TEXT_QUALITY_TASK] MLflow 指标/Traces flush 失败: {e}"
+                )
             return
         except Exception as e:
             error_msg = str(e)

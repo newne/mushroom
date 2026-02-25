@@ -21,7 +21,7 @@ x-app-service: &app-service
   <<: *base
   pull_policy: if_not_present
   healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+    test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
     interval: 30s
     timeout: 10s
     retries: 3
@@ -70,7 +70,7 @@ services:
   # 业务应用服务
   mushroom_solution:
     <<: [*app-service, *db-deps]
-    image: "registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:0.1.0-20260224141127-2fefb16"
+    image: "registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:0.1.0-20260224180854-e4d3a2f"
     container_name: mushroom_solution
     environment:
       - PYTHONUNBUFFERED=1
@@ -90,9 +90,9 @@ services:
       - ./data:/app/data:rw
     #ports:
       #- "${STREAMLIT_PORT:-7005}:7005"
-      #- 7009:5000
+      #- 7009:5001
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -131,6 +131,8 @@ services:
       - MLFLOW_PORT=${MLFLOW_PORT:-5000}
       - MLFLOW_ARTIFACTS_DESTINATION=${MLFLOW_ARTIFACTS_DESTINATION}
       - MLFLOW_SERVER_ALLOWED_HOSTS=${MLFLOW_SERVER_ALLOWED_HOSTS:-*}
+      - MLFLOW_SERVER_CORS_ALLOWED_ORIGINS=${MLFLOW_SERVER_CORS_ALLOWED_ORIGINS:-*}
+      - MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE=${MLFLOW_SERVER_DISABLE_SECURITY_MIDDLEWARE:-true}
       # 时区/编码兜底
       - LC_ALL=zh_CN.UTF-8
       - LANG=zh_CN.UTF-8
@@ -160,7 +162,7 @@ services:
       - "5000:5000"    # MLflow
       - "7002:7002"    # mushroom_llama
       - "7005:7005"    # streamlit
-      - "7009:5001"    # fastapi 
+      - "7009:7009"    # fastapi
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data

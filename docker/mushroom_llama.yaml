@@ -31,7 +31,7 @@ services:
       # CPU 数量限制
       cpus: 2.0
       # 内存限制 (对应原 OOM 调整)
-      mem_limit: 2g
+      mem_limit: 4g
       environment:
         # 线程数设置
         - OMP_NUM_THREADS=2

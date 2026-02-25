@@ -106,5 +106,5 @@ if __name__ == "__main__":
     # 无论在开发环境还是容器环境，都使用 uvicorn 启动
     # 这将触发 lifespan 事件，从而启动调度器
     logger.info("[MAIN] 启动 Web 服务 (端口 5001)...")
-    workers = int(os.getenv("UVICORN_WORKERS", "1"))
+    workers = int(os.getenv("UVICORN_WORKERS", "4"))
     uvicorn.run(app, host="0.0.0.0", port=5001, workers=workers)

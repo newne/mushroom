@@ -7,6 +7,7 @@
 import base64
 import io
 import json
+import re
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -275,6 +276,55 @@ class MushroomImageEncoder:
             logger.warning(f"LLaMA-VL客户端初始化失败: {e}")
             self.llama_client = False
 
+    def _apply_prompt_length_guard(self, prompt_text: str) -> str:
+        """提示词长度守卫：过长时切换紧凑版提示词。"""
+        normalized = str(prompt_text) if prompt_text is not None else ""
+        if len(normalized) > 2600:
+            logger.warning("[LLAMA-API] 提示词过长，使用紧凑版提示词以避免接口拒绝")
+            return self._build_compact_v15_prompt()
+        return normalized
+
+    def _build_compact_v15_prompt(self) -> str:
+        """构建紧凑版v15提示词，保留核心约束和关键示例。"""
+        return (
+            "You are a visual morphologist for Lyophyllum decastes in industrial bag cultivation. "
+            "Return exactly one JSON object with growth_stage_description, chinese_description, image_quality_score.\n"
+            "Use exact stage terms: Substrate Stage, Primordia Stage, Fruiting Stage, Post-harvest Stage.\n"
+            "Stage rules: "
+            "Substrate Stage=bags/substrate visible, smooth/flat, no visible primordia or fruiting bodies; "
+            "Primordia Stage=pinhead/coral primordia visible, no mature fruiting bodies; "
+            "Fruiting Stage=mature caps/stipes present; "
+            "Post-harvest Stage=bags visible, disturbed substrate, cut traces/residual bases, no intact mushrooms.\n"
+            "Visible traits only, no causes/speculation, no subjective words, no verbs.\n"
+            "Describe only deer antler mushroom growth status; never use biological-activity wording.\n"
+            "When primordia/fruiting visible, use noun-chain traits if clearly visible: "
+            "Cap(thin/thick, small/large, hemispherical/flattened, smooth/rough), "
+            "Stipe(short/long, slender/clavate, uniform/irregular), "
+            "Cluster(sparse/moderate/dense, radial/bushy), "
+            "Development(normal development/delayed development/over-mature), "
+            "Morphology Integrity(intact morphology/minor deformity/severe deformity), "
+            "Texture Uniformity(uniform grayscale/mottled grayscale), "
+            "Grayscale Tone(dark/medium/light).\n"
+            "growth_stage_description format: "
+            "[Stage], [Cap], [Stipe], [Cluster], [Development Status], [Morphology Integrity], [Texture Uniformity], [Grayscale Tone]. "
+            "Omit categories with no visible evidence. Post-harvest may skip cap/stipe.\n"
+            "chinese_description must be a professional mycological translation.\n"
+            "image_quality_score (0-100) based on focus/illumination/noise and obscuration; do not penalize natural absence of mushrooms.\n"
+            "Few-shot examples:\n"
+            '{"growth_stage_description": "Fruiting Stage, thick caps, long stipes, dense radial cluster, normal development, intact morphology, uniform grayscale, medium grayscale", "chinese_description": "子实体阶段，厚菌盖，长菌柄，密集放射状菌簇，发育正常，形态完整，灰度均匀，中等灰度", "image_quality_score": 92}\n'
+            '{"growth_stage_description": "Primordia Stage, coral primordia, dense cluster, normal development, intact morphology, uniform grayscale, medium grayscale", "chinese_description": "原基阶段，珊瑚状原基，密集菌簇，发育正常，形态完整，灰度均匀，中等灰度", "image_quality_score": 88}\n'
+            '{"growth_stage_description": "Post-harvest Stage, disturbed substrate, cut traces visible, low contrast grayscale", "chinese_description": "已采收阶段，基质扰动，可见切痕，低对比度灰度", "image_quality_score": 45}'
+        )
+
+    def _build_minimal_fallback_prompt(self) -> str:
+        """构建最小兼容提示词，用于接口400时降级重试。"""
+        return (
+            "Analyze this mushroom image and return EXACTLY one JSON object with keys "
+            "growth_stage_description, chinese_description, image_quality_score. "
+            "Use growth stages only from: Substrate Stage, Primordia Stage, Fruiting Stage, Post-harvest Stage. "
+            "Describe only visible traits and keep concise professional terms."
+        )
+
     def _call_llama_api(self, image_data: str) -> dict[str, Any]:
         """
         直接调用LLaMA API (集成性能监控)
@@ -323,9 +373,19 @@ class MushroomImageEncoder:
                     role = msg.get("role", "user")
                     content = msg.get("content", "")
                     if role == "system":
-                        messages.append({"role": "system", "content": str(content)})
+                        messages.append(
+                            {
+                                "role": "system",
+                                "content": self._apply_prompt_length_guard(content),
+                            }
+                        )
                     elif role == "user":
-                        messages.append({"role": "user", "content": str(content)})
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": self._apply_prompt_length_guard(content),
+                            }
+                        )
                         last_user_index = len(messages) - 1
                     elif role == "assistant":
                         messages.append({"role": "assistant", "content": str(content)})
@@ -334,7 +394,12 @@ class MushroomImageEncoder:
                         if role == "user":
                             last_user_index = len(messages) - 1
             else:
-                messages.append({"role": "system", "content": str(prompt)})
+                messages.append(
+                    {
+                        "role": "system",
+                        "content": self._apply_prompt_length_guard(prompt),
+                    }
+                )
                 messages.append({"role": "user", "content": ""})
                 last_user_index = 1
 
@@ -367,6 +432,7 @@ class MushroomImageEncoder:
                 "temperature": temperature,
                 "top_p": top_p,
                 "stream": False,
+                "response_format": {"type": "text"},
             }
 
             headers = {"Content-Type": "application/json"}
@@ -426,35 +492,150 @@ class MushroomImageEncoder:
             except Exception:
                 linked_prompt_tag_value = None
 
-            resp = None
+            # 尝试设置 MLflow trace
+            span_cm = None
+            span = None
             try:
                 import mlflow
                 from mlflow.tracing.utils.prompt import TraceTagKey
+                import copy
+                import base64
+                import tempfile
+                import os
 
-                with mlflow.start_span(name="llama_chat_completions", span_type="LLM"):
-                    trace_id = None
+                span_cm = mlflow.start_span(
+                    name="llama_chat_completions", span_type="LLM"
+                )
+                span = span_cm.__enter__()
+
+                trace_payload = copy.deepcopy(payload)
+
+                if mlflow.active_run():
                     try:
-                        trace_id = mlflow.get_active_trace_id()
+                        image_bytes = base64.b64decode(image_data)
+                        with tempfile.NamedTemporaryFile(
+                            suffix=".jpg", delete=False
+                        ) as f:
+                            f.write(image_bytes)
+                            temp_path = f.name
+
+                        artifact_path = f"images/{request_id}.jpg"
+                        mlflow.log_artifact(temp_path, artifact_path)
+                        os.remove(temp_path)
+
+                        artifact_uri = mlflow.get_artifact_uri(artifact_path)
+                        tracking_uri = mlflow.get_tracking_uri()
+                        if artifact_uri.startswith("mlflow-artifacts:/"):
+                            path = artifact_uri[len("mlflow-artifacts:/") :]
+                            http_url = f"{tracking_uri.rstrip('/')}/api/2.0/mlflow-artifacts/artifacts/{path}"
+                        else:
+                            http_url = artifact_uri
+
+                        for msg in trace_payload.get("messages", []):
+                            if isinstance(msg.get("content"), list):
+                                for item in msg["content"]:
+                                    if item.get("type") == "image_url":
+                                        item["image_url"]["artifact_url"] = http_url
+                    except Exception as e:
+                        logger.debug(
+                            f"[LLAMA-API] Failed to log image artifact for trace: {e}"
+                        )
+
+                span.set_inputs(trace_payload)
+
+                trace_id = None
+                try:
+                    trace_id = mlflow.get_active_trace_id()
+                except Exception:
+                    pass
+
+                if trace_id and linked_prompt_tag_value is not None:
+                    try:
+                        mlflow.set_trace_tag(
+                            trace_id,
+                            TraceTagKey.LINKED_PROMPTS,
+                            linked_prompt_tag_value,
+                        )
                     except Exception:
-                        trace_id = None
+                        pass
+            except Exception as e:
+                logger.debug(f"[LLAMA-API] MLflow trace setup failed: {e}")
+                if span_cm:
+                    span_cm.__exit__(None, None, None)
+                span_cm = None
+                span = None
 
-                    if trace_id and linked_prompt_tag_value is not None:
-                        try:
-                            mlflow.set_trace_tag(
-                                trace_id,
-                                TraceTagKey.LINKED_PROMPTS,
-                                linked_prompt_tag_value,
-                            )
-                        except Exception:
-                            pass
-
-                    resp = requests.post(
-                        base_url, json=payload, headers=headers, timeout=timeout
-                    )
-            except Exception:
+            try:
                 resp = requests.post(
                     base_url, json=payload, headers=headers, timeout=timeout
                 )
+                if span:
+                    if resp.status_code == 200:
+                        span.set_outputs(resp.json())
+                    else:
+                        span.set_outputs(
+                            {"status_code": resp.status_code, "text": resp.text}
+                        )
+
+                if (
+                    resp.status_code == 400
+                    and "failed to process image" in (resp.text or "").lower()
+                ):
+                    logger.warning(
+                        "[LLAMA-API] 主提示词请求被拒绝，使用最小兼容提示词重试一次"
+                    )
+                    fallback_payload = {
+                        "model": model,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "text",
+                                        "text": self._build_minimal_fallback_prompt(),
+                                    },
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/jpeg;base64,{image_data}"
+                                        },
+                                    },
+                                ],
+                            }
+                        ],
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                        "top_p": top_p,
+                        "stream": False,
+                        "response_format": {"type": "text"},
+                    }
+                    resp = requests.post(
+                        base_url,
+                        json=fallback_payload,
+                        headers=headers,
+                        timeout=timeout,
+                    )
+
+                    if span:
+                        if resp.status_code == 200:
+                            span.set_outputs(resp.json())
+                        else:
+                            span.set_outputs(
+                                {"status_code": resp.status_code, "text": resp.text}
+                            )
+            except Exception as e:
+                import sys
+
+                if span_cm:
+                    span_cm.__exit__(*sys.exc_info())
+                    span_cm = None
+                # Retry once
+                resp = requests.post(
+                    base_url, json=payload, headers=headers, timeout=timeout
+                )
+            finally:
+                if span_cm:
+                    span_cm.__exit__(None, None, None)
 
             if resp.status_code == 200:
                 response_data = resp.json()
@@ -469,7 +650,13 @@ class MushroomImageEncoder:
                     elif "```" in content:
                         content = content.split("```")[1].split("```")[0].strip()
 
-                    llama_result = json.loads(content)
+                    try:
+                        llama_result = json.loads(content)
+                    except json.JSONDecodeError:
+                        match = re.search(r"\{[\s\S]*\}", content)
+                        if not match:
+                            raise
+                        llama_result = json.loads(match.group(0))
 
                     # 验证必需字段
                     if (
