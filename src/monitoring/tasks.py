@@ -58,6 +58,13 @@ def safe_hourly_setpoint_monitoring() -> None:
     5. 记录变化并存储到数据库
     6. 具备错误处理机制和性能优化
     """
+    from utils.task_common import check_database_connection
+
+    if not check_database_connection():
+        error_msg = "[SETPOINT_MONITOR] 数据库不可达，任务终止（按配置不启用容错）"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
     max_retries = 3
     retry_delay = 5  # 秒
 

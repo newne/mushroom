@@ -246,6 +246,13 @@ def safe_batch_decision_analysis(
         schedule_hour: 计划执行的小时（可选，用于日志记录）
         schedule_minute: 计划执行的分钟（可选，用于日志记录）
     """
+    from utils.task_common import check_database_connection
+
+    if not check_database_connection():
+        error_msg = "[DECISION_TASK] 数据库不可达，任务终止（按配置不启用容错）"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
     # 如果没有提供时间参数，使用当前时间
     if schedule_hour is None or schedule_minute is None:
         current_time = datetime.now()

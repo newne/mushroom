@@ -5,20 +5,26 @@
 """
 
 import argparse
+import os
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from datetime import datetime, timedelta
 
 # 统一使用 loguru，配置简单的控制台输出格式以保持 CLI 友好性
 from loguru import logger
 
 # 路径管理
 from global_const.global_const import ensure_src_path
+from global_const.const_config import MUSHROOM_ROOM_IDS
 
 ensure_src_path()
 
 # 延迟导入以加快帮助信息的显示速度
 try:
-    from utils.create_table import ensure_mushroom_embedding_id_autoincrement
+    from sqlalchemy import text
+    from global_const.global_const import pgsql_engine
+    from utils.task_common import check_database_connection
     from utils.minio_client import create_minio_client
     from vision.mushroom_image_encoder import create_mushroom_encoder
     from vision.recent_image_processor import (
@@ -100,16 +106,49 @@ def initialize_services() -> RecentImageProcessor:
     try:
         logger.info("🔧 初始化共享组件...")
         t0 = time.time()
+        db_check_timeout = int(os.environ.get("PROCESS_RECENT_DB_CHECK_TIMEOUT", "45"))
+        logger.info(f"[INIT-001] 数据库连通性检查超时配置: {db_check_timeout}s")
 
-        logger.debug("确保mushroom_embedding.id自增...")
-        ensure_mushroom_embedding_id_autoincrement()
+        logger.info("[INIT-002] 开始检查数据库连通性...")
+        db_check_start = time.time()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(check_database_connection)
+            try:
+                db_ok = future.result(timeout=db_check_timeout)
+            except FuturesTimeoutError:
+                raise RuntimeError(
+                    f"数据库连通性检查超过 {db_check_timeout}s，终止 process_recent_images 初始化"
+                )
+
+        if not db_ok:
+            raise RuntimeError("数据库不可达，终止 process_recent_images 初始化")
+        logger.info(
+            f"[INIT-003] 数据库连通性检查通过 (耗时: {time.time() - db_check_start:.2f}s)"
+        )
+
+        # 二次确认（显示触发一次实际连接）
+        db_confirm_start = time.time()
+        logger.info("[INIT-004] 执行数据库二次确认查询 SELECT 1...")
+        with pgsql_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        logger.info(
+            f"[INIT-005] 数据库二次确认通过 (耗时: {time.time() - db_confirm_start:.2f}s)"
+        )
 
         # 显式分离初始化步骤以便定位错误
-        logger.debug("正在连接 MinIO...")
+        logger.info("[INIT-008] 正在连接 MinIO...")
+        minio_start = time.time()
         minio_client = create_minio_client()
+        logger.info(
+            f"[INIT-009] MinIO 连接完成 (耗时: {time.time() - minio_start:.2f}s)"
+        )
 
-        logger.debug("正在加载 AI 编码器 (CLIP)...")
+        logger.info("[INIT-010] 正在加载 AI 编码器...")
+        encoder_start = time.time()
         encoder = create_mushroom_encoder(load_clip=False)
+        logger.info(
+            f"[INIT-011] AI 编码器加载完成 (耗时: {time.time() - encoder_start:.2f}s)"
+        )
 
         # [增强逻辑] 配置预处理过滤规则
         # 1. 设置质量评分阈值 (0-100)，过滤低质量图片
@@ -132,7 +171,7 @@ def initialize_services() -> RecentImageProcessor:
             shared_encoder=encoder, shared_minio_client=minio_client
         )
 
-        logger.success(f"组件初始化完成 (耗时: {time.time() - t0:.2f}s)")
+        logger.success(f"[INIT-012] 组件初始化完成 (总耗时: {time.time() - t0:.2f}s)")
         return processor
 
     except Exception as e:
@@ -200,6 +239,74 @@ def format_summary(summary: dict, hours: int, filter_room_ids: list[str] | None 
             logger.warning("   ⚠️ 该时间段内未发现任何图片")
 
 
+def run_text_quality_pipeline_like_scheduler(
+    processor: RecentImageProcessor,
+    hours: int,
+    target_room_ids: list[str] | None,
+    batch_size: int,
+    max_images_per_room: int | None,
+    save_to_db: bool,
+) -> dict:
+    """按 safe_hourly_text_quality_inference 的逻辑执行文本/质量处理。"""
+    if not save_to_db:
+        logger.warning(
+            "⚠️ 当前仍会触发数据库读写流程，--no-save 仅用于提示，不改变任务链路"
+        )
+
+    encoder = processor.encoder
+    end_time = datetime.now()
+    start_time = end_time - timedelta(hours=hours)
+
+    minio_rooms = set(encoder.minio_client.list_rooms())
+    env_to_minio: dict[str, list[str]] = {}
+    for minio_id, env_id in encoder.room_id_mapping.items():
+        env_to_minio.setdefault(env_id, []).append(minio_id)
+
+    room_sequence = target_room_ids if target_room_ids else MUSHROOM_ROOM_IDS
+
+    total_stats = {"total": 0, "success": 0, "failed": 0, "skipped": 0}
+    room_stats: dict[str, dict] = {}
+
+    for room_id in room_sequence:
+        candidate_ids = env_to_minio.get(room_id, [room_id])
+        minio_room_id = next(
+            (cid for cid in candidate_ids if cid in minio_rooms), candidate_ids[0]
+        )
+
+        if minio_room_id != room_id:
+            logger.info(f"[PIPELINE] 映射库房号: {room_id} -> {minio_room_id}")
+
+        stats = encoder.batch_process_text_quality(
+            mushroom_id=minio_room_id,
+            start_time=start_time,
+            end_time=end_time,
+            batch_size=batch_size,
+            reprocess=False,
+            max_images=max_images_per_room,
+            link_mushroom_embedding=False,
+        )
+
+        room_stats[room_id] = {
+            "found": stats.get("total", 0),
+            "processed": stats.get("total", 0),
+            "success": stats.get("success", 0),
+            "failed": stats.get("failed", 0),
+            "skipped": stats.get("skipped", 0),
+        }
+
+        for key in total_stats:
+            total_stats[key] += stats.get(key, 0)
+
+    return {
+        "total_found": total_stats["total"],
+        "total_processed": total_stats["total"],
+        "total_success": total_stats["success"],
+        "total_failed": total_stats["failed"],
+        "total_skipped": total_stats["skipped"],
+        "room_stats": room_stats,
+    }
+
+
 def main():
     args = parse_arguments()
     setup_logging(args.verbose)
@@ -233,28 +340,23 @@ def main():
         if target_room_ids:
             logger.info(f"🎯 目标库房: {target_room_ids}")
 
-        batch_config = {"enabled": args.enable_batch, "batch_size": args.batch_size}
+        summary = processor.get_recent_image_summary(hours=args.hours)
 
-        # 关键修改：show_summary=False，完全由 CLI 接管摘要输出，避免混乱
-        result = processor.get_recent_image_summary_and_process(
+        processing = run_text_quality_pipeline_like_scheduler(
+            processor=processor,
             hours=args.hours,
-            room_ids=target_room_ids,
+            target_room_ids=target_room_ids,
+            batch_size=args.batch_size,
             max_images_per_room=args.max_per_room,
             save_to_db=not args.no_save,
-            show_summary=False,
-            batch_config=batch_config,
         )
 
         # 1. 先打印摘要 (使用返回结果中的 summary 数据)
-        if "summary" in result:
-            format_summary(
-                result["summary"], args.hours, filter_room_ids=target_room_ids
-            )
+        format_summary(summary, args.hours, filter_room_ids=target_room_ids)
 
         logger.info("-" * 40)
 
         # 2. 结果展示
-        processing = result["processing"]
         logger.info("📈 此轮运行结果统计:")
         logger.info(f"   🔍 扫描: {processing['total_found']}")
         logger.info(f"   ⚙️  执行: {processing['total_processed']}")

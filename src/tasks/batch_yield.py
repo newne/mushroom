@@ -13,6 +13,13 @@ SessionLocal = sessionmaker(bind=pgsql_engine, autoflush=False, autocommit=False
 
 def safe_daily_batch_yield_init() -> None:
     """每日初始化批次产量基础记录。"""
+    from utils.task_common import check_database_connection
+
+    if not check_database_connection():
+        error_msg = "[BATCH_YIELD_TASK] 数据库不可达，任务终止（按配置不启用容错）"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
     stat_date = date.today()
     db = SessionLocal()
     try:

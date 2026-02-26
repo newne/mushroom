@@ -43,6 +43,27 @@ def get_environment() -> str:
 # Convert prod env var to boolean, default to False if not set
 env = get_environment()
 
+
+def _get_int_env(name: str, default: int) -> int:
+    """读取整型环境变量，非法值时回退默认值。"""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+        return value if value > 0 else default
+    except ValueError:
+        logger.warning(f"环境变量 {name}={raw} 非法，使用默认值 {default}")
+        return default
+
+
+DB_CONNECT_TIMEOUT = _get_int_env("DB_CONNECT_TIMEOUT", 30)
+DB_POOL_TIMEOUT = _get_int_env("DB_POOL_TIMEOUT", 60)
+
+logger.info(
+    f"[DB-CONFIG] connect_timeout={DB_CONNECT_TIMEOUT}s, pool_timeout={DB_POOL_TIMEOUT}s"
+)
+
 config_dir_path = BASE_DIR / "configs"
 logger.info(f"[9.9.1] 已加载配置文件目录：{config_dir_path}")
 
@@ -142,9 +163,9 @@ mysql_engine = sqlalchemy.create_engine(
     pool_recycle=1800,  # 连接回收时间（30分钟）
     pool_size=5,  # 连接池大小
     max_overflow=10,  # 最大溢出连接数
-    pool_timeout=30,  # 获取连接的超时时间（秒）
+    pool_timeout=DB_POOL_TIMEOUT,  # 获取连接的超时时间（秒）
     connect_args={
-        "connect_timeout": 10  # TCP连接超时（秒）- 适应Docker网络
+        "connect_timeout": DB_CONNECT_TIMEOUT  # TCP连接超时（秒）- 适应Docker网络
     },
     echo=False,  # 不输出SQL日志
 )
@@ -157,9 +178,9 @@ pgsql_engine = sqlalchemy.create_engine(
     pool_recycle=1800,  # 连接回收时间（30分钟）
     pool_size=5,  # 连接池大小
     max_overflow=10,  # 最大溢出连接数
-    pool_timeout=30,  # 获取连接的超时时间（秒）
+    pool_timeout=DB_POOL_TIMEOUT,  # 获取连接的超时时间（秒）
     connect_args={
-        "connect_timeout": 10,  # TCP连接超时（秒）- 适应Docker网络
+        "connect_timeout": DB_CONNECT_TIMEOUT,  # TCP连接超时（秒）- 适应Docker网络
         "options": "-c statement_timeout=300000 -c client_encoding=UTF8",  # SQL语句超时（5分钟）+ UTF8编码
         "client_encoding": "utf8",  # 明确设置客户端编码为UTF-8
     },

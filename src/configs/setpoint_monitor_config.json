@@ -1,5 +1,10 @@
 {
-  "default_rooms": ["607", "608", "611", "612"],
+  "default_rooms": [
+    "607",
+    "608",
+    "611",
+    "612"
+  ],
   "time_limits": {
     "max_batch_days": 30,
     "default_hours_back": 1
@@ -8,14 +13,20 @@
     "table_name": "device_setpoint_changes",
     "batch_size": 1000,
     "required_fields": [
-      "room_id", "device_type", "device_name", "point_name",
-      "change_time", "previous_value", "current_value", "change_type"
+      "room_id",
+      "device_type",
+      "device_name",
+      "point_name",
+      "change_time",
+      "previous_value",
+      "current_value",
+      "change_type"
     ]
   },
   "thresholds": {
     "air_cooler": {
-      "temp_set": 0.5,
-      "temp_diffset": 0.2,
+      "temp_set": 0.1,
+      "temp_diffset": 0.1,
       "cyc_on_time": 1.0,
       "cyc_off_time": 1.0
     },
@@ -26,36 +37,60 @@
       "off": 1.0
     },
     "humidifier": {
-      "on": 2.0,
-      "off": 2.0
+      "on": 1.0,
+      "off": 1.0
     },
     "grow_light": {
-      "on_mset": 5.0,
-      "off_mset": 5.0
+      "on_mset": 1.0,
+      "off_mset": 1.0
     }
   },
   "device_types": {
     "air_cooler": {
       "monitored_points": [
-        "on_off", "temp_set", "temp_diffset", "cyc_on_time", 
-        "cyc_off_time", "air_on_off", "hum_on_off", "cyc_on_off"
+        "on_off",
+        "temp_set",
+        "temp_diffset",
+        "cyc_on_time",
+        "cyc_off_time",
+        "air_on_off",
+        "hum_on_off",
+        "cyc_on_off"
       ],
       "description": "冷风机设备监控点"
     },
     "fresh_air_fan": {
       "monitored_points": [
-        "mode", "control", "co2_on", "co2_off", "on", "off"
+        "mode",
+        "control",
+        "co2_on",
+        "co2_off",
+        "on",
+        "off"
       ],
       "description": "新风机设备监控点"
     },
     "humidifier": {
-      "monitored_points": ["mode", "on", "off"],
+      "monitored_points": [
+        "mode",
+        "on",
+        "off"
+      ],
       "description": "加湿器设备监控点"
     },
     "grow_light": {
       "monitored_points": [
-        "model", "on_mset", "off_mset", "on_off1", "on_off2", 
-        "on_off3", "on_off4", "choose1", "choose2", "choose3", "choose4"
+        "model",
+        "on_mset",
+        "off_mset",
+        "on_off1",
+        "on_off2",
+        "on_off3",
+        "on_off4",
+        "choose1",
+        "choose2",
+        "choose3",
+        "choose4"
       ],
       "description": "补光灯设备监控点"
     }

@@ -45,6 +45,13 @@ def safe_hourly_text_quality_inference(reprocess: bool = False) -> None:
     Args:
         reprocess: 是否强制重处理已存在记录（用于补跑/回填场景）
     """
+    from utils.task_common import check_database_connection
+
+    if not check_database_connection():
+        error_msg = "[TEXT_QUALITY_TASK] 数据库不可达，任务终止（按配置不启用容错）"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
     max_retries = CLIP_INFERENCE_MAX_RETRIES
     retry_delay = CLIP_INFERENCE_RETRY_DELAY
 
@@ -131,6 +138,7 @@ def safe_hourly_text_quality_inference(reprocess: bool = False) -> None:
                         end_time=end_time,
                         batch_size=CLIP_INFERENCE_BATCH_SIZE,
                         reprocess=reprocess,
+                        link_mushroom_embedding=False,
                     )
                     for key in total_stats:
                         total_stats[key] += stats.get(key, 0)
@@ -180,6 +188,13 @@ def safe_hourly_text_quality_inference(reprocess: bool = False) -> None:
 
 def safe_daily_top_quality_clip_inference() -> None:
     """每天凌晨执行Top质量图像编码任务"""
+    from utils.task_common import check_database_connection
+
+    if not check_database_connection():
+        error_msg = "[TOP_QUALITY_TASK] 数据库不可达，任务终止（按配置不启用容错）"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
+
     max_retries = CLIP_INFERENCE_MAX_RETRIES
     retry_delay = CLIP_INFERENCE_RETRY_DELAY
 

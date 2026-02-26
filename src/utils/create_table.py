@@ -1226,10 +1226,7 @@ def create_tables():
     except Exception as e:
         logger.error(f"[0.1.3] Failed to migrate dynamic status: {str(e)}")
 
-    # 5. 确保mushroom_embedding.id自增
-    ensure_mushroom_embedding_id_autoincrement()
-
-    # 6. 创建向量索引
+    # 5. 创建向量索引
     # 向量索引不需要在建表时立即完成，且 DDL 语句较长，分离出来管理更清晰
     # create_vector_index()
 

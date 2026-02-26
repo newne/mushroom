@@ -25,7 +25,7 @@ from transformers import CLIPModel, CLIPProcessor
 
 from environment.processor import create_env_data_processor
 from global_const.const_config import ROOM_ID_MAPPING
-from global_const.global_const import pgsql_engine, settings
+from global_const.global_const import env, pgsql_engine, settings
 from utils.create_table import (
     ImageTextQuality,
     MushroomImageEmbedding,
@@ -325,12 +325,17 @@ class MushroomImageEncoder:
             "Describe only visible traits and keep concise professional terms."
         )
 
-    def _call_llama_api(self, image_data: str) -> dict[str, Any]:
+    def _call_llama_api(
+        self,
+        image_data: str,
+        mlflow_images: dict[str, bytes] | None = None,
+    ) -> dict[str, Any]:
         """
         直接调用LLaMA API (集成性能监控)
 
         Args:
             image_data: base64编码的图像数据
+            mlflow_images: 需额外写入MLflow的图像字节，key为名称
 
         Returns:
             包含描述和评分的字典
@@ -510,36 +515,61 @@ class MushroomImageEncoder:
 
                 trace_payload = copy.deepcopy(payload)
 
-                if mlflow.active_run():
+                if mlflow.active_run() and env != "production":
                     try:
-                        image_bytes = base64.b64decode(image_data)
-                        with tempfile.NamedTemporaryFile(
-                            suffix=".jpg", delete=False
-                        ) as f:
-                            f.write(image_bytes)
-                            temp_path = f.name
-
-                        artifact_path = f"images/{request_id}.jpg"
-                        mlflow.log_artifact(temp_path, artifact_path)
-                        os.remove(temp_path)
-
-                        artifact_uri = mlflow.get_artifact_uri(artifact_path)
-                        tracking_uri = mlflow.get_tracking_uri()
-                        if artifact_uri.startswith("mlflow-artifacts:/"):
-                            path = artifact_uri[len("mlflow-artifacts:/") :]
-                            http_url = f"{tracking_uri.rstrip('/')}/api/2.0/mlflow-artifacts/artifacts/{path}"
+                        tracked_images: dict[str, bytes] = {}
+                        if mlflow_images:
+                            tracked_images.update(mlflow_images)
                         else:
-                            http_url = artifact_uri
+                            tracked_images["compressed"] = base64.b64decode(image_data)
+
+                        tracking_uri = mlflow.get_tracking_uri()
+                        compressed_http_url = None
+
+                        for image_name, image_bytes in tracked_images.items():
+                            with tempfile.NamedTemporaryFile(
+                                suffix=".jpg", delete=False
+                            ) as f:
+                                f.write(image_bytes)
+                                temp_path = f.name
+
+                            artifact_path = f"images/{request_id}_{image_name}.jpg"
+                            mlflow.log_artifact(temp_path, artifact_path)
+                            os.remove(temp_path)
+
+                            artifact_uri = mlflow.get_artifact_uri(artifact_path)
+                            if artifact_uri.startswith("mlflow-artifacts:/"):
+                                path = artifact_uri[len("mlflow-artifacts:/") :]
+                                http_url = f"{tracking_uri.rstrip('/')}/api/2.0/mlflow-artifacts/artifacts/{path}"
+                            else:
+                                http_url = artifact_uri
+
+                            if image_name == "compressed":
+                                compressed_http_url = http_url
+
+                        if compressed_http_url is None and tracked_images:
+                            first_name = next(iter(tracked_images.keys()))
+                            artifact_path = f"images/{request_id}_{first_name}.jpg"
+                            artifact_uri = mlflow.get_artifact_uri(artifact_path)
+                            if artifact_uri.startswith("mlflow-artifacts:/"):
+                                path = artifact_uri[len("mlflow-artifacts:/") :]
+                                compressed_http_url = f"{tracking_uri.rstrip('/')}/api/2.0/mlflow-artifacts/artifacts/{path}"
+                            else:
+                                compressed_http_url = artifact_uri
 
                         for msg in trace_payload.get("messages", []):
                             if isinstance(msg.get("content"), list):
                                 for item in msg["content"]:
                                     if item.get("type") == "image_url":
-                                        item["image_url"]["artifact_url"] = http_url
+                                        item["image_url"]["artifact_url"] = (
+                                            compressed_http_url
+                                        )
                     except Exception as e:
                         logger.debug(
                             f"[LLAMA-API] Failed to log image artifact for trace: {e}"
                         )
+                elif mlflow.active_run() and env == "production":
+                    logger.debug("[LLAMA-API] 生产环境，跳过MLflow图像artifact写入")
 
                 span.set_inputs(trace_payload)
 
@@ -803,35 +833,32 @@ class MushroomImageEncoder:
             缩放后的PIL图像对象
         """
         try:
-            # 获取配置的目标分辨率，默认为960
-            target_width = getattr(self.llama_config, "image_width", 960)
-            target_height = getattr(self.llama_config, "image_height", 960)
+            # 获取配置的目标分辨率（宽高双上限），默认为 960x960
+            target_width = int(getattr(self.llama_config, "image_width", 960))
+            target_height = int(getattr(self.llama_config, "image_height", 960))
 
-            # 使用较小的一边作为基准
-            target_size = min(target_width, target_height)
+            # 下限保护，避免异常配置
+            target_width = max(64, target_width)
+            target_height = max(64, target_height)
 
             original_width, original_height = image.size
 
-            # 计算缩放比例，使短边为target_size
-            if original_width < original_height:
-                # 宽度是短边
-                scale_ratio = target_size / original_width
-                new_width = target_size
-                new_height = int(original_height * scale_ratio)
-            else:
-                # 高度是短边
-                scale_ratio = target_size / original_height
-                new_height = target_size
-                new_width = int(original_width * scale_ratio)
+            # 使用“框内缩放”策略：同时约束宽和高，避免长边过大导致视觉token暴涨
+            scale_ratio = min(
+                target_width / original_width,
+                target_height / original_height,
+                1.0,
+            )
 
-            # 如果新尺寸超过原尺寸，则不放大，保持原尺寸
-            if new_width > original_width or new_height > original_height:
+            new_width = max(1, int(original_width * scale_ratio))
+            new_height = max(1, int(original_height * scale_ratio))
+
+            if new_width == original_width and new_height == original_height:
                 logger.debug(
-                    f"Image already smaller than target size, keeping original: {original_width}x{original_height}"
+                    f"Image already within target bounds, keeping original: {original_width}x{original_height}"
                 )
                 return image
 
-            # 使用高质量重采样进行缩放
             resized_image = image.resize(
                 (new_width, new_height), Image.Resampling.LANCZOS
             )
@@ -844,6 +871,190 @@ class MushroomImageEncoder:
         except Exception as e:
             logger.warning(f"Failed to resize image for LLaMA, using original: {e}")
             return image
+
+    def _compute_ssim(
+        self, source_image: Image.Image, target_image: Image.Image
+    ) -> float:
+        """计算两张图像的全局SSIM（灰度）。"""
+        src_gray = np.asarray(source_image.convert("L"), dtype=np.float64)
+        tgt_gray = np.asarray(target_image.convert("L"), dtype=np.float64)
+
+        if src_gray.shape != tgt_gray.shape:
+            tgt_gray = np.asarray(
+                target_image.convert("L").resize(
+                    (src_gray.shape[1], src_gray.shape[0]),
+                    Image.Resampling.BILINEAR,
+                ),
+                dtype=np.float64,
+            )
+
+        c1 = (0.01 * 255) ** 2
+        c2 = (0.03 * 255) ** 2
+
+        mu_src = src_gray.mean()
+        mu_tgt = tgt_gray.mean()
+        var_src = src_gray.var()
+        var_tgt = tgt_gray.var()
+        cov = ((src_gray - mu_src) * (tgt_gray - mu_tgt)).mean()
+
+        numerator = (2 * mu_src * mu_tgt + c1) * (2 * cov + c2)
+        denominator = (mu_src**2 + mu_tgt**2 + c1) * (var_src + var_tgt + c2)
+
+        if denominator <= 0:
+            return 0.0
+        return float(max(0.0, min(1.0, numerator / denominator)))
+
+    def _encode_jpeg_bytes(self, image: Image.Image, quality: int) -> bytes:
+        """将图像按指定质量编码为JPEG字节流。"""
+        buffer = io.BytesIO()
+        image.save(
+            buffer,
+            format="JPEG",
+            quality=quality,
+            optimize=True,
+        )
+        return buffer.getvalue()
+
+    def _binary_search_quality(
+        self,
+        source_image: Image.Image,
+        max_image_bytes: int,
+        min_jpeg_quality: int,
+        max_jpeg_quality: int,
+        ssim_threshold: float,
+        quality_search_steps: int,
+    ) -> tuple[bytes, int, float]:
+        """在体积和SSIM约束下二分搜索最优JPEG质量。"""
+        low = min_jpeg_quality
+        high = max_jpeg_quality
+
+        best_bytes = self._encode_jpeg_bytes(source_image, min_jpeg_quality)
+        best_quality = min_jpeg_quality
+        best_ssim = 0.0
+
+        for _ in range(quality_search_steps):
+            if low > high:
+                break
+
+            mid = (low + high) // 2
+            encoded = self._encode_jpeg_bytes(source_image, mid)
+
+            decoded = Image.open(io.BytesIO(encoded)).convert("RGB")
+            current_ssim = self._compute_ssim(source_image, decoded)
+            size_ok = len(encoded) <= max_image_bytes
+            ssim_ok = current_ssim >= ssim_threshold
+
+            if size_ok and ssim_ok:
+                if mid >= best_quality:
+                    best_bytes = encoded
+                    best_quality = mid
+                    best_ssim = current_ssim
+                low = mid + 1
+            else:
+                high = mid - 1
+
+        # 如果没有命中SSIM门限，至少返回满足体积约束的最高质量版本
+        if best_ssim <= 0.0:
+            fallback_quality = min_jpeg_quality
+            for q in range(max_jpeg_quality, min_jpeg_quality - 1, -5):
+                encoded = self._encode_jpeg_bytes(source_image, q)
+                if len(encoded) <= max_image_bytes:
+                    decoded = Image.open(io.BytesIO(encoded)).convert("RGB")
+                    best_ssim = self._compute_ssim(source_image, decoded)
+                    best_bytes = encoded
+                    fallback_quality = q
+                    break
+            best_quality = fallback_quality
+
+        return best_bytes, best_quality, best_ssim
+
+    def _encode_image_for_llama_with_meta(
+        self,
+        image: Image.Image,
+    ) -> tuple[str, bytes, Image.Image]:
+        """将图像编码为适合LLaMA-VL的base64，含体积/质量双约束。"""
+        resized_image = self._resize_image_for_llama(image)
+
+        if resized_image.mode != "RGB":
+            resized_image = resized_image.convert("RGB")
+
+        jpeg_quality = int(getattr(self.llama_config, "jpeg_quality", 80))
+        min_jpeg_quality = int(getattr(self.llama_config, "min_jpeg_quality", 50))
+        max_image_bytes = int(getattr(self.llama_config, "max_image_bytes", 350 * 1024))
+        downscale_step_percent = int(
+            getattr(self.llama_config, "downscale_step_percent", 15)
+        )
+        ssim_threshold = float(getattr(self.llama_config, "ssim_threshold", 0.95))
+        quality_search_steps = int(
+            getattr(self.llama_config, "quality_search_steps", 7)
+        )
+        max_downscale_attempts = int(
+            getattr(self.llama_config, "max_downscale_attempts", 4)
+        )
+
+        jpeg_quality = max(20, min(95, jpeg_quality))
+        min_jpeg_quality = max(20, min(jpeg_quality, min_jpeg_quality))
+        max_image_bytes = max(64 * 1024, max_image_bytes)
+        downscale_step_percent = max(5, min(40, downscale_step_percent))
+        ssim_threshold = max(0.7, min(0.999, ssim_threshold))
+        quality_search_steps = max(3, min(10, quality_search_steps))
+        max_downscale_attempts = max(1, min(8, max_downscale_attempts))
+
+        current_image = resized_image
+
+        for attempt in range(1, max_downscale_attempts + 1):
+            image_bytes, selected_quality, current_ssim = self._binary_search_quality(
+                source_image=current_image,
+                max_image_bytes=max_image_bytes,
+                min_jpeg_quality=min_jpeg_quality,
+                max_jpeg_quality=jpeg_quality,
+                ssim_threshold=ssim_threshold,
+                quality_search_steps=quality_search_steps,
+            )
+
+            if len(image_bytes) <= max_image_bytes:
+                if attempt > 1 or current_ssim < ssim_threshold:
+                    logger.warning(
+                        "[LLAMA-IMG] 自适应压缩完成 | "
+                        f"attempt={attempt}, size={current_image.size}, quality={selected_quality}, "
+                        f"bytes={len(image_bytes)}, ssim={current_ssim:.4f}, target_ssim={ssim_threshold:.4f}"
+                    )
+                return (
+                    base64.b64encode(image_bytes).decode("utf-8"),
+                    image_bytes,
+                    resized_image,
+                )
+
+            width, height = current_image.size
+            scale = (100 - downscale_step_percent) / 100
+            next_width = max(64, int(width * scale))
+            next_height = max(64, int(height * scale))
+
+            # 防止无法继续缩放导致死循环
+            if (next_width, next_height) == (width, height):
+                return (
+                    base64.b64encode(image_bytes).decode("utf-8"),
+                    image_bytes,
+                    resized_image,
+                )
+
+            current_image = current_image.resize(
+                (next_width, next_height), Image.Resampling.LANCZOS
+            )
+            jpeg_quality = max(min_jpeg_quality, jpeg_quality - 5)
+
+        # 兜底返回最后一次编码结果
+        final_bytes = self._encode_jpeg_bytes(current_image, min_jpeg_quality)
+        return (
+            base64.b64encode(final_bytes).decode("utf-8"),
+            final_bytes,
+            resized_image,
+        )
+
+    def _encode_image_for_llama(self, image: Image.Image) -> str:
+        """兼容接口：仅返回base64编码字符串。"""
+        image_data, _, _ = self._encode_image_for_llama_with_meta(image)
+        return image_data
 
     def _get_llama_description(self, image: Image.Image) -> dict[str, Any]:
         """
@@ -867,18 +1078,28 @@ class MushroomImageEncoder:
             }
 
         try:
-            # 为LLaMA处理缩放图像（减少运算量）
-            resized_image = self._resize_image_for_llama(image)
+            # 图像预处理 + 自适应压缩编码（减少视觉token和请求体积）
+            image_data, compressed_bytes, resized_image = (
+                self._encode_image_for_llama_with_meta(image)
+            )
 
-            # 将缩放后的PIL图像转换为base64编码
-            buffer = io.BytesIO()
-            resized_image.save(
-                buffer, format="JPEG", quality=85
-            )  # 使用适中的质量以平衡文件大小和质量
-            image_data = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            # 记录压缩前后图像到MLflow（在safe_hourly_text_quality_inference中有active run）
+            pre_quality = int(
+                getattr(self.llama_config, "mlflow_pre_image_quality", 95)
+            )
+            pre_quality = max(20, min(100, pre_quality))
+            pre_compression_bytes = self._encode_jpeg_bytes(resized_image, pre_quality)
+
+            mlflow_images = {
+                "pre_compression": pre_compression_bytes,
+                "compressed": compressed_bytes,
+            }
 
             # 调用LLaMA API
-            result = self._call_llama_api(image_data)
+            result = self._call_llama_api(
+                image_data,
+                mlflow_images=mlflow_images,
+            )
             logger.trace(
                 f"LLaMA result: description='{result.get('growth_stage_description', '')[:50]}...', quality_score={result.get('image_quality_score')}"
             )
@@ -2103,6 +2324,8 @@ class MushroomImageEncoder:
         end_time: datetime | None = None,
         batch_size: int = 10,
         reprocess: bool = False,
+        max_images: int | None = None,
+        link_mushroom_embedding: bool = True,
     ) -> dict[str, int]:
         """仅计算文本描述和图像质量评分并落库（不做图像编码）"""
         time_msg = f"[{start_time} ~ {end_time}]" if start_time or end_time else ""
@@ -2118,6 +2341,11 @@ class MushroomImageEncoder:
         if not all_images:
             logger.warning(f"⚠️ 未找到符合条件的图像 {time_msg}")
             return {"total": 0, "success": 0, "failed": 0, "skipped": 0}
+
+        # 与最近图片脚本对齐：优先处理最新图片，可选限制数量
+        if max_images is not None and max_images > 0:
+            all_images.sort(key=lambda img: img.collection_datetime, reverse=True)
+            all_images = all_images[:max_images]
 
         stats = {"total": len(all_images), "success": 0, "failed": 0, "skipped": 0}
 
@@ -2179,14 +2407,16 @@ class MushroomImageEncoder:
                         )
                         quality_score = llama_result.get("image_quality_score", None)
 
-                        existing_embedding = (
-                            session.query(MushroomImageEmbedding)
-                            .filter_by(image_path=image_info.file_path)
-                            .first()
-                        )
-                        embedding_id = (
-                            existing_embedding.id if existing_embedding else None
-                        )
+                        embedding_id = None
+                        if link_mushroom_embedding:
+                            existing_embedding = (
+                                session.query(MushroomImageEmbedding)
+                                .filter_by(image_path=image_info.file_path)
+                                .first()
+                            )
+                            embedding_id = (
+                                existing_embedding.id if existing_embedding else None
+                            )
 
                         if existing:
                             if not existing.chinese_description and chinese_description:
