@@ -53,7 +53,7 @@ port="5000"
 [development.llama]
 llama_host = "10.77.77.49"
 llama_port = "7001"
-model = "qwen3-vl-4b"
+model = "qwen3-vl-8b"
 llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
@@ -128,7 +128,7 @@ llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
 
-[production.llama_vl]
+[production.llama_vl.bak]
 llama_host = "172.17.0.1"
 llama_port = "7002"
 model = "llama-mushroom-vl-light.service"
@@ -145,3 +145,26 @@ ssim_threshold = 0.95
 quality_search_steps = 7
 max_downscale_attempts = 4
 mlflow_pre_image_quality = 95
+
+[production.llama_vl]
+llama_host = "10.77.77.49"
+llama_port = "7001"
+model = "qwen3-vl-8b"
+llama_completions = "http://{0}:{1}/v1/chat/completions"
+enabled = true  # 是否启用LLaMA描述生成
+timeout = 600   # API调用超时时间（秒）
+temperature = 0.3
+max_tokens = 2048
+top_p = 0.2
+image_width = 768
+image_height = 768
+jpeg_quality = 80
+min_jpeg_quality = 50
+max_image_bytes = 358400
+downscale_step_percent = 15
+ssim_threshold = 0.95
+quality_search_steps = 7
+max_downscale_attempts = 4
+mlflow_pre_image_quality = 95
+device = "cuda" # 即使是API调用，保留此配置以兼容可能的本地加载逻辑
+mushroom_descripe_prompt = "" # Loaded from MLflow Prompt Registry: growth_stage_describe

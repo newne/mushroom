@@ -1,6 +1,8 @@
+import json
 import re
 from datetime import date, datetime, timedelta
 from io import BytesIO
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -701,6 +703,660 @@ def compute_impact_metrics(
         "delta": delta,
         "rate_per_min": rate,
     }
+
+
+@st.cache_data(ttl=300)
+def load_control_strategy_cluster_kb() -> dict:
+    kb_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "control_strategy_cluster_kb.json"
+    )
+    if not kb_path.exists():
+        return {}
+
+    try:
+        return json.loads(kb_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=300)
+def load_control_strategy_cluster_records() -> pd.DataFrame:
+    csv_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "control_strategy_cluster_kb_cluster_records.csv"
+    )
+    if not csv_path.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(csv_path)
+        if df.empty:
+            return df
+        df["growth_day_num"] = pd.to_numeric(df.get("growth_day_num"), errors="coerce")
+        df["daily_changes"] = pd.to_numeric(df.get("daily_changes"), errors="coerce")
+        df["current_value_last"] = pd.to_numeric(
+            df.get("current_value_last"), errors="coerce"
+        )
+        df["day_to_day_delta"] = pd.to_numeric(
+            df.get("day_to_day_delta"), errors="coerce"
+        )
+        df["cluster_id"] = pd.to_numeric(df.get("cluster_id"), errors="coerce")
+        df["cluster_name"] = df.get("cluster_name").astype(str)
+        df["point_display"] = df.get("point_display").fillna(df.get("point_key"))
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+def cluster_kb_to_dataframe(kb: dict) -> pd.DataFrame:
+    if not isinstance(kb, dict):
+        return pd.DataFrame()
+
+    devices_cfg = kb.get("devices", {})
+    if not isinstance(devices_cfg, dict) or not devices_cfg:
+        return pd.DataFrame()
+
+    device_remark_map = build_device_remark_map()
+    rows: list[dict] = []
+
+    for device_type, dev_obj in devices_cfg.items():
+        points = dev_obj.get("points", {}) if isinstance(dev_obj, dict) else {}
+        for point_key, point_obj in points.items():
+            point_display = point_obj.get("point_display") or point_key
+            meta = (
+                point_obj.get("cluster_meta", {}) if isinstance(point_obj, dict) else {}
+            )
+            for cluster in point_obj.get("time_clusters", []):
+                growth_min = cluster.get("growth_day_min")
+                growth_max = cluster.get("growth_day_max")
+                growth_window = cluster.get("growth_window")
+                if (
+                    not growth_window
+                    and growth_min is not None
+                    and growth_max is not None
+                ):
+                    growth_window = f"D{growth_min}-D{growth_max}"
+
+                preferred_setpoint = cluster.get("preferred_setpoint")
+                if preferred_setpoint is None or str(
+                    preferred_setpoint
+                ).strip().lower() in [
+                    "",
+                    "none",
+                    "nan",
+                    "n/a",
+                ]:
+                    preferred_setpoint = cluster.get("value_median")
+
+                rows.append(
+                    {
+                        "device_type": device_type,
+                        "设备类型": device_remark_map.get(device_type, device_type),
+                        "point_key": point_key,
+                        "测点类型": point_display,
+                        "时间簇": cluster.get("cluster_name"),
+                        "生长时间窗": growth_window,
+                        "生长天中位数": cluster.get("growth_day_median"),
+                        "样本天数": cluster.get("sample_days"),
+                        "调控次数(中位)": cluster.get("daily_changes_median"),
+                        "覆盖库房数": cluster.get("active_rooms"),
+                        "覆盖批次数": cluster.get("active_batches"),
+                        "常见设定值": preferred_setpoint,
+                        "设定值中位数": cluster.get("value_median"),
+                        "设定值P25": cluster.get("value_p25"),
+                        "设定值P75": cluster.get("value_p75"),
+                        "控制变化趋势": cluster.get("value_trend"),
+                        "常见控制方式": cluster.get("preferred_change_type"),
+                        "常见调控小时": cluster.get("preferred_hour"),
+                        "测点聚类数": meta.get("cluster_count"),
+                        "聚类方法": meta.get("cluster_method"),
+                        "轮廓系数": meta.get("silhouette_score"),
+                    }
+                )
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows)
+
+
+def _mode_text(series: pd.Series):
+    if series is None:
+        return None
+    valid = series.dropna().astype(str)
+    if valid.empty:
+        return None
+    m = valid.mode()
+    if m.empty:
+        return None
+    return m.iloc[0]
+
+
+def render_cluster_kb_page() -> None:
+    st.subheader("聚类调控知识库（全库房全批次）")
+    kb = load_control_strategy_cluster_kb()
+    kb_df = cluster_kb_to_dataframe(kb)
+    records_df = load_control_strategy_cluster_records()
+
+    scope = kb.get("scope", {}) if isinstance(kb, dict) else {}
+    pipeline = kb.get("pipeline", {}) if isinstance(kb, dict) else {}
+    if isinstance(scope, dict):
+        st.caption(
+            f"数据范围：库房 {scope.get('rooms', [])} | 批次 {scope.get('batch_count', 0)} | 记录 {scope.get('record_count', 0)}"
+        )
+    if isinstance(pipeline, dict):
+        st.caption(
+            f"流程：{pipeline.get('source_table', 'N/A')} → {pipeline.get('analysis_grain', 'N/A')} → {kb.get('cluster_method', 'kmeans')}"
+        )
+
+    if kb_df.empty:
+        st.info("聚类知识库为空，请先运行构建脚本生成数据。")
+        return
+
+    c1, c2, c3 = st.columns([2, 2, 2])
+    with c1:
+        device_options = sorted(
+            kb_df["设备类型"].dropna().astype(str).unique().tolist()
+        )
+        selected_devices = st.multiselect(
+            "设备类型",
+            options=device_options,
+            default=device_options,
+            key="cluster_page_devices",
+        )
+    with c2:
+        point_options = (
+            kb_df["测点类型"]
+            .dropna()
+            .astype(str)
+            .value_counts()
+            .head(80)
+            .index.tolist()
+        )
+        selected_points = st.multiselect(
+            "测点类型（Top80）",
+            options=point_options,
+            default=point_options,
+            key="cluster_page_points",
+        )
+    with c3:
+        min_sample_days = st.slider(
+            "最小样本天数",
+            min_value=1,
+            max_value=30,
+            value=1,
+            key="cluster_page_min_days",
+        )
+
+    view_df = kb_df.copy()
+    if selected_devices:
+        view_df = view_df[view_df["设备类型"].isin(selected_devices)].copy()
+    if selected_points:
+        view_df = view_df[view_df["测点类型"].isin(selected_points)].copy()
+    view_df = view_df[
+        pd.to_numeric(view_df["样本天数"], errors="coerce").fillna(0) >= min_sample_days
+    ].copy()
+
+    if view_df.empty:
+        st.info("当前筛选条件下无聚类规则。")
+        return
+
+    actionable_df = view_df.copy()
+    actionable_df["常见设定值_str"] = (
+        actionable_df["常见设定值"].astype(str).str.strip()
+    )
+    actionable_df["控制变化趋势_str"] = (
+        actionable_df["控制变化趋势"].astype(str).str.strip().str.lower()
+    )
+    valid_setpoint_mask = ~actionable_df["常见设定值_str"].str.lower().isin(
+        ["", "none", "nan", "n/a"]
+    )
+    need_adjust_mask = actionable_df["控制变化趋势_str"].isin(
+        ["increasing", "decreasing"]
+    )
+
+    strict_df = actionable_df[valid_setpoint_mask & need_adjust_mask].copy()
+    if strict_df.empty:
+        actionable_df = actionable_df[valid_setpoint_mask].copy()
+        actionable_df["控制变化趋势"] = actionable_df["控制变化趋势"].fillna("stable")
+        recommendation_mode = "fallback_target_setpoint"
+    else:
+        actionable_df = strict_df
+        recommendation_mode = "trend_adjustment"
+
+    st.markdown("#### 关键调参建议（按生长天）")
+    if actionable_df.empty:
+        st.info("当前筛选条件下无有效设定值数据。")
+    else:
+        if recommendation_mode == "fallback_target_setpoint":
+            st.warning(
+                "未命中显著变化趋势(increasing/decreasing)，已自动切换为“目标设定值推荐（含 stable）”模式。"
+            )
+
+        rec_df = actionable_df.copy()
+        rec_df["建议生长天"] = (
+            pd.to_numeric(rec_df["生长天中位数"], errors="coerce")
+            .round()
+            .astype("Int64")
+        )
+        rec_df = rec_df[rec_df["建议生长天"].notna()].copy()
+        rec_df["建议生长天"] = rec_df["建议生长天"].astype(int)
+
+        recommendation = (
+            rec_df.groupby(["设备类型", "测点类型", "建议生长天"], as_index=False)
+            .agg(
+                推荐设定值=("常见设定值", _mode_text),
+                设定值中位数=("设定值中位数", "median"),
+                覆盖批次数=("覆盖批次数", "sum"),
+                覆盖库房数=("覆盖库房数", "max"),
+                控制趋势=("控制变化趋势", _mode_text),
+                常见控制方式=("常见控制方式", _mode_text),
+            )
+            .sort_values(["设备类型", "测点类型", "建议生长天"])
+        )
+
+        recommendation["建议类型"] = np.where(
+            recommendation["控制趋势"]
+            .astype(str)
+            .str.lower()
+            .isin(["increasing", "decreasing"]),
+            "调整参数",
+            "目标设定",
+        )
+
+        recommendation["建议语句"] = (
+            recommendation["设备类型"]
+            .astype(str)
+            .str.cat(recommendation["测点类型"].astype(str), sep=" | ")
+            .str.cat("D" + recommendation["建议生长天"].astype(str), sep=" | ")
+            .str.cat("建议设为 " + recommendation["推荐设定值"].astype(str), sep=" | ")
+        )
+
+        st.dataframe(
+            recommendation[
+                [
+                    "建议语句",
+                    "建议类型",
+                    "设备类型",
+                    "测点类型",
+                    "建议生长天",
+                    "推荐设定值",
+                    "设定值中位数",
+                    "控制趋势",
+                    "常见控制方式",
+                    "覆盖库房数",
+                    "覆盖批次数",
+                ]
+            ],
+            width="stretch",
+        )
+
+    st.markdown("#### 聚类结果散点图（仅聚类结果）")
+    timeline_df = actionable_df.copy()
+    timeline_df["生长天中位数_num"] = pd.to_numeric(
+        timeline_df["生长天中位数"], errors="coerce"
+    )
+    timeline_df = timeline_df[timeline_df["生长天中位数_num"].notna()].copy()
+
+    if timeline_df.empty:
+        st.info("缺少有效生长天中位数，无法绘制聚类时间轴。")
+    else:
+        cluster_only_tabs = sorted(
+            timeline_df["设备类型"].dropna().astype(str).unique().tolist()
+        )
+        tabs = st.tabs(cluster_only_tabs)
+        for tab, device_cn in zip(tabs, cluster_only_tabs):
+            with tab:
+                dev_df = timeline_df[timeline_df["设备类型"] == device_cn].copy()
+                if dev_df.empty:
+                    st.info(f"{device_cn} 无聚类结果。")
+                    continue
+
+                point_order = (
+                    dev_df.groupby("测点类型", as_index=False)["样本天数"]
+                    .sum()
+                    .sort_values("样本天数", ascending=False)["测点类型"]
+                    .tolist()
+                )
+
+                dev_df["建议值标签"] = "建议 " + dev_df["常见设定值"].astype(str)
+                fig_cluster = go.Figure()
+                for cluster_name, cdf in dev_df.groupby("时间簇"):
+                    center = pd.to_numeric(cdf["生长天中位数_num"], errors="coerce")
+                    x_min = pd.to_numeric(
+                        cdf["生长时间窗"]
+                        .astype(str)
+                        .str.extract(r"D(\d+)", expand=False),
+                        errors="coerce",
+                    )
+                    x_max = pd.to_numeric(
+                        cdf["生长时间窗"]
+                        .astype(str)
+                        .str.extract(r"-D(\d+)", expand=False),
+                        errors="coerce",
+                    )
+                    err_plus = (x_max - center).fillna(0)
+                    err_minus = (center - x_min).fillna(0)
+                    marker_size = pd.to_numeric(
+                        cdf["样本天数"], errors="coerce"
+                    ).fillna(1)
+                    marker_size = marker_size.clip(lower=8, upper=20)
+
+                    fig_cluster.add_trace(
+                        go.Scatter(
+                            x=center,
+                            y=cdf["测点类型"],
+                            mode="markers+text",
+                            name=f"时间簇 {cluster_name}",
+                            text=cdf["建议值标签"],
+                            textposition="top center",
+                            marker=dict(size=marker_size, opacity=0.95),
+                            error_x=dict(
+                                type="data",
+                                array=err_plus,
+                                arrayminus=err_minus,
+                                thickness=1.2,
+                            ),
+                            customdata=np.stack(
+                                [
+                                    cdf["生长时间窗"].astype(str),
+                                    cdf["样本天数"],
+                                    cdf["调控次数(中位)"],
+                                    cdf["常见设定值"].astype(str),
+                                    cdf["设定值中位数"],
+                                    cdf["控制变化趋势"].astype(str),
+                                    cdf["轮廓系数"],
+                                ],
+                                axis=1,
+                            ),
+                            hovertemplate=(
+                                "测点 %{y}<br>生长天中心 %{x}"
+                                "<br>时间窗 %{customdata[0]}"
+                                "<br>样本天数 %{customdata[1]}"
+                                "<br>调控次数(中位) %{customdata[2]}"
+                                "<br>建议设定值 %{customdata[3]}"
+                                "<br>设定值中位数 %{customdata[4]}"
+                                "<br>趋势 %{customdata[5]}"
+                                "<br>轮廓系数 %{customdata[6]}<extra></extra>"
+                            ),
+                        )
+                    )
+
+                fig_cluster.update_layout(
+                    title=f"设备类型：{device_cn} | 仅聚类结果散点（含建议值）",
+                    height=max(360, 42 * max(8, len(point_order))),
+                )
+                fig_cluster.update_yaxes(
+                    categoryorder="array", categoryarray=point_order
+                )
+                fig_cluster.update_xaxes(
+                    tickmode="linear", dtick=1, title="生长周期（天）"
+                )
+                st.plotly_chart(
+                    fig_cluster,
+                    width="stretch",
+                    config={"scrollZoom": True, "responsive": True},
+                )
+
+    st.markdown("#### 原始调整 + 聚类结果叠加图（按设备类型 × 测点类型）")
+    overlay_df = timeline_df.copy()
+    if overlay_df.empty:
+        st.info("缺少有效聚类数据，无法绘制叠加图。")
+    else:
+        overlay_devices = sorted(
+            overlay_df["设备类型"].dropna().astype(str).unique().tolist()
+        )
+        overlay_tabs = st.tabs(overlay_devices)
+        for tab, device_cn in zip(overlay_tabs, overlay_devices):
+            with tab:
+                dev_df = overlay_df[overlay_df["设备类型"] == device_cn].copy()
+                if dev_df.empty:
+                    st.info(f"{device_cn} 无可视化数据。")
+                    continue
+
+                point_options = sorted(
+                    dev_df["测点类型"].dropna().astype(str).unique().tolist()
+                )
+                selected_point = st.selectbox(
+                    "选择测点类型",
+                    options=point_options,
+                    key=f"cluster_overlay_point_{device_cn}",
+                )
+
+                point_cluster_df = dev_df[dev_df["测点类型"] == selected_point].copy()
+                if point_cluster_df.empty:
+                    st.info(f"{device_cn} - {selected_point} 无聚类数据。")
+                    continue
+
+                device_type_values = (
+                    point_cluster_df["device_type"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                )
+
+                point_raw_df = pd.DataFrame()
+                if not records_df.empty and device_type_values:
+                    point_raw_df = records_df[
+                        records_df["device_type"].astype(str).isin(device_type_values)
+                    ].copy()
+                    point_raw_df["point_display"] = (
+                        point_raw_df.get("point_display")
+                        .fillna(point_raw_df.get("point_key"))
+                        .astype(str)
+                    )
+                    point_raw_df = point_raw_df[
+                        (point_raw_df["point_display"] == str(selected_point))
+                        & point_raw_df["growth_day_num"].notna()
+                    ].copy()
+
+                fig_overlay = go.Figure()
+
+                if not point_raw_df.empty:
+                    point_raw_df["current_value_last"] = pd.to_numeric(
+                        point_raw_df.get("current_value_last"), errors="coerce"
+                    )
+                    point_raw_df = point_raw_df[
+                        point_raw_df["current_value_last"].notna()
+                    ].copy()
+
+                if not point_raw_df.empty:
+                    marker_size = (
+                        pd.to_numeric(
+                            point_raw_df.get("daily_changes"), errors="coerce"
+                        )
+                        .fillna(1)
+                        .clip(lower=1, upper=9)
+                    )
+                    marker_color = pd.to_numeric(
+                        point_raw_df.get("day_to_day_delta"), errors="coerce"
+                    ).fillna(0)
+                    fig_overlay.add_trace(
+                        go.Scatter(
+                            x=point_raw_df["growth_day_num"],
+                            y=point_raw_df["current_value_last"],
+                            mode="markers",
+                            name="原始调整（日粒度）",
+                            marker=dict(
+                                size=marker_size,
+                                color=marker_color,
+                                colorscale="Greys",
+                                opacity=0.45,
+                                showscale=True,
+                                colorbar=dict(title="日间变化"),
+                            ),
+                            customdata=np.stack(
+                                [
+                                    point_raw_df.get("batch_key").astype(str),
+                                    point_raw_df.get("cluster_name").astype(str),
+                                    point_raw_df.get("daily_changes"),
+                                ],
+                                axis=1,
+                            ),
+                            hovertemplate=(
+                                "生长天 %{x}<br>当日设定值 %{y}"
+                                "<br>批次 %{customdata[0]}"
+                                "<br>聚类标签 %{customdata[1]}"
+                                "<br>当日调控次数 %{customdata[2]}<extra></extra>"
+                            ),
+                        )
+                    )
+
+                point_cluster_df["设定值展示"] = pd.to_numeric(
+                    point_cluster_df["设定值中位数"], errors="coerce"
+                )
+                point_cluster_df["常见设定值_num"] = pd.to_numeric(
+                    point_cluster_df["常见设定值"], errors="coerce"
+                )
+                point_cluster_df["设定值展示"] = point_cluster_df[
+                    "设定值展示"
+                ].combine_first(point_cluster_df["常见设定值_num"])
+                point_cluster_df = point_cluster_df[
+                    point_cluster_df["设定值展示"].notna()
+                ].copy()
+
+                boundary_colors = px.colors.qualitative.Plotly
+                boundary_idx = 0
+                for cluster_name, cdf in point_cluster_df.groupby("时间簇"):
+                    center = pd.to_numeric(cdf["生长天中位数_num"], errors="coerce")
+                    x_min = pd.to_numeric(
+                        cdf["生长时间窗"]
+                        .astype(str)
+                        .str.extract(r"D(\d+)", expand=False),
+                        errors="coerce",
+                    )
+                    x_max = pd.to_numeric(
+                        cdf["生长时间窗"]
+                        .astype(str)
+                        .str.extract(r"-D(\d+)", expand=False),
+                        errors="coerce",
+                    )
+                    err_plus = (x_max - center).fillna(0)
+                    err_minus = (center - x_min).fillna(0)
+
+                    # 聚类边界高亮带（显示时间窗）
+                    xmin_val = x_min.dropna().min()
+                    xmax_val = x_max.dropna().max()
+                    if pd.notna(xmin_val) and pd.notna(xmax_val):
+                        color = boundary_colors[boundary_idx % len(boundary_colors)]
+                        fig_overlay.add_vrect(
+                            x0=float(xmin_val),
+                            x1=float(xmax_val),
+                            fillcolor=color,
+                            opacity=0.08,
+                            line_width=1,
+                            line_color=color,
+                            annotation_text=f"{cluster_name} 边界",
+                            annotation_position="top left",
+                        )
+                        boundary_idx += 1
+
+                    fig_overlay.add_trace(
+                        go.Scatter(
+                            x=center,
+                            y=cdf["设定值展示"],
+                            mode="markers+text",
+                            name=f"聚类中心 {cluster_name}",
+                            text=(
+                                cdf["时间簇"].astype(str)
+                                + " | 建议 "
+                                + cdf["常见设定值"].astype(str)
+                            ),
+                            textposition="top center",
+                            marker=dict(
+                                size=15,
+                                opacity=0.98,
+                                symbol="diamond",
+                                line=dict(width=1.5, color="black"),
+                            ),
+                            error_x=dict(
+                                type="data",
+                                array=err_plus,
+                                arrayminus=err_minus,
+                                thickness=2.0,
+                                color="rgba(20,20,20,0.7)",
+                            ),
+                            customdata=np.stack(
+                                [
+                                    cdf["生长时间窗"].astype(str),
+                                    cdf["样本天数"],
+                                    cdf["调控次数(中位)"],
+                                    cdf["控制变化趋势"].astype(str),
+                                    cdf["常见控制方式"].astype(str),
+                                    cdf["轮廓系数"],
+                                ],
+                                axis=1,
+                            ),
+                            hovertemplate=(
+                                "生长时间窗 %{customdata[0]}"
+                                "<br>聚类中心设定值 %{y}"
+                                "<br>样本天数 %{customdata[1]}"
+                                "<br>调控次数(中位) %{customdata[2]}"
+                                "<br>趋势 %{customdata[3]}"
+                                "<br>控制方式 %{customdata[4]}"
+                                "<br>轮廓系数 %{customdata[5]}<extra></extra>"
+                            ),
+                        )
+                    )
+
+                fig_overlay.update_layout(
+                    height=460,
+                    xaxis_title="生长周期（天）",
+                    yaxis_title="设定值",
+                    title=f"设备类型：{device_cn} | 测点类型：{selected_point} | 原始点-聚类边界-聚类中心",
+                )
+                fig_overlay.update_xaxes(tickmode="linear", dtick=1)
+                st.plotly_chart(
+                    fig_overlay,
+                    width="stretch",
+                    config={"scrollZoom": True, "responsive": True},
+                )
+
+    rank_df = (
+        actionable_df.groupby(["设备类型", "测点类型"], as_index=False)["样本天数"]
+        .sum()
+        .sort_values("样本天数", ascending=False)
+        .head(20)
+    )
+    fig_rank = px.bar(
+        rank_df,
+        x="测点类型",
+        y="样本天数",
+        color="设备类型",
+        title="聚类知识库 Top20 测点覆盖样本天数",
+    )
+    st.plotly_chart(
+        fig_rank, width="stretch", config={"scrollZoom": True, "responsive": True}
+    )
+
+    st.dataframe(
+        actionable_df[
+            [
+                "设备类型",
+                "测点类型",
+                "时间簇",
+                "生长时间窗",
+                "生长天中位数",
+                "样本天数",
+                "调控次数(中位)",
+                "覆盖库房数",
+                "覆盖批次数",
+                "常见设定值",
+                "设定值中位数",
+                "设定值P25",
+                "设定值P75",
+                "控制变化趋势",
+                "常见控制方式",
+                "常见调控小时",
+                "测点聚类数",
+                "聚类方法",
+                "轮廓系数",
+            ]
+        ].sort_values(["设备类型", "测点类型", "时间簇"]),
+        width="stretch",
+    )
 
 
 def show_legacy():
@@ -1490,7 +2146,6 @@ def show():
         compute_cooccurrence_matrix,
     )
     from web_app.control_ops_dashboard.data import (
-        attach_batch_and_growth_day,
         load_batch_windows_from_yield,
         load_device_setpoint_changes,
         load_room_list_from_yield,
@@ -1549,6 +2204,16 @@ html, body, [class*="css"] {
     )
 
     st.title("调控操作可视化")
+
+    page_mode = st.radio(
+        "页面",
+        options=["调控时间轴", "聚类知识库"],
+        horizontal=True,
+        key="control_ops_page_mode",
+    )
+    if page_mode == "聚类知识库":
+        render_cluster_kb_page()
+        return
 
     @st.cache_data(ttl=300)
     def cached_rooms():
@@ -1648,7 +2313,30 @@ html, body, [class*="css"] {
             tuple(sorted(selected_windows["room_id"].unique().tolist())),
             selected_in_dates,
         )
-        changes = attach_batch_and_growth_day(raw_changes, selected_windows)
+
+        changes = raw_changes.copy()
+        if not changes.empty:
+            changes["change_time"] = pd.to_datetime(
+                changes["change_time"], errors="coerce"
+            )
+            changes["in_date"] = pd.to_datetime(
+                changes.get("in_date"), errors="coerce"
+            ).dt.date
+            changes = changes.dropna(subset=["change_time", "room_id", "in_date"])
+
+            changes["batch_key"] = (
+                changes["room_id"].astype(str) + "|" + changes["in_date"].astype(str)
+            )
+            changes = changes[changes["batch_key"].isin(selected_batches)].copy()
+
+            growth_day_num = pd.to_numeric(changes.get("growth_day"), errors="coerce")
+            inferred_growth_day = (
+                pd.to_datetime(changes["change_time"]).dt.normalize()
+                - pd.to_datetime(changes["in_date"]).dt.normalize()
+            ).dt.days + 1
+            changes["growth_day"] = growth_day_num.fillna(inferred_growth_day)
+            changes = changes[changes["growth_day"].notna()].copy()
+            changes["growth_day"] = changes["growth_day"].astype(int)
 
     if not changes.empty:
         static_cfg_df = load_static_config_map(selected_rooms)
@@ -1704,9 +2392,12 @@ html, body, [class*="css"] {
             changes = changes.drop(columns=["point_remark_alias"], errors="ignore")
             changes = changes.drop(columns=["point_remark_by_type"], errors="ignore")
             if "point_remark" in changes.columns:
-                changes["point_group"] = changes["point_remark"].fillna(
-                    changes.get("point_group")
-                )
+                if "point_group" in changes.columns:
+                    changes["point_group"] = changes["point_remark"].combine_first(
+                        changes["point_group"]
+                    )
+                else:
+                    changes["point_group"] = changes["point_remark"]
 
     if changes.empty:
         return

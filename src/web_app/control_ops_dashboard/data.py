@@ -113,8 +113,11 @@ def attach_batch_and_growth_day(
     df = changes.copy()
     df["change_time"] = pd.to_datetime(df["change_time"], errors="coerce")
     df = df.dropna(subset=["change_time"])
+    if "in_date" in df.columns:
+        df["in_date"] = pd.to_datetime(df["in_date"], errors="coerce").dt.date
 
     w = windows[["room_id", "in_date", "start_time", "end_time", "batch_key"]].copy()
+    w["in_date"] = pd.to_datetime(w["in_date"], errors="coerce").dt.date
     w["start_time"] = pd.to_datetime(w["start_time"], errors="coerce")
     w["end_time"] = pd.to_datetime(w["end_time"], errors="coerce")
 
@@ -123,20 +126,35 @@ def attach_batch_and_growth_day(
         merged = df.merge(w, on=["room_id", "in_date"], how="left")
     else:
         merged = df.merge(w, on="room_id", how="inner")
-        merged = merged[
+
+    merged = merged[
+        merged["start_time"].isna()
+        | merged["end_time"].isna()
+        | (
             (merged["change_time"] >= merged["start_time"])
             & (merged["change_time"] <= merged["end_time"])
-        ]
+        )
+    ]
 
     if "in_date" not in merged.columns:
         merged["in_date"] = merged.get("in_date_x")
         merged["in_date"] = merged["in_date"].fillna(merged.get("in_date_y"))
     elif merged["in_date"].isna().all():
         merged["in_date"] = merged["in_date"].fillna(merged.get("in_date_y"))
-    if "growth_day" not in merged.columns or merged["growth_day"].isna().all():
-        merged["growth_day"] = (
-            merged["change_time"].dt.date - merged["in_date"]
-        ).apply(lambda d: d.days + 1)
+    in_date_ts = pd.to_datetime(merged.get("in_date"), errors="coerce")
+    change_time_ts = pd.to_datetime(merged.get("change_time"), errors="coerce")
+    inferred_growth_day = (
+        change_time_ts.dt.normalize() - in_date_ts.dt.normalize()
+    ).dt.days + 1
+
+    if "growth_day" not in merged.columns:
+        merged["growth_day"] = inferred_growth_day
+    else:
+        merged["growth_day"] = pd.to_numeric(merged["growth_day"], errors="coerce")
+        merged["growth_day"] = merged["growth_day"].fillna(inferred_growth_day)
+
+    merged = merged[merged["growth_day"].notna()].copy()
+    merged["growth_day"] = merged["growth_day"].astype(int)
     merged["batch_key"] = (
         merged["room_id"].astype(str) + "|" + merged["in_date"].astype(str)
     )
@@ -148,3 +166,55 @@ def attach_batch_and_growth_day(
         axis=1,
     )
     return merged
+
+
+def load_control_history_with_growth_day(
+    room_ids: list[str] | None = None,
+    batch_keys: list[str] | None = None,
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+) -> pd.DataFrame:
+    """从数据库读取历史调控数据，并与批次、生长天数建立稳定关联。"""
+    rooms = room_ids or load_room_list_from_yield()
+    if not rooms:
+        return pd.DataFrame()
+
+    windows = load_batch_windows_from_yield(rooms)
+    if windows is None or windows.empty:
+        return pd.DataFrame()
+
+    if batch_keys:
+        windows = windows[windows["batch_key"].isin(batch_keys)].copy()
+        if windows.empty:
+            return pd.DataFrame()
+
+    in_dates = (
+        pd.to_datetime(windows["in_date"], errors="coerce")
+        .dt.date.dropna()
+        .drop_duplicates()
+        .tolist()
+    )
+
+    raw_changes = load_device_setpoint_changes(
+        room_ids=sorted(windows["room_id"].dropna().astype(str).unique().tolist()),
+        start_time=start_time,
+        end_time=end_time,
+        in_dates=in_dates,
+    )
+    if raw_changes is None or raw_changes.empty:
+        return pd.DataFrame()
+
+    merged = attach_batch_and_growth_day(raw_changes, windows)
+    if merged.empty:
+        return pd.DataFrame()
+
+    merged["growth_stage"] = pd.cut(
+        pd.to_numeric(merged["growth_day"], errors="coerce"),
+        bins=[-float("inf"), 7, 14, 21, 28, float("inf")],
+        labels=["D1-D7", "D8-D14", "D15-D21", "D22-D28", "D29+"],
+    )
+
+    return merged.sort_values(
+        ["room_id", "batch_key", "growth_day", "change_time"],
+        ascending=[True, True, True, True],
+    ).reset_index(drop=True)

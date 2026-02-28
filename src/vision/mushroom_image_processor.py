@@ -47,6 +47,8 @@ class MushroomImagePathParser:
     """蘑菇图像路径解析器"""
 
     def __init__(self):
+        self._latest_in_date_cache: dict[str, datetime | None] = {}
+
         # 文件路径正则表达式 - 支持多种格式变体
         # 格式: 612/20251224/612_1921681235_20251218_20251224160000.jpg
         # 或: 7/20251224/7_1921681233_2025124_20251224160000.jpg (collection_date可能是7位)
@@ -68,6 +70,9 @@ class MushroomImagePathParser:
         if not mushroom_id:
             return None
 
+        if mushroom_id in self._latest_in_date_cache:
+            return self._latest_in_date_cache[mushroom_id]
+
         Session = sessionmaker(bind=pgsql_engine)
         session = Session()
         try:
@@ -77,9 +82,12 @@ class MushroomImagePathParser:
                 .order_by(MushroomImageEmbedding.in_date.desc())
                 .first()
             )
-            return latest[0] if latest else None
+            latest_in_date = latest[0] if latest else None
+            self._latest_in_date_cache[mushroom_id] = latest_in_date
+            return latest_in_date
         except Exception as e:
             logger.warning(f"入库记录查询失败: {e} | 库房: {mushroom_id}")
+            self._latest_in_date_cache[mushroom_id] = None
             return None
         finally:
             session.close()

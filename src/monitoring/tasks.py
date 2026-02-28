@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
 import pandas as pd
+from sqlalchemy import bindparam, text
 from sqlalchemy.orm import sessionmaker
 
 from global_const.global_const import pgsql_engine
@@ -642,6 +643,16 @@ def detect_changes_with_static_configs(
             }
         )
 
+        # 保护性去重：同一库房同一设备测点同一时刻的重复变化仅保留一条
+        dedupe_keys = ["room_id", "device_name", "point_name", "change_time"]
+        before_dedupe = len(result_df)
+        result_df = result_df.drop_duplicates(subset=dedupe_keys, keep="last")
+        duplicate_count = before_dedupe - len(result_df)
+        if duplicate_count > 0:
+            logger.warning(
+                f"[CHANGE_DETECT] 检测到并移除 {duplicate_count} 条重复变化（按 {dedupe_keys}）"
+            )
+
         logger.debug(f"[CHANGE_DETECT] 检测到 {len(result_df)} 个变更")
         return result_df.to_dict("records")
 
@@ -757,8 +768,79 @@ def store_setpoint_changes_to_database(changes: List[Dict[str, Any]]) -> int:
         # 转换为DataFrame
         df = pd.DataFrame(changes)
 
+        if df.empty:
+            return 0
+
+        # 统一时间字段，避免字符串/时区差异导致重复判定失效
+        df["change_time"] = pd.to_datetime(df["change_time"], errors="coerce")
+        df = df.dropna(subset=["change_time"])
+
+        if df.empty:
+            logger.warning("[DB_STORE] 变更记录的 change_time 全部无效，跳过入库")
+            return 0
+
+        # 批内去重：同一批次内重复记录只保留一条
+        dedupe_keys = ["room_id", "device_name", "point_name", "change_time"]
+        batch_before = len(df)
+        df = df.drop_duplicates(subset=dedupe_keys, keep="last").reset_index(drop=True)
+        batch_removed = batch_before - len(df)
+        if batch_removed > 0:
+            logger.warning(
+                f"[DB_STORE] 批内去重移除 {batch_removed} 条重复记录（按 {dedupe_keys}）"
+            )
+
+        # 库内幂等：过滤数据库中已经存在的相同主键记录，避免重试/重跑重复写入
+        min_change_time = df["change_time"].min()
+        max_change_time = df["change_time"].max()
+        room_ids = sorted(df["room_id"].dropna().astype(str).unique().tolist())
+
+        existing_sql = text(
+            """
+            SELECT room_id, device_name, point_name, change_time
+            FROM device_setpoint_changes
+            WHERE change_time BETWEEN :min_change_time AND :max_change_time
+              AND room_id IN :room_ids
+            """
+        ).bindparams(bindparam("room_ids", expanding=True))
+
+        existing_df = pd.read_sql(
+            existing_sql,
+            con=pgsql_engine,
+            params={
+                "min_change_time": min_change_time,
+                "max_change_time": max_change_time,
+                "room_ids": room_ids,
+            },
+        )
+
+        if not existing_df.empty:
+            existing_df["change_time"] = pd.to_datetime(
+                existing_df["change_time"], errors="coerce"
+            )
+            existing_df = existing_df.dropna(subset=["change_time"]).drop_duplicates(
+                subset=dedupe_keys
+            )
+
+            df = df.merge(
+                existing_df[dedupe_keys],
+                on=dedupe_keys,
+                how="left",
+                indicator=True,
+            )
+            already_exists = int((df["_merge"] == "both").sum())
+            df = df[df["_merge"] == "left_only"].drop(columns=["_merge"])
+
+            if already_exists > 0:
+                logger.warning(
+                    f"[DB_STORE] 检测到 {already_exists} 条已存在记录，已跳过重复写入"
+                )
+
+        if df.empty:
+            logger.info("[DB_STORE] 过滤重复后无新记录需要入库")
+            return 0
+
         # 存储到数据库
-        stored_count = df.to_sql(
+        df.to_sql(
             "device_setpoint_changes",
             con=pgsql_engine,
             if_exists="append",
@@ -767,8 +849,8 @@ def store_setpoint_changes_to_database(changes: List[Dict[str, Any]]) -> int:
             chunksize=1000,
         )
 
-        logger.info(f"[DB_STORE] 成功存储 {len(changes)} 条变更记录")
-        return len(changes)
+        logger.info(f"[DB_STORE] 成功存储 {len(df)} 条变更记录")
+        return len(df)
 
     except Exception as e:
         logger.error(f"[DB_STORE] 存储变更记录失败: {e}")
