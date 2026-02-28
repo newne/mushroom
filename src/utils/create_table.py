@@ -774,6 +774,50 @@ class DecisionAnalysisBatchStatus(Base):
     )
 
 
+class DecisionAnalysisSkillAudit(Base):
+    """决策分析 Skill 执行审计表"""
+
+    __tablename__ = "decision_analysis_skill_audit"
+
+    __table_args__ = (
+        Index("idx_skill_audit_batch", "batch_id"),
+        Index("idx_skill_audit_room_time", "room_id", "analysis_time"),
+        Index("idx_skill_audit_skill_enabled", "skill_enabled"),
+        Index("idx_skill_audit_kb_prior_enabled", "kb_prior_enabled"),
+        {"comment": "Skill执行审计：记录命中、修正、KB先验引用等证据"},
+    )
+
+    id = Column(
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        comment="主键ID (UUID4)",
+    )
+    batch_id = Column(String(100), nullable=False, comment="批次ID")
+    room_id = Column(String(10), nullable=False, comment="库房编号")
+    analysis_time = Column(DateTime, nullable=False, comment="分析时间")
+
+    skill_enabled = Column(Boolean, nullable=False, default=True, comment="Skill是否启用")
+    kb_prior_enabled = Column(
+        Boolean, nullable=False, default=False, comment="Skill KB先验是否启用"
+    )
+    kb_prior_points = Column(Integer, nullable=False, default=0, comment="可用KB先验点位数")
+    kb_prior_used = Column(Integer, nullable=False, default=0, comment="KB先验引用次数")
+
+    matched_count = Column(Integer, nullable=False, default=0, comment="命中Skill数量")
+    constraint_corrections = Column(Integer, nullable=False, default=0, comment="约束修正次数")
+    matched_skill_ids = Column(JSON, nullable=True, comment="命中Skill ID列表")
+
+    trigger_context = Column(JSON, nullable=True, comment="触发上下文")
+    correction_details = Column(JSON, nullable=True, comment="修正明细")
+    raw_feedback = Column(JSON, nullable=True, comment="原始skill_feedback")
+
+    created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
+    )
+
+
 def migrate_dynamic_status_to_batch_status():
     """
     将 decision_analysis_dynamic_result 中的批次信息迁移到批次状态表。
@@ -1756,6 +1800,83 @@ def extract_dynamic_results_from_json(
         return []
 
 
+def extract_skill_feedback_from_json(json_data: dict) -> dict:
+    """从决策JSON中提取 skill_feedback。"""
+    try:
+        if not isinstance(json_data, dict):
+            return {}
+        feedback = json_data.get("skill_feedback")
+        if isinstance(feedback, dict):
+            return feedback
+        return {}
+    except Exception:
+        return {}
+
+
+def store_decision_analysis_skill_audit(
+    skill_feedback: dict,
+    batch_id: str,
+    room_id: str,
+    analysis_time: datetime,
+) -> int:
+    """存储 Skill 执行审计记录。"""
+    if not isinstance(skill_feedback, dict) or not skill_feedback:
+        return 0
+
+    def _insert_once() -> int:
+        Session = sessionmaker(bind=pgsql_engine)
+        session = Session()
+        try:
+            row = DecisionAnalysisSkillAudit(
+                batch_id=batch_id,
+                room_id=room_id,
+                analysis_time=analysis_time,
+                skill_enabled=bool(skill_feedback.get("enabled", True)),
+                kb_prior_enabled=bool(skill_feedback.get("kb_prior_enabled", False)),
+                kb_prior_points=int(skill_feedback.get("kb_prior_points", 0) or 0),
+                kb_prior_used=int(skill_feedback.get("kb_prior_used", 0) or 0),
+                matched_count=int(skill_feedback.get("matched_count", 0) or 0),
+                constraint_corrections=int(
+                    skill_feedback.get("constraint_corrections", 0) or 0
+                ),
+                matched_skill_ids=skill_feedback.get("matched_skill_ids") or [],
+                trigger_context=skill_feedback.get("trigger_context") or {},
+                correction_details=skill_feedback.get("correction_details") or [],
+                raw_feedback=skill_feedback,
+            )
+            session.add(row)
+            session.commit()
+            logger.info(
+                f"[Skill Audit] Stored skill audit: batch={batch_id}, room={room_id}, "
+                f"matched={row.matched_count}, corrections={row.constraint_corrections}, kb_used={row.kb_prior_used}"
+            )
+            return 1
+        finally:
+            session.close()
+
+    try:
+        return _insert_once()
+    except Exception as e:
+        error_text = str(e)
+        if "decision_analysis_skill_audit" in error_text and "does not exist" in error_text:
+            try:
+                Base.metadata.create_all(
+                    bind=pgsql_engine,
+                    tables=[DecisionAnalysisSkillAudit.__table__],
+                    checkfirst=True,
+                )
+                logger.info("[Skill Audit] 已自动创建 decision_analysis_skill_audit 表")
+                return _insert_once()
+            except Exception as create_error:
+                logger.warning(
+                    f"[Skill Audit] 自动建表后写入仍失败: {create_error}"
+                )
+                return 0
+
+        logger.warning(f"[Skill Audit] Failed to store skill audit: {e}")
+        return 0
+
+
 def store_decision_analysis_static_configs(configs: list) -> int:
     """
     存储静态点位配置到数据库（支持批量插入和更新）
@@ -1914,6 +2035,14 @@ def store_decision_analysis_dynamic_results_only(
             else 0
         )
 
+        skill_feedback = extract_skill_feedback_from_json(json_data)
+        skill_audit_count = store_decision_analysis_skill_audit(
+            skill_feedback=skill_feedback,
+            batch_id=batch_id,
+            room_id=room_id,
+            analysis_time=analysis_time,
+        )
+
         result_stats = {
             "batch_id": batch_id,
             "room_id": room_id,
@@ -1926,12 +2055,14 @@ def store_decision_analysis_dynamic_results_only(
             "total_points_processed": len(dynamic_results) if dynamic_results else 0,
             "processing_time": 0.0,
             "static_configs_skipped": True,  # 标记跳过了静态配置存储
+            "skill_audit_count": skill_audit_count,
         }
 
         logger.info("[Dynamic Storage] Dynamic results stored successfully:")
         logger.info(f"  - Batch ID: {batch_id}")
         logger.info(f"  - Dynamic results: {dynamic_count}")
         logger.info(f"  - Changes: {result_stats['change_count']}")
+        logger.info(f"  - Skill audit: {skill_audit_count}")
         logger.info("  - Static configs: skipped (optimization)")
 
         return result_stats
@@ -1982,6 +2113,15 @@ def store_decision_analysis_results(
             else 0
         )
 
+        # 3. 存储Skill执行审计
+        skill_feedback = extract_skill_feedback_from_json(json_data)
+        skill_audit_count = store_decision_analysis_skill_audit(
+            skill_feedback=skill_feedback,
+            batch_id=batch_id,
+            room_id=room_id,
+            analysis_time=analysis_time,
+        )
+
         if batch_id:
             Session = sessionmaker(bind=pgsql_engine)
             session = Session()
@@ -2017,12 +2157,14 @@ def store_decision_analysis_results(
             else 0,  # 计算变更数量
             "total_points_processed": len(static_configs) if static_configs else 0,
             "processing_time": 0.0,  # 这里可以添加处理时间统计
+            "skill_audit_count": skill_audit_count,
         }
 
         logger.info("[IoT Storage] IoT analysis results stored successfully:")
         logger.info(f"  - Batch ID: {batch_id}")
         logger.info(f"  - Static configs: {static_count}")
         logger.info(f"  - Dynamic results: {dynamic_count}")
+        logger.info(f"  - Skill audit: {skill_audit_count}")
 
         return result_stats
 

@@ -16,8 +16,15 @@ from datetime import datetime
 from typing import Any, Dict
 
 from global_const.const_config import (
+    DECISION_ANALYSIS_EMBEDDING_SIM_WEIGHT,
+    DECISION_ANALYSIS_ENABLE_SKILL_ENGINE,
+    DECISION_ANALYSIS_ENABLE_SKILL_KB_PRIOR,
+    DECISION_ANALYSIS_ENABLE_KB_HUMAN_PRIOR,
     DECISION_ANALYSIS_MAX_RETRIES,
+    DECISION_ANALYSIS_MULTI_IMAGE_BOOST,
     DECISION_ANALYSIS_RETRY_DELAY,
+    DECISION_ANALYSIS_SIMILAR_CASE_TOP_K,
+    DECISION_ANALYSIS_ENV_SIM_WEIGHT,
     MUSHROOM_ROOM_IDS,
 )
 from global_const.global_const import ensure_src_path
@@ -29,7 +36,7 @@ from utils.create_table import store_decision_analysis_results
 from utils.loguru_setting import logger
 
 
-def safe_decision_analysis_for_room(room_id: str) -> bool:
+def safe_decision_analysis_for_room(room_id: str) -> Dict[str, Any]:
     """
     执行单个蘑菇房的决策分析任务（优化版：仅存储动态结果）
 
@@ -55,6 +62,7 @@ def safe_decision_analysis_for_room(room_id: str) -> bool:
     retry_delay = DECISION_ANALYSIS_RETRY_DELAY
 
     task_id = f"decision_analysis_{room_id}"
+    _ = task_id
 
     for attempt in range(1, max_retries + 1):
         try:
@@ -74,16 +82,41 @@ def safe_decision_analysis_for_room(room_id: str) -> bool:
                 output_file=None,  # 不生成JSON文件
                 verbose=False,
                 output_format="both",  # 同时生成静态配置与动态结果
+                similar_case_top_k=DECISION_ANALYSIS_SIMILAR_CASE_TOP_K,
+                embedding_similarity_weight=DECISION_ANALYSIS_EMBEDDING_SIM_WEIGHT,
+                env_similarity_weight=DECISION_ANALYSIS_ENV_SIM_WEIGHT,
+                enable_kb_human_prior=DECISION_ANALYSIS_ENABLE_KB_HUMAN_PRIOR,
+                multi_image_boost=DECISION_ANALYSIS_MULTI_IMAGE_BOOST,
+                enable_skill_engine=DECISION_ANALYSIS_ENABLE_SKILL_ENGINE,
             )
 
             duration = (datetime.now() - start_time).total_seconds()
 
             # 记录执行结果
             if result.success:
+                skill_enabled = bool(result.metadata.get("skill_enabled", False))
+                skill_matched_count = int(result.metadata.get("skill_matched_count", 0))
+                skill_constraint_corrections = int(
+                    result.metadata.get("skill_constraint_corrections", 0)
+                )
+
                 logger.info(
                     f"[DECISION_TASK] 决策分析完成: 库房{room_id}, "
                     f"成功={result.success}, 多图像数量={result.metadata.get('multi_image_count', 0)}, 耗时={duration:.2f}秒"
                 )
+                logger.info(
+                    "[DECISION_TASK] Skill反馈: 启用=%s, KB先验=%s, 命中=%s, 约束修正=%s, KB修正引用=%s"
+                    % (
+                        skill_enabled,
+                        result.metadata.get("skill_kb_prior_enabled", False),
+                        skill_matched_count,
+                        skill_constraint_corrections,
+                        result.metadata.get("skill_kb_prior_used", 0),
+                    )
+                )
+
+                dynamic_results_count = 0
+                change_count = 0
 
                 # ==================== 新增：仅存储动态结果到数据库 ====================
                 try:
@@ -123,6 +156,13 @@ def safe_decision_analysis_for_room(room_id: str) -> bool:
                         logger.info(
                             f"[DECISION_TASK]   - 变更记录: {storage_result.get('change_count', 0)}条"
                         )
+                        logger.info(
+                            f"[DECISION_TASK]   - Skill审计: {storage_result.get('skill_audit_count', 0)}条"
+                        )
+                        dynamic_results_count = int(
+                            storage_result.get("dynamic_results_count", 0)
+                        )
+                        change_count = int(storage_result.get("change_count", 0))
 
                 except Exception as storage_error:
                     # 数据库存储失败不影响分析任务的成功状态
@@ -142,7 +182,19 @@ def safe_decision_analysis_for_room(room_id: str) -> bool:
                         logger.warning(f"[DECISION_TASK]   - {warning}")
 
                 # 成功执行，退出重试循环
-                return True
+                return {
+                    "success": True,
+                    "duration": duration,
+                    "skill_enabled": skill_enabled,
+                    "skill_matched_count": skill_matched_count,
+                    "skill_constraint_corrections": skill_constraint_corrections,
+                    "skill_kb_prior_used": int(
+                        result.metadata.get("skill_kb_prior_used", 0)
+                    ),
+                    "warnings_count": len(result.warnings or []),
+                    "dynamic_results_count": dynamic_results_count,
+                    "change_count": change_count,
+                }
 
             else:
                 # 分析执行但有错误
@@ -175,18 +227,30 @@ def safe_decision_analysis_for_room(room_id: str) -> bool:
                         f"[DECISION_TASK] 库房{room_id}决策分析失败，"
                         f"已达到最大重试次数 ({max_retries})"
                     )
-                    return False
+                    return {
+                        "success": False,
+                        "duration": duration,
+                        "error": error_msg,
+                    }
                 else:
                     # 非连接错误，不重试
                     logger.error(
                         f"[DECISION_TASK] 库房{room_id}决策分析遇到非连接错误，不再重试"
                     )
-                    return False
+                    return {
+                        "success": False,
+                        "duration": duration,
+                        "error": error_msg,
+                    }
 
         except ImportError as e:
             logger.error(f"[DECISION_TASK] 导入决策分析模块失败: {e}")
             # 导入错误不重试
-            return False
+            return {
+                "success": False,
+                "duration": 0.0,
+                "error": str(e),
+            }
 
         except Exception as e:
             error_msg = str(e)
@@ -216,10 +280,18 @@ def safe_decision_analysis_for_room(room_id: str) -> bool:
                     f"[DECISION_TASK] 库房{room_id}决策分析失败，"
                     f"已达到最大重试次数 ({max_retries})"
                 )
-                return False
+                return {
+                    "success": False,
+                    "duration": 0.0,
+                    "error": error_msg,
+                }
             else:
                 logger.error("[DECISION_TASK] 决策分析遇到非连接错误，不再重试")
-                return False
+                return {
+                    "success": False,
+                    "duration": 0.0,
+                    "error": error_msg,
+                }
 
 
 def safe_batch_decision_analysis(
@@ -268,6 +340,20 @@ def safe_batch_decision_analysis(
     logger.info(
         "[DECISION_TASK] 功能: 多图像分析, 结构化参数调整, 风险评估, 仅动态结果存储（优化版）"
     )
+    logger.info(
+        "[DECISION_TASK] 策略: KB人工偏好优先=%s, 相似案例top_k=%s, embedding权重=%.2f, env权重=%.2f, multi_image_boost=%s, skill_engine=%s"
+        % (
+            DECISION_ANALYSIS_ENABLE_KB_HUMAN_PRIOR,
+            DECISION_ANALYSIS_SIMILAR_CASE_TOP_K,
+            DECISION_ANALYSIS_EMBEDDING_SIM_WEIGHT,
+            DECISION_ANALYSIS_ENV_SIM_WEIGHT,
+            DECISION_ANALYSIS_MULTI_IMAGE_BOOST,
+            DECISION_ANALYSIS_ENABLE_SKILL_ENGINE,
+        )
+    )
+    logger.info(
+        f"[DECISION_TASK] Skill策略: 启用KB先验={DECISION_ANALYSIS_ENABLE_SKILL_KB_PRIOR}"
+    )
     logger.info("[DECISION_TASK] ==========================================")
 
     batch_start_time = datetime.now()
@@ -277,10 +363,20 @@ def safe_batch_decision_analysis(
         room_start_time = datetime.now()
 
         try:
-            room_success = safe_decision_analysis_for_room(room_id)
+            room_result = safe_decision_analysis_for_room(room_id)
             results[room_id] = {
-                "status": "success" if room_success else "failed",
+                "status": "success" if room_result.get("success") else "failed",
                 "duration": (datetime.now() - room_start_time).total_seconds(),
+                "skill_enabled": bool(room_result.get("skill_enabled", False)),
+                "skill_matched_count": int(room_result.get("skill_matched_count", 0)),
+                "skill_constraint_corrections": int(
+                    room_result.get("skill_constraint_corrections", 0)
+                ),
+                "skill_kb_prior_used": int(room_result.get("skill_kb_prior_used", 0)),
+                "warnings_count": int(room_result.get("warnings_count", 0)),
+                "dynamic_results_count": int(room_result.get("dynamic_results_count", 0)),
+                "change_count": int(room_result.get("change_count", 0)),
+                "error": room_result.get("error"),
             }
         except Exception as e:
             results[room_id] = {
@@ -294,6 +390,23 @@ def safe_batch_decision_analysis(
     batch_duration = (datetime.now() - batch_start_time).total_seconds()
     success_count = sum(1 for r in results.values() if r["status"] == "success")
     failed_count = len(results) - success_count
+    skill_enabled_rooms = sum(
+        1 for r in results.values() if r.get("status") == "success" and r.get("skill_enabled")
+    )
+    skill_hit_rooms = sum(
+        1
+        for r in results.values()
+        if r.get("status") == "success" and int(r.get("skill_matched_count", 0)) > 0
+    )
+    skill_total_matched = sum(int(r.get("skill_matched_count", 0)) for r in results.values())
+    skill_total_corrections = sum(
+        int(r.get("skill_constraint_corrections", 0)) for r in results.values()
+    )
+    skill_total_kb_prior_used = sum(
+        int(r.get("skill_kb_prior_used", 0)) for r in results.values()
+    )
+    total_dynamic_results = sum(int(r.get("dynamic_results_count", 0)) for r in results.values())
+    total_change_count = sum(int(r.get("change_count", 0)) for r in results.values())
 
     logger.info("[DECISION_TASK] ==========================================")
     logger.info("[DECISION_TASK] 批量决策分析完成")
@@ -305,8 +418,14 @@ def safe_batch_decision_analysis(
 
     for room_id, result in results.items():
         status_icon = "✓" if result["status"] == "success" else "✗"
+        skill_summary = (
+            f"skill_hit={result.get('skill_matched_count', 0)}, "
+            f"skill_fix={result.get('skill_constraint_corrections', 0)}, "
+            f"kb_ref={result.get('skill_kb_prior_used', 0)}, "
+            f"dynamic={result.get('dynamic_results_count', 0)}"
+        )
         logger.info(
-            f"[DECISION_TASK]   库房{room_id}: [{status_icon}] {result['duration']:.2f}秒"
+            f"[DECISION_TASK]   库房{room_id}: [{status_icon}] {result['duration']:.2f}秒, {skill_summary}"
         )
 
     # 数据库存储统计（如果有成功的分析）
@@ -315,6 +434,29 @@ def safe_batch_decision_analysis(
             f"[DECISION_TASK] 数据库存储: {success_count}个库房的动态结果已自动存储"
         )
         logger.info("[DECISION_TASK] 存储内容: 静态配置表 + 动态结果表")
+        logger.info(
+            f"[DECISION_TASK] 动态结果汇总: dynamic_results={total_dynamic_results}, changes={total_change_count}"
+        )
+
+    if skill_enabled_rooms > 0:
+        skill_hit_rate = skill_hit_rooms / skill_enabled_rooms
+        correction_rate_by_hit = (
+            skill_total_corrections / skill_hit_rooms if skill_hit_rooms > 0 else 0.0
+        )
+        logger.info(
+            "[DECISION_TASK] Skill汇总: 启用库房=%s, 命中库房=%s, 命中率=%.2f, 匹配总数=%s, 修正总数=%s, 平均每命中修正=%.2f"
+            % (
+                skill_enabled_rooms,
+                skill_hit_rooms,
+                skill_hit_rate,
+                skill_total_matched,
+                skill_total_corrections,
+                correction_rate_by_hit,
+            )
+        )
+        logger.info(
+            f"[DECISION_TASK] Skill-KB汇总: KB先验引用次数={skill_total_kb_prior_used}"
+        )
 
     logger.info("[DECISION_TASK] ==========================================")
 

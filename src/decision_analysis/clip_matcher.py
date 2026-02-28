@@ -45,6 +45,8 @@ class CLIPMatcher:
         top_k: int = 3,
         date_window_days: int = 7,
         growth_day_window: int = 3,
+        embedding_similarity_weight: float = 0.7,
+        env_similarity_weight: float = 0.3,
         multi_image_data: Dict = None,
         analysis_datetime: datetime = None,
     ) -> List[SimilarCase]:
@@ -113,6 +115,8 @@ class CLIPMatcher:
                 top_k=top_k,
                 analysis_datetime=analysis_datetime,
                 date_window_days=date_window_days,
+                embedding_similarity_weight=embedding_similarity_weight,
+                env_similarity_weight=env_similarity_weight,
             )
 
             if similar_df.empty:
@@ -184,6 +188,8 @@ class CLIPMatcher:
         top_k: int = 3,
         date_window_days: int = 7,
         growth_day_window: int = 3,
+        embedding_similarity_weight: float = 0.7,
+        env_similarity_weight: float = 0.3,
         multi_image_boost: bool = True,
         image_count: int = 1,
         analysis_datetime: datetime = None,
@@ -221,6 +227,8 @@ class CLIPMatcher:
             top_k=top_k,
             date_window_days=date_window_days,
             growth_day_window=growth_day_window,
+            embedding_similarity_weight=embedding_similarity_weight,
+            env_similarity_weight=env_similarity_weight,
             analysis_datetime=analysis_datetime,
         )
 

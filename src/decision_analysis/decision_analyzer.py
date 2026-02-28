@@ -15,7 +15,8 @@ from typing import Dict
 
 from dynaconf import Dynaconf
 from loguru import logger
-from sqlalchemy import Engine
+from sqlalchemy import Engine, text
+from sqlalchemy.orm import sessionmaker
 
 from decision_analysis.clip_matcher import CLIPMatcher
 from decision_analysis.data_extractor import DataExtractor
@@ -617,7 +618,14 @@ class DecisionAnalyzer:
         return decision_output
 
     def analyze_enhanced(
-        self, room_id: str, analysis_datetime: datetime
+        self,
+        room_id: str,
+        analysis_datetime: datetime,
+        similar_case_top_k: int = 3,
+        embedding_similarity_weight: float = 0.7,
+        env_similarity_weight: float = 0.3,
+        enable_kb_human_prior: bool = False,
+        multi_image_boost: bool = True,
     ) -> "EnhancedDecisionOutput":
         """
         Execute enhanced decision analysis workflow with multi-image support
@@ -667,6 +675,7 @@ class DecisionAnalyzer:
         similar_cases = []
         rendered_prompt = ""
         llm_decision = {}
+        kb_human_prior_text = ""
         # 初始化默认的多图像分析对象
         multi_image_analysis = MultiImageAnalysis(
             total_images_analyzed=0,
@@ -811,6 +820,15 @@ class DecisionAnalyzer:
                     f"using aggregated data from {current_data['collection_datetime']}"
                 )
 
+                if enable_kb_human_prior:
+                    kb_human_prior_text = self._load_cluster_kb_human_prior(
+                        growth_day=current_data.get("growth_day")
+                    )
+                    if kb_human_prior_text:
+                        logger.info("[DecisionAnalyzer] 已加载聚类知识库人工调控偏好")
+                    else:
+                        metadata["warnings"].append("未加载到可用知识库人工偏好，继续常规分析")
+
                 # Validate environmental parameters
                 validation_warnings = self.data_extractor.validate_env_params(
                     embedding_df
@@ -906,10 +924,12 @@ class DecisionAnalyzer:
                     room_id=room_id,
                     in_date=current_data.get("in_date"),
                     growth_day=current_data.get("growth_day", 0),
-                    top_k=3,
+                    top_k=max(0, int(similar_case_top_k)),
                     date_window_days=3,
                     growth_day_window=3,
-                    multi_image_boost=True,
+                    embedding_similarity_weight=float(embedding_similarity_weight),
+                    env_similarity_weight=float(env_similarity_weight),
+                    multi_image_boost=bool(multi_image_boost),
                     image_count=metadata["multi_image_count"],
                     analysis_datetime=analysis_datetime,
                 )
@@ -978,6 +998,16 @@ class DecisionAnalyzer:
                 similar_cases=similar_cases,
                 multi_image_analysis=multi_image_analysis,
             )
+
+            if kb_human_prior_text:
+                rendered_prompt += (
+                    "\n\n================ 人工调控知识库偏好（高优先级） ================\n"
+                    "以下为基于历史人工调控聚类得到的高频控制规律。\n"
+                    "当与相似图像案例冲突时，优先遵循该知识库偏好；相似图像仅作弱参考。\n"
+                    "请在输出中尽量让设定值靠近以下建议区间与中位值。\n"
+                    f"{kb_human_prior_text}\n"
+                    "============================================================\n"
+                )
 
             logger.info(
                 f"[DecisionAnalyzer] Rendered enhanced prompt successfully "
@@ -1364,6 +1394,96 @@ class DecisionAnalyzer:
         logger.info("[DecisionAnalyzer] ==========================================")
 
         return enhanced_decision_output
+
+    def _load_cluster_kb_human_prior(self, growth_day: int | None) -> str:
+        """加载最新聚类知识库中与当前生长天接近的人工调控偏好文本。"""
+        try:
+            target_day = int(growth_day) if growth_day is not None else None
+        except Exception:
+            target_day = None
+
+        Session = sessionmaker(bind=self.db_engine)
+        try:
+            with Session() as session:
+                run_row = session.execute(
+                    text(
+                        """
+                    SELECT id
+                    FROM control_strategy_kb_runs
+                    WHERE kb_type = 'cluster'
+                    ORDER BY is_active DESC, generated_at DESC
+                    LIMIT 1
+                    """
+                    )
+                ).fetchone()
+
+                if not run_row:
+                    return ""
+
+                run_id = run_row[0]
+                if target_day is None:
+                    rows = session.execute(
+                        text(
+                            """
+                        SELECT device_type, point_display, growth_window, value_median,
+                               value_p25, value_p75, preferred_change_type, preferred_hour
+                        FROM control_strategy_kb_cluster_rules
+                        WHERE run_id = :run_id
+                        ORDER BY sample_days DESC NULLS LAST
+                        LIMIT 8
+                        """
+                        ),
+                        {"run_id": run_id},
+                    ).fetchall()
+                else:
+                    rows = session.execute(
+                        text(
+                            """
+                        SELECT device_type, point_display, growth_window, value_median,
+                               value_p25, value_p75, preferred_change_type, preferred_hour,
+                               ABS(COALESCE(growth_day_median, :target_day) - :target_day) AS day_gap
+                        FROM control_strategy_kb_cluster_rules
+                        WHERE run_id = :run_id
+                        ORDER BY day_gap ASC, sample_days DESC NULLS LAST
+                        LIMIT 8
+                        """
+                        ),
+                        {"run_id": run_id, "target_day": target_day},
+                    ).fetchall()
+
+            if not rows:
+                return ""
+
+            lines = []
+            for idx, row in enumerate(rows, start=1):
+                device_type = row[0]
+                point_display = row[1] or "unknown_point"
+                growth_window = row[2] or "unknown_window"
+                value_median = row[3]
+                value_p25 = row[4]
+                value_p75 = row[5]
+                change_type = row[6] or "unknown"
+                pref_hour = row[7]
+
+                value_hint = (
+                    f"中位值={value_median:.2f}, 建议区间=[{value_p25:.2f}, {value_p75:.2f}]"
+                    if value_median is not None and value_p25 is not None and value_p75 is not None
+                    else "缺少稳定统计区间"
+                )
+                hour_hint = (
+                    f"偏好调整时段≈{float(pref_hour):.1f}h"
+                    if pref_hour is not None
+                    else "偏好调整时段未知"
+                )
+
+                lines.append(
+                    f"{idx}. {device_type}/{point_display} | 生长窗口={growth_window} | {value_hint} | 变化趋势={change_type} | {hour_hint}"
+                )
+
+            return "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"[DecisionAnalyzer] 加载聚类知识库偏好失败: {e}")
+            return ""
 
     def _calculate_stage_alignment_confidence(
         self,

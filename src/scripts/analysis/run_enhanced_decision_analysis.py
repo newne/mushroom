@@ -17,7 +17,10 @@ from typing import Any, Dict, Optional, Union
 
 from loguru import logger
 
-from global_const.const_config import OUTPUT_DIR_NAME
+from global_const.const_config import (
+    DECISION_ANALYSIS_ENABLE_SKILL_KB_PRIOR,
+    OUTPUT_DIR_NAME,
+)
 from global_const.global_const import (
     BASE_DIR,
     ensure_src_path,
@@ -30,6 +33,7 @@ from utils.time_utils import format_datetime
 ensure_src_path()
 
 from decision_analysis.decision_analyzer import DecisionAnalyzer
+from decision_analysis.skills.cultivation_skill import CultivationSkillEngine
 
 
 @dataclass
@@ -201,6 +205,12 @@ def execute_enhanced_decision_analysis(
     output_file: Optional[Union[str, Path]] = None,
     verbose: bool = False,
     output_format: str = "both",
+    similar_case_top_k: int = 3,
+    embedding_similarity_weight: float = 0.7,
+    env_similarity_weight: float = 0.3,
+    enable_kb_human_prior: bool = False,
+    multi_image_boost: bool = True,
+    enable_skill_engine: bool = True,
 ) -> EnhancedDecisionAnalysisResult:
     """
     Execute enhanced decision analysis
@@ -211,6 +221,12 @@ def execute_enhanced_decision_analysis(
         output_file: Optional output file path
         verbose: Enable debug logging
         output_format: "enhanced", "monitoring", or "both"
+        similar_case_top_k: 相似案例数量
+        embedding_similarity_weight: 图像向量相似度权重
+        env_similarity_weight: 环境相似度权重
+        enable_kb_human_prior: 是否注入知识库人工调控偏好
+        multi_image_boost: 是否启用多图像相似度增强
+        enable_skill_engine: 是否启用Skill能力模块约束修正
     """
 
     start_time = datetime.now()
@@ -236,21 +252,72 @@ def execute_enhanced_decision_analysis(
             template_path=str(template_path),
         )
 
-        enhanced_output = analyzer.analyze_enhanced(room_id, analysis_datetime)
+        enhanced_output = analyzer.analyze_enhanced(
+            room_id=room_id,
+            analysis_datetime=analysis_datetime,
+            similar_case_top_k=int(similar_case_top_k),
+            embedding_similarity_weight=float(embedding_similarity_weight),
+            env_similarity_weight=float(env_similarity_weight),
+            enable_kb_human_prior=bool(enable_kb_human_prior),
+            multi_image_boost=bool(multi_image_boost),
+        )
 
         enhanced_dict = _serialize(asdict(enhanced_output))
         monitoring_dict = _build_monitoring_points_output(
             enhanced_output, room_id, analysis_datetime
         )
+        skill_feedback: Dict[str, Any] = {
+            "enabled": bool(enable_skill_engine),
+            "matched_count": 0,
+            "constraint_corrections": 0,
+        }
+
+        if enable_skill_engine and output_format in {"monitoring", "both"}:
+            try:
+                skill_library_path = BASE_DIR / "configs" / "cultivation_skill_library.json"
+                skill_engine = CultivationSkillEngine(
+                    config_path=skill_library_path,
+                    enable_kb_prior=DECISION_ANALYSIS_ENABLE_SKILL_KB_PRIOR,
+                )
+                skill_context = skill_engine.build_context_from_db(
+                    room_id=room_id,
+                    analysis_time=analysis_datetime,
+                )
+                monitoring_dict, skill_feedback = skill_engine.apply(
+                    decision_data=monitoring_dict,
+                    context=skill_context,
+                )
+                logger.info(
+                    "[ENHANCED_DECISION_ANALYSIS] Skill执行: room=%s, matched=%s, corrections=%s"
+                    % (
+                        room_id,
+                        skill_feedback.get("matched_count", 0),
+                        skill_feedback.get("constraint_corrections", 0),
+                    )
+                )
+            except Exception as skill_error:
+                logger.warning(
+                    f"[ENHANCED_DECISION_ANALYSIS] Skill执行失败 room={room_id}: {skill_error}"
+                )
+                skill_feedback = {
+                    "enabled": True,
+                    "error": str(skill_error),
+                    "matched_count": 0,
+                    "constraint_corrections": 0,
+                }
 
         if output_format == "enhanced":
             data = {"enhanced_decision": enhanced_dict}
         elif output_format == "monitoring":
-            data = monitoring_dict
+            data = {
+                **monitoring_dict,
+                "skill_feedback": skill_feedback,
+            }
         else:
             data = {
                 "enhanced_decision": enhanced_dict,
                 **monitoring_dict,
+                "skill_feedback": skill_feedback,
             }
 
         if output_file:
@@ -278,6 +345,13 @@ def execute_enhanced_decision_analysis(
             "image_aggregation_method": enhanced_output.metadata.image_aggregation_method,
             "llm_model": enhanced_output.metadata.llm_model,
             "llm_response_time": enhanced_output.metadata.llm_response_time,
+            "skill_enabled": bool(enable_skill_engine),
+            "skill_kb_prior_enabled": bool(DECISION_ANALYSIS_ENABLE_SKILL_KB_PRIOR),
+            "skill_matched_count": skill_feedback.get("matched_count", 0),
+            "skill_constraint_corrections": skill_feedback.get(
+                "constraint_corrections", 0
+            ),
+            "skill_kb_prior_used": skill_feedback.get("kb_prior_used", 0),
         }
 
     except Exception as e:

@@ -4,7 +4,7 @@
 
 ## 文档列表
 
-*(当前目录为空，待补充具体算法文档)*
+- [Skill+知识库融合决策算法说明](./skill_kb_fusion_decision_algorithm.md)
 
 ## 待补充内容
 - 设定点监控算法逻辑

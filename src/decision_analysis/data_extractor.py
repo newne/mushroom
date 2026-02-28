@@ -721,6 +721,8 @@ class DataExtractor:
         top_k: int = 3,
         analysis_datetime: Optional[datetime] = None,
         date_window_days: int = 3,
+        embedding_similarity_weight: float = 0.7,
+        env_similarity_weight: float = 0.3,
     ) -> pd.DataFrame:
         """
         Find top-k most similar historical cases based on embedding similarity
@@ -848,7 +850,16 @@ class DataExtractor:
                 valid_df.at[idx, "env_similarity_score"] = env_score
 
             # Calculate combined similarity score
-            # 70% embedding similarity + 30% environmental similarity
+            # 权重可配置，默认 70% embedding + 30% environmental
+            emb_w = max(0.0, float(embedding_similarity_weight))
+            env_w = max(0.0, float(env_similarity_weight))
+            if emb_w + env_w <= 0:
+                emb_w, env_w = 0.7, 0.3
+            else:
+                total_w = emb_w + env_w
+                emb_w = emb_w / total_w
+                env_w = env_w / total_w
+
             max_env_score = valid_df["env_similarity_score"].max()
             if max_env_score > 0:
                 normalized_env_scores = valid_df["env_similarity_score"] / max_env_score
@@ -856,7 +867,8 @@ class DataExtractor:
                 normalized_env_scores = 0.0
 
             valid_df["combined_similarity"] = (
-                0.7 * valid_df["embedding_similarity"] + 0.3 * normalized_env_scores
+                emb_w * valid_df["embedding_similarity"]
+                + env_w * normalized_env_scores
             )
 
             # Sort by combined similarity and select top-k

@@ -1,0 +1,155 @@
+{
+  "skill_library_version": "1.0.0",
+  "updated_at": "2026-02-28T18:50:00+08:00",
+  "skills": [
+    {
+      "skill_id": "skill_humi_stabilize_mid_stage",
+      "name": "出菇中期稳湿防畸形",
+      "source": "onsite",
+      "priority": "high",
+      "status": "candidate",
+      "applicable_conditions": {
+        "growth_day_range": [10, 20],
+        "season": ["spring", "autumn", "winter"],
+        "env": {
+          "temperature": [15.0, 18.5],
+          "humidity": [82.0, 90.0],
+          "co2": [700, 1400]
+        }
+      },
+      "actions": [
+        {
+          "device_type": "humidifier",
+          "point_alias": "on",
+          "target_range": [35, 45],
+          "step": 2,
+          "unit": "sec"
+        },
+        {
+          "device_type": "humidifier",
+          "point_alias": "off",
+          "target_range": [45, 65],
+          "step": 2,
+          "unit": "sec"
+        }
+      ],
+      "risk_guardrails": {
+        "hard_limits": {
+          "humidity": [78, 93]
+        },
+        "rollback_if": [
+          "humidity_gt_93_for_30min",
+          "surface_water_visible"
+        ]
+      },
+      "success_criteria": {
+        "stability_window_min": 120,
+        "target_hit_rate": 0.75
+      },
+      "evidence": {
+        "verified_count": 0,
+        "latest_verified_at": null,
+        "notes": "来自现场值班经验，待多批次验证"
+      }
+    },
+    {
+      "skill_id": "skill_co2_control_fruiting",
+      "name": "出菇期CO2抑制与通风平衡",
+      "source": "industry",
+      "priority": "high",
+      "status": "candidate",
+      "applicable_conditions": {
+        "growth_day_range": [8, 24],
+        "season": ["all"],
+        "env": {
+          "temperature": [14.0, 19.0],
+          "humidity": [80.0, 92.0],
+          "co2": [900, 2200]
+        }
+      },
+      "actions": [
+        {
+          "device_type": "fresh_air_fan",
+          "point_alias": "co2_on",
+          "target_range": [900, 1200],
+          "step": 50,
+          "unit": "ppm"
+        },
+        {
+          "device_type": "fresh_air_fan",
+          "point_alias": "co2_off",
+          "target_range": [650, 900],
+          "step": 50,
+          "unit": "ppm"
+        }
+      ],
+      "risk_guardrails": {
+        "hard_limits": {
+          "co2": [500, 2500]
+        },
+        "rollback_if": [
+          "temp_drop_gt_2c_after_ventilation",
+          "humidity_drop_gt_8pct_in_30min"
+        ]
+      },
+      "success_criteria": {
+        "stability_window_min": 90,
+        "target_hit_rate": 0.7
+      },
+      "evidence": {
+        "verified_count": 0,
+        "latest_verified_at": null,
+        "notes": "行业经验初始值，需结合现场设备响应校正"
+      }
+    },
+    {
+      "skill_id": "skill_temp_guard_night",
+      "name": "夜间温度波动抑制",
+      "source": "expert",
+      "priority": "medium",
+      "status": "candidate",
+      "applicable_conditions": {
+        "growth_day_range": [1, 27],
+        "season": ["winter"],
+        "env": {
+          "temperature": [12.0, 18.0],
+          "humidity": [75.0, 92.0],
+          "co2": [600, 1800]
+        }
+      },
+      "actions": [
+        {
+          "device_type": "air_cooler",
+          "point_alias": "temp_set",
+          "target_range": [15.5, 17.5],
+          "step": 0.5,
+          "unit": "c"
+        },
+        {
+          "device_type": "air_cooler",
+          "point_alias": "temp_diffset",
+          "target_range": [1.0, 2.0],
+          "step": 0.5,
+          "unit": "c"
+        }
+      ],
+      "risk_guardrails": {
+        "hard_limits": {
+          "temperature": [12, 20]
+        },
+        "rollback_if": [
+          "temp_oscillation_gt_2c_in_60min"
+        ]
+      },
+      "success_criteria": {
+        "stability_window_min": 120,
+        "target_hit_rate": 0.7
+      },
+      "evidence": {
+        "verified_count": 0,
+        "latest_verified_at": null,
+        "notes": "专家经验，建议先在单库房灰度"
+      }
+    }
+  ]
+}
