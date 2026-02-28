@@ -1,19 +1,19 @@
-import json
 import re
 from datetime import date, datetime, timedelta
 from io import BytesIO
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+from plotly.subplots import make_subplots
 from sqlalchemy import desc, func
 from sqlalchemy.orm import sessionmaker
 
 from global_const.global_const import pgsql_engine, static_settings
 from utils.create_table import (
+    ControlStrategyKnowledgeBaseRun,
     DecisionAnalysisStaticConfig,
     DeviceSetpointChange,
     ImageTextQuality,
@@ -707,47 +707,33 @@ def compute_impact_metrics(
 
 @st.cache_data(ttl=300)
 def load_control_strategy_cluster_kb() -> dict:
-    kb_path = (
-        Path(__file__).resolve().parents[1]
-        / "configs"
-        / "control_strategy_cluster_kb.json"
-    )
-    if not kb_path.exists():
-        return {}
+    with Session() as session:
+        latest = (
+            session.query(ControlStrategyKnowledgeBaseRun)
+            .filter(ControlStrategyKnowledgeBaseRun.kb_type == "cluster")
+            .order_by(
+                desc(ControlStrategyKnowledgeBaseRun.generated_at),
+                desc(ControlStrategyKnowledgeBaseRun.created_at),
+            )
+            .first()
+        )
 
-    try:
-        return json.loads(kb_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
+        if latest is None:
+            return {}
+
+        payload = latest.payload if isinstance(latest.payload, dict) else {}
+        if (
+            payload
+            and "generated_at" not in payload
+            and latest.generated_at is not None
+        ):
+            payload["generated_at"] = latest.generated_at.isoformat()
+        return payload
 
 
 @st.cache_data(ttl=300)
 def load_control_strategy_cluster_records() -> pd.DataFrame:
-    csv_path = (
-        Path(__file__).resolve().parents[1]
-        / "configs"
-        / "control_strategy_cluster_kb_cluster_records.csv"
-    )
-    if not csv_path.exists():
-        return pd.DataFrame()
-    try:
-        df = pd.read_csv(csv_path)
-        if df.empty:
-            return df
-        df["growth_day_num"] = pd.to_numeric(df.get("growth_day_num"), errors="coerce")
-        df["daily_changes"] = pd.to_numeric(df.get("daily_changes"), errors="coerce")
-        df["current_value_last"] = pd.to_numeric(
-            df.get("current_value_last"), errors="coerce"
-        )
-        df["day_to_day_delta"] = pd.to_numeric(
-            df.get("day_to_day_delta"), errors="coerce"
-        )
-        df["cluster_id"] = pd.to_numeric(df.get("cluster_id"), errors="coerce")
-        df["cluster_name"] = df.get("cluster_name").astype(str)
-        df["point_display"] = df.get("point_display").fillna(df.get("point_key"))
-        return df
-    except Exception:
-        return pd.DataFrame()
+    return pd.DataFrame()
 
 
 def cluster_kb_to_dataframe(kb: dict) -> pd.DataFrame:
@@ -841,6 +827,9 @@ def render_cluster_kb_page() -> None:
 
     scope = kb.get("scope", {}) if isinstance(kb, dict) else {}
     pipeline = kb.get("pipeline", {}) if isinstance(kb, dict) else {}
+    generated_at = kb.get("generated_at") if isinstance(kb, dict) else None
+    if generated_at:
+        st.caption(f"最新计算时间：{generated_at}")
     if isinstance(scope, dict):
         st.caption(
             f"数据范围：库房 {scope.get('rooms', [])} | 批次 {scope.get('batch_count', 0)} | 记录 {scope.get('record_count', 0)}"
@@ -851,7 +840,7 @@ def render_cluster_kb_page() -> None:
         )
 
     if kb_df.empty:
-        st.info("聚类知识库为空，请先运行构建脚本生成数据。")
+        st.info("聚类知识库为空，请先运行构建脚本（落库模式）生成数据。")
         return
 
     c1, c2, c3 = st.columns([2, 2, 2])
@@ -2061,87 +2050,297 @@ def show_legacy():
                         "生长阶段", "是" if latest_day["is_growth_phase"] else "否"
                     )
 
-                    # Dual Axis Chart
-                    fig = go.Figure()
+                    room_data = room_data.sort_values("stat_date").copy()
+                    numeric_cols = [
+                        "temp_q25",
+                        "temp_q75",
+                        "temp_median",
+                        "humidity_q25",
+                        "humidity_q75",
+                        "humidity_median",
+                        "co2_q25",
+                        "co2_q75",
+                        "co2_median",
+                    ]
+                    for col in numeric_cols:
+                        if col in room_data.columns:
+                            room_data[col] = pd.to_numeric(
+                                room_data[col], errors="coerce"
+                            )
 
-                    # Temperature (Area with median line)
-                    # Q25-Q75 range
-                    fig.add_trace(
-                        go.Scatter(
-                            x=room_data["stat_date"],
-                            y=room_data["temp_q75"],
-                            mode="lines",
-                            line=dict(width=0),
-                            showlegend=False,
-                            hoverinfo="skip",
-                        )
-                    )
-                    fig.add_trace(
-                        go.Scatter(
-                            x=room_data["stat_date"],
-                            y=room_data["temp_q25"],
-                            mode="lines",
-                            line=dict(width=0),
-                            fill="tonexty",
-                            fillcolor="rgba(255, 100, 100, 0.2)",
-                            name="温度波动区间 (Q25-Q75)",
-                        )
+                    st.caption("透明区域为 Q25-Q75 分位区间，折线为中位数趋势。")
+
+                    metric_cfg = [
+                        {
+                            "label": "温度",
+                            "q25": "temp_q25",
+                            "q75": "temp_q75",
+                            "median": "temp_median",
+                            "line_color": "#E74C3C",
+                            "fill_color": "rgba(231, 76, 60, 0.18)",
+                            "unit": "℃",
+                        },
+                        {
+                            "label": "湿度",
+                            "q25": "humidity_q25",
+                            "q75": "humidity_q75",
+                            "median": "humidity_median",
+                            "line_color": "#2980B9",
+                            "fill_color": "rgba(41, 128, 185, 0.18)",
+                            "unit": "%",
+                        },
+                        {
+                            "label": "CO2",
+                            "q25": "co2_q25",
+                            "q75": "co2_q75",
+                            "median": "co2_median",
+                            "line_color": "#16A085",
+                            "fill_color": "rgba(22, 160, 133, 0.18)",
+                            "unit": "ppm",
+                        },
+                    ]
+
+                    fig = make_subplots(
+                        rows=3,
+                        cols=1,
+                        shared_xaxes=True,
+                        vertical_spacing=0.06,
+                        subplot_titles=[
+                            "温度（Q25-Q75 + 中位数）",
+                            "湿度（Q25-Q75 + 中位数）",
+                            "CO2（Q25-Q75 + 中位数）",
+                        ],
                     )
 
-                    # Median Lines
-                    fig.add_trace(
-                        go.Scatter(
-                            x=room_data["stat_date"],
-                            y=room_data["temp_median"],
-                            mode="lines+markers",
-                            name="温度中位数",
-                            line=dict(color="red", width=2),
-                            yaxis="y1",
-                        )
-                    )
+                    for i, cfg in enumerate(metric_cfg, start=1):
+                        q25_col = cfg["q25"]
+                        q75_col = cfg["q75"]
+                        med_col = cfg["median"]
 
-                    # Humidity
-                    fig.add_trace(
-                        go.Scatter(
-                            x=room_data["stat_date"],
-                            y=room_data["humidity_median"],
-                            mode="lines+markers",
-                            name="湿度中位数",
-                            line=dict(color="blue", width=2),
-                            yaxis="y2",
-                        )
-                    )
+                        if (
+                            q25_col in room_data.columns
+                            and q75_col in room_data.columns
+                        ):
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=room_data["stat_date"],
+                                    y=room_data[q75_col],
+                                    mode="lines",
+                                    line=dict(width=0),
+                                    showlegend=False,
+                                    hoverinfo="skip",
+                                ),
+                                row=i,
+                                col=1,
+                            )
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=room_data["stat_date"],
+                                    y=room_data[q25_col],
+                                    mode="lines",
+                                    line=dict(width=0),
+                                    fill="tonexty",
+                                    fillcolor=cfg["fill_color"],
+                                    name=f"{cfg['label']}分位区间(Q25-Q75)",
+                                ),
+                                row=i,
+                                col=1,
+                            )
 
-                    # Layout
+                        if med_col in room_data.columns:
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=room_data["stat_date"],
+                                    y=room_data[med_col],
+                                    mode="lines+markers",
+                                    name=f"{cfg['label']}中位数",
+                                    line=dict(color=cfg["line_color"], width=2),
+                                    marker=dict(size=5, color=cfg["line_color"]),
+                                ),
+                                row=i,
+                                col=1,
+                            )
+
+                        fig.update_yaxes(
+                            title_text=f"{cfg['label']} ({cfg['unit']})",
+                            row=i,
+                            col=1,
+                        )
+
                     fig.update_layout(
-                        title=f"库房 {room_id} 温湿度趋势",
-                        xaxis_title="日期",
-                        yaxis=dict(title="温度 (℃)", side="left", range=[0, 35]),
-                        yaxis2=dict(
-                            title="湿度 (%)",
-                            side="right",
-                            overlaying="y",
-                            range=[0, 100],
-                        ),
+                        title=f"库房 {room_id} 环境参数分位数与中位数趋势",
+                        xaxis3_title="日期",
                         hovermode="x unified",
-                        legend=dict(orientation="h", y=1.1),
-                    )
-
-                    # Threshold Alerts Lines
-                    fig.add_hrect(
-                        y0=18,
-                        y1=22,
-                        line_width=0,
-                        fillcolor="green",
-                        opacity=0.1,
-                        annotation_text="适宜温度 (18-22)",
-                        annotation_position="top left",
+                        legend=dict(orientation="h", y=1.08),
+                        height=900,
                     )
 
                     st.plotly_chart(fig, width="stretch")
 
 
-def show():
+def render_env_stats_in_timeline_page(
+    selected_rooms: list[str],
+    selected_windows: pd.DataFrame,
+) -> None:
+    st.subheader("环境温湿度分析")
+
+    if not selected_rooms:
+        st.info("请选择库房后查看环境温湿度分析。")
+        return
+
+    today = datetime.now().date()
+    default_start = today - timedelta(days=30)
+    env_date_range = (default_start, today)
+
+    if selected_windows is not None and not selected_windows.empty:
+        env_start = pd.to_datetime(selected_windows["start_time"], errors="coerce")
+        env_end = pd.to_datetime(selected_windows["end_time"], errors="coerce")
+        if env_start.notna().any() and env_end.notna().any():
+            env_date_range = (env_start.min().date(), env_end.max().date())
+
+    env_df = load_env_stats(selected_rooms, env_date_range)
+    if env_df.empty:
+        st.info("选定范围内无环境统计数据。")
+        return
+
+    for room_id in selected_rooms:
+        room_data = env_df[env_df["room_id"] == room_id].copy()
+        if room_data.empty:
+            continue
+
+        st.markdown(f"#### 库房: {room_id}")
+        latest_day = room_data.iloc[-1]
+        s1, s2, s3, s4, s5 = st.columns(5)
+        s1.metric("统计日期", str(latest_day.get("stat_date", "N/A")))
+        s2.metric("中位温度", f"{latest_day.get('temp_median', 0):.1f} ℃")
+        s3.metric("中位湿度", f"{latest_day.get('humidity_median', 0):.1f} %")
+        s4.metric("中位CO2", f"{latest_day.get('co2_median', 0):.0f} ppm")
+        s5.metric("生长阶段", "是" if latest_day.get("is_growth_phase") else "否")
+
+        room_data = room_data.sort_values("stat_date").copy()
+        numeric_cols = [
+            "temp_q25",
+            "temp_q75",
+            "temp_median",
+            "humidity_q25",
+            "humidity_q75",
+            "humidity_median",
+            "co2_q25",
+            "co2_q75",
+            "co2_median",
+        ]
+        for col in numeric_cols:
+            if col in room_data.columns:
+                room_data[col] = pd.to_numeric(room_data[col], errors="coerce")
+
+        st.caption("透明区域为 Q25-Q75 分位区间，折线为中位数趋势。")
+
+        metric_cfg = [
+            {
+                "label": "温度",
+                "q25": "temp_q25",
+                "q75": "temp_q75",
+                "median": "temp_median",
+                "line_color": "#E74C3C",
+                "fill_color": "rgba(231, 76, 60, 0.18)",
+                "unit": "℃",
+            },
+            {
+                "label": "湿度",
+                "q25": "humidity_q25",
+                "q75": "humidity_q75",
+                "median": "humidity_median",
+                "line_color": "#2980B9",
+                "fill_color": "rgba(41, 128, 185, 0.18)",
+                "unit": "%",
+            },
+            {
+                "label": "CO2",
+                "q25": "co2_q25",
+                "q75": "co2_q75",
+                "median": "co2_median",
+                "line_color": "#16A085",
+                "fill_color": "rgba(22, 160, 133, 0.18)",
+                "unit": "ppm",
+            },
+        ]
+
+        fig = make_subplots(
+            rows=3,
+            cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.06,
+            subplot_titles=[
+                "温度（Q25-Q75 + 中位数）",
+                "湿度（Q25-Q75 + 中位数）",
+                "CO2（Q25-Q75 + 中位数）",
+            ],
+        )
+
+        for i, cfg in enumerate(metric_cfg, start=1):
+            q25_col = cfg["q25"]
+            q75_col = cfg["q75"]
+            med_col = cfg["median"]
+
+            if q25_col in room_data.columns and q75_col in room_data.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=room_data["stat_date"],
+                        y=room_data[q75_col],
+                        mode="lines",
+                        line=dict(width=0),
+                        showlegend=False,
+                        hoverinfo="skip",
+                    ),
+                    row=i,
+                    col=1,
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=room_data["stat_date"],
+                        y=room_data[q25_col],
+                        mode="lines",
+                        line=dict(width=0),
+                        fill="tonexty",
+                        fillcolor=cfg["fill_color"],
+                        name=f"{cfg['label']}分位区间(Q25-Q75)",
+                    ),
+                    row=i,
+                    col=1,
+                )
+
+            if med_col in room_data.columns:
+                fig.add_trace(
+                    go.Scatter(
+                        x=room_data["stat_date"],
+                        y=room_data[med_col],
+                        mode="lines+markers",
+                        name=f"{cfg['label']}中位数",
+                        line=dict(color=cfg["line_color"], width=2),
+                        marker=dict(size=5, color=cfg["line_color"]),
+                    ),
+                    row=i,
+                    col=1,
+                )
+
+            fig.update_yaxes(
+                title_text=f"{cfg['label']} ({cfg['unit']})",
+                row=i,
+                col=1,
+            )
+
+        fig.update_layout(
+            title=f"库房 {room_id} 环境参数分位数与中位数趋势",
+            xaxis3_title="日期",
+            hovermode="x unified",
+            legend=dict(orientation="h", y=1.08),
+            height=900,
+        )
+
+        st.plotly_chart(fig, width="stretch")
+
+
+def render_control_timeline_page():
     from web_app.control_ops_dashboard.analysis import (
         compute_cooccurrence_matrix,
     )
@@ -2203,17 +2402,7 @@ html, body, [class*="css"] {
         unsafe_allow_html=True,
     )
 
-    st.title("调控操作可视化")
-
-    page_mode = st.radio(
-        "页面",
-        options=["调控时间轴", "聚类知识库"],
-        horizontal=True,
-        key="control_ops_page_mode",
-    )
-    if page_mode == "聚类知识库":
-        render_cluster_kb_page()
-        return
+    st.subheader("调控时间轴")
 
     @st.cache_data(ttl=300)
     def cached_rooms():
@@ -2443,7 +2632,7 @@ html, body, [class*="css"] {
     if changes.empty:
         return
 
-    st.subheader("调控时间轴（按设备类型分项）")
+    st.subheader("调控分析视图")
     for room_id in selected_rooms:
         room_df = changes[changes["room_id"] == room_id].copy()
         if room_df.empty:
@@ -2466,6 +2655,270 @@ html, body, [class*="css"] {
         if not device_types:
             device_types = ["unknown"]
             room_df["device_type"] = room_df["device_type"].fillna("unknown")
+
+        st.markdown(f"#### 库房 {room_id} 环境参数趋势")
+        st.caption("基于当前筛选批次展示温度 湿度 CO2 趋势。")
+        env_windows_room = selected_windows[
+            selected_windows["room_id"].astype(str) == str(room_id)
+        ].copy()
+
+        if env_windows_room.empty:
+            st.info("未找到可用批次，无法展示环境参数变化。")
+        else:
+            env_windows_room["batch_date"] = pd.to_datetime(
+                env_windows_room["in_date"], errors="coerce"
+            ).dt.date
+            env_windows_room = env_windows_room[env_windows_room["batch_date"].notna()][
+                ["batch_key", "batch_date"]
+            ].drop_duplicates()
+
+            if env_windows_room.empty:
+                st.info("当前批次缺少 batch_date 信息，无法展示环境参数。")
+            else:
+                env_df = load_env_stats([str(room_id)], None)
+                env_room_df = env_df[
+                    env_df["room_id"].astype(str) == str(room_id)
+                ].copy()
+
+                if env_room_df.empty:
+                    st.info("当前筛选批次无环境统计数据。")
+                else:
+                    env_room_df["batch_date"] = pd.to_datetime(
+                        env_room_df.get("batch_date"), errors="coerce"
+                    ).dt.date
+                    env_room_df = env_room_df.merge(
+                        env_windows_room,
+                        on="batch_date",
+                        how="inner",
+                    )
+
+                    if env_room_df.empty:
+                        st.info("当前筛选批次无匹配的环境统计数据。")
+                    else:
+                        env_room_df["in_day_num"] = pd.to_numeric(
+                            env_room_df.get("in_day_num"), errors="coerce"
+                        )
+                        env_room_df = env_room_df[
+                            env_room_df["in_day_num"].notna()
+                        ].copy()
+                        env_room_df["in_day_num"] = env_room_df["in_day_num"].astype(
+                            int
+                        )
+                        env_room_df = env_room_df.sort_values(
+                            ["batch_key", "in_day_num"]
+                        )
+
+                        if env_room_df.empty:
+                            st.info(
+                                "当前筛选批次缺少 in_day_num，无法按入库天数展示环境参数。"
+                            )
+                        else:
+                            batch_order = (
+                                env_windows_room["batch_key"].astype(str).tolist()
+                            )
+                            batch_order = [
+                                key
+                                for key in batch_order
+                                if key in env_room_df["batch_key"].astype(str).unique()
+                            ]
+                            if not batch_order:
+                                batch_order = sorted(
+                                    env_room_df["batch_key"]
+                                    .astype(str)
+                                    .unique()
+                                    .tolist()
+                                )
+
+                            for c in [
+                                "temp_q25",
+                                "temp_q75",
+                                "temp_median",
+                                "humidity_q25",
+                                "humidity_q75",
+                                "humidity_median",
+                                "co2_q25",
+                                "co2_q75",
+                                "co2_median",
+                            ]:
+                                if c in env_room_df.columns:
+                                    env_room_df[c] = pd.to_numeric(
+                                        env_room_df[c], errors="coerce"
+                                    )
+
+                            st.caption(
+                                f"库房 {room_id} | 批次数={len(batch_order)} | x轴 in_day_num 入库天数"
+                            )
+
+                            t_temp, t_humi, t_co2 = st.tabs(["温度", "湿度", "CO2"])
+
+                            metric_cfg = [
+                                (
+                                    t_temp,
+                                    "温度变化 Q25-Q75 与中位数",
+                                    "temp_q25",
+                                    "temp_q75",
+                                    "temp_median",
+                                    "温度 (℃)",
+                                    "#E74C3C",
+                                    "rgba(231, 76, 60, 0.18)",
+                                ),
+                                (
+                                    t_humi,
+                                    "湿度变化 Q25-Q75 与中位数",
+                                    "humidity_q25",
+                                    "humidity_q75",
+                                    "humidity_median",
+                                    "湿度 (%)",
+                                    "#2980B9",
+                                    "rgba(41, 128, 185, 0.18)",
+                                ),
+                                (
+                                    t_co2,
+                                    "CO2变化 Q25-Q75 与中位数",
+                                    "co2_q25",
+                                    "co2_q75",
+                                    "co2_median",
+                                    "CO2 (ppm)",
+                                    "#16A085",
+                                    "rgba(22, 160, 133, 0.18)",
+                                ),
+                            ]
+
+                            for (
+                                tab_obj,
+                                chart_title,
+                                q25_col,
+                                q75_col,
+                                med_col,
+                                y_title,
+                                line_color,
+                                fill_color,
+                            ) in metric_cfg:
+                                with tab_obj:
+                                    valid_batches = []
+                                    for batch_key in batch_order:
+                                        sub = env_room_df[
+                                            env_room_df["batch_key"].astype(str)
+                                            == str(batch_key)
+                                        ][
+                                            ["in_day_num", q25_col, q75_col, med_col]
+                                        ].copy()
+                                        if (
+                                            not sub.empty
+                                            and sub[med_col].notna().sum() > 0
+                                        ):
+                                            valid_batches.append(batch_key)
+
+                                    if not valid_batches:
+                                        st.info("当前批次缺少可绘制的环境数据。")
+                                        continue
+
+                                    fig_env = make_subplots(
+                                        rows=len(valid_batches),
+                                        cols=1,
+                                        shared_xaxes=False,
+                                        subplot_titles=[
+                                            f"批次 {b}" for b in valid_batches
+                                        ],
+                                        vertical_spacing=0.1,
+                                    )
+
+                                    for idx, batch_key in enumerate(
+                                        valid_batches, start=1
+                                    ):
+                                        plot_df = env_room_df[
+                                            env_room_df["batch_key"].astype(str)
+                                            == str(batch_key)
+                                        ][
+                                            ["in_day_num", q25_col, q75_col, med_col]
+                                        ].copy()
+                                        plot_df = plot_df.sort_values(
+                                            "in_day_num"
+                                        ).dropna(
+                                            subset=["in_day_num", med_col], how="any"
+                                        )
+                                        if plot_df.empty:
+                                            continue
+
+                                        if (
+                                            q25_col in plot_df.columns
+                                            and q75_col in plot_df.columns
+                                        ):
+                                            fig_env.add_trace(
+                                                go.Scatter(
+                                                    x=plot_df["in_day_num"],
+                                                    y=plot_df[q75_col],
+                                                    mode="lines",
+                                                    line=dict(width=0),
+                                                    showlegend=False,
+                                                    hoverinfo="skip",
+                                                ),
+                                                row=idx,
+                                                col=1,
+                                            )
+                                            fig_env.add_trace(
+                                                go.Scatter(
+                                                    x=plot_df["in_day_num"],
+                                                    y=plot_df[q25_col],
+                                                    mode="lines",
+                                                    line=dict(width=0),
+                                                    fill="tonexty",
+                                                    fillcolor=fill_color,
+                                                    name="Q25-Q75"
+                                                    if idx == 1
+                                                    else None,
+                                                    showlegend=(idx == 1),
+                                                ),
+                                                row=idx,
+                                                col=1,
+                                            )
+
+                                        fig_env.add_trace(
+                                            go.Scatter(
+                                                x=plot_df["in_day_num"],
+                                                y=plot_df[med_col],
+                                                mode="lines+markers",
+                                                name="中位数" if idx == 1 else None,
+                                                showlegend=(idx == 1),
+                                                line=dict(color=line_color, width=2),
+                                                marker=dict(size=5, color=line_color),
+                                            ),
+                                            row=idx,
+                                            col=1,
+                                        )
+
+                                        fig_env.update_xaxes(
+                                            tickmode="linear",
+                                            dtick=1,
+                                            title_text=(
+                                                "入库天数（in_day_num）"
+                                                if idx == len(valid_batches)
+                                                else ""
+                                            ),
+                                            row=idx,
+                                            col=1,
+                                        )
+                                        fig_env.update_yaxes(
+                                            title_text=y_title,
+                                            row=idx,
+                                            col=1,
+                                        )
+
+                                    fig_env.update_layout(
+                                        title=chart_title,
+                                        hovermode="x unified",
+                                        height=max(320 * len(valid_batches), 360),
+                                        margin=dict(t=90, b=70),
+                                    )
+                                    fig_env.update_annotations(yshift=8)
+                                    st.plotly_chart(
+                                        fig_env,
+                                        width="stretch",
+                                        config={"scrollZoom": True, "responsive": True},
+                                    )
+
+        st.markdown(f"#### 库房 {room_id} 设备调节时间轴")
+        st.caption("可查看当前库房与批次下，不同设备类型的调节明细。")
 
         device_remark_map = build_device_remark_map()
         tab_labels = [device_remark_map.get(dt, dt) for dt in device_types]
@@ -2583,7 +3036,7 @@ html, body, [class*="css"] {
                         "previous_value",
                         "current_value",
                     ],
-                    title=f"库房 {room_id} | 设备类型: {device_type} 调控明细",
+                    title="调节记录时间轴",
                 )
                 fig.update_traces(
                     textposition="top center",
@@ -2612,13 +3065,15 @@ html, body, [class*="css"] {
                 fig.for_each_yaxis(lambda axis: axis.update(title_text=""))
                 fig.update_yaxes(matches="y")
                 fig.update_layout(yaxis_title="测点类型")
+                timeline_fig = fig
+
                 st.plotly_chart(
-                    fig,
+                    timeline_fig,
                     width="stretch",
                     config={"scrollZoom": True, "responsive": True},
                 )
 
-                st.markdown("#### 参数设定点趋势（按设备类型）")
+                st.markdown("#### 设定点趋势分析")
                 trend_df = type_df.copy().sort_values("change_time")
                 if not trend_df.empty:
                     trend_df["current_value_num"] = pd.to_numeric(
@@ -2815,7 +3270,7 @@ html, body, [class*="css"] {
                                                     "y": "测点",
                                                     "color": "设定值",
                                                 },
-                                                title=f"库房 {room_id} | {device_type} | 批次 {batch_key} 生长周期设定值（原值）",
+                                                title="设定值热力图 原始值",
                                             )
                                             fig_heat.update_traces(
                                                 customdata=raw_customdata,
@@ -2850,7 +3305,7 @@ html, body, [class*="css"] {
                                                     "y": "测点",
                                                     "color": "标准化值",
                                                 },
-                                                title=f"库房 {room_id} | {device_type} | 批次 {batch_key} 生长周期设定值（标准化）",
+                                                title="设定值热力图 标准化",
                                             )
                                             fig_heat_norm.update_traces(
                                                 customdata=np.dstack(
@@ -2889,37 +3344,69 @@ html, body, [class*="css"] {
                             point_cycle_df = cycle_df[
                                 cycle_df["point_group"] == selected_point_cycle
                             ].sort_values(["batch_key", "growth_day_int"])
-                            fig_point_cycle = go.Figure()
-                            for batch_key in sorted(
+                            point_cycle_batches = sorted(
                                 point_cycle_df["batch_key"].dropna().unique().tolist()
-                            ):
-                                batch_point_df = point_cycle_df[
-                                    point_cycle_df["batch_key"] == batch_key
-                                ].copy()
-                                if batch_point_df.empty:
-                                    continue
-                                fig_point_cycle.add_trace(
-                                    go.Scatter(
-                                        x=batch_point_df["growth_day_int"],
-                                        y=batch_point_df["current_value_num"],
-                                        mode="lines+markers",
-                                        line_shape="hv",
-                                        name=str(batch_key),
-                                        hovertemplate="生长天数 %{x}<br>设定值 %{y}<extra></extra>",
-                                    )
+                            )
+                            if not point_cycle_batches:
+                                st.info("当前筛选条件下无可展示的批次趋势。")
+                            else:
+                                fig_point_cycle = make_subplots(
+                                    rows=len(point_cycle_batches),
+                                    cols=1,
+                                    shared_xaxes=False,
+                                    subplot_titles=[
+                                        f"批次 {b}" for b in point_cycle_batches
+                                    ],
+                                    vertical_spacing=0.1,
                                 )
-                            fig_point_cycle.update_layout(
-                                title=f"{selected_point_cycle} 生长周期设定值变化（按天最后值，分批次）",
-                                xaxis_title="生长天数",
-                                yaxis_title="设定值",
-                                legend_title="批次",
-                                height=320,
-                            )
-                            st.plotly_chart(
-                                fig_point_cycle,
-                                width="stretch",
-                                config={"scrollZoom": True, "responsive": True},
-                            )
+
+                                for idx, batch_key in enumerate(
+                                    point_cycle_batches, start=1
+                                ):
+                                    batch_point_df = point_cycle_df[
+                                        point_cycle_df["batch_key"] == batch_key
+                                    ].copy()
+                                    if batch_point_df.empty:
+                                        continue
+                                    fig_point_cycle.add_trace(
+                                        go.Scatter(
+                                            x=batch_point_df["growth_day_int"],
+                                            y=batch_point_df["current_value_num"],
+                                            mode="lines+markers",
+                                            line_shape="hv",
+                                            name=str(batch_key),
+                                            showlegend=False,
+                                            hovertemplate="生长天数 %{x}<br>设定值 %{y}<extra></extra>",
+                                        ),
+                                        row=idx,
+                                        col=1,
+                                    )
+                                    fig_point_cycle.update_xaxes(
+                                        title_text=(
+                                            "生长天数"
+                                            if idx == len(point_cycle_batches)
+                                            else ""
+                                        ),
+                                        row=idx,
+                                        col=1,
+                                    )
+                                    fig_point_cycle.update_yaxes(
+                                        title_text="设定值",
+                                        row=idx,
+                                        col=1,
+                                    )
+
+                                fig_point_cycle.update_layout(
+                                    title=f"{selected_point_cycle} 设定值变化趋势 按批次",
+                                    height=max(300 * len(point_cycle_batches), 360),
+                                    margin=dict(t=90, b=70),
+                                )
+                                fig_point_cycle.update_annotations(yshift=8)
+                                st.plotly_chart(
+                                    fig_point_cycle,
+                                    width="stretch",
+                                    config={"scrollZoom": True, "responsive": True},
+                                )
 
                 with st.expander(f"{room_id} 调控效果反馈", expanded=True):
                     if not selected_point_cycle:
@@ -3142,6 +3629,7 @@ html, body, [class*="css"] {
                 config={"scrollZoom": True, "responsive": True},
             )
 
+    st.markdown("---")
     st.subheader("参数共现分析")
     co = compute_cooccurrence_matrix(changes, window_minutes=30)
     if not co.empty:
@@ -3159,6 +3647,17 @@ html, body, [class*="css"] {
         )
     else:
         st.info("暂无可用共现数据。")
+
+
+def show():
+    st.title("鹿茸菇智能调控看板")
+
+    pages = [
+        st.Page(render_control_timeline_page, title="调控分析", icon="🕒"),
+        st.Page(render_cluster_kb_page, title="知识库分析", icon="🧠"),
+    ]
+    nav = st.navigation(pages, position="top")
+    nav.run()
 
 
 # For compatibility if run directly

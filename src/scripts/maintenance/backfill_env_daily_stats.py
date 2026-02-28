@@ -109,6 +109,7 @@ def _fetch_existing_stats(
         co2_q75,
         co2_count,
         in_day_num,
+        batch_date,
         is_growth_phase,
         remark
     FROM mushroom_env_daily_stats
@@ -122,6 +123,57 @@ def _fetch_existing_stats(
         pgsql_engine,
         params={"room_id": room_id, "start_date": start_date, "end_date": end_date},
     )
+
+
+def _repair_null_fields_for_existing_rows(
+    room_id: str, start_date: date, end_date: date
+) -> int:
+    query = text(
+        """
+        SELECT stat_date, in_day_num, batch_date
+        FROM mushroom_env_daily_stats
+        WHERE room_id = :room_id
+          AND stat_date BETWEEN :start_date AND :end_date
+          AND (in_day_num IS NULL OR batch_date IS NULL)
+        ORDER BY stat_date
+        """
+    )
+    df = pd.read_sql(
+        query,
+        pgsql_engine,
+        params={"room_id": room_id, "start_date": start_date, "end_date": end_date},
+    )
+    if df.empty:
+        return 0
+
+    repaired = 0
+    for _, row in df.iterrows():
+        stat_date = row["stat_date"]
+        info = get_room_mushroom_info(room_id, stat_date)
+
+        patch: Dict[str, object] = {}
+        in_date = info.get("in_date")
+        if isinstance(in_date, datetime):
+            in_date = in_date.date()
+
+        in_day_num = info.get("in_day_num")
+        if in_day_num is None and in_date:
+            delta = (stat_date - in_date).days
+            if delta >= 0:
+                in_day_num = delta + 1
+
+        if pd.isna(row.get("in_day_num")) and in_day_num is not None:
+            patch["in_day_num"] = int(in_day_num)
+            patch["is_growth_phase"] = bool(1 <= int(in_day_num) <= 27)
+
+        if pd.isna(row.get("batch_date")) and in_date is not None:
+            patch["batch_date"] = in_date
+
+        if patch:
+            store_env_statistics(room_id, stat_date, patch)
+            repaired += 1
+
+    return repaired
 
 
 def _interpolate_series(series: pd.Series, all_dates: List[date]) -> pd.Series:
@@ -180,6 +232,7 @@ def backfill_env_daily_stats(start_date: date, end_date: date) -> Dict[str, obje
         "missing_dates": [],
         "raw_dates": [],
         "interpolated_dates": [],
+        "repaired_null_fields": 0,
     }
 
     _ensure_remark_column("mushroom_env_daily_stats")
@@ -201,6 +254,10 @@ def backfill_env_daily_stats(start_date: date, end_date: date) -> Dict[str, obje
         report["expected_missing"] += len(missing_dates)
 
         if not missing_dates:
+            repaired = _repair_null_fields_for_existing_rows(
+                room_id, start_date, end_date
+            )
+            report["repaired_null_fields"] += repaired
             continue
 
         computed_records: List[Dict[str, object]] = []
@@ -216,6 +273,15 @@ def backfill_env_daily_stats(start_date: date, end_date: date) -> Dict[str, obje
             stats = calculate_env_statistics(
                 env_data, in_day_num=info.get("in_day_num")
             )
+            info_in_date = info.get("in_date")
+            if isinstance(info_in_date, datetime):
+                info_in_date = info_in_date.date()
+            if stats.get("in_day_num") is None and info_in_date:
+                delta = (stat_date - info_in_date).days
+                if delta >= 0:
+                    stats["in_day_num"] = delta + 1
+                    stats["is_growth_phase"] = bool(1 <= int(stats["in_day_num"]) <= 27)
+            stats["batch_date"] = info_in_date
             stats["remark"] = None
             computed_records.append({"stat_date": stat_date, **stats})
             report["raw_dates"].append(str(stat_date))
@@ -287,6 +353,7 @@ def backfill_env_daily_stats(start_date: date, end_date: date) -> Dict[str, obje
             idx = all_dates.index(stat_date)
             stats: Dict[str, object] = {
                 "in_day_num": filled_in_day[idx],
+                "batch_date": None,
                 "remark": "interpolated",
             }
             for col, series in interpolated_series.items():
@@ -314,6 +381,9 @@ def backfill_env_daily_stats(start_date: date, end_date: date) -> Dict[str, obje
                 )
             record_count = store_env_statistics(room_id, record["stat_date"], record)
             report["inserted"] += record_count
+
+        repaired = _repair_null_fields_for_existing_rows(room_id, start_date, end_date)
+        report["repaired_null_fields"] += repaired
 
         if interpolated_targets:
             report["missing_dates"].extend([str(d) for d in interpolated_targets])

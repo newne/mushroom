@@ -240,6 +240,7 @@ class MushroomEnvDailyStats(Base):
 
     __table_args__ = (
         Index("idx_env_room_date", "room_id", "stat_date"),
+        Index("uq_env_room_stat_date", "room_id", "stat_date", unique=True),
         Index("idx_env_stat_date", "stat_date"),
         Index("idx_env_batch_date", "batch_date"),
         {"comment": "蘑菇房环境统计（日级）"},
@@ -292,6 +293,14 @@ class DeviceSetpointChange(Base):
 
     __table_args__ = (
         Index("idx_room_change_time", "room_id", "change_time"),
+        Index(
+            "uq_setpoint_change_natural_key",
+            "room_id",
+            "device_name",
+            "point_name",
+            "change_time",
+            unique=True,
+        ),
         Index("idx_room_in_date", "room_id", "in_date"),
         Index("idx_room_growth_day", "room_id", "growth_day"),
         Index("idx_device_point", "device_name", "point_name"),
@@ -326,6 +335,231 @@ class DeviceSetpointChange(Base):
 
     detection_time = Column(DateTime, nullable=False, comment="检测时间")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
+
+
+class ControlStrategyKnowledgeBaseRun(Base):
+    """控制策略知识库构建批次元信息表"""
+
+    __tablename__ = "control_strategy_kb_runs"
+
+    __table_args__ = (
+        Index("idx_control_kb_run_type", "kb_type"),
+        Index("idx_control_kb_run_generated_at", "generated_at"),
+        Index("idx_control_kb_run_is_active", "is_active"),
+        {"comment": "控制策略知识库构建批次元信息（stage/model/cluster）"},
+    )
+
+    id = Column(
+        PgUUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        comment="主键ID (UUID4)",
+    )
+    kb_type = Column(
+        String(20),
+        nullable=False,
+        comment="知识库类型：stage/model/cluster",
+    )
+    source = Column(String(100), nullable=True, comment="来源标识")
+    description = Column(Text, nullable=True, comment="知识库描述")
+    generated_at = Column(DateTime, nullable=False, comment="知识库生成时间")
+    cluster_method = Column(String(50), nullable=True, comment="聚类方法（cluster型）")
+    stage_definition = Column(JSON, nullable=True, comment="阶段定义映射")
+    pipeline = Column(JSON, nullable=True, comment="构建流水线参数")
+    scope = Column(JSON, nullable=True, comment="数据范围统计")
+    rooms = Column(JSON, nullable=True, comment="覆盖库房列表")
+    payload = Column(JSON, nullable=False, comment="原始知识库JSON快照")
+    source_file = Column(Text, nullable=True, comment="来源文件路径")
+    is_active = Column(Boolean, nullable=False, default=True, comment="是否启用")
+    created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
+    )
+
+
+class ControlStrategyKnowledgeBaseStageRule(Base):
+    """控制策略知识库阶段/日粒度规则明细表"""
+
+    __tablename__ = "control_strategy_kb_stage_rules"
+
+    __table_args__ = (
+        Index("idx_control_kb_stage_run", "run_id"),
+        Index(
+            "idx_control_kb_stage_room_device_point",
+            "room_id",
+            "device_type",
+            "point_key",
+        ),
+        Index("idx_control_kb_stage_stage", "stage"),
+        Index("idx_control_kb_stage_growth_day", "growth_day_num"),
+        Index(
+            "uq_control_kb_stage_rule",
+            "run_id",
+            "room_id",
+            "device_type",
+            "point_key",
+            "profile_type",
+            "stage",
+            "growth_day_num",
+            unique=True,
+        ),
+        {
+            "comment": "控制策略知识库规则明细（stage_profile/daily_profile/stage_rules）"
+        },
+    )
+
+    id = Column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+        comment="自增主键 (BIGINT)",
+    )
+    run_id = Column(PgUUID(as_uuid=True), nullable=False, comment="关联批次ID")
+    profile_type = Column(
+        String(20),
+        nullable=False,
+        comment="规则类型：stage_profile/daily_profile/stage_rules",
+    )
+
+    room_id = Column(String(10), nullable=True, comment="库房编号（model全局规则可空）")
+    device_type = Column(String(50), nullable=False, comment="设备类型")
+    point_key = Column(
+        String(150), nullable=False, comment="点位键（point_group/设备.点位）"
+    )
+    point_display = Column(String(200), nullable=True, comment="点位显示名")
+
+    stage = Column(String(20), nullable=True, comment="生长阶段（D1-D7等）")
+    growth_day_num = Column(Integer, nullable=True, comment="生长天数（日粒度规则）")
+
+    changes = Column(Integer, nullable=True, comment="变更次数")
+    active_batches = Column(Integer, nullable=True, comment="活跃批次数")
+    active_days = Column(Integer, nullable=True, comment="活跃天数")
+
+    value_median = Column(Float, nullable=True, comment="设定值中位数")
+    value_p25 = Column(Float, nullable=True, comment="设定值25分位")
+    value_p75 = Column(Float, nullable=True, comment="设定值75分位")
+    value_min = Column(Float, nullable=True, comment="设定值最小值")
+    value_max = Column(Float, nullable=True, comment="设定值最大值")
+    delta_median = Column(Float, nullable=True, comment="变化量中位数")
+
+    preferred_setpoint = Column(String(100), nullable=True, comment="推荐设定点")
+    major_change_type = Column(String(50), nullable=True, comment="主要变更类型")
+    preferred_hour = Column(Integer, nullable=True, comment="推荐调整小时")
+
+    raw_rule = Column(JSON, nullable=False, comment="原始规则JSON快照")
+    created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
+    )
+
+
+class ControlStrategyKnowledgeBaseClusterMeta(Base):
+    """控制策略聚类知识库点位元信息表"""
+
+    __tablename__ = "control_strategy_kb_cluster_meta"
+
+    __table_args__ = (
+        Index("idx_control_kb_cluster_meta_run", "run_id"),
+        Index(
+            "uq_control_kb_cluster_meta",
+            "run_id",
+            "device_type",
+            "point_key",
+            unique=True,
+        ),
+        {"comment": "控制策略聚类知识库点位元信息"},
+    )
+
+    id = Column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+        comment="自增主键 (BIGINT)",
+    )
+    run_id = Column(PgUUID(as_uuid=True), nullable=False, comment="关联批次ID")
+    device_type = Column(String(50), nullable=False, comment="设备类型")
+    point_key = Column(String(150), nullable=False, comment="点位键")
+    point_display = Column(String(200), nullable=True, comment="点位显示名")
+
+    cluster_count = Column(Integer, nullable=True, comment="聚类簇数量")
+    sample_count = Column(Integer, nullable=True, comment="样本数量")
+    silhouette_score = Column(Float, nullable=True, comment="轮廓系数")
+    cluster_method = Column(String(50), nullable=True, comment="聚类方法")
+    feature_columns = Column(JSON, nullable=True, comment="聚类特征列")
+
+    raw_meta = Column(JSON, nullable=False, comment="原始聚类元信息JSON")
+    created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
+    )
+
+
+class ControlStrategyKnowledgeBaseClusterRule(Base):
+    """控制策略聚类知识库时间簇规则明细表"""
+
+    __tablename__ = "control_strategy_kb_cluster_rules"
+
+    __table_args__ = (
+        Index("idx_control_kb_cluster_rule_run", "run_id"),
+        Index(
+            "idx_control_kb_cluster_rule_device_point",
+            "device_type",
+            "point_key",
+        ),
+        Index("idx_control_kb_cluster_rule_growth", "growth_day_min", "growth_day_max"),
+        Index(
+            "uq_control_kb_cluster_rule",
+            "run_id",
+            "device_type",
+            "point_key",
+            "cluster_id",
+            "point_display",
+            unique=True,
+        ),
+        {"comment": "控制策略聚类知识库时间簇规则明细"},
+    )
+
+    id = Column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=True,
+        comment="自增主键 (BIGINT)",
+    )
+    run_id = Column(PgUUID(as_uuid=True), nullable=False, comment="关联批次ID")
+
+    device_type = Column(String(50), nullable=False, comment="设备类型")
+    point_key = Column(String(150), nullable=False, comment="点位键")
+    point_display = Column(String(200), nullable=True, comment="点位显示名")
+
+    cluster_id = Column(Integer, nullable=False, comment="聚类ID")
+    cluster_name = Column(String(50), nullable=True, comment="聚类名称")
+
+    sample_days = Column(Integer, nullable=True, comment="样本天数")
+    active_rooms = Column(Integer, nullable=True, comment="活跃库房数")
+    active_batches = Column(Integer, nullable=True, comment="活跃批次数")
+
+    growth_day_min = Column(Integer, nullable=True, comment="生长天数最小值")
+    growth_day_max = Column(Integer, nullable=True, comment="生长天数最大值")
+    growth_day_median = Column(Float, nullable=True, comment="生长天数中位数")
+    growth_window = Column(String(50), nullable=True, comment="生长窗口")
+
+    daily_changes_median = Column(Float, nullable=True, comment="日变更中位数")
+    value_median = Column(Float, nullable=True, comment="设定值中位数")
+    value_p25 = Column(Float, nullable=True, comment="设定值25分位")
+    value_p75 = Column(Float, nullable=True, comment="设定值75分位")
+    value_min = Column(Float, nullable=True, comment="设定值最小值")
+    value_max = Column(Float, nullable=True, comment="设定值最大值")
+    day_delta_median = Column(Float, nullable=True, comment="日变化中位数")
+
+    preferred_change_type = Column(String(50), nullable=True, comment="偏好变更类型")
+    preferred_hour = Column(Float, nullable=True, comment="偏好调整小时")
+    value_trend = Column(String(30), nullable=True, comment="值变化趋势")
+
+    raw_rule = Column(JSON, nullable=False, comment="原始时间簇规则JSON")
+    created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
+    updated_at = Column(
+        DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间"
+    )
 
 
 class DecisionAnalysisStaticConfig(Base):
@@ -916,6 +1150,76 @@ def update_device_setpoint_change_schema() -> None:
         raise
 
 
+def ensure_env_and_setpoint_uniqueness() -> None:
+    """为环境统计与设定点变化表执行去重并建立唯一索引。"""
+    try:
+        with pgsql_engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    WITH ranked AS (
+                        SELECT
+                            ctid,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY room_id, stat_date
+                                ORDER BY updated_at DESC NULLS LAST,
+                                         created_at DESC NULLS LAST,
+                                         id DESC
+                            ) AS rn
+                        FROM mushroom_env_daily_stats
+                    )
+                    DELETE FROM mushroom_env_daily_stats t
+                    USING ranked r
+                    WHERE t.ctid = r.ctid AND r.rn > 1
+                    """
+                )
+            )
+
+            conn.execute(
+                text(
+                    """
+                    WITH ranked AS (
+                        SELECT
+                            ctid,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY room_id, device_name, point_name, change_time
+                                ORDER BY id DESC
+                            ) AS rn
+                        FROM device_setpoint_changes
+                    )
+                    DELETE FROM device_setpoint_changes t
+                    USING ranked r
+                    WHERE t.ctid = r.ctid AND r.rn > 1
+                    """
+                )
+            )
+
+            conn.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_env_room_stat_date
+                    ON mushroom_env_daily_stats (room_id, stat_date)
+                    """
+                )
+            )
+
+            conn.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_setpoint_change_natural_key
+                    ON device_setpoint_changes (room_id, device_name, point_name, change_time)
+                    """
+                )
+            )
+
+            conn.commit()
+
+        logger.info("[Migration] ensured env/setpoint uniqueness and deduplication")
+    except Exception as e:
+        logger.error(f"[Migration] Failed to ensure uniqueness constraints: {e}")
+        raise
+
+
 def update_existing_collection_ip_data():
     """
     更新现有记录的collection_ip字段
@@ -1225,6 +1529,12 @@ def create_tables():
         migrate_dynamic_status_to_batch_status()
     except Exception as e:
         logger.error(f"[0.1.3] Failed to migrate dynamic status: {str(e)}")
+
+    # 4.4 去重并补唯一索引（防并发重复写）
+    try:
+        ensure_env_and_setpoint_uniqueness()
+    except Exception as e:
+        logger.error(f"[0.1.3] Failed to ensure uniqueness constraints: {str(e)}")
 
     # 5. 创建向量索引
     # 向量索引不需要在建表时立即完成，且 DDL 语句较长，分离出来管理更清晰
@@ -1868,6 +2178,269 @@ def query_decision_analysis_dynamic_results(
             f"[Dynamic Results Query] Failed to query dynamic point results: {e}"
         )
         raise
+
+
+def _parse_kb_generated_at(generated_at: str | None) -> datetime:
+    """解析知识库 generated_at 字段。"""
+    if not generated_at:
+        return datetime.now()
+    try:
+        return datetime.fromisoformat(str(generated_at).replace("Z", "+00:00"))
+    except Exception:
+        return datetime.now()
+
+
+def _to_int(value):
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _to_float(value):
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def store_control_strategy_knowledge_base(
+    kb_payload: dict,
+    kb_type: str,
+    source_file: str | None = None,
+    mark_previous_inactive: bool = False,
+) -> dict:
+    """将控制策略知识库JSON持久化到数据库。
+
+    Args:
+        kb_payload: 知识库JSON对象
+        kb_type: 知识库类型，支持 stage/model/cluster
+        source_file: 来源文件路径
+        mark_previous_inactive: 是否将同类型历史run标记为非激活
+
+    Returns:
+        持久化统计信息
+    """
+    kb_type = (kb_type or "").strip().lower()
+    if kb_type not in {"stage", "model", "cluster"}:
+        raise ValueError("kb_type must be one of: stage/model/cluster")
+
+    Session = sessionmaker(bind=pgsql_engine)
+    session = Session()
+
+    try:
+        generated_at = _parse_kb_generated_at(kb_payload.get("generated_at"))
+        run = ControlStrategyKnowledgeBaseRun(
+            kb_type=kb_type,
+            source=kb_payload.get("source"),
+            description=kb_payload.get("description"),
+            generated_at=generated_at,
+            cluster_method=kb_payload.get("cluster_method"),
+            stage_definition=kb_payload.get("stage_definition"),
+            pipeline=kb_payload.get("pipeline"),
+            scope=kb_payload.get("scope"),
+            rooms=(kb_payload.get("scope") or {}).get("rooms"),
+            payload=kb_payload,
+            source_file=source_file,
+            is_active=True,
+        )
+        session.add(run)
+        session.flush()
+
+        if mark_previous_inactive:
+            (
+                session.query(ControlStrategyKnowledgeBaseRun)
+                .filter(
+                    ControlStrategyKnowledgeBaseRun.kb_type == kb_type,
+                    ControlStrategyKnowledgeBaseRun.id != run.id,
+                    ControlStrategyKnowledgeBaseRun.is_active.is_(True),
+                )
+                .update({ControlStrategyKnowledgeBaseRun.is_active: False})
+            )
+
+        stage_rule_count = 0
+        cluster_meta_count = 0
+        cluster_rule_count = 0
+
+        devices = kb_payload.get("devices") or {}
+
+        if kb_type == "cluster":
+            for device_type, dev_data in devices.items():
+                points = (dev_data or {}).get("points") or {}
+                for point_key, point_data in points.items():
+                    point_display = (point_data or {}).get("point_display")
+                    cluster_meta = (point_data or {}).get("cluster_meta") or {}
+                    meta_row = ControlStrategyKnowledgeBaseClusterMeta(
+                        run_id=run.id,
+                        device_type=str(device_type),
+                        point_key=str(point_key),
+                        point_display=point_display,
+                        cluster_count=_to_int(cluster_meta.get("cluster_count")),
+                        sample_count=_to_int(cluster_meta.get("sample_count")),
+                        silhouette_score=_to_float(
+                            cluster_meta.get("silhouette_score")
+                        ),
+                        cluster_method=cluster_meta.get("cluster_method"),
+                        feature_columns=cluster_meta.get("feature_columns"),
+                        raw_meta=cluster_meta,
+                    )
+                    session.add(meta_row)
+                    cluster_meta_count += 1
+
+                    for item in (point_data or {}).get("time_clusters") or []:
+                        rule = ControlStrategyKnowledgeBaseClusterRule(
+                            run_id=run.id,
+                            device_type=str(device_type),
+                            point_key=str(point_key),
+                            point_display=item.get("point_display") or point_display,
+                            cluster_id=_to_int(item.get("cluster_id")) or 0,
+                            cluster_name=item.get("cluster_name"),
+                            sample_days=_to_int(item.get("sample_days")),
+                            active_rooms=_to_int(item.get("active_rooms")),
+                            active_batches=_to_int(item.get("active_batches")),
+                            growth_day_min=_to_int(item.get("growth_day_min")),
+                            growth_day_max=_to_int(item.get("growth_day_max")),
+                            growth_day_median=_to_float(item.get("growth_day_median")),
+                            growth_window=item.get("growth_window"),
+                            daily_changes_median=_to_float(
+                                item.get("daily_changes_median")
+                            ),
+                            value_median=_to_float(item.get("value_median")),
+                            value_p25=_to_float(item.get("value_p25")),
+                            value_p75=_to_float(item.get("value_p75")),
+                            value_min=_to_float(item.get("value_min")),
+                            value_max=_to_float(item.get("value_max")),
+                            day_delta_median=_to_float(item.get("day_delta_median")),
+                            preferred_change_type=item.get("preferred_change_type"),
+                            preferred_hour=_to_float(item.get("preferred_hour")),
+                            value_trend=item.get("value_trend"),
+                            raw_rule=item,
+                        )
+                        session.add(rule)
+                        cluster_rule_count += 1
+        elif kb_type == "stage":
+            rooms_data = kb_payload.get("rooms") or {}
+            for room_id, room_data in rooms_data.items():
+                room_devices = (room_data or {}).get("devices") or {}
+                for device_type, dev_data in room_devices.items():
+                    points = (dev_data or {}).get("points") or {}
+                    for point_key, point_data in points.items():
+                        for item in (point_data or {}).get("stage_profile") or []:
+                            rule = ControlStrategyKnowledgeBaseStageRule(
+                                run_id=run.id,
+                                profile_type="stage_profile",
+                                room_id=str(item.get("room_id") or room_id),
+                                device_type=str(item.get("device_type") or device_type),
+                                point_key=str(item.get("point_group") or point_key),
+                                point_display=(point_data or {}).get("point_display"),
+                                stage=item.get("stage"),
+                                growth_day_num=None,
+                                changes=_to_int(item.get("changes")),
+                                active_batches=_to_int(item.get("active_batches")),
+                                active_days=_to_int(item.get("active_days")),
+                                value_median=_to_float(item.get("value_median")),
+                                value_p25=_to_float(item.get("value_p25")),
+                                value_p75=_to_float(item.get("value_p75")),
+                                value_min=_to_float(item.get("value_min")),
+                                value_max=_to_float(item.get("value_max")),
+                                delta_median=_to_float(item.get("delta_median")),
+                                preferred_setpoint=str(item.get("preferred_setpoint")),
+                                major_change_type=item.get("major_change_type"),
+                                preferred_hour=_to_int(item.get("preferred_hour")),
+                                raw_rule=item,
+                            )
+                            session.add(rule)
+                            stage_rule_count += 1
+
+                        for item in (point_data or {}).get("daily_profile") or []:
+                            rule = ControlStrategyKnowledgeBaseStageRule(
+                                run_id=run.id,
+                                profile_type="daily_profile",
+                                room_id=str(item.get("room_id") or room_id),
+                                device_type=str(item.get("device_type") or device_type),
+                                point_key=str(item.get("point_group") or point_key),
+                                point_display=(point_data or {}).get("point_display"),
+                                stage=None,
+                                growth_day_num=_to_int(item.get("growth_day_num")),
+                                changes=_to_int(item.get("changes")),
+                                active_batches=_to_int(item.get("active_batches")),
+                                active_days=_to_int(item.get("active_days")),
+                                value_median=_to_float(item.get("value_median")),
+                                value_p25=_to_float(item.get("value_p25")),
+                                value_p75=_to_float(item.get("value_p75")),
+                                value_min=_to_float(item.get("value_min")),
+                                value_max=_to_float(item.get("value_max")),
+                                delta_median=_to_float(item.get("delta_median")),
+                                preferred_setpoint=str(item.get("preferred_setpoint")),
+                                major_change_type=item.get("major_change_type"),
+                                preferred_hour=_to_int(item.get("preferred_hour")),
+                                raw_rule=item,
+                            )
+                            session.add(rule)
+                            stage_rule_count += 1
+        else:
+            for device_type, dev_data in devices.items():
+                points = (dev_data or {}).get("points") or {}
+                for point_key, point_data in points.items():
+                    point_display = (point_data or {}).get("point_display")
+                    for item in (point_data or {}).get("stage_rules") or []:
+                        rule = ControlStrategyKnowledgeBaseStageRule(
+                            run_id=run.id,
+                            profile_type="stage_rules",
+                            room_id=None,
+                            device_type=str(device_type),
+                            point_key=str(point_key),
+                            point_display=point_display,
+                            stage=item.get("stage"),
+                            growth_day_num=None,
+                            changes=_to_int(item.get("changes")),
+                            active_batches=_to_int(item.get("active_batches")),
+                            active_days=None,
+                            value_median=_to_float(item.get("value_median")),
+                            value_p25=None,
+                            value_p75=None,
+                            value_min=_to_float((item.get("value_range") or [None])[0])
+                            if isinstance(item.get("value_range"), list)
+                            and len(item.get("value_range")) >= 1
+                            else None,
+                            value_max=_to_float(
+                                (item.get("value_range") or [None, None])[1]
+                            )
+                            if isinstance(item.get("value_range"), list)
+                            and len(item.get("value_range")) >= 2
+                            else None,
+                            delta_median=_to_float(item.get("delta_median")),
+                            preferred_setpoint=str(item.get("preferred_setpoint")),
+                            major_change_type=item.get("major_change_type"),
+                            preferred_hour=_to_int(item.get("preferred_adjust_hour")),
+                            raw_rule=item,
+                        )
+                        session.add(rule)
+                        stage_rule_count += 1
+
+        session.commit()
+        logger.info(
+            f"[Control KB] Stored kb_type={kb_type} run_id={run.id} "
+            f"stage_rules={stage_rule_count} cluster_meta={cluster_meta_count} "
+            f"cluster_rules={cluster_rule_count}"
+        )
+        return {
+            "run_id": str(run.id),
+            "kb_type": kb_type,
+            "stage_rule_count": stage_rule_count,
+            "cluster_meta_count": cluster_meta_count,
+            "cluster_rule_count": cluster_rule_count,
+        }
+    except Exception as e:
+        session.rollback()
+        logger.error(f"[Control KB] Failed to store knowledge base: {e}")
+        raise
+    finally:
+        session.close()
 
 
 def test_decision_analysis_tables():

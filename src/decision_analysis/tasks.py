@@ -24,6 +24,7 @@ from global_const.global_const import ensure_src_path
 from scripts.analysis.run_enhanced_decision_analysis import (
     execute_enhanced_decision_analysis,
 )
+from scripts.processing.build_control_knowledge_base import build_and_persist_cluster_kb
 from utils.create_table import store_decision_analysis_results
 from utils.loguru_setting import logger
 
@@ -316,3 +317,51 @@ def safe_batch_decision_analysis(
         logger.info("[DECISION_TASK] 存储内容: 静态配置表 + 动态结果表")
 
     logger.info("[DECISION_TASK] ==========================================")
+
+
+def safe_refresh_control_strategy_cluster_kb(
+    interval_days: int = 27,
+    min_samples_per_point: int = 12,
+) -> None:
+    """定时刷新聚类控制知识库（默认27天间隔，结果直接落库）。"""
+    logger.info("[CONTROL_KB_TASK] ==========================================")
+    logger.info(
+        f"[CONTROL_KB_TASK] 开始执行聚类知识库刷新任务: interval_days={interval_days}, "
+        f"min_samples_per_point={min_samples_per_point}"
+    )
+
+    start_time = datetime.now()
+    try:
+        result = build_and_persist_cluster_kb(
+            room_ids=MUSHROOM_ROOM_IDS,
+            min_samples_per_point=int(min_samples_per_point),
+            interval_days=int(interval_days),
+            force_run=False,
+            persist=True,
+            export_csv=False,
+        )
+
+        duration = (datetime.now() - start_time).total_seconds()
+        if result.get("skipped"):
+            logger.info(
+                "[CONTROL_KB_TASK] 跳过执行：未达到间隔要求，"
+                f"last={result.get('last_generated_at')}, next={result.get('next_due_at')}"
+            )
+            logger.info(f"[CONTROL_KB_TASK] 任务结束（跳过），耗时={duration:.2f}秒")
+            logger.info("[CONTROL_KB_TASK] ==========================================")
+            return
+
+        persist_stats = result.get("persist_stats") or {}
+        logger.info(
+            "[CONTROL_KB_TASK] 刷新完成: "
+            f"run_id={persist_stats.get('run_id')}, "
+            f"cluster_meta={persist_stats.get('cluster_meta_count', 0)}, "
+            f"cluster_rules={persist_stats.get('cluster_rule_count', 0)}, "
+            f"耗时={duration:.2f}秒"
+        )
+        logger.info("[CONTROL_KB_TASK] ==========================================")
+    except Exception as e:
+        duration = (datetime.now() - start_time).total_seconds()
+        logger.error(f"[CONTROL_KB_TASK] 刷新失败: {e}", exc_info=True)
+        logger.error(f"[CONTROL_KB_TASK] 失败耗时={duration:.2f}秒")
+        logger.info("[CONTROL_KB_TASK] ==========================================")

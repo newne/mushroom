@@ -1,5 +1,5 @@
 #!/bin/bash
-# 生产级容器启动脚本 - 双服务模式（主应用[FastAPI+Scheduler] + Streamlit）
+# 生产级容器启动脚本 - 三服务模式（FastAPI + Scheduler + Streamlit）
 # 支持崩溃自动退出、日志透传、资源限制
 
 set -euo pipefail
@@ -10,6 +10,7 @@ set -euo pipefail
 APP_ROOT="/app"
 LOG_DIR="$APP_ROOT/Logs"
 MAIN_LOG="$LOG_DIR/main.log"
+SCHEDULER_LOG="$LOG_DIR/scheduler.log"
 STREAMLIT_LOG="$LOG_DIR/streamlit.log"
 PYTHON="${PYTHON:-python3}"
 
@@ -35,8 +36,12 @@ cleanup() {
         log "停止 Streamlit (PID: $STREAMLIT_PID)"
         kill -TERM "$STREAMLIT_PID" 2>/dev/null || true
     fi
+    if [[ -n "${SCHEDULER_PID:-}" ]] && kill -0 "$SCHEDULER_PID" 2>/dev/null; then
+        log "停止调度器 (PID: $SCHEDULER_PID)"
+        kill -TERM "$SCHEDULER_PID" 2>/dev/null || true
+    fi
     if [[ -n "${MAIN_PID:-}" ]] && kill -0 "$MAIN_PID" 2>/dev/null; then
-        log "停止主应用 (PID: $MAIN_PID)"
+        log "停止 FastAPI (PID: $MAIN_PID)"
         kill -TERM "$MAIN_PID" 2>/dev/null || true
     fi
     exit 0
@@ -75,6 +80,7 @@ fi
 
 # 清理旧日志（避免累积）
 > "$MAIN_LOG" 2>/dev/null || true
+> "$SCHEDULER_LOG" 2>/dev/null || true
 > "$STREAMLIT_LOG" 2>/dev/null || true
 
 log "线程限制已在环境设置中配置"
@@ -103,9 +109,9 @@ if ! kill -0 $STREAMLIT_PID 2>/dev/null; then
 fi
 
 # =============================
-# 启动主应用 (FastAPI + Scheduler)
+# 启动主应用 (FastAPI only)
 # =============================
-log "启动主应用 (FastAPI + Scheduler)..."
+log "启动主应用 (FastAPI only)..."
 
 # 先测试Python环境和依赖
 log "检查Python环境和依赖..."
@@ -113,28 +119,53 @@ if ! $PYTHON -c "import sys; print(f'Python {sys.version}')"; then
     fail "Python环境检查失败"
 fi
 
-if ! $PYTHON -c "import sys; sys.path.insert(0, '/app'); import scheduling.core.scheduler; print('调度器模块导入成功')"; then
-    fail "调度器模块导入失败，请检查依赖"
+if ! $PYTHON -c "import sys; sys.path.insert(0, '/app'); import main_no_scheduler; print('FastAPI 无调度入口导入成功')"; then
+    fail "FastAPI 入口导入失败，请检查依赖"
 fi
 
-# 启动主应用
+# 启动 FastAPI
 # 使用 tee 同时输出到文件和标准输出
 cd "$APP_ROOT"
-nohup $PYTHON main.py 2>&1 | tee -a "$MAIN_LOG" &
+nohup $PYTHON main_no_scheduler.py 2>&1 | tee -a "$MAIN_LOG" &
 MAIN_PID=$!
-log "主应用已启动，PID=$MAIN_PID"
+log "FastAPI 已启动，PID=$MAIN_PID"
 
 # 等待启动
 sleep 5
 if ! kill -0 $MAIN_PID 2>/dev/null; then
-    log "主应用进程已退出，查看最后几行日志："
+    log "FastAPI 进程已退出，查看最后几行日志："
     tail -10 "$MAIN_LOG" | while read line; do
         log "MAIN_LOG: $line"
     done
-    fail "主应用启动失败，请检查代码或依赖"
+    fail "FastAPI 启动失败，请检查代码或依赖"
 fi
 
-log "主应用运行正常"
+log "FastAPI 运行正常"
+
+# =============================
+# 启动调度器 (Scheduler only)
+# =============================
+log "启动独立调度器服务..."
+
+if ! $PYTHON -c "import sys; sys.path.insert(0, '/app'); import scheduling.optimized_scheduler; print('调度器入口导入成功')"; then
+    fail "调度器入口导入失败，请检查依赖"
+fi
+
+cd "$APP_ROOT"
+nohup $PYTHON scheduling/optimized_scheduler.py 2>&1 | tee -a "$SCHEDULER_LOG" &
+SCHEDULER_PID=$!
+log "Scheduler 已启动，PID=$SCHEDULER_PID"
+
+sleep 5
+if ! kill -0 $SCHEDULER_PID 2>/dev/null; then
+    log "Scheduler 进程已退出，查看最后几行日志："
+    tail -10 "$SCHEDULER_LOG" | while read line; do
+        log "SCHEDULER_LOG: $line"
+    done
+    fail "Scheduler 启动失败，请检查代码或依赖"
+fi
+
+log "Scheduler 运行正常"
 
 log "所有服务已成功启动。保持容器活跃中..."
 
@@ -149,9 +180,15 @@ while true; do
         tail -20 "$STREAMLIT_LOG" | while read line; do log "  $line"; done
         fail "Streamlit 进程异常退出"
     fi
+    if ! kill -0 $SCHEDULER_PID 2>/dev/null; then
+        log "ERROR: Scheduler 进程异常退出"
+        log "最后的 Scheduler 日志："
+        tail -20 "$SCHEDULER_LOG" | while read line; do log "  $line"; done
+        fail "Scheduler 进程异常退出"
+    fi
     if ! kill -0 $MAIN_PID 2>/dev/null; then
-        log "ERROR: 主应用进程异常退出"
-        log "最后的 主应用 日志："
+        log "ERROR: FastAPI 进程异常退出"
+        log "最后的 FastAPI 日志："
         tail -20 "$MAIN_LOG" | while read line; do log "  $line"; done
         
         # 同时检查业务日志
@@ -159,7 +196,7 @@ while true; do
             log "最后的业务错误日志："
             tail -20 "$LOG_DIR/mushroom_solution-error.log" | while read line; do log "  $line"; done
         fi
-        fail "主应用进程异常退出"
+        fail "FastAPI 进程异常退出"
     fi
     
     sleep 30

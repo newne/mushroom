@@ -179,6 +179,20 @@ def process_daily_env_stats(room_id: str, stat_date: date) -> Dict[str, Any]:
             in_day_num=info_data.get("in_day_num"),
         )
 
+        # 从 mushroom_info 配置补齐批次字段
+        info_in_date = info_data.get("in_date")
+        if isinstance(info_in_date, datetime):
+            info_in_date = info_in_date.date()
+
+        if stats.get("in_day_num") is None and info_in_date:
+            delta = (stat_date - info_in_date).days
+            if delta >= 0:
+                stats["in_day_num"] = delta + 1
+                stats["is_growth_phase"] = bool(1 <= int(stats["in_day_num"]) <= 27)
+
+        # batch_date 与 mushroom_info.in_date 对齐
+        stats["batch_date"] = info_in_date
+
         # 存储统计结果
         record_count = store_env_statistics(room_id, stat_date, stats)
 
@@ -301,18 +315,30 @@ def derive_in_day_num_from_info(
     mapper = {
         "InDayNum": "in_day_num",
         "in_day_num": "in_day_num",
+        "indaynum": "in_day_num",
         "InNum": "in_num",
         "in_num": "in_num",
+        "innum": "in_num",
         "InYear": "in_year",
         "in_year": "in_year",
+        "inyear": "in_year",
         "InMonth": "in_month",
         "in_month": "in_month",
+        "inmonth": "in_month",
         "InDay": "in_day",
         "in_day": "in_day",
+        "inday": "in_day",
     }
 
     info_df = info_df[[point_col, "value"]].copy()
     info_df["point_key"] = info_df[point_col].map(mapper)
+    if info_df["point_key"].isna().any():
+        normalized_key = (
+            info_df[point_col].astype(str).str.replace("_", "", regex=False).str.lower()
+        )
+        info_df.loc[info_df["point_key"].isna(), "point_key"] = normalized_key.map(
+            mapper
+        )
     info_df = info_df[info_df["point_key"].notna()]
     if info_df.empty:
         return result
@@ -360,19 +386,31 @@ def get_room_mushroom_info(room_id: str, stat_date: date) -> Dict[str, Any]:
             else:
                 return {"in_day_num": None, "in_date": None, "in_num": None}
 
-        start_time = datetime.combine(stat_date, datetime.min.time())
-        end_time = start_time + timedelta(days=1)
+        def _query_info(window_days: int) -> pd.DataFrame:
+            start_time = datetime.combine(stat_date, datetime.min.time()) - timedelta(
+                days=window_days
+            )
+            end_time = datetime.combine(stat_date, datetime.min.time()) + timedelta(
+                days=1
+            )
 
-        results = []
-        for _, group in info_config.groupby("device_alias", as_index=False):
-            res = query_data_by_batch_time(group, start_time, end_time)
-            if not res.empty:
-                results.append(res)
+            collected = []
+            for _, group in info_config.groupby("device_alias", as_index=False):
+                res = query_data_by_batch_time(group, start_time, end_time)
+                if not res.empty:
+                    collected.append(res)
 
-        if not results:
+            if not collected:
+                return pd.DataFrame()
+            return pd.concat(collected).reset_index(drop=True)
+
+        # 优先查当天，缺失时回退近7天，避免偶发缺采样导致空值
+        info_df = _query_info(window_days=0)
+        if info_df.empty:
+            info_df = _query_info(window_days=7)
+        if info_df.empty:
             return {"in_day_num": None, "in_date": None, "in_num": None}
 
-        info_df = pd.concat(results).reset_index(drop=True)
         return derive_in_day_num_from_info(info_df, stat_date)
 
     except Exception as exc:
@@ -503,27 +541,79 @@ def store_env_statistics(room_id: str, stat_date: date, stats: Dict[str, Any]) -
         }
         insert_data = {k: v for k, v in insert_data.items() if k in available_columns}
 
+        columns = ", ".join(insert_data.keys())
+        placeholders = ", ".join([f":{key}" for key in insert_data.keys()])
+        update_columns = [
+            col
+            for col in insert_data.keys()
+            if col not in {"room_id", "stat_date", "created_at"}
+        ]
+
         with pgsql_engine.connect() as conn:
-            conn.execute(
-                text("""
-                DELETE FROM mushroom_env_daily_stats 
-                WHERE room_id = :room_id AND stat_date = :stat_date
-            """),
-                {"room_id": room_id, "stat_date": stat_date},
-            )
+            if update_columns:
+                update_set_clause = ", ".join(
+                    [f"{col} = EXCLUDED.{col}" for col in update_columns]
+                )
+                upsert_sql = text(
+                    f"""
+                    INSERT INTO mushroom_env_daily_stats ({columns})
+                    VALUES ({placeholders})
+                    ON CONFLICT (room_id, stat_date)
+                    DO UPDATE SET {update_set_clause}
+                    """
+                )
+            else:
+                upsert_sql = text(
+                    f"""
+                    INSERT INTO mushroom_env_daily_stats ({columns})
+                    VALUES ({placeholders})
+                    ON CONFLICT (room_id, stat_date)
+                    DO NOTHING
+                    """
+                )
 
-            columns = ", ".join(insert_data.keys())
-            placeholders = ", ".join([f":{key}" for key in insert_data.keys()])
+            try:
+                conn.execute(upsert_sql, insert_data)
+                conn.commit()
+            except Exception as upsert_error:
+                error_msg = str(upsert_error)
+                if (
+                    "no unique or exclusion constraint matching the ON CONFLICT specification"
+                    not in error_msg
+                ):
+                    raise
 
-            conn.execute(
-                text(f"""
-                INSERT INTO mushroom_env_daily_stats ({columns})
-                VALUES ({placeholders})
-            """),
-                insert_data,
-            )
+                logger.warning(
+                    "[ENV_PROCESSOR] ON CONFLICT 不可用（缺少唯一约束），"
+                    "回退到 UPDATE->INSERT 兼容路径"
+                )
+                conn.rollback()
 
-            conn.commit()
+                with conn.begin():
+                    update_params = dict(insert_data)
+                    set_clause = ", ".join(
+                        [f"{col} = :{col}" for col in update_columns]
+                    )
+                    updated_rows = 0
+                    if set_clause:
+                        update_sql = text(
+                            f"""
+                            UPDATE mushroom_env_daily_stats
+                            SET {set_clause}
+                            WHERE room_id = :room_id AND stat_date = :stat_date
+                            """
+                        )
+                        update_result = conn.execute(update_sql, update_params)
+                        updated_rows = int(update_result.rowcount or 0)
+
+                    if updated_rows == 0:
+                        insert_sql = text(
+                            f"""
+                            INSERT INTO mushroom_env_daily_stats ({columns})
+                            VALUES ({placeholders})
+                            """
+                        )
+                        conn.execute(insert_sql, insert_data)
 
         logger.debug("[ENV_PROCESSOR] 环境统计数据存储完成")
         return 1

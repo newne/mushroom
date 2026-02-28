@@ -7,7 +7,7 @@
 任务模块：
 - base_task: 基础任务执行框架
 - table: 数据库表管理任务
-- env: 环境统计任务  
+- env: 环境统计任务
 - monitoring: 设定点监控任务
 - clip: CLIP推理任务
 - decision: 决策分析任务
@@ -20,20 +20,27 @@ from .base_task import BaseTask, TaskExecutor, task_wrapper
 from .table import safe_create_tables
 from environment.tasks import safe_daily_env_stats
 from monitoring.tasks import safe_hourly_setpoint_monitoring
-from vision.tasks import safe_hourly_text_quality_inference, safe_daily_top_quality_clip_inference
-from decision_analysis.tasks import safe_batch_decision_analysis
+from vision.tasks import (
+    safe_hourly_text_quality_inference,
+    safe_daily_top_quality_clip_inference,
+)
+from decision_analysis.tasks import (
+    safe_batch_decision_analysis,
+    safe_refresh_control_strategy_cluster_kb,
+)
 
 # 任务接口列表
 __all__ = [
     # 基础框架
-    'BaseTask',
-    'TaskExecutor', 
-    'task_wrapper',
+    "BaseTask",
+    "TaskExecutor",
+    "task_wrapper",
     # 任务接口
-    'safe_create_tables',
-    'safe_daily_env_stats', 
-    'safe_hourly_setpoint_monitoring',
-    'safe_hourly_text_quality_inference',
-    'safe_daily_top_quality_clip_inference',
-    'safe_batch_decision_analysis',
+    "safe_create_tables",
+    "safe_daily_env_stats",
+    "safe_hourly_setpoint_monitoring",
+    "safe_hourly_text_quality_inference",
+    "safe_daily_top_quality_clip_inference",
+    "safe_batch_decision_analysis",
+    "safe_refresh_control_strategy_cluster_kb",
 ]

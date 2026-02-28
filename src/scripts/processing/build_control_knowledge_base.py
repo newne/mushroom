@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +12,12 @@ from sklearn.preprocessing import StandardScaler
 from sqlalchemy.orm import sessionmaker
 
 from global_const.global_const import pgsql_engine
-from utils.create_table import DecisionAnalysisStaticConfig
+from utils.create_table import (
+    ControlStrategyKnowledgeBaseRun,
+    DecisionAnalysisStaticConfig,
+    create_tables,
+    store_control_strategy_knowledge_base,
+)
 from web_app.control_ops_dashboard.data import (
     load_device_setpoint_changes,
     load_room_list_from_yield,
@@ -457,51 +461,173 @@ def parse_args() -> argparse.Namespace:
         help="仅处理指定库房，例如: --rooms 607 611",
     )
     parser.add_argument(
-        "--output",
-        default="src/configs/control_strategy_cluster_kb.json",
-        help="知识库 JSON 输出路径",
-    )
-    parser.add_argument(
         "--min-samples-per-point",
         type=int,
         default=12,
         help="单测点最小样本数，低于该值时不聚类，使用单簇回退",
     )
     parser.add_argument(
+        "--interval-days",
+        type=int,
+        default=27,
+        help="执行间隔天数（默认27天）；若距离上次落库未超过该值则跳过",
+    )
+    parser.add_argument(
+        "--force-run",
+        action="store_true",
+        help="强制执行，忽略间隔天数限制",
+    )
+    parser.add_argument(
+        "--skip-persist",
+        action="store_true",
+        help="仅计算不落库（默认会落库）",
+    )
+    parser.add_argument(
         "--export-csv",
         action="store_true",
         help="额外导出 cluster_summary/cluster_records 两份 CSV 以便人工校验",
     )
+    parser.add_argument(
+        "--export-prefix",
+        default="output/control_strategy_cluster_kb",
+        help="导出CSV前缀路径（仅在 --export-csv 时生效）",
+    )
     return parser.parse_args()
+
+
+def get_latest_cluster_kb_generated_at() -> datetime | None:
+    with Session() as session:
+        latest_active = (
+            session.query(ControlStrategyKnowledgeBaseRun.generated_at)
+            .filter(
+                ControlStrategyKnowledgeBaseRun.kb_type == "cluster",
+                ControlStrategyKnowledgeBaseRun.is_active.is_(True),
+            )
+            .order_by(ControlStrategyKnowledgeBaseRun.generated_at.desc())
+            .first()
+        )
+        if latest_active and latest_active[0]:
+            return latest_active[0]
+
+        latest_any = (
+            session.query(ControlStrategyKnowledgeBaseRun.generated_at)
+            .filter(ControlStrategyKnowledgeBaseRun.kb_type == "cluster")
+            .order_by(ControlStrategyKnowledgeBaseRun.generated_at.desc())
+            .first()
+        )
+        return latest_any[0] if latest_any and latest_any[0] else None
+
+
+def build_and_persist_cluster_kb(
+    room_ids: list[str] | None = None,
+    min_samples_per_point: int = 12,
+    interval_days: int = 27,
+    force_run: bool = False,
+    persist: bool = True,
+    export_csv: bool = False,
+    export_prefix: str = "output/control_strategy_cluster_kb",
+) -> dict:
+    """构建聚类知识库并按需落库。
+
+    Returns:
+        包含是否执行、是否跳过、run_id、统计信息的结果字典。
+    """
+    if not force_run and int(interval_days) > 0:
+        latest_generated_at = get_latest_cluster_kb_generated_at()
+        if latest_generated_at is not None:
+            next_due_at = latest_generated_at + timedelta(days=int(interval_days))
+            if datetime.now() < next_due_at:
+                return {
+                    "executed": False,
+                    "skipped": True,
+                    "reason": "interval_not_reached",
+                    "interval_days": int(interval_days),
+                    "last_generated_at": latest_generated_at.isoformat(),
+                    "next_due_at": next_due_at.isoformat(),
+                }
+
+    payload, cluster_summary_df, cluster_records_df = build_knowledge_base(
+        room_ids,
+        min_samples_per_point=int(min_samples_per_point),
+    )
+
+    persist_stats = None
+    if persist:
+        create_tables()
+        persist_stats = store_control_strategy_knowledge_base(
+            kb_payload=payload,
+            kb_type="cluster",
+            source_file=None,
+            mark_previous_inactive=True,
+        )
+
+    summary_path = None
+    records_path = None
+    if export_csv:
+        export_prefix_path = Path(export_prefix)
+        export_prefix_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path = export_prefix_path.with_name(
+            export_prefix_path.name + "_cluster_summary.csv"
+        )
+        records_path = export_prefix_path.with_name(
+            export_prefix_path.name + "_cluster_records.csv"
+        )
+        cluster_summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
+        cluster_records_df.to_csv(records_path, index=False, encoding="utf-8-sig")
+
+    result = {
+        "executed": True,
+        "skipped": False,
+        "interval_days": int(interval_days),
+        "room_count": len(payload.get("scope", {}).get("rooms", [])),
+        "scope": payload.get("scope", {}),
+        "persisted": bool(persist),
+        "persist_stats": persist_stats,
+        "export_csv": bool(export_csv),
+        "summary_csv": str(summary_path) if summary_path else None,
+        "records_csv": str(records_path) if records_path else None,
+    }
+    return result
 
 
 def main() -> None:
     args = parse_args()
-    payload, cluster_summary_df, cluster_records_df = build_knowledge_base(
-        args.rooms,
+    result = build_and_persist_cluster_kb(
+        room_ids=args.rooms,
         min_samples_per_point=int(args.min_samples_per_point),
+        interval_days=int(args.interval_days),
+        force_run=bool(args.force_run),
+        persist=not bool(args.skip_persist),
+        export_csv=bool(args.export_csv),
+        export_prefix=args.export_prefix,
     )
 
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
-        encoding="utf-8",
-    )
+    if result.get("skipped"):
+        print(
+            "跳过执行：距离上次聚类知识库落库未满 "
+            f"{result.get('interval_days', 27)} 天。"
+        )
+        print(f"上次生成时间: {result.get('last_generated_at')}")
+        print(f"下次可执行时间: {result.get('next_due_at')}")
+        return
 
-    if args.export_csv:
-        summary_path = output_path.with_name(output_path.stem + "_cluster_summary.csv")
-        records_path = output_path.with_name(output_path.stem + "_cluster_records.csv")
-        cluster_summary_df.to_csv(summary_path, index=False, encoding="utf-8-sig")
-        cluster_records_df.to_csv(records_path, index=False, encoding="utf-8-sig")
+    print("知识库已计算完成。")
+    print(f"覆盖库房数: {result.get('room_count', 0)}")
+    persist_stats = result.get("persist_stats") or {}
+    if result.get("persisted") and persist_stats:
+        print(
+            "已落库: "
+            f"run_id={persist_stats.get('run_id')} "
+            f"cluster_meta={persist_stats.get('cluster_meta_count')} "
+            f"cluster_rules={persist_stats.get('cluster_rule_count')}"
+        )
+    elif not result.get("persisted"):
+        print("未落库：已按 --skip-persist 跳过数据库写入。")
 
-    room_count = len(payload.get("scope", {}).get("rooms", []))
-    print(f"知识库已生成: {output_path}")
-    print(f"覆盖库房数: {room_count}")
-    if args.export_csv:
+    if result.get("export_csv"):
         print("已导出校验文件:")
-        print(f"- {summary_path}")
-        print(f"- {records_path}")
+        print(f"- {result.get('summary_csv')}")
+        print(f"- {result.get('records_csv')}")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import streamlit as st
 
 # Must be the first Streamlit command
 st.set_page_config(
-    page_title="鹿茸菇数据分析及可视化",
+    page_title="鹿茸菇智能调控看板",
     page_icon="",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -33,7 +33,7 @@ def main():
 
     pg = st.navigation(
         [
-            st.Page(dashboard.show, title="数据看板", icon="📊"),
+            st.Page(dashboard.show, title="智能调控看板", icon="📊"),
         ]
     )
     pg.run()
