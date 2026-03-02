@@ -33,6 +33,7 @@ from utils.time_utils import format_datetime
 ensure_src_path()
 
 from decision_analysis.decision_analyzer import DecisionAnalyzer
+from decision_analysis.prompt_manager import resolve_decision_prompt_template
 from decision_analysis.skills.cultivation_skill import CultivationSkillEngine
 
 
@@ -211,6 +212,7 @@ def execute_enhanced_decision_analysis(
     enable_kb_human_prior: bool = False,
     multi_image_boost: bool = True,
     enable_skill_engine: bool = True,
+    persist_output_file: bool = True,
 ) -> EnhancedDecisionAnalysisResult:
     """
     Execute enhanced decision analysis
@@ -227,6 +229,7 @@ def execute_enhanced_decision_analysis(
         enable_kb_human_prior: 是否注入知识库人工调控偏好
         multi_image_boost: 是否启用多图像相似度增强
         enable_skill_engine: 是否启用Skill能力模块约束修正
+        persist_output_file: 是否写入输出JSON文件（调度任务可关闭以减少I/O）
     """
 
     start_time = datetime.now()
@@ -245,11 +248,18 @@ def execute_enhanced_decision_analysis(
             logger.enable(__name__)
 
         template_path = BASE_DIR / "configs" / "decision_prompt.jinja"
+        template_content, prompt_meta = resolve_decision_prompt_template(
+            settings=settings,
+            urls=settings.data_source_url,
+            fallback_template_path=template_path,
+        )
+
         analyzer = DecisionAnalyzer(
             db_engine=pgsql_engine,
             settings=settings,
             static_config=static_settings,
             template_path=str(template_path),
+            template_content=template_content,
         )
 
         enhanced_output = analyzer.analyze_enhanced(
@@ -274,7 +284,9 @@ def execute_enhanced_decision_analysis(
 
         if enable_skill_engine and output_format in {"monitoring", "both"}:
             try:
-                skill_library_path = BASE_DIR / "configs" / "cultivation_skill_library.json"
+                skill_library_path = (
+                    BASE_DIR / "configs" / "cultivation_skill_library.json"
+                )
                 skill_engine = CultivationSkillEngine(
                     config_path=skill_library_path,
                     enable_kb_prior=DECISION_ANALYSIS_ENABLE_SKILL_KB_PRIOR,
@@ -320,20 +332,23 @@ def execute_enhanced_decision_analysis(
                 "skill_feedback": skill_feedback,
             }
 
-        if output_file:
-            output_path = (
-                Path(output_file) if isinstance(output_file, str) else output_file
-            )
-        else:
-            timestamp = analysis_datetime.strftime("%Y%m%d_%H%M%S")
-            output_dir = BASE_DIR.parent / OUTPUT_DIR_NAME
-            output_dir.mkdir(parents=True, exist_ok=True)
-            output_path = (
-                output_dir / f"enhanced_decision_analysis_{room_id}_{timestamp}.json"
-            )
+        output_path: Optional[Path] = None
+        if persist_output_file:
+            if output_file:
+                output_path = (
+                    Path(output_file) if isinstance(output_file, str) else output_file
+                )
+            else:
+                timestamp = analysis_datetime.strftime("%Y%m%d_%H%M%S")
+                output_dir = BASE_DIR.parent / OUTPUT_DIR_NAME
+                output_dir.mkdir(parents=True, exist_ok=True)
+                output_path = (
+                    output_dir
+                    / f"enhanced_decision_analysis_{room_id}_{timestamp}.json"
+                )
 
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
 
         result.success = True
         result.status = enhanced_output.status
@@ -345,6 +360,9 @@ def execute_enhanced_decision_analysis(
             "image_aggregation_method": enhanced_output.metadata.image_aggregation_method,
             "llm_model": enhanced_output.metadata.llm_model,
             "llm_response_time": enhanced_output.metadata.llm_response_time,
+            "prompt_source": prompt_meta.get("source"),
+            "prompt_uri": prompt_meta.get("prompt_uri"),
+            "registered_prompt_uri": prompt_meta.get("registered_prompt_uri"),
             "skill_enabled": bool(enable_skill_engine),
             "skill_kb_prior_enabled": bool(DECISION_ANALYSIS_ENABLE_SKILL_KB_PRIOR),
             "skill_matched_count": skill_feedback.get("matched_count", 0),

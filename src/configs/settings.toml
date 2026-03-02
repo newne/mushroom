@@ -1,4 +1,8 @@
 [default]
+decision_prompt_registry_name="decision_analysis_structured"
+decision_prompt_register_on_start=true
+decision_prompt_cache_ttl_seconds=1800
+
 [default.data_source_url]
 # data
 mushroom_ledger="http://{host}/service/monitor/register/ledger/page/list" #蘑菇台账接口
@@ -13,6 +17,8 @@ write_cmd="http://{}:9277/edge/device/point/cmd/private" # 发送指令
 llama_completions="http://{host}:{port}/chat/completions"
 prompt_mushroom_description="prompts:/growth_stage_describe/17"
 prompt_mushroom_description_bak="http://{host}/prompt/api/v1/prompts/role-instruction/active"
+prompt_decision_analysis="prompts:/decision_analysis_structured/1"
+prompt_decision_analysis_bak="http://{host}/prompt/api/v1/prompts/decision-analysis/active"
 prompt_login="http://{host}/prompt/api/v1/auth/login"
 
 [development]
@@ -120,13 +126,24 @@ minio_bucket_name = "mogu"
 host = "mlflow"
 port="5000"
 
-[production.llama]
+[production.llama.bak]
 llama_host = "172.17.0.1"
 llama_port = "7002"
 model = "llama-mushroom-light.service"
 llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
+
+
+[production.llama]
+llama_host = "10.77.77.49"
+llama_port = "7001"
+model = "qwen3-vl-8b"
+llama_completions = "http://{0}:{1}/v1/chat/completions"
+enabled = true  # 是否启用LLaMA描述生成
+timeout = 600   # API调用超时时间（秒）
+mushroom_descripe_prompt = "" # Loaded from MLflow Prompt Registry: growth_stage_describe
+
 
 [production.llama_vl.bak]
 llama_host = "172.17.0.1"

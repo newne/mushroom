@@ -51,16 +51,218 @@ class EnvDataProcessor:
             from utils.data_preprocessing import query_data_by_batch_time
             from utils.dataframe_utils import get_all_device_configs
 
+            def _normalize_numeric(value: Any) -> Any:
+                if value is None:
+                    return None
+                try:
+                    number = float(value)
+                    if pd.isna(number):
+                        return None
+                    if number.is_integer():
+                        return int(number)
+                    return float(number)
+                except Exception:
+                    return value
+
+            def _query_device_window(
+                config_df: pd.DataFrame,
+                start_time: datetime,
+                end_time: datetime,
+            ) -> pd.DataFrame:
+                if config_df is None or config_df.empty:
+                    return pd.DataFrame()
+
+                working_df = config_df.copy()
+                if "device_alias" not in working_df.columns:
+                    if working_df.index.name == "device_alias":
+                        working_df = working_df.reset_index()
+                    else:
+                        return pd.DataFrame()
+
+                result_frames: List[pd.DataFrame] = []
+                for _, group in working_df.groupby("device_alias", as_index=False):
+                    raw_df = query_data_by_batch_time(
+                        group.copy(), start_time, end_time
+                    )
+                    if raw_df is None or raw_df.empty:
+                        continue
+
+                    if "device_alias" not in raw_df.columns:
+                        raw_df = raw_df.copy()
+                        raw_df["device_alias"] = group["device_alias"].iloc[0]
+
+                    mapping_cols = [
+                        col
+                        for col in [
+                            "device_alias",
+                            "device_name",
+                            "point_name",
+                            "point_alias",
+                        ]
+                        if col in group.columns
+                    ]
+                    mapping_df = group[mapping_cols].drop_duplicates()
+
+                    join_keys = [
+                        c
+                        for c in ["device_alias", "device_name", "point_name"]
+                        if c in mapping_df.columns and c in raw_df.columns
+                    ]
+                    if join_keys:
+                        merged_df = raw_df.merge(
+                            mapping_df,
+                            on=join_keys,
+                            how="left",
+                        )
+                    else:
+                        merged_df = raw_df.copy()
+
+                    if (
+                        "point_alias" not in merged_df.columns
+                        or merged_df["point_alias"].isna().all()
+                    ):
+                        merged_df["point_alias"] = merged_df.get("point_name")
+
+                    result_frames.append(merged_df)
+
+                if not result_frames:
+                    return pd.DataFrame()
+
+                merged = pd.concat(result_frames, ignore_index=True)
+                merged["time"] = pd.to_datetime(merged.get("time"), errors="coerce")
+                merged["value"] = pd.to_numeric(merged.get("value"), errors="coerce")
+                merged = merged.dropna(subset=["time", "value", "point_alias"])
+                return merged
+
+            def _build_latest_point_map(df: pd.DataFrame) -> Dict[str, Any]:
+                if df is None or df.empty:
+                    return {}
+                latest_rows = (
+                    df.sort_values("time")
+                    .groupby("point_alias", as_index=False)
+                    .tail(1)
+                )
+                return {
+                    str(row["point_alias"]): _normalize_numeric(row["value"])
+                    for _, row in latest_rows.iterrows()
+                }
+
             # 1. 初始化结果
             env_data = {
                 "room_id": room_id,
                 "in_date": collection_time.date(),
                 "semantic_description": f"Mushroom Room {room_id}, Time: {collection_time}",
-                "env_sensor_status": "{}",
+                "env_sensor_status": {},
+                "air_cooler_config": {},
+                "fresh_fan_config": {},
+                "humidifier_config": {"left": {}, "right": {}},
+                "light_config": {},
+                "in_num": 0,
+                "growth_day": 0,
+                "light_count": 0,
+                "humidifier_count": 0,
             }
 
-            # 2. 获取环境传感器配置
+            # 1.5 获取蘑菇批次字段（in_num / growth_day / in_date）
+            try:
+                info_data = get_room_mushroom_info(room_id, collection_time.date())
+                if info_data:
+                    if info_data.get("in_date") is not None:
+                        env_data["in_date"] = info_data.get("in_date")
+                    in_num = info_data.get("in_num")
+                    growth_day = info_data.get("in_day_num")
+                    env_data["in_num"] = int(in_num) if in_num is not None else 0
+                    env_data["growth_day"] = (
+                        int(growth_day) if growth_day is not None else 0
+                    )
+            except Exception as info_error:
+                logger.warning(
+                    f"[ENV_PROCESSOR] 获取批次信息失败 room={room_id}: {info_error}"
+                )
+
+            # 2. 获取设备配置（环境传感器 + 四类控制设备）
             device_configs = get_all_device_configs(room_id=room_id)
+            start_time = collection_time - timedelta(minutes=time_window_minutes)
+            end_time = collection_time + timedelta(minutes=time_window_minutes)
+
+            # 2.1 冷风机配置
+            air_df = _query_device_window(
+                device_configs.get("air_cooler", pd.DataFrame()),
+                start_time,
+                end_time,
+            )
+            env_data["air_cooler_config"] = _build_latest_point_map(air_df)
+
+            # 2.2 新风机配置
+            fresh_df = _query_device_window(
+                device_configs.get("fresh_air_fan", pd.DataFrame()),
+                start_time,
+                end_time,
+            )
+            env_data["fresh_fan_config"] = _build_latest_point_map(fresh_df)
+
+            # 2.3 补光灯配置
+            light_df = _query_device_window(
+                device_configs.get("grow_light", pd.DataFrame()),
+                start_time,
+                end_time,
+            )
+            light_cfg = _build_latest_point_map(light_df)
+            env_data["light_config"] = light_cfg
+            light_model = light_cfg.get("model")
+            light_status = light_cfg.get("mode")
+            env_data["light_count"] = (
+                1
+                if isinstance(light_model, (int, float))
+                and isinstance(light_status, (int, float))
+                and light_model != 0
+                and light_status < 3
+                else 0
+            )
+
+            # 2.4 加湿器配置（左右设备拆分）
+            humidifier_df = _query_device_window(
+                device_configs.get("humidifier", pd.DataFrame()),
+                start_time,
+                end_time,
+            )
+            if "device_alias" in humidifier_df.columns:
+                alias_series = humidifier_df["device_alias"].astype(str)
+                left_df = humidifier_df[
+                    alias_series.str.contains("left", case=False, na=False)
+                ]
+                right_df = humidifier_df[
+                    alias_series.str.contains("right", case=False, na=False)
+                ]
+            else:
+                left_df = pd.DataFrame()
+                right_df = pd.DataFrame()
+            left_cfg = _build_latest_point_map(left_df)
+            right_cfg = _build_latest_point_map(right_df)
+            env_data["humidifier_config"] = {
+                "left": {
+                    "on": left_cfg.get("on"),
+                    "off": left_cfg.get("off"),
+                    "status": left_cfg.get("status"),
+                    "mode": left_cfg.get("mode"),
+                },
+                "right": {
+                    "on": right_cfg.get("on"),
+                    "off": right_cfg.get("off"),
+                    "status": right_cfg.get("status"),
+                    "mode": right_cfg.get("mode"),
+                },
+            }
+
+            humidifier_count = 0
+            for side_cfg in [
+                env_data["humidifier_config"]["left"],
+                env_data["humidifier_config"]["right"],
+            ]:
+                side_status = side_cfg.get("status")
+                if isinstance(side_status, (int, float)) and side_status != 3:
+                    humidifier_count += 1
+            env_data["humidifier_count"] = humidifier_count
 
             # 3. 获取环境传感器数据 (temperature, humidity, co2)
             if device_configs and "mushroom_env_status" in device_configs:
@@ -76,9 +278,6 @@ class EnvDataProcessor:
                             f"[ENV_PROCESSOR] 库房 {room_id} 配置缺失 device_alias 列，跳过环境数据查询"
                         )
                         return env_data
-
-                start_time = collection_time - timedelta(minutes=time_window_minutes)
-                end_time = collection_time + timedelta(minutes=time_window_minutes)
 
                 # 查询数据
                 # Fix for FutureWarning: Replace groupby.apply with iteration
@@ -110,19 +309,27 @@ class EnvDataProcessor:
                     # 计算平均值并更新 env_data
                     desc_parts = []
 
+                    env_status_payload: Dict[str, Any] = {
+                        "sampled_at": collection_time.isoformat(),
+                        "window_minutes": int(time_window_minutes),
+                    }
+
                     if "temperature" in pivot_df.columns:
                         temp = pivot_df["temperature"].mean()
                         env_data["temperature"] = temp
+                        env_status_payload["temperature"] = float(temp)
                         desc_parts.append(f"Temperature: {temp:.1f}C")
 
                     if "humidity" in pivot_df.columns:
                         hum = pivot_df["humidity"].mean()
                         env_data["humidity"] = hum
+                        env_status_payload["humidity"] = float(hum)
                         desc_parts.append(f"Humidity: {hum:.1f}%")
 
                     if "co2" in pivot_df.columns:
                         co2 = pivot_df["co2"].mean()
                         env_data["co2"] = co2
+                        env_status_payload["co2"] = float(co2)
                         desc_parts.append(f"CO2: {co2:.0f}ppm")
 
                     if desc_parts:
@@ -130,8 +337,8 @@ class EnvDataProcessor:
                             ". Environment: " + ", ".join(desc_parts) + "."
                         )
 
-                    # 序列化传感器状态 (简化)
-                    env_data["env_sensor_status"] = df.head(1).to_json()
+                    # 结构化传感器状态（便于后续直接解析）
+                    env_data["env_sensor_status"] = env_status_payload
 
             return env_data
 

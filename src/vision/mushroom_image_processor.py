@@ -166,13 +166,15 @@ class MushroomImagePathParser:
         valid_candidates = []
         thirty_days = timedelta(days=30)
 
+        max_date_gap_days = 120
+
         for dt in candidates:
             # 检查1: 不应晚于采集时间 (允许同一天)
             if dt.date() > ref_dt.date():
                 continue
 
-            # 检查2: 不应早于采集时间30天
-            if dt.date() < (ref_dt - timedelta(days=30)).date():
+            # 检查2: 不应早于采集时间过久（默认120天）
+            if dt.date() < (ref_dt - timedelta(days=max_date_gap_days)).date():
                 continue
 
             valid_candidates.append(dt)
@@ -195,7 +197,8 @@ class MushroomImagePathParser:
                         )
                         return normalized
                 raise ValueError(
-                    f"日期 {collection_date} 与采集时间 {detailed_time} 不一致 (不在30天窗口内或为未来时间)"
+                    f"日期 {collection_date} 与采集时间 {detailed_time} 不一致 "
+                    f"(不在{max_date_gap_days}天窗口内或为未来时间)"
                 )
             raise ValueError(f"无法解析日期格式: {collection_date}")
 

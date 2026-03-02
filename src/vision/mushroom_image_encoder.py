@@ -1383,6 +1383,7 @@ class MushroomImageEncoder:
         image_info: MushroomImageInfo,
         save_to_db: bool = True,
         precomputed_analysis: dict | None = None,
+        selected_quality_record_id: int | None = None,
     ) -> dict | None:
         """
         处理单个图像：解析时间、获取环境参数、多模态编码
@@ -1392,6 +1393,7 @@ class MushroomImageEncoder:
             image_info: 蘑菇图像信息
             save_to_db: 是否保存到数据库
             precomputed_analysis: 预计算的分析结果（可选），包含growth_stage_description和image_quality_score
+            selected_quality_record_id: 已选中的image_text_quality记录ID（可选），用于仅回填mushroom_embedding_id
 
         Returns:
             处理结果字典
@@ -1543,7 +1545,10 @@ class MushroomImageEncoder:
 
             # 10. 只有在获取到完整数据时才保存到数据库
             if save_to_db:
-                success = self._save_to_database(result)
+                success = self._save_to_database(
+                    result,
+                    selected_quality_record_id=selected_quality_record_id,
+                )
                 result["saved_to_db"] = success
                 if not success:
                     logger.error(
@@ -2128,7 +2133,11 @@ class MushroomImageEncoder:
             )
         )
 
-    def _save_to_database(self, result: dict) -> bool:
+    def _save_to_database(
+        self,
+        result: dict,
+        selected_quality_record_id: int | None = None,
+    ) -> bool:
         """
         保存处理结果到数据库
         只有在获取到完整环境数据时才保存
@@ -2156,6 +2165,32 @@ class MushroomImageEncoder:
                 .first()
             )
 
+            def _normalize_json_value(value, fallback):
+                if value in (None, "", "{}", "null"):
+                    return fallback
+                return value
+
+            def _is_empty_json(value) -> bool:
+                return value in (None, "", "{}", "null", {})
+
+            def _load_latest_room_config_fallback(room_id: str) -> dict:
+                latest_room_record = (
+                    session.query(MushroomImageEmbedding)
+                    .filter(MushroomImageEmbedding.room_id == room_id)
+                    .order_by(MushroomImageEmbedding.collection_datetime.desc())
+                    .first()
+                )
+                if not latest_room_record:
+                    return {}
+                return {
+                    "air_cooler_config": latest_room_record.air_cooler_config,
+                    "fresh_fan_config": latest_room_record.fresh_fan_config,
+                    "light_config": latest_room_record.light_config,
+                    "humidifier_config": latest_room_record.humidifier_config,
+                    "light_count": latest_room_record.light_count,
+                    "humidifier_count": latest_room_record.humidifier_count,
+                }
+
             if existing:
                 # 更新现有记录
                 existing.embedding = result["embedding"]
@@ -2170,13 +2205,41 @@ class MushroomImageEncoder:
                 )
                 existing.in_num = env_data.get("in_num", 0)
                 existing.growth_day = env_data.get("growth_day", 0)
-                existing.air_cooler_config = env_data.get("air_cooler_config", "{}")
-                existing.fresh_fan_config = env_data.get("fresh_fan_config", "{}")
+                existing.collection_ip = image_info.collection_ip
+
+                air_cooler_config = _normalize_json_value(
+                    env_data.get("air_cooler_config"), existing.air_cooler_config
+                )
+                fresh_fan_config = _normalize_json_value(
+                    env_data.get("fresh_fan_config"), existing.fresh_fan_config
+                )
+                light_config = _normalize_json_value(
+                    env_data.get("light_config"), existing.light_config
+                )
+                humidifier_config = _normalize_json_value(
+                    env_data.get("humidifier_config"), existing.humidifier_config
+                )
+                env_sensor_status = _normalize_json_value(
+                    env_data.get("env_sensor_status"), existing.env_sensor_status
+                )
+
+                existing.air_cooler_config = (
+                    air_cooler_config if air_cooler_config is not None else {}
+                )
+                existing.fresh_fan_config = (
+                    fresh_fan_config if fresh_fan_config is not None else {}
+                )
                 existing.light_count = env_data.get("light_count", 0)
-                existing.light_config = env_data.get("light_config", "{}")
+                existing.light_config = light_config if light_config is not None else {}
                 existing.humidifier_count = env_data.get("humidifier_count", 0)
-                existing.humidifier_config = env_data.get("humidifier_config", "{}")
-                existing.env_sensor_status = env_data.get("env_sensor_status", "{}")
+                existing.humidifier_config = (
+                    humidifier_config
+                    if humidifier_config is not None
+                    else {"left": {}, "right": {}}
+                )
+                existing.env_sensor_status = (
+                    env_sensor_status if env_sensor_status is not None else {}
+                )
                 existing.semantic_description = env_data.get(
                     "semantic_description", "无环境数据。"
                 )
@@ -2184,24 +2247,52 @@ class MushroomImageEncoder:
 
                 logger.trace(f"更新数据库记录: {image_info.file_name}")
             else:
+                room_for_fallback = env_data.get("room_id", image_info.mushroom_id)
+                fallback_config = _load_latest_room_config_fallback(room_for_fallback)
+
+                air_cooler_config = env_data.get("air_cooler_config")
+                fresh_fan_config = env_data.get("fresh_fan_config")
+                light_config = env_data.get("light_config")
+                humidifier_config = env_data.get("humidifier_config")
+
+                if _is_empty_json(air_cooler_config):
+                    air_cooler_config = fallback_config.get("air_cooler_config") or {}
+                if _is_empty_json(fresh_fan_config):
+                    fresh_fan_config = fallback_config.get("fresh_fan_config") or {}
+                if _is_empty_json(light_config):
+                    light_config = fallback_config.get("light_config") or {}
+                if _is_empty_json(humidifier_config):
+                    humidifier_config = fallback_config.get("humidifier_config") or {
+                        "left": {},
+                        "right": {},
+                    }
+
+                light_count = env_data.get("light_count", 0)
+                humidifier_count = env_data.get("humidifier_count", 0)
+                if not light_count and fallback_config.get("light_count"):
+                    light_count = fallback_config.get("light_count")
+                if not humidifier_count and fallback_config.get("humidifier_count"):
+                    humidifier_count = fallback_config.get("humidifier_count")
+
                 # 创建新记录
                 new_record = MushroomImageEmbedding(
                     image_path=image_info.file_path,
                     collection_datetime=result["time_info"]["collection_datetime"],
                     embedding=result["embedding"],
-                    room_id=env_data.get("room_id", image_info.mushroom_id),
+                    room_id=room_for_fallback,
                     in_date=env_data.get(
                         "in_date", result["time_info"]["collection_date"].date()
                     ),
                     in_num=env_data.get("in_num", 0),
                     growth_day=env_data.get("growth_day", 0),
-                    air_cooler_config=env_data.get("air_cooler_config", "{}"),
-                    fresh_fan_config=env_data.get("fresh_fan_config", "{}"),
-                    light_count=env_data.get("light_count", 0),
-                    light_config=env_data.get("light_config", "{}"),
-                    humidifier_count=env_data.get("humidifier_count", 0),
-                    humidifier_config=env_data.get("humidifier_config", "{}"),
-                    env_sensor_status=env_data.get("env_sensor_status", "{}"),
+                    collection_ip=image_info.collection_ip,
+                    air_cooler_config=air_cooler_config,
+                    fresh_fan_config=fresh_fan_config,
+                    light_count=light_count,
+                    light_config=light_config,
+                    humidifier_count=humidifier_count,
+                    humidifier_config=humidifier_config,
+                    env_sensor_status=env_data.get("env_sensor_status") or {},
                     semantic_description=env_data.get(
                         "semantic_description", "无环境数据。"
                     ),
@@ -2221,17 +2312,36 @@ class MushroomImageEncoder:
             chinese_description = env_data.get("chinese_description", None)
             image_quality_score = env_data.get("image_quality_score", None)
 
-            self._insert_text_quality_record(
-                session,
-                image_info.file_path,
-                embedding_id,
-                room_id,
-                in_date,
-                result["time_info"]["collection_datetime"],
-                llama_description,
-                chinese_description,
-                image_quality_score,
-            )
+            if selected_quality_record_id is not None:
+                quality_record = (
+                    session.query(ImageTextQuality)
+                    .filter(ImageTextQuality.id == selected_quality_record_id)
+                    .first()
+                )
+                if quality_record:
+                    quality_record.mushroom_embedding_id = embedding_id
+                    quality_record.updated_at = func.now()
+                    logger.debug(
+                        "[TOP_QUALITY] 已回填 image_text_quality.mushroom_embedding_id: "
+                        f"quality_id={selected_quality_record_id}, embedding_id={embedding_id}"
+                    )
+                else:
+                    logger.warning(
+                        "[TOP_QUALITY] 指定的image_text_quality记录不存在，跳过回填: "
+                        f"quality_id={selected_quality_record_id}"
+                    )
+            else:
+                self._insert_text_quality_record(
+                    session,
+                    image_info.file_path,
+                    embedding_id,
+                    room_id,
+                    in_date,
+                    result["time_info"]["collection_datetime"],
+                    llama_description,
+                    chinese_description,
+                    image_quality_score,
+                )
 
             session.commit()
             return True
@@ -2481,14 +2591,45 @@ class MushroomImageEncoder:
         logger.info(f"📌 开始处理 {target_date} Top-{top_k} 质量图像")
         stats = {"total": 0, "success": 0, "failed": 0, "skipped": 0}
 
+        def _normalize_path(path: str | None) -> str:
+            if not path:
+                return ""
+            value = str(path).strip().replace("\\", "/")
+            if value.startswith("mogu/"):
+                value = value[5:]
+            return value.lstrip("/")
+
         session = self.Session()
         try:
+            minio_rooms = set(self.minio_client.list_rooms())
+
             for room_id in MUSHROOM_ROOM_IDS:
+                candidate_quality_room_ids = {str(room_id)}
+                for minio_room_id, env_room_id in self.room_id_mapping.items():
+                    if str(env_room_id) == str(room_id):
+                        candidate_quality_room_ids.add(str(minio_room_id))
+
+                day_start = datetime.combine(target_date, datetime.min.time())
+                day_end = day_start + timedelta(days=1)
+
                 quality_rows = (
                     session.query(ImageTextQuality)
-                    .filter(ImageTextQuality.room_id == room_id)
-                    .filter(ImageTextQuality.in_date == target_date)
+                    .filter(
+                        ImageTextQuality.room_id.in_(list(candidate_quality_room_ids))
+                    )
                     .filter(ImageTextQuality.image_quality_score.isnot(None))
+                    .filter(ImageTextQuality.chinese_description.isnot(None))
+                    .filter(
+                        func.length(func.trim(ImageTextQuality.chinese_description)) > 0
+                    )
+                    .filter(
+                        (
+                            ImageTextQuality.collection_datetime.isnot(None)
+                            & (ImageTextQuality.collection_datetime >= day_start)
+                            & (ImageTextQuality.collection_datetime < day_end)
+                        )
+                        | (ImageTextQuality.in_date == target_date)
+                    )
                     .order_by(
                         ImageTextQuality.image_quality_score.desc(),
                         ImageTextQuality.created_at.desc(),
@@ -2497,27 +2638,79 @@ class MushroomImageEncoder:
                 )
 
                 if not quality_rows:
+                    logger.debug(
+                        f"[TOP_QUALITY] room={room_id} 无可用质量记录, "
+                        f"候选room_id={sorted(candidate_quality_room_ids)}"
+                    )
                     continue
 
-                image_map = {
-                    img.file_path: img
-                    for img in self.processor.get_mushroom_images(
-                        mushroom_id=room_id,
-                        date_filter=target_date.strftime("%Y%m%d"),
+                minio_candidates = [
+                    rid for rid in candidate_quality_room_ids if rid in minio_rooms
+                ]
+                if not minio_candidates and str(room_id) in minio_rooms:
+                    minio_candidates = [str(room_id)]
+
+                images = []
+                for minio_room_id in minio_candidates:
+                    images.extend(
+                        self.processor.get_mushroom_images(
+                            mushroom_id=minio_room_id,
+                            date_filter=target_date.strftime("%Y%m%d"),
+                        )
                     )
+
+                image_map = {img.file_path: img for img in images}
+                normalized_image_map = {
+                    _normalize_path(img.file_path): img for img in images
+                }
+                basename_image_map = {
+                    Path(img.file_path).name: img for img in images if img.file_path
                 }
 
+                logger.info(
+                    f"[TOP_QUALITY] room={room_id}, quality_rows={len(quality_rows)}, "
+                    f"minio_candidates={minio_candidates}, minio_images={len(images)}"
+                )
+
                 seen_paths = set()
+                selected = 0
                 for row in quality_rows:
+                    if selected >= top_k:
+                        break
+
                     if row.image_path in seen_paths:
                         continue
                     seen_paths.add(row.image_path)
+
                     image_info = image_map.get(row.image_path)
                     if not image_info:
+                        normalized_path = _normalize_path(row.image_path)
+                        image_info = normalized_image_map.get(normalized_path)
+                    if not image_info and row.image_path:
+                        image_info = basename_image_map.get(Path(row.image_path).name)
+
+                    if not image_info:
                         stats["failed"] += 1
+                        logger.debug(
+                            f"[TOP_QUALITY] room={room_id} 未匹配到图像: {row.image_path}"
+                        )
                         continue
 
+                    selected += 1
+
                     if self._is_already_processed(image_info.file_path):
+                        if linked_embedding := (
+                            session.query(MushroomImageEmbedding)
+                            .filter_by(image_path=image_info.file_path)
+                            .first()
+                        ):
+                            if row.mushroom_embedding_id != linked_embedding.id:
+                                row.mushroom_embedding_id = linked_embedding.id
+                                row.updated_at = func.now()
+                                logger.debug(
+                                    "[TOP_QUALITY] 图像已编码，已回填关联: "
+                                    f"quality_id={row.id}, embedding_id={linked_embedding.id}"
+                                )
                         stats["skipped"] += 1
                         continue
 
@@ -2532,15 +2725,13 @@ class MushroomImageEncoder:
                         image_info,
                         save_to_db=True,
                         precomputed_analysis=precomputed,
+                        selected_quality_record_id=row.id,
                     )
+                    stats["total"] += 1
                     if result and result.get("saved_to_db", False):
                         stats["success"] += 1
                     else:
                         stats["failed"] += 1
-
-                    stats["total"] += 1
-                    if len(seen_paths) >= top_k:
-                        break
 
             logger.info(
                 f"✅ Top质量编码完成 - 总计: {stats['total']}, 成功: {stats['success']}, "

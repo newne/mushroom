@@ -11,8 +11,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -31,6 +31,15 @@ class SkillContext:
     temperature: Optional[float] = None
     humidity: Optional[float] = None
     co2: Optional[float] = None
+    realtime_temperature: Optional[float] = None
+    realtime_humidity: Optional[float] = None
+    realtime_co2: Optional[float] = None
+    realtime_light_mode: Optional[float] = None
+    realtime_light_on_mset: Optional[float] = None
+    realtime_light_off_mset: Optional[float] = None
+    realtime_data_time: Optional[datetime] = None
+    recent_setpoint_change_count_6h: int = 0
+    recent_setpoint_changes: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class CultivationSkillEngine:
@@ -45,7 +54,15 @@ class CultivationSkillEngine:
 
     def io_contract(self) -> Dict[str, Any]:
         return {
-            "trigger": ["growth_day", "season", "temperature", "humidity", "co2"],
+            "trigger": [
+                "growth_day",
+                "season",
+                "temperature",
+                "humidity",
+                "co2",
+                "realtime_light",
+                "recent_setpoint_changes",
+            ],
             "input": {
                 "room_id": "str",
                 "analysis_time": "datetime",
@@ -62,10 +79,16 @@ class CultivationSkillEngine:
                 "apply_action_constraints",
                 "emit_feedback",
             ],
-            "tools": ["postgresql:mushroom_env_daily_stats"],
+            "tools": [
+                "postgresql:mushroom_env_daily_stats",
+                "postgresql:mushroom_embedding",
+                "postgresql:device_setpoint_changes",
+            ],
         }
 
-    def _load_cluster_kb_priors(self, context: SkillContext) -> Dict[Tuple[str, str], Dict[str, Any]]:
+    def _load_cluster_kb_priors(
+        self, context: SkillContext
+    ) -> Dict[Tuple[str, str], Dict[str, Any]]:
         """加载聚类知识库中与当前生长天接近的点位先验区间。"""
         if not self.enable_kb_prior:
             return {}
@@ -129,11 +152,16 @@ class CultivationSkillEngine:
                 if not device_type or not point_key:
                     continue
 
-                key = (device_type, point_key)
+                key = (
+                    self._normalize_device_type(device_type),
+                    self._normalize_point_key(point_key),
+                )
                 sample_days = int(row[5]) if row[5] is not None else 0
 
                 # 若同点位有多条记录，保留样本天数更高的一条
-                if key in priors and sample_days <= int(priors[key].get("sample_days", 0)):
+                if key in priors and sample_days <= int(
+                    priors[key].get("sample_days", 0)
+                ):
                     continue
 
                 priors[key] = {
@@ -173,9 +201,13 @@ class CultivationSkillEngine:
             self.skill_library = {}
             self.skills = []
 
-    def build_context_from_db(self, room_id: str, analysis_time: datetime) -> SkillContext:
+    def build_context_from_db(
+        self, room_id: str, analysis_time: datetime
+    ) -> SkillContext:
         season = self._infer_season(analysis_time.month)
-        context = SkillContext(room_id=room_id, analysis_time=analysis_time, season=season)
+        context = SkillContext(
+            room_id=room_id, analysis_time=analysis_time, season=season
+        )
 
         try:
             with pgsql_engine.connect() as conn:
@@ -193,11 +225,125 @@ class CultivationSkillEngine:
                     {"room_id": str(room_id), "stat_date": analysis_time.date()},
                 ).fetchone()
 
+                realtime_row = conn.execute(
+                    text(
+                        """
+                        SELECT growth_day, env_sensor_status, light_config, collection_datetime
+                        FROM mushroom_embedding
+                        WHERE room_id = :room_id
+                          AND collection_datetime <= :analysis_time
+                        ORDER BY collection_datetime DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {
+                        "room_id": str(room_id),
+                        "analysis_time": analysis_time,
+                    },
+                ).fetchone()
+
+                window_start = analysis_time - timedelta(hours=6)
+                recent_count_row = conn.execute(
+                    text(
+                        """
+                        SELECT COUNT(*)
+                        FROM device_setpoint_changes
+                        WHERE room_id = :room_id
+                          AND change_time >= :window_start
+                          AND change_time <= :analysis_time
+                        """
+                    ),
+                    {
+                        "room_id": str(room_id),
+                        "window_start": window_start,
+                        "analysis_time": analysis_time,
+                    },
+                ).fetchone()
+
+                recent_change_rows = conn.execute(
+                    text(
+                        """
+                        SELECT device_type, point_name, previous_value, current_value, change_time
+                        FROM device_setpoint_changes
+                        WHERE room_id = :room_id
+                          AND change_time >= :window_start
+                          AND change_time <= :analysis_time
+                        ORDER BY change_time DESC
+                        LIMIT 8
+                        """
+                    ),
+                    {
+                        "room_id": str(room_id),
+                        "window_start": window_start,
+                        "analysis_time": analysis_time,
+                    },
+                ).fetchall()
+
             if row:
                 context.growth_day = int(row[0]) if row[0] is not None else None
                 context.temperature = float(row[1]) if row[1] is not None else None
                 context.humidity = float(row[2]) if row[2] is not None else None
                 context.co2 = float(row[3]) if row[3] is not None else None
+
+            if realtime_row:
+                realtime_growth_day = (
+                    int(realtime_row[0]) if realtime_row[0] is not None else None
+                )
+                if realtime_growth_day is not None:
+                    context.growth_day = realtime_growth_day
+
+                env_status = self._to_dict(realtime_row[1])
+                light_config = self._to_dict(realtime_row[2])
+
+                context.realtime_data_time = realtime_row[3]
+                context.realtime_temperature = self._pick_numeric(
+                    env_status, ["temperature", "temp", "tem"]
+                )
+                context.realtime_humidity = self._pick_numeric(
+                    env_status, ["humidity", "hum"]
+                )
+                context.realtime_co2 = self._pick_numeric(env_status, ["co2"])
+                context.realtime_light_mode = self._pick_numeric(
+                    light_config, ["model", "mode"]
+                )
+                context.realtime_light_on_mset = self._pick_numeric(
+                    light_config, ["on_mset", "onmset"]
+                )
+                context.realtime_light_off_mset = self._pick_numeric(
+                    light_config, ["off_mset", "offmset"]
+                )
+
+                # 实时数据优先于日统计，保证触发条件贴近现场状态
+                if context.realtime_temperature is not None:
+                    context.temperature = context.realtime_temperature
+                if context.realtime_humidity is not None:
+                    context.humidity = context.realtime_humidity
+                if context.realtime_co2 is not None:
+                    context.co2 = context.realtime_co2
+
+            context.recent_setpoint_change_count_6h = (
+                int(recent_count_row[0])
+                if recent_count_row and recent_count_row[0]
+                else 0
+            )
+            context.recent_setpoint_changes = [
+                {
+                    "device_type": str(change_row[0])
+                    if change_row[0] is not None
+                    else None,
+                    "point_name": str(change_row[1])
+                    if change_row[1] is not None
+                    else None,
+                    "previous_value": self._to_float(change_row[2]),
+                    "current_value": self._to_float(change_row[3]),
+                    "change_time": (
+                        change_row[4].isoformat()
+                        if hasattr(change_row[4], "isoformat")
+                        else str(change_row[4])
+                    ),
+                }
+                for change_row in (recent_change_rows or [])
+            ]
         except Exception as exc:
             logger.warning(f"[SKILL] 读取上下文失败 room_id={room_id}: {exc}")
 
@@ -207,11 +353,14 @@ class CultivationSkillEngine:
         matched: List[Dict[str, Any]] = []
 
         for skill in self.skills:
-            if skill.get("status") not in {"active", "candidate"}:
+            status = str(skill.get("status", "active")).lower()
+            if status != "active":
                 continue
 
             conditions = skill.get("applicable_conditions", {}) or {}
-            if not self._match_growth_day(context.growth_day, conditions.get("growth_day_range")):
+            if not self._match_growth_day(
+                context.growth_day, conditions.get("growth_day_range")
+            ):
                 continue
             if not self._match_season(context.season, conditions.get("season")):
                 continue
@@ -220,7 +369,9 @@ class CultivationSkillEngine:
 
             matched.append(skill)
 
-        matched.sort(key=lambda item: self._priority_score(item.get("priority")), reverse=True)
+        matched.sort(
+            key=lambda item: self._priority_score(item.get("priority")), reverse=True
+        )
         return matched
 
     def apply(
@@ -242,6 +393,24 @@ class CultivationSkillEngine:
                 "temperature": context.temperature,
                 "humidity": context.humidity,
                 "co2": context.co2,
+                "realtime": {
+                    "data_time": (
+                        context.realtime_data_time.isoformat()
+                        if context.realtime_data_time
+                        else None
+                    ),
+                    "temperature": context.realtime_temperature,
+                    "humidity": context.realtime_humidity,
+                    "co2": context.realtime_co2,
+                    "light_mode": context.realtime_light_mode,
+                    "light_on_mset": context.realtime_light_on_mset,
+                    "light_off_mset": context.realtime_light_off_mset,
+                },
+                "setpoint_changes": {
+                    "window_hours": 6,
+                    "count": context.recent_setpoint_change_count_6h,
+                    "latest": context.recent_setpoint_changes,
+                },
             },
             "matched_skill_ids": [item.get("skill_id") for item in matches],
             "matched_count": len(matches),
@@ -259,13 +428,18 @@ class CultivationSkillEngine:
 
         # 按优先级最多执行前2个skill，避免过度改写
         for skill in matches[:2]:
-            for action in (skill.get("actions") or []):
+            for action in skill.get("actions") or []:
                 device_type = action.get("device_type")
                 point_alias = action.get("point_alias")
                 target_range = action.get("target_range")
                 step = action.get("step")
 
-                if not device_type or not point_alias or not isinstance(target_range, list) or len(target_range) != 2:
+                if (
+                    not device_type
+                    or not point_alias
+                    or not isinstance(target_range, list)
+                    or len(target_range) != 2
+                ):
                     continue
 
                 device_list = devices_map.get(device_type) or []
@@ -284,20 +458,31 @@ class CultivationSkillEngine:
                             continue
 
                         low, high = float(target_range[0]), float(target_range[1])
-                        kb_prior = kb_priors.get((str(device_type), str(point_alias)))
+                        kb_prior = kb_priors.get(
+                            (
+                                self._normalize_device_type(device_type),
+                                self._normalize_point_key(point_alias),
+                            )
+                        )
                         merged_low, merged_high = self._merge_skill_and_kb_range(
                             skill_low=low,
                             skill_high=high,
                             kb_prior=kb_prior,
                         )
                         adjusted = self._clamp_and_step(new_value, low, high, step)
-                        adjusted = self._clamp_and_step(adjusted, merged_low, merged_high, step)
+                        adjusted = self._clamp_and_step(
+                            adjusted, merged_low, merged_high, step
+                        )
 
                         if abs(adjusted - new_value) < 1e-9:
                             continue
 
-                        point["new"] = self._preserve_numeric_type(point.get("new"), adjusted)
-                        point["change"] = self._compute_change(point, old_value, adjusted)
+                        point["new"] = self._preserve_numeric_type(
+                            point.get("new"), adjusted
+                        )
+                        point["change"] = self._compute_change(
+                            point, old_value, adjusted
+                        )
 
                         reason = point.get("reason")
                         suffix = f"skill:{skill.get('skill_id')}"
@@ -340,6 +525,53 @@ class CultivationSkillEngine:
         return mapping.get(str(priority).lower(), 0)
 
     @staticmethod
+    def _normalize_device_type(device_type: Any) -> str:
+        raw = str(device_type or "").strip().lower()
+        mapping = {
+            "fresh_fan": "fresh_air_fan",
+            "freshairfan": "fresh_air_fan",
+            "fresh_air_fan": "fresh_air_fan",
+            "aircooler": "air_cooler",
+            "air_cooler": "air_cooler",
+            "growlight": "grow_light",
+            "grow_light": "grow_light",
+            "humidifier": "humidifier",
+        }
+        key = raw.replace("-", "_").replace(" ", "_")
+        return mapping.get(key, key)
+
+    @staticmethod
+    def _normalize_point_key(point_key: Any) -> str:
+        raw = str(point_key or "").strip().lower()
+        key = raw.replace("-", "_").replace(" ", "_")
+        key = key.replace("__", "_")
+        mapping = {
+            "temp_diff_set": "temp_diffset",
+            "tem_diff_set": "temp_diffset",
+            "tempdiffset": "temp_diffset",
+            "temp_set": "temp_set",
+            "tem_set": "temp_set",
+            "co2on": "co2_on",
+            "co2_off": "co2_off",
+            "co2off": "co2_off",
+            "co2_on": "co2_on",
+            "onoff": "on_off",
+            "on_off": "on_off",
+            "cyc_onoff": "cyc_on_off",
+            "cyc_on_off": "cyc_on_off",
+            "cyc_ontime": "cyc_on_time",
+            "cyc_on_time": "cyc_on_time",
+            "cyc_offtime": "cyc_off_time",
+            "cyc_off_time": "cyc_off_time",
+            "air_onoff": "air_on_off",
+            "air_on_off": "air_on_off",
+            "hum_onoff": "hum_on_off",
+            "hum_on_off": "hum_on_off",
+            "temp_diffset": "temp_diffset",
+        }
+        return mapping.get(key, key)
+
+    @staticmethod
     def _match_growth_day(value: Optional[int], value_range: Any) -> bool:
         if value is None:
             return False
@@ -379,6 +611,30 @@ class CultivationSkillEngine:
             return float(value)
         except Exception:
             return None
+
+    @staticmethod
+    def _to_dict(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                return {}
+        return {}
+
+    @classmethod
+    def _pick_numeric(cls, data: Dict[str, Any], keys: List[str]) -> Optional[float]:
+        if not isinstance(data, dict):
+            return None
+        for key in keys:
+            if key in data:
+                value = cls._to_float(data.get(key))
+                if value is not None:
+                    return value
+        return None
 
     @staticmethod
     def _clamp_and_step(value: float, low: float, high: float, step: Any) -> float:
@@ -444,7 +700,9 @@ class CultivationSkillEngine:
         return float(value)
 
     @staticmethod
-    def _compute_change(point: Dict[str, Any], old_value: Optional[float], new_value: float) -> bool:
+    def _compute_change(
+        point: Dict[str, Any], old_value: Optional[float], new_value: float
+    ) -> bool:
         if old_value is None:
             return True
         threshold = point.get("threshold")

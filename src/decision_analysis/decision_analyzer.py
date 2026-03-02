@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from statistics import mean, pstdev
-from typing import Dict
+from typing import Dict, Optional
 
 from dynaconf import Dynaconf
 from loguru import logger
@@ -50,6 +50,7 @@ class DecisionAnalyzer:
         settings: Dynaconf,
         static_config: Dict,
         template_path: str,
+        template_content: Optional[str] = None,
     ):
         """
         Initialize decision analyzer
@@ -66,6 +67,7 @@ class DecisionAnalyzer:
             settings: Dynaconf configuration object
             static_config: Static configuration dictionary
             template_path: Path to decision_prompt.jinja template
+            template_content: 直接注入模板文本（优先于 template_path）
 
         Requirements: 12.1
         """
@@ -78,6 +80,7 @@ class DecisionAnalyzer:
         self.settings = settings
         self.static_config = static_config
         self.template_path = template_path
+        self.template_content = template_content
         self.decision_config = DECISION_ANALYSIS_CONFIG
 
         # Load monitoring points config
@@ -127,7 +130,10 @@ class DecisionAnalyzer:
 
             logger.debug("[DecisionAnalyzer] 正在初始化 TemplateRenderer...")
             self.template_renderer = TemplateRenderer(
-                template_path, static_config, self.monitoring_points_config
+                template_path,
+                static_config,
+                self.monitoring_points_config,
+                template_content=template_content,
             )
 
             logger.debug("[DecisionAnalyzer] 正在初始化 LLMClient...")
@@ -305,6 +311,37 @@ class DecisionAnalyzer:
                 logger.info(
                     f"[DecisionAnalyzer] 环境数据提取完成，共获取 {len(env_stats)} 条统计记录"
                 )
+
+                if current_data:
+                    latest_env = env_stats.iloc[-1]
+
+                    def _valid_number(value) -> bool:
+                        return value is not None and value == value
+
+                    realtime_temp = latest_env.get("temp_median")
+                    realtime_humidity = latest_env.get("humidity_median")
+                    realtime_co2 = latest_env.get("co2_median")
+                    realtime_in_day_num = latest_env.get("in_day_num")
+
+                    if _valid_number(realtime_temp):
+                        current_data["temperature"] = float(realtime_temp)
+                    if _valid_number(realtime_humidity):
+                        current_data["humidity"] = float(realtime_humidity)
+                    if _valid_number(realtime_co2):
+                        current_data["co2"] = float(realtime_co2)
+                    if _valid_number(realtime_in_day_num):
+                        current_data["in_day_num"] = int(realtime_in_day_num)
+                        current_data["growth_day"] = int(realtime_in_day_num)
+
+                    logger.info(
+                        "[DecisionAnalyzer] 已用实时环境覆盖当前上下文: temp=%s, humidity=%s, co2=%s, growth_day=%s"
+                        % (
+                            current_data.get("temperature"),
+                            current_data.get("humidity"),
+                            current_data.get("co2"),
+                            current_data.get("growth_day"),
+                        )
+                    )
 
             # Extract device change records
             logger.info("[DecisionAnalyzer] 正在提取设备变更记录...")
@@ -827,7 +864,9 @@ class DecisionAnalyzer:
                     if kb_human_prior_text:
                         logger.info("[DecisionAnalyzer] 已加载聚类知识库人工调控偏好")
                     else:
-                        metadata["warnings"].append("未加载到可用知识库人工偏好，继续常规分析")
+                        metadata["warnings"].append(
+                            "未加载到可用知识库人工偏好，继续常规分析"
+                        )
 
                 # Validate environmental parameters
                 validation_warnings = self.data_extractor.validate_env_params(
@@ -856,6 +895,37 @@ class DecisionAnalyzer:
                 logger.info(
                     f"[DecisionAnalyzer] 环境数据提取完成，共获取 {len(env_stats)} 条统计记录"
                 )
+
+                if current_data:
+                    latest_env = env_stats.iloc[-1]
+
+                    def _valid_number(value) -> bool:
+                        return value is not None and value == value
+
+                    realtime_temp = latest_env.get("temp_median")
+                    realtime_humidity = latest_env.get("humidity_median")
+                    realtime_co2 = latest_env.get("co2_median")
+                    realtime_in_day_num = latest_env.get("in_day_num")
+
+                    if _valid_number(realtime_temp):
+                        current_data["temperature"] = float(realtime_temp)
+                    if _valid_number(realtime_humidity):
+                        current_data["humidity"] = float(realtime_humidity)
+                    if _valid_number(realtime_co2):
+                        current_data["co2"] = float(realtime_co2)
+                    if _valid_number(realtime_in_day_num):
+                        current_data["in_day_num"] = int(realtime_in_day_num)
+                        current_data["growth_day"] = int(realtime_in_day_num)
+
+                    logger.info(
+                        "[DecisionAnalyzer] 已用实时环境覆盖当前上下文: temp=%s, humidity=%s, co2=%s, growth_day=%s"
+                        % (
+                            current_data.get("temperature"),
+                            current_data.get("humidity"),
+                            current_data.get("co2"),
+                            current_data.get("growth_day"),
+                        )
+                    )
 
             # Extract device change records (same as before)
             logger.info("[DecisionAnalyzer] 正在提取设备变更记录...")
@@ -997,17 +1067,8 @@ class DecisionAnalyzer:
                 device_changes=device_changes,
                 similar_cases=similar_cases,
                 multi_image_analysis=multi_image_analysis,
+                knowledge_base_content=kb_human_prior_text,
             )
-
-            if kb_human_prior_text:
-                rendered_prompt += (
-                    "\n\n================ 人工调控知识库偏好（高优先级） ================\n"
-                    "以下为基于历史人工调控聚类得到的高频控制规律。\n"
-                    "当与相似图像案例冲突时，优先遵循该知识库偏好；相似图像仅作弱参考。\n"
-                    "请在输出中尽量让设定值靠近以下建议区间与中位值。\n"
-                    f"{kb_human_prior_text}\n"
-                    "============================================================\n"
-                )
 
             logger.info(
                 f"[DecisionAnalyzer] Rendered enhanced prompt successfully "
@@ -1467,7 +1528,9 @@ class DecisionAnalyzer:
 
                 value_hint = (
                     f"中位值={value_median:.2f}, 建议区间=[{value_p25:.2f}, {value_p75:.2f}]"
-                    if value_median is not None and value_p25 is not None and value_p75 is not None
+                    if value_median is not None
+                    and value_p25 is not None
+                    and value_p75 is not None
                     else "缺少稳定统计区间"
                 )
                 hour_hint = (

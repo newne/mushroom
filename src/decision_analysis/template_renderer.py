@@ -29,6 +29,7 @@ class TemplateRenderer:
         template_path: str,
         static_config: Dict,
         monitoring_points_config: Dict = None,
+        template_content: Optional[str] = None,
     ):
         """
         Initialize template renderer
@@ -37,6 +38,7 @@ class TemplateRenderer:
             template_path: Path to decision_prompt.jinja template file
             static_config: Static configuration dictionary from static_config.json
             monitoring_points_config: Monitoring points configuration dictionary
+            template_content: 直接注入模板内容（优先级高于 template_path）
 
         Requirements: 6.1, 6.2
         """
@@ -44,13 +46,17 @@ class TemplateRenderer:
         self.static_config = static_config
         self.monitoring_points_config = monitoring_points_config
 
-        # Load template file
-        if not self.template_path.exists():
-            raise FileNotFoundError(f"Template file not found: {self.template_path}")
+        # Load template content (using Python format strings, not Jinja2)
+        if template_content is not None:
+            self.template_content = template_content
+        else:
+            if not self.template_path.exists():
+                raise FileNotFoundError(
+                    f"Template file not found: {self.template_path}"
+                )
 
-        # Read template content (using Python format strings, not Jinja2)
-        with open(self.template_path, "r", encoding="utf-8") as f:
-            self.template_content = f.read()
+            with open(self.template_path, "r", encoding="utf-8") as f:
+                self.template_content = f.read()
 
         # Escape braces in JSON examples to prevent format string errors
         # We need to escape braces that are not template variables
@@ -159,6 +165,7 @@ class TemplateRenderer:
         env_stats: pd.DataFrame,
         device_changes: pd.DataFrame,
         similar_cases: List[SimilarCase],
+        knowledge_base_content: str = "",
     ) -> str:
         """
         Render decision prompt template
@@ -183,6 +190,7 @@ class TemplateRenderer:
                 env_stats=env_stats,
                 device_changes=device_changes,
                 similar_cases=similar_cases,
+                knowledge_base_content=knowledge_base_content,
             )
 
             # Add dynamic device sections
@@ -217,6 +225,7 @@ class TemplateRenderer:
         env_stats: pd.DataFrame,
         device_changes: pd.DataFrame,
         similar_cases: List[SimilarCase],
+        knowledge_base_content: str = "",
     ) -> Dict:
         """
         Map data to template variables
@@ -254,6 +263,11 @@ class TemplateRenderer:
         # 4. Map historical data
         variables["historical_data"] = self._format_historical_data(
             env_stats, device_changes
+        )
+        variables["knowledge_base_section"] = (
+            knowledge_base_content.strip()
+            if knowledge_base_content and str(knowledge_base_content).strip()
+            else "暂无知识库人工调控偏好，按常规规则与相似案例进行决策。"
         )
 
         # 5. Add placeholder for documentation examples
@@ -660,6 +674,7 @@ class TemplateRenderer:
         device_changes: pd.DataFrame,
         similar_cases: List[SimilarCase],
         multi_image_analysis: Optional["MultiImageAnalysis"] = None,
+        knowledge_base_content: str = "",
     ) -> str:
         """
         Render enhanced decision prompt template with multi-image context
@@ -690,6 +705,7 @@ class TemplateRenderer:
                 env_stats=env_stats,
                 device_changes=device_changes,
                 similar_cases=similar_cases,
+                knowledge_base_content=knowledge_base_content,
             )
 
             # Add multi-image context if available

@@ -797,15 +797,21 @@ class DecisionAnalysisSkillAudit(Base):
     room_id = Column(String(10), nullable=False, comment="库房编号")
     analysis_time = Column(DateTime, nullable=False, comment="分析时间")
 
-    skill_enabled = Column(Boolean, nullable=False, default=True, comment="Skill是否启用")
+    skill_enabled = Column(
+        Boolean, nullable=False, default=True, comment="Skill是否启用"
+    )
     kb_prior_enabled = Column(
         Boolean, nullable=False, default=False, comment="Skill KB先验是否启用"
     )
-    kb_prior_points = Column(Integer, nullable=False, default=0, comment="可用KB先验点位数")
+    kb_prior_points = Column(
+        Integer, nullable=False, default=0, comment="可用KB先验点位数"
+    )
     kb_prior_used = Column(Integer, nullable=False, default=0, comment="KB先验引用次数")
 
     matched_count = Column(Integer, nullable=False, default=0, comment="命中Skill数量")
-    constraint_corrections = Column(Integer, nullable=False, default=0, comment="约束修正次数")
+    constraint_corrections = Column(
+        Integer, nullable=False, default=0, comment="约束修正次数"
+    )
     matched_skill_ids = Column(JSON, nullable=True, comment="命中Skill ID列表")
 
     trigger_context = Column(JSON, nullable=True, comment="触发上下文")
@@ -1054,6 +1060,65 @@ def add_image_text_quality_fields():
 
     except Exception as e:
         logger.error(f"[Migration] Failed to add image_text_quality fields: {e}")
+        raise
+
+
+def clean_image_text_quality_dirty_links() -> dict:
+    """
+    清理 image_text_quality 脏关联：
+    - 条件：mushroom_embedding_id 非空，但 chinese_description 为空
+    - 动作：仅将 mushroom_embedding_id 置空
+
+    注意：
+    - 不主动更新 updated_at，避免按 updated_at 排序时污染“最新记录”视图
+    """
+    try:
+        with pgsql_engine.begin() as conn:
+            before = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM image_text_quality
+                    WHERE mushroom_embedding_id IS NOT NULL
+                      AND (chinese_description IS NULL OR btrim(chinese_description) = '')
+                    """
+                )
+            ).scalar_one()
+
+            updated = conn.execute(
+                text(
+                    """
+                    UPDATE image_text_quality
+                    SET mushroom_embedding_id = NULL
+                    WHERE mushroom_embedding_id IS NOT NULL
+                      AND (chinese_description IS NULL OR btrim(chinese_description) = '')
+                    """
+                )
+            )
+
+            after = conn.execute(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM image_text_quality
+                    WHERE mushroom_embedding_id IS NOT NULL
+                      AND (chinese_description IS NULL OR btrim(chinese_description) = '')
+                    """
+                )
+            ).scalar_one()
+
+            result = {
+                "dirty_before": int(before or 0),
+                "cleaned": int(updated.rowcount or 0),
+                "dirty_after": int(after or 0),
+            }
+            logger.info(
+                "[Migration] image_text_quality dirty link cleanup done: "
+                f"before={result['dirty_before']}, cleaned={result['cleaned']}, after={result['dirty_after']}"
+            )
+            return result
+    except Exception as e:
+        logger.error(f"[Migration] Failed to clean image_text_quality dirty links: {e}")
         raise
 
 
@@ -1858,7 +1923,10 @@ def store_decision_analysis_skill_audit(
         return _insert_once()
     except Exception as e:
         error_text = str(e)
-        if "decision_analysis_skill_audit" in error_text and "does not exist" in error_text:
+        if (
+            "decision_analysis_skill_audit" in error_text
+            and "does not exist" in error_text
+        ):
             try:
                 Base.metadata.create_all(
                     bind=pgsql_engine,
@@ -1868,9 +1936,7 @@ def store_decision_analysis_skill_audit(
                 logger.info("[Skill Audit] 已自动创建 decision_analysis_skill_audit 表")
                 return _insert_once()
             except Exception as create_error:
-                logger.warning(
-                    f"[Skill Audit] 自动建表后写入仍失败: {create_error}"
-                )
+                logger.warning(f"[Skill Audit] 自动建表后写入仍失败: {create_error}")
                 return 0
 
         logger.warning(f"[Skill Audit] Failed to store skill audit: {e}")

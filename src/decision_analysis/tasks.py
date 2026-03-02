@@ -12,8 +12,10 @@
 """
 
 import time
+import traceback
 from datetime import datetime
 from typing import Any, Dict
+from uuid import uuid4
 
 from global_const.const_config import (
     DECISION_ANALYSIS_EMBEDDING_SIM_WEIGHT,
@@ -32,11 +34,53 @@ from scripts.analysis.run_enhanced_decision_analysis import (
     execute_enhanced_decision_analysis,
 )
 from scripts.processing.build_control_knowledge_base import build_and_persist_cluster_kb
-from utils.create_table import store_decision_analysis_results
+from utils.create_table import store_decision_analysis_dynamic_results_only
 from utils.loguru_setting import logger
 
 
-def safe_decision_analysis_for_room(room_id: str) -> Dict[str, Any]:
+def _format_log_context(**kwargs: Any) -> str:
+    """将上下文转为可解析的 key=value 串，便于检索与排障。"""
+    parts = []
+    for key, value in kwargs.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={value}")
+    return " | " + ", ".join(parts) if parts else ""
+
+
+def _log_event(level: str, event: str, message: str, **context: Any) -> None:
+    """统一事件日志输出，沿用原有结构（事件前缀 + key=value）。"""
+    normalized_level = str(level or "INFO").upper()
+    batch_id = context.pop("batch_id", None) or context.pop("batch_run_id", None)
+    decision_id = context.pop("decision_id", None)
+
+    log_context = {
+        "batch_id": batch_id or "N/A",
+        "decision_id": decision_id or "N/A",
+        **context,
+    }
+    logger.log(
+        normalized_level,
+        f"[DECISION_TASK][{event}] {message}{_format_log_context(**log_context)}",
+    )
+
+
+def _build_batch_run_id(schedule_hour: int, schedule_minute: int) -> str:
+    now_str = datetime.now().strftime("%Y%m%d%H%M%S")
+    suffix = uuid4().hex[:6]
+    return f"BATCH-{schedule_hour:02d}{schedule_minute:02d}-{now_str}-{suffix}"
+
+
+def _build_decision_id(room_id: str) -> str:
+    now_str = datetime.now().strftime("%Y%m%d%H%M%S")
+    suffix = uuid4().hex[:6]
+    return f"DEC-{room_id}-{now_str}-{suffix}"
+
+
+def safe_decision_analysis_for_room(
+    room_id: str,
+    batch_run_id: str | None = None,
+) -> Dict[str, Any]:
     """
     执行单个蘑菇房的决策分析任务（优化版：仅存储动态结果）
 
@@ -60,17 +104,39 @@ def safe_decision_analysis_for_room(room_id: str) -> Dict[str, Any]:
     """
     max_retries = DECISION_ANALYSIS_MAX_RETRIES
     retry_delay = DECISION_ANALYSIS_RETRY_DELAY
+    decision_id = _build_decision_id(room_id)
+    batch_id_for_log = batch_run_id or "standalone"
 
     task_id = f"decision_analysis_{room_id}"
     _ = task_id
 
     for attempt in range(1, max_retries + 1):
         try:
-            logger.info(
-                f"[DECISION_TASK] 开始执行决策分析任务: 库房{room_id} "
-                f"(尝试 {attempt}/{max_retries})"
+            _log_event(
+                "INFO",
+                "ROOM_START",
+                "开始执行单库房决策分析",
+                batch_id=batch_id_for_log,
+                decision_id=decision_id,
+                room_id=room_id,
+                attempt=f"{attempt}/{max_retries}",
             )
             start_time = datetime.now()
+
+            _log_event(
+                "DEBUG",
+                "ROOM_EXECUTE_PARAMS",
+                "单库房执行参数快照",
+                batch_id=batch_id_for_log,
+                decision_id=decision_id,
+                room_id=room_id,
+                similar_case_top_k=DECISION_ANALYSIS_SIMILAR_CASE_TOP_K,
+                embedding_similarity_weight=DECISION_ANALYSIS_EMBEDDING_SIM_WEIGHT,
+                env_similarity_weight=DECISION_ANALYSIS_ENV_SIM_WEIGHT,
+                enable_kb_human_prior=DECISION_ANALYSIS_ENABLE_KB_HUMAN_PRIOR,
+                multi_image_boost=DECISION_ANALYSIS_MULTI_IMAGE_BOOST,
+                enable_skill_engine=DECISION_ANALYSIS_ENABLE_SKILL_ENGINE,
+            )
 
             ensure_src_path()
 
@@ -80,8 +146,9 @@ def safe_decision_analysis_for_room(room_id: str) -> Dict[str, Any]:
                 room_id=room_id,
                 analysis_datetime=analysis_datetime,
                 output_file=None,  # 不生成JSON文件
+                persist_output_file=False,
                 verbose=False,
-                output_format="both",  # 同时生成静态配置与动态结果
+                output_format="monitoring",  # 仅生成动态结果格式
                 similar_case_top_k=DECISION_ANALYSIS_SIMILAR_CASE_TOP_K,
                 embedding_similarity_weight=DECISION_ANALYSIS_EMBEDDING_SIM_WEIGHT,
                 env_similarity_weight=DECISION_ANALYSIS_ENV_SIM_WEIGHT,
@@ -100,19 +167,44 @@ def safe_decision_analysis_for_room(room_id: str) -> Dict[str, Any]:
                     result.metadata.get("skill_constraint_corrections", 0)
                 )
 
-                logger.info(
-                    f"[DECISION_TASK] 决策分析完成: 库房{room_id}, "
-                    f"成功={result.success}, 多图像数量={result.metadata.get('multi_image_count', 0)}, 耗时={duration:.2f}秒"
+                _log_event(
+                    "INFO",
+                    "ROOM_ANALYSIS_DONE",
+                    "单库房决策分析执行完成",
+                    batch_id=batch_id_for_log,
+                    decision_id=decision_id,
+                    room_id=room_id,
+                    success=result.success,
+                    multi_image_count=result.metadata.get("multi_image_count", 0),
+                    duration_sec=f"{duration:.2f}",
                 )
-                logger.info(
-                    "[DECISION_TASK] Skill反馈: 启用=%s, KB先验=%s, 命中=%s, 约束修正=%s, KB修正引用=%s"
-                    % (
-                        skill_enabled,
-                        result.metadata.get("skill_kb_prior_enabled", False),
-                        skill_matched_count,
-                        skill_constraint_corrections,
-                        result.metadata.get("skill_kb_prior_used", 0),
-                    )
+                _log_event(
+                    "DEBUG",
+                    "ROOM_RESULT_METADATA",
+                    "单库房结果元数据快照",
+                    batch_id=batch_id_for_log,
+                    decision_id=decision_id,
+                    room_id=room_id,
+                    prompt_source=result.metadata.get("prompt_source"),
+                    prompt_uri=result.metadata.get("prompt_uri"),
+                    registered_prompt_uri=result.metadata.get("registered_prompt_uri"),
+                    llm_model=result.metadata.get("llm_model"),
+                    llm_response_time=result.metadata.get("llm_response_time"),
+                )
+                _log_event(
+                    "INFO",
+                    "ROOM_SKILL_SUMMARY",
+                    "Skill反馈统计",
+                    batch_id=batch_id_for_log,
+                    decision_id=decision_id,
+                    room_id=room_id,
+                    skill_enabled=skill_enabled,
+                    skill_kb_prior_enabled=result.metadata.get(
+                        "skill_kb_prior_enabled", False
+                    ),
+                    skill_matched_count=skill_matched_count,
+                    skill_constraint_corrections=skill_constraint_corrections,
+                    skill_kb_prior_used=result.metadata.get("skill_kb_prior_used", 0),
                 )
 
                 dynamic_results_count = 0
@@ -120,8 +212,13 @@ def safe_decision_analysis_for_room(room_id: str) -> Dict[str, Any]:
 
                 # ==================== 新增：仅存储动态结果到数据库 ====================
                 try:
-                    logger.info(
-                        f"[DECISION_TASK] 开始存储动态结果到数据库: 库房{room_id}"
+                    _log_event(
+                        "DEBUG",
+                        "ROOM_DB_STORE_START",
+                        "开始落库动态结果",
+                        batch_id=batch_id_for_log,
+                        decision_id=decision_id,
+                        room_id=room_id,
                     )
 
                     ensure_src_path()
@@ -130,34 +227,40 @@ def safe_decision_analysis_for_room(room_id: str) -> Dict[str, Any]:
                     if hasattr(result, "data") and result.data:
                         json_data = result.data
                     else:
-                        logger.warning(
-                            f"[DECISION_TASK] 结果数据为空，跳过数据库存储: 库房{room_id}"
+                        _log_event(
+                            "WARNING",
+                            "ROOM_DB_STORE_SKIP",
+                            "结果数据为空，跳过动态结果落库",
+                            batch_id=batch_id_for_log,
+                            decision_id=decision_id,
+                            room_id=room_id,
                         )
                         # 不使用continue，而是跳过存储但继续执行
                         json_data = None
 
                     if json_data:
-                        storage_result = store_decision_analysis_results(
+                        storage_result = store_decision_analysis_dynamic_results_only(
                             json_data=json_data,
                             room_id=room_id,
                             analysis_time=analysis_datetime,
                         )
+                        db_batch_id = storage_result.get("batch_id")
 
-                        logger.info(f"[DECISION_TASK] 动态结果存储完成: 库房{room_id}")
-                        logger.info(
-                            f"[DECISION_TASK]   - 批次ID: {storage_result.get('batch_id')}"
-                        )
-                        logger.info(
-                            f"[DECISION_TASK]   - 静态配置: {storage_result.get('static_configs_stored', 0)}条"
-                        )
-                        logger.info(
-                            f"[DECISION_TASK]   - 动态结果: {storage_result.get('dynamic_results_count', 0)}条"
-                        )
-                        logger.info(
-                            f"[DECISION_TASK]   - 变更记录: {storage_result.get('change_count', 0)}条"
-                        )
-                        logger.info(
-                            f"[DECISION_TASK]   - Skill审计: {storage_result.get('skill_audit_count', 0)}条"
+                        _log_event(
+                            "INFO",
+                            "ROOM_DB_STORE_DONE",
+                            "动态结果落库完成",
+                            batch_id=batch_id_for_log,
+                            decision_id=decision_id,
+                            room_id=room_id,
+                            db_batch_id=db_batch_id,
+                            dynamic_results_count=storage_result.get(
+                                "dynamic_results_count", 0
+                            ),
+                            change_count=storage_result.get("change_count", 0),
+                            skill_audit_count=storage_result.get(
+                                "skill_audit_count", 0
+                            ),
                         )
                         dynamic_results_count = int(
                             storage_result.get("dynamic_results_count", 0)
@@ -166,20 +269,39 @@ def safe_decision_analysis_for_room(room_id: str) -> Dict[str, Any]:
 
                 except Exception as storage_error:
                     # 数据库存储失败不影响分析任务的成功状态
-                    logger.error(
-                        f"[DECISION_TASK] 动态结果存储失败: 库房{room_id}, 错误={storage_error}"
-                    )
-                    logger.warning(
-                        "[DECISION_TASK] 分析任务成功但数据库存储失败，请检查数据库连接"
+                    _log_event(
+                        "ERROR",
+                        "ROOM_DB_STORE_ERROR",
+                        "动态结果落库失败（分析已成功）",
+                        batch_id=batch_id_for_log,
+                        decision_id=decision_id,
+                        room_id=room_id,
+                        error=str(storage_error),
+                        error_type=type(storage_error).__name__,
+                        error_stack=traceback.format_exc(),
                     )
                 # ==================== 动态结果存储结束 ====================
 
                 if result.warnings:
-                    logger.warning(
-                        f"[DECISION_TASK] 库房{room_id}分析警告: {len(result.warnings)}条"
+                    _log_event(
+                        "WARNING",
+                        "ROOM_WARNINGS",
+                        "单库房分析存在业务告警",
+                        batch_id=batch_id_for_log,
+                        decision_id=decision_id,
+                        room_id=room_id,
+                        warnings_count=len(result.warnings),
                     )
                     for warning in result.warnings[:3]:  # 只显示前3条警告
-                        logger.warning(f"[DECISION_TASK]   - {warning}")
+                        _log_event(
+                            "WARNING",
+                            "ROOM_WARNING_ITEM",
+                            "告警详情",
+                            batch_id=batch_id_for_log,
+                            decision_id=decision_id,
+                            room_id=room_id,
+                            warning=warning,
+                        )
 
                 # 成功执行，退出重试循环
                 return {
@@ -194,14 +316,21 @@ def safe_decision_analysis_for_room(room_id: str) -> Dict[str, Any]:
                     "warnings_count": len(result.warnings or []),
                     "dynamic_results_count": dynamic_results_count,
                     "change_count": change_count,
+                    "decision_id": decision_id,
                 }
 
             else:
                 # 分析执行但有错误
                 error_msg = result.error_message or "未知错误"
-                logger.error(
-                    f"[DECISION_TASK] 决策分析失败: 库房{room_id}, "
-                    f"错误={error_msg}, 耗时={duration:.2f}秒"
+                _log_event(
+                    "ERROR",
+                    "ROOM_ANALYSIS_FAILED",
+                    "单库房决策分析失败",
+                    batch_id=batch_id_for_log,
+                    decision_id=decision_id,
+                    room_id=room_id,
+                    error=error_msg,
+                    duration_sec=f"{duration:.2f}",
                 )
 
                 # 判断是否需要重试
@@ -217,46 +346,85 @@ def safe_decision_analysis_for_room(room_id: str) -> Dict[str, Any]:
                 )
 
                 if is_connection_error and attempt < max_retries:
-                    logger.warning(
-                        f"[DECISION_TASK] 检测到连接错误，{retry_delay}秒后重试..."
+                    _log_event(
+                        "WARNING",
+                        "ROOM_RETRY",
+                        "检测到连接类错误，进入重试",
+                        batch_id=batch_id_for_log,
+                        decision_id=decision_id,
+                        room_id=room_id,
+                        retry_delay_sec=retry_delay,
+                        next_attempt=f"{attempt + 1}/{max_retries}",
                     )
                     time.sleep(retry_delay)
                     continue
                 elif attempt >= max_retries:
-                    logger.error(
-                        f"[DECISION_TASK] 库房{room_id}决策分析失败，"
-                        f"已达到最大重试次数 ({max_retries})"
+                    _log_event(
+                        "ERROR",
+                        "ROOM_RETRY_EXHAUSTED",
+                        "达到最大重试次数，任务失败",
+                        batch_id=batch_id_for_log,
+                        decision_id=decision_id,
+                        room_id=room_id,
+                        max_retries=max_retries,
                     )
                     return {
                         "success": False,
                         "duration": duration,
                         "error": error_msg,
+                        "decision_id": decision_id,
                     }
                 else:
                     # 非连接错误，不重试
-                    logger.error(
-                        f"[DECISION_TASK] 库房{room_id}决策分析遇到非连接错误，不再重试"
+                    _log_event(
+                        "ERROR",
+                        "ROOM_NON_RETRYABLE",
+                        "非连接类错误，不执行重试",
+                        batch_id=batch_id_for_log,
+                        decision_id=decision_id,
+                        room_id=room_id,
+                        error=error_msg,
                     )
                     return {
                         "success": False,
                         "duration": duration,
                         "error": error_msg,
+                        "decision_id": decision_id,
                     }
 
         except ImportError as e:
-            logger.error(f"[DECISION_TASK] 导入决策分析模块失败: {e}")
+            _log_event(
+                "ERROR",
+                "ROOM_IMPORT_ERROR",
+                "导入决策分析模块失败",
+                batch_id=batch_id_for_log,
+                decision_id=decision_id,
+                room_id=room_id,
+                error=str(e),
+                error_type=type(e).__name__,
+                error_stack=traceback.format_exc(),
+            )
             # 导入错误不重试
             return {
                 "success": False,
                 "duration": 0.0,
                 "error": str(e),
+                "decision_id": decision_id,
             }
 
         except Exception as e:
             error_msg = str(e)
-            logger.error(
-                f"[DECISION_TASK] 决策分析异常: 库房{room_id} "
-                f"(尝试 {attempt}/{max_retries}): {error_msg}"
+            _log_event(
+                "ERROR",
+                "ROOM_EXCEPTION",
+                "执行过程中出现未处理异常",
+                batch_id=batch_id_for_log,
+                decision_id=decision_id,
+                room_id=room_id,
+                attempt=f"{attempt}/{max_retries}",
+                error=error_msg,
+                error_type=type(e).__name__,
+                error_stack=traceback.format_exc(),
             )
 
             is_connection_error = any(
@@ -271,26 +439,48 @@ def safe_decision_analysis_for_room(room_id: str) -> Dict[str, Any]:
             )
 
             if is_connection_error and attempt < max_retries:
-                logger.warning(
-                    f"[DECISION_TASK] 检测到连接错误，{retry_delay}秒后重试..."
+                _log_event(
+                    "WARNING",
+                    "ROOM_RETRY",
+                    "异常属于连接类错误，进入重试",
+                    batch_id=batch_id_for_log,
+                    decision_id=decision_id,
+                    room_id=room_id,
+                    retry_delay_sec=retry_delay,
+                    next_attempt=f"{attempt + 1}/{max_retries}",
                 )
                 time.sleep(retry_delay)
             elif attempt >= max_retries:
-                logger.error(
-                    f"[DECISION_TASK] 库房{room_id}决策分析失败，"
-                    f"已达到最大重试次数 ({max_retries})"
+                _log_event(
+                    "ERROR",
+                    "ROOM_RETRY_EXHAUSTED",
+                    "达到最大重试次数，任务失败",
+                    batch_id=batch_id_for_log,
+                    decision_id=decision_id,
+                    room_id=room_id,
+                    max_retries=max_retries,
                 )
                 return {
                     "success": False,
                     "duration": 0.0,
                     "error": error_msg,
+                    "decision_id": decision_id,
                 }
             else:
-                logger.error("[DECISION_TASK] 决策分析遇到非连接错误，不再重试")
+                _log_event(
+                    "ERROR",
+                    "ROOM_NON_RETRYABLE",
+                    "异常属于非连接类错误，不执行重试",
+                    batch_id=batch_id_for_log,
+                    decision_id=decision_id,
+                    room_id=room_id,
+                    error=error_msg,
+                )
                 return {
                     "success": False,
                     "duration": 0.0,
                     "error": error_msg,
+                    "decision_id": decision_id,
                 }
 
 
@@ -322,8 +512,8 @@ def safe_batch_decision_analysis(
     from utils.task_common import check_database_connection
 
     if not check_database_connection():
-        error_msg = "[DECISION_TASK] 数据库不可达，任务终止（按配置不启用容错）"
-        logger.error(error_msg)
+        error_msg = "数据库不可达，任务终止（按配置不启用容错）"
+        _log_event("ERROR", "BATCH_DB_UNAVAILABLE", error_msg, batch_id="N/A")
         raise RuntimeError(error_msg)
 
     # 如果没有提供时间参数，使用当前时间
@@ -332,38 +522,52 @@ def safe_batch_decision_analysis(
         schedule_hour = current_time.hour
         schedule_minute = current_time.minute
 
-    logger.info("[DECISION_TASK] ==========================================")
-    logger.info(
-        f"[DECISION_TASK] 开始批量决策分析任务 (执行时间: {schedule_hour:02d}:{schedule_minute:02d})"
+    batch_run_id = _build_batch_run_id(schedule_hour, schedule_minute)
+
+    _log_event(
+        "INFO",
+        "BATCH_START",
+        "开始批量决策分析任务",
+        batch_id=batch_run_id,
+        decision_id="N/A",
+        schedule_time=f"{schedule_hour:02d}:{schedule_minute:02d}",
+        room_count=len(MUSHROOM_ROOM_IDS),
+        room_ids="|".join(MUSHROOM_ROOM_IDS),
     )
-    logger.info(f"[DECISION_TASK] 待分析库房: {MUSHROOM_ROOM_IDS}")
-    logger.info(
-        "[DECISION_TASK] 功能: 多图像分析, 结构化参数调整, 风险评估, 仅动态结果存储（优化版）"
+    _log_event(
+        "DEBUG",
+        "BATCH_CONFIG",
+        "批量任务策略配置",
+        batch_id=batch_run_id,
+        decision_id="N/A",
+        enable_kb_human_prior=DECISION_ANALYSIS_ENABLE_KB_HUMAN_PRIOR,
+        similar_case_top_k=DECISION_ANALYSIS_SIMILAR_CASE_TOP_K,
+        embedding_similarity_weight=f"{DECISION_ANALYSIS_EMBEDDING_SIM_WEIGHT:.2f}",
+        env_similarity_weight=f"{DECISION_ANALYSIS_ENV_SIM_WEIGHT:.2f}",
+        multi_image_boost=DECISION_ANALYSIS_MULTI_IMAGE_BOOST,
+        enable_skill_engine=DECISION_ANALYSIS_ENABLE_SKILL_ENGINE,
+        enable_skill_kb_prior=DECISION_ANALYSIS_ENABLE_SKILL_KB_PRIOR,
     )
-    logger.info(
-        "[DECISION_TASK] 策略: KB人工偏好优先=%s, 相似案例top_k=%s, embedding权重=%.2f, env权重=%.2f, multi_image_boost=%s, skill_engine=%s"
-        % (
-            DECISION_ANALYSIS_ENABLE_KB_HUMAN_PRIOR,
-            DECISION_ANALYSIS_SIMILAR_CASE_TOP_K,
-            DECISION_ANALYSIS_EMBEDDING_SIM_WEIGHT,
-            DECISION_ANALYSIS_ENV_SIM_WEIGHT,
-            DECISION_ANALYSIS_MULTI_IMAGE_BOOST,
-            DECISION_ANALYSIS_ENABLE_SKILL_ENGINE,
-        )
-    )
-    logger.info(
-        f"[DECISION_TASK] Skill策略: 启用KB先验={DECISION_ANALYSIS_ENABLE_SKILL_KB_PRIOR}"
-    )
-    logger.info("[DECISION_TASK] ==========================================")
 
     batch_start_time = datetime.now()
     results: Dict[str, Dict[str, Any]] = {}
 
     for room_id in MUSHROOM_ROOM_IDS:
         room_start_time = datetime.now()
+        _log_event(
+            "INFO",
+            "ROOM_DISPATCH",
+            "开始处理库房",
+            batch_id=batch_run_id,
+            decision_id="N/A",
+            room_id=room_id,
+        )
 
         try:
-            room_result = safe_decision_analysis_for_room(room_id)
+            room_result = safe_decision_analysis_for_room(
+                room_id,
+                batch_run_id=batch_run_id,
+            )
             results[room_id] = {
                 "status": "success" if room_result.get("success") else "failed",
                 "duration": (datetime.now() - room_start_time).total_seconds(),
@@ -374,68 +578,119 @@ def safe_batch_decision_analysis(
                 ),
                 "skill_kb_prior_used": int(room_result.get("skill_kb_prior_used", 0)),
                 "warnings_count": int(room_result.get("warnings_count", 0)),
-                "dynamic_results_count": int(room_result.get("dynamic_results_count", 0)),
+                "dynamic_results_count": int(
+                    room_result.get("dynamic_results_count", 0)
+                ),
                 "change_count": int(room_result.get("change_count", 0)),
                 "error": room_result.get("error"),
+                "decision_id": room_result.get("decision_id"),
             }
+
+            room_status = results[room_id]["status"]
+            log_level = "INFO" if room_status == "success" else "ERROR"
+            _log_event(
+                log_level,
+                "ROOM_FINISH",
+                "库房处理结束",
+                batch_id=batch_run_id,
+                room_id=room_id,
+                decision_id=results[room_id].get("decision_id"),
+                status=room_status,
+                duration_sec=f"{results[room_id]['duration']:.2f}",
+                warnings_count=results[room_id].get("warnings_count", 0),
+                dynamic_results_count=results[room_id].get("dynamic_results_count", 0),
+                change_count=results[room_id].get("change_count", 0),
+                error=results[room_id].get("error"),
+            )
         except Exception as e:
             results[room_id] = {
                 "status": "failed",
                 "error": str(e),
                 "duration": (datetime.now() - room_start_time).total_seconds(),
             }
-            logger.error(f"[DECISION_TASK] 库房{room_id}分析异常: {e}")
+            _log_event(
+                "ERROR",
+                "ROOM_CRASH",
+                "库房处理出现未捕获异常",
+                batch_id=batch_run_id,
+                decision_id="N/A",
+                room_id=room_id,
+                error=str(e),
+                error_type=type(e).__name__,
+                error_stack=traceback.format_exc(),
+                duration_sec=f"{results[room_id]['duration']:.2f}",
+            )
 
     # 汇总报告
     batch_duration = (datetime.now() - batch_start_time).total_seconds()
     success_count = sum(1 for r in results.values() if r["status"] == "success")
     failed_count = len(results) - success_count
     skill_enabled_rooms = sum(
-        1 for r in results.values() if r.get("status") == "success" and r.get("skill_enabled")
+        1
+        for r in results.values()
+        if r.get("status") == "success" and r.get("skill_enabled")
     )
     skill_hit_rooms = sum(
         1
         for r in results.values()
         if r.get("status") == "success" and int(r.get("skill_matched_count", 0)) > 0
     )
-    skill_total_matched = sum(int(r.get("skill_matched_count", 0)) for r in results.values())
+    skill_total_matched = sum(
+        int(r.get("skill_matched_count", 0)) for r in results.values()
+    )
     skill_total_corrections = sum(
         int(r.get("skill_constraint_corrections", 0)) for r in results.values()
     )
     skill_total_kb_prior_used = sum(
         int(r.get("skill_kb_prior_used", 0)) for r in results.values()
     )
-    total_dynamic_results = sum(int(r.get("dynamic_results_count", 0)) for r in results.values())
+    total_dynamic_results = sum(
+        int(r.get("dynamic_results_count", 0)) for r in results.values()
+    )
     total_change_count = sum(int(r.get("change_count", 0)) for r in results.values())
 
-    logger.info("[DECISION_TASK] ==========================================")
-    logger.info("[DECISION_TASK] 批量决策分析完成")
-    logger.info(
-        f"[DECISION_TASK] 成功: {success_count}/{len(MUSHROOM_ROOM_IDS)}, "
-        f"失败: {failed_count}/{len(MUSHROOM_ROOM_IDS)}"
+    summary_level = "INFO" if failed_count == 0 else "WARNING"
+    _log_event(
+        summary_level,
+        "BATCH_SUMMARY",
+        "批量决策分析完成",
+        batch_id=batch_run_id,
+        decision_id="N/A",
+        success_count=success_count,
+        failed_count=failed_count,
+        total_rooms=len(MUSHROOM_ROOM_IDS),
+        duration_sec=f"{batch_duration:.2f}",
     )
-    logger.info(f"[DECISION_TASK] 总耗时: {batch_duration:.2f}秒")
 
     for room_id, result in results.items():
-        status_icon = "✓" if result["status"] == "success" else "✗"
-        skill_summary = (
-            f"skill_hit={result.get('skill_matched_count', 0)}, "
-            f"skill_fix={result.get('skill_constraint_corrections', 0)}, "
-            f"kb_ref={result.get('skill_kb_prior_used', 0)}, "
-            f"dynamic={result.get('dynamic_results_count', 0)}"
-        )
-        logger.info(
-            f"[DECISION_TASK]   库房{room_id}: [{status_icon}] {result['duration']:.2f}秒, {skill_summary}"
+        _log_event(
+            "INFO",
+            "BATCH_ROOM_RESULT",
+            "库房结果汇总",
+            batch_id=batch_run_id,
+            room_id=room_id,
+            decision_id=result.get("decision_id"),
+            status=result.get("status"),
+            duration_sec=f"{result.get('duration', 0.0):.2f}",
+            skill_hit=result.get("skill_matched_count", 0),
+            skill_fix=result.get("skill_constraint_corrections", 0),
+            kb_ref=result.get("skill_kb_prior_used", 0),
+            warnings_count=result.get("warnings_count", 0),
+            dynamic_results_count=result.get("dynamic_results_count", 0),
+            error=result.get("error"),
         )
 
     # 数据库存储统计（如果有成功的分析）
     if success_count > 0:
-        logger.info(
-            f"[DECISION_TASK] 数据库存储: {success_count}个库房的动态结果已自动存储"
-        )
-        logger.info("[DECISION_TASK] 存储内容: 静态配置表 + 动态结果表")
-        logger.info(
-            f"[DECISION_TASK] 动态结果汇总: dynamic_results={total_dynamic_results}, changes={total_change_count}"
+        _log_event(
+            "INFO",
+            "BATCH_DB_SUMMARY",
+            "动态结果落库汇总",
+            batch_id=batch_run_id,
+            decision_id="N/A",
+            success_rooms=success_count,
+            total_dynamic_results=total_dynamic_results,
+            total_change_count=total_change_count,
         )
 
     if skill_enabled_rooms > 0:
@@ -443,22 +698,20 @@ def safe_batch_decision_analysis(
         correction_rate_by_hit = (
             skill_total_corrections / skill_hit_rooms if skill_hit_rooms > 0 else 0.0
         )
-        logger.info(
-            "[DECISION_TASK] Skill汇总: 启用库房=%s, 命中库房=%s, 命中率=%.2f, 匹配总数=%s, 修正总数=%s, 平均每命中修正=%.2f"
-            % (
-                skill_enabled_rooms,
-                skill_hit_rooms,
-                skill_hit_rate,
-                skill_total_matched,
-                skill_total_corrections,
-                correction_rate_by_hit,
-            )
+        _log_event(
+            "INFO",
+            "BATCH_SKILL_SUMMARY",
+            "Skill统计汇总",
+            batch_id=batch_run_id,
+            decision_id="N/A",
+            skill_enabled_rooms=skill_enabled_rooms,
+            skill_hit_rooms=skill_hit_rooms,
+            skill_hit_rate=f"{skill_hit_rate:.2f}",
+            skill_total_matched=skill_total_matched,
+            skill_total_corrections=skill_total_corrections,
+            correction_rate_by_hit=f"{correction_rate_by_hit:.2f}",
+            skill_total_kb_prior_used=skill_total_kb_prior_used,
         )
-        logger.info(
-            f"[DECISION_TASK] Skill-KB汇总: KB先验引用次数={skill_total_kb_prior_used}"
-        )
-
-    logger.info("[DECISION_TASK] ==========================================")
 
 
 def safe_refresh_control_strategy_cluster_kb(
