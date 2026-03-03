@@ -12,7 +12,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers import SchedulerAlreadyRunningError
 
 from global_const.global_const import pgsql_engine
-from utils.loguru_setting import logger
+from utils.loguru_setting import logger, loguru_setting
 from utils.exception_listener import exception_listener, set_scheduler_instance
 
 from ..config.settings import SchedulerConfig
@@ -216,5 +216,6 @@ class OptimizedScheduler:
 
 def run_scheduler() -> NoReturn:
     """运行调度器入口函数"""
+    loguru_setting()
     scheduler = OptimizedScheduler()
     scheduler.run()

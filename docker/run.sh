@@ -1,5 +1,5 @@
 #!/bin/bash
-# 生产级容器启动脚本 - 三服务模式（FastAPI + Scheduler + Streamlit）
+# 生产级容器启动脚本 - 单主入口模式（由 main.py 统一拉起三服务）
 # 支持崩溃自动退出、日志透传、资源限制
 
 set -euo pipefail
@@ -10,9 +10,8 @@ set -euo pipefail
 APP_ROOT="/app"
 LOG_DIR="$APP_ROOT/Logs"
 MAIN_LOG="$LOG_DIR/main.log"
-SCHEDULER_LOG="$LOG_DIR/scheduler.log"
-STREAMLIT_LOG="$LOG_DIR/streamlit.log"
 PYTHON="${PYTHON:-python3}"
+export PYTHONUNBUFFERED=1
 
 # 创建日志目录
 mkdir -p "$LOG_DIR"
@@ -32,16 +31,8 @@ fail() {
 # 进程清理函数
 cleanup() {
     log "收到退出信号，正在清理进程..."
-    if [[ -n "${STREAMLIT_PID:-}" ]] && kill -0 "$STREAMLIT_PID" 2>/dev/null; then
-        log "停止 Streamlit (PID: $STREAMLIT_PID)"
-        kill -TERM "$STREAMLIT_PID" 2>/dev/null || true
-    fi
-    if [[ -n "${SCHEDULER_PID:-}" ]] && kill -0 "$SCHEDULER_PID" 2>/dev/null; then
-        log "停止调度器 (PID: $SCHEDULER_PID)"
-        kill -TERM "$SCHEDULER_PID" 2>/dev/null || true
-    fi
     if [[ -n "${MAIN_PID:-}" ]] && kill -0 "$MAIN_PID" 2>/dev/null; then
-        log "停止 FastAPI (PID: $MAIN_PID)"
+        log "停止主入口进程 (PID: $MAIN_PID)"
         kill -TERM "$MAIN_PID" 2>/dev/null || true
     fi
     exit 0
@@ -80,38 +71,15 @@ fi
 
 # 清理旧日志（避免累积）
 > "$MAIN_LOG" 2>/dev/null || true
-> "$SCHEDULER_LOG" 2>/dev/null || true
-> "$STREAMLIT_LOG" 2>/dev/null || true
+> "$LOG_DIR/startup.log" 2>/dev/null || true
 
 log "线程限制已在环境设置中配置"
 
 
 # =============================
-# 启动 Streamlit 应用
+# 启动主入口（统一拉起 FastAPI + Scheduler + Streamlit）
 # =============================
-log "启动 Streamlit 应用..."
-STREAMLIT_CMD="$PYTHON -m streamlit run streamlit_app.py \
-    --server.port=7005 \
-    --server.address=0.0.0.0 \
-    --browser.gatherUsageStats=false \
-    --server.enableCORS=false \
-    --server.enableXsrfProtection=false \
-    --server.maxUploadSize=100 \
-    --server.maxMessageSize=200"
-
-nohup $STREAMLIT_CMD 2>&1 | tee -a "$STREAMLIT_LOG" &
-STREAMLIT_PID=$!
-log "Streamlit 已启动，PID=$STREAMLIT_PID"
-
-sleep 2
-if ! kill -0 $STREAMLIT_PID 2>/dev/null; then
-    fail "Streamlit 启动失败，请检查端口占用或配置"
-fi
-
-# =============================
-# 启动主应用 (FastAPI only)
-# =============================
-log "启动主应用 (FastAPI only)..."
+log "启动主入口服务（统一拉起全部子服务）..."
 
 # 先测试Python环境和依赖
 log "检查Python环境和依赖..."
@@ -119,53 +87,28 @@ if ! $PYTHON -c "import sys; print(f'Python {sys.version}')"; then
     fail "Python环境检查失败"
 fi
 
-if ! $PYTHON -c "import sys; sys.path.insert(0, '/app'); import main_no_scheduler; print('FastAPI 无调度入口导入成功')"; then
-    fail "FastAPI 入口导入失败，请检查依赖"
+if ! $PYTHON -c "import sys; sys.path.insert(0, '/app'); import main; print('主入口模块导入成功')"; then
+    fail "主入口模块导入失败，请检查依赖"
 fi
 
-# 启动 FastAPI
+# 启动统一主入口
 # 使用 tee 同时输出到文件和标准输出
 cd "$APP_ROOT"
-nohup $PYTHON main_no_scheduler.py 2>&1 | tee -a "$MAIN_LOG" &
+nohup "$PYTHON" -u main.py 2>&1 | tee -a "$MAIN_LOG" &
 MAIN_PID=$!
-log "FastAPI 已启动，PID=$MAIN_PID"
+log "主入口已启动，PID=$MAIN_PID"
 
 # 等待启动
 sleep 5
 if ! kill -0 $MAIN_PID 2>/dev/null; then
-    log "FastAPI 进程已退出，查看最后几行日志："
+    log "主入口进程已退出，查看最后几行日志："
     tail -10 "$MAIN_LOG" | while read line; do
         log "MAIN_LOG: $line"
     done
-    fail "FastAPI 启动失败，请检查代码或依赖"
+    fail "主入口启动失败，请检查代码或依赖"
 fi
 
-log "FastAPI 运行正常"
-
-# =============================
-# 启动调度器 (Scheduler only)
-# =============================
-log "启动独立调度器服务..."
-
-if ! $PYTHON -c "import sys; sys.path.insert(0, '/app'); import scheduling.optimized_scheduler; print('调度器入口导入成功')"; then
-    fail "调度器入口导入失败，请检查依赖"
-fi
-
-cd "$APP_ROOT"
-nohup $PYTHON scheduling/optimized_scheduler.py 2>&1 | tee -a "$SCHEDULER_LOG" &
-SCHEDULER_PID=$!
-log "Scheduler 已启动，PID=$SCHEDULER_PID"
-
-sleep 5
-if ! kill -0 $SCHEDULER_PID 2>/dev/null; then
-    log "Scheduler 进程已退出，查看最后几行日志："
-    tail -10 "$SCHEDULER_LOG" | while read line; do
-        log "SCHEDULER_LOG: $line"
-    done
-    fail "Scheduler 启动失败，请检查代码或依赖"
-fi
-
-log "Scheduler 运行正常"
+log "主入口运行正常"
 
 log "所有服务已成功启动。保持容器活跃中..."
 
@@ -173,22 +116,9 @@ log "所有服务已成功启动。保持容器活跃中..."
 # 主进程监控循环
 # =============================
 while true; do
-    # 检查所有进程是否还在运行
-    if ! kill -0 $STREAMLIT_PID 2>/dev/null; then
-        log "ERROR: Streamlit 进程异常退出"
-        log "最后的 Streamlit 日志："
-        tail -20 "$STREAMLIT_LOG" | while read line; do log "  $line"; done
-        fail "Streamlit 进程异常退出"
-    fi
-    if ! kill -0 $SCHEDULER_PID 2>/dev/null; then
-        log "ERROR: Scheduler 进程异常退出"
-        log "最后的 Scheduler 日志："
-        tail -20 "$SCHEDULER_LOG" | while read line; do log "  $line"; done
-        fail "Scheduler 进程异常退出"
-    fi
     if ! kill -0 $MAIN_PID 2>/dev/null; then
-        log "ERROR: FastAPI 进程异常退出"
-        log "最后的 FastAPI 日志："
+        log "ERROR: 主入口进程异常退出"
+        log "最后的主入口日志："
         tail -20 "$MAIN_LOG" | while read line; do log "  $line"; done
         
         # 同时检查业务日志
@@ -196,7 +126,7 @@ while true; do
             log "最后的业务错误日志："
             tail -20 "$LOG_DIR/mushroom_solution-error.log" | while read line; do log "  $line"; done
         fi
-        fail "FastAPI 进程异常退出"
+        fail "主入口进程异常退出"
     fi
     
     sleep 30
