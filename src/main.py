@@ -127,9 +127,7 @@ def run_all_services() -> None:
 
     for service_name, process in processes.items():
         process.start()
-        logger.info(
-            f"[MAIN] {service_name} 已启动，PID={process.pid}"
-        )
+        logger.info(f"[MAIN] {service_name} 已启动，PID={process.pid}")
 
     def _shutdown_handler(signum, _frame):
         signal_name = signal.Signals(signum).name

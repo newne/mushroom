@@ -59,7 +59,7 @@ port="5000"
 [development.llama]
 llama_host = "10.77.77.49"
 llama_port = "7001"
-model = "qwen3-vl-8b"
+model = "llama-mushroom-medium"
 llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
@@ -69,7 +69,7 @@ mushroom_descripe_prompt = "" # Loaded from MLflow Prompt Registry: growth_stage
 [development.llama_vl]
 llama_host = "10.77.77.49"
 llama_port = "7001"
-model = "qwen3-vl-8b"
+model = "llama-mushroom-medium"
 llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
@@ -129,7 +129,7 @@ port="5000"
 [production.llama.bak]
 llama_host = "172.17.0.1"
 llama_port = "7002"
-model = "llama-mushroom-light.service"
+model = "llama-mushroom-medium"
 llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
@@ -138,7 +138,7 @@ timeout = 600   # API调用超时时间（秒）
 [production.llama]
 llama_host = "10.77.77.49"
 llama_port = "7001"
-model = "qwen3-vl-8b"
+model = "llama-mushroom-medium"
 llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
@@ -148,7 +148,7 @@ mushroom_descripe_prompt = "" # Loaded from MLflow Prompt Registry: growth_stage
 [production.llama_vl.bak]
 llama_host = "172.17.0.1"
 llama_port = "7002"
-model = "llama-mushroom-vl-light.service"
+model = "llama-mushroom-medium"
 llama_completions = "http://{0}:{1}/vl-light/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
@@ -166,7 +166,7 @@ mlflow_pre_image_quality = 95
 [production.llama_vl]
 llama_host = "10.77.77.49"
 llama_port = "7001"
-model = "qwen3-vl-8b"
+model = "llama-mushroom-medium"
 llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
 timeout = 600   # API调用超时时间（秒）
