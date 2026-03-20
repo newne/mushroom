@@ -5,35 +5,113 @@
 """
 
 import base64
+import importlib
 import io
 import json
 import re
+import sys
 import time
+import traceback
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import requests
-import torch
-from loguru import logger
-from PIL import Image
-from sqlalchemy import func
-from sqlalchemy.orm import sessionmaker
-from transformers import CLIPModel, CLIPProcessor
+from PIL.Image import Image as PILImageType
 
-from environment.processor import create_env_data_processor
-from global_const.const_config import ROOM_ID_MAPPING
-from global_const.global_const import env, pgsql_engine, settings
-from utils.create_table import (
-    ImageTextQuality,
-    MushroomImageEmbedding,
+_import_start = time.perf_counter()
+_import_last = _import_start
+_import_steps = []
+
+
+def _record_import_step(label: str, last: float) -> float:
+    now = time.perf_counter()
+    _import_steps.append((label, (now - last) * 1000.0, (now - _import_start) * 1000.0))
+    return now
+
+
+def _timed_import(module_name: str, label: str):
+    global _import_last
+    module = importlib.import_module(module_name)
+    _import_last = _record_import_step(label, _import_last)
+    return module
+
+
+np = _timed_import("numpy", "numpy")
+requests = _timed_import("requests", "requests")
+logger = _timed_import("loguru", "loguru").logger
+Image = _timed_import("PIL.Image", "PIL")
+func = _timed_import("sqlalchemy", "sqlalchemy.func").func
+sessionmaker = _timed_import("sqlalchemy.orm", "sqlalchemy.orm").sessionmaker
+
+environment_processor_module = _timed_import(
+    "environment.processor", "environment.processor"
 )
-from utils.get_data import GetData
-from utils.minio_client import create_minio_client
+const_config_module = _timed_import(
+    "global_const.const_config", "global_const.const_config"
+)
+global_const_module = _timed_import(
+    "global_const.global_const", "global_const.global_const"
+)
+utils_module = _timed_import("utils", "utils")
+create_table_module = _timed_import("utils.create_table", "utils.create_table")
+get_data_module = _timed_import("utils.get_data", "utils.get_data")
+minio_client_module = _timed_import("utils.minio_client", "utils.minio_client")
 
-from .mushroom_image_processor import MushroomImageInfo, create_mushroom_processor
+create_env_data_processor = environment_processor_module.create_env_data_processor
+ROOM_ID_MAPPING = const_config_module.ROOM_ID_MAPPING
+env = global_const_module.env
+pgsql_engine = global_const_module.pgsql_engine
+settings = global_const_module.settings
+log_task_event = utils_module.log_task_event
+ImageTextQuality = create_table_module.ImageTextQuality
+MushroomImageEmbedding = create_table_module.MushroomImageEmbedding
+GetData = get_data_module.GetData
+create_minio_client = minio_client_module.create_minio_client
+
+_import_last = _record_import_step("project_modules", _import_last)
+
+mushroom_image_processor_module = _timed_import(
+    "vision.mushroom_image_processor", "vision.mushroom_image_processor"
+)
+MushroomImageInfo = mushroom_image_processor_module.MushroomImageInfo
+create_mushroom_processor = mushroom_image_processor_module.create_mushroom_processor
+
+_import_last = _record_import_step("local_modules", _import_last)
+
+
+def _encoder_log(event: str, message: str, level: str = "INFO", **context: Any) -> None:
+    """输出统一的视觉编码事件日志。"""
+    log_task_event(
+        "VISION_ENCODER",
+        event,
+        message,
+        level=level,
+        task_type="helper",
+        **context,
+    )
+
+
+torch = None
+CLIPModel = None
+CLIPProcessor = None
+
+if _import_steps:
+    for label, delta_ms, total_ms in _import_steps:
+        _encoder_log(
+            "VISION_IMPORT_TIMING",
+            "模块导入阶段计时",
+            level="DEBUG",
+            import_label=label,
+            delta_ms=round(delta_ms, 2),
+            total_ms=round(total_ms, 2),
+        )
+    _encoder_log(
+        "VISION_IMPORT_TOTAL",
+        "模块导入完成",
+        level="DEBUG",
+        total_ms=round((time.perf_counter() - _import_start) * 1000.0, 2),
+    )
 
 
 class MushroomImageEncoder:
@@ -41,8 +119,13 @@ class MushroomImageEncoder:
 
     def __init__(self, load_clip: bool = True):
         """初始化编码器"""
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.debug(f"设备: {self.device}")
+        self.device = "cpu"
+        _encoder_log(
+            "VISION_ENCODER_INIT_START",
+            "开始初始化图像编码器",
+            level="DEBUG",
+            device=self.device,
+        )
 
         # 初始化CLIP模型
         self.clip_model = None
@@ -50,7 +133,11 @@ class MushroomImageEncoder:
         if load_clip:
             self._init_clip_model()
         else:
-            logger.info("[ImageEncoder] 跳过CLIP模型加载 (仅文本/质量分析)")
+            _encoder_log(
+                "VISION_CLIP_SKIPPED",
+                "跳过CLIP模型加载，仅执行文本与质量分析",
+                status="skipped",
+            )
 
         # 初始化MinIO客户端和处理器
         self.minio_client = create_minio_client()
@@ -96,7 +183,60 @@ class MushroomImageEncoder:
         self.time_threshold = 5000  # 性能警告阈值 (毫秒)
         self._setup_performance_logger()
 
-        logger.debug("图像编码器初始化完成")
+        _encoder_log(
+            "VISION_ENCODER_INIT_FINISH",
+            "图像编码器初始化完成",
+            level="DEBUG",
+            status="success",
+        )
+
+    def _ensure_torch_imported(self):
+        """按需导入 torch，避免纯文本任务在模块导入阶段加载重依赖。"""
+        global torch
+
+        if torch is None:
+            start = time.perf_counter()
+            torch = importlib.import_module("torch")
+            _encoder_log(
+                "VISION_LAZY_IMPORT_TORCH",
+                "按需加载 torch 完成",
+                level="DEBUG",
+                delta_ms=round((time.perf_counter() - start) * 1000.0, 2),
+            )
+
+        return torch
+
+    def _ensure_clip_dependencies_loaded(self):
+        """按需导入 CLIP 依赖，仅在需要向量编码时加载。"""
+        global CLIPModel, CLIPProcessor
+
+        torch_module = self._ensure_torch_imported()
+        if self.device == "cpu" and torch_module.cuda.is_available():
+            self.device = "cuda"
+            _encoder_log(
+                "VISION_DEVICE_SWITCH",
+                "编码设备切换为 CUDA",
+                level="DEBUG",
+                device=self.device,
+            )
+
+        if CLIPModel is None or CLIPProcessor is None:
+            start = time.perf_counter()
+            transformers_module = importlib.import_module("transformers")
+            CLIPModel = transformers_module.CLIPModel
+            CLIPProcessor = transformers_module.CLIPProcessor
+            _encoder_log(
+                "VISION_LAZY_IMPORT_TRANSFORMERS",
+                "按需加载 transformers 完成",
+                level="DEBUG",
+                delta_ms=round((time.perf_counter() - start) * 1000.0, 2),
+            )
+
+    def _ensure_clip_model_ready(self):
+        """确保 CLIP 依赖和模型在首次使用前加载完成。"""
+        self._ensure_clip_dependencies_loaded()
+        if self.clip_model is None or self.clip_processor is None:
+            self._init_clip_model()
 
     def _setup_performance_logger(self):
         """配置 LLaMA 性能监控专用日志"""
@@ -119,7 +259,14 @@ class MushroomImageEncoder:
                 )
                 self._perf_logger_configured = True
             except Exception as e:
-                logger.error(f"配置性能日志失败: {e}")
+                _encoder_log(
+                    "VISION_PERF_LOGGER_CONFIG_FAILED",
+                    "配置 LLaMA 性能日志失败",
+                    level="ERROR",
+                    status="failed",
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                )
 
     def _map_room_id(self, room_id: str) -> str:
         """
@@ -133,7 +280,13 @@ class MushroomImageEncoder:
         """
         mapped_id = self.room_id_mapping.get(room_id, room_id)
         if mapped_id != room_id:
-            logger.debug(f"Mapped room ID: {room_id} -> {mapped_id}")
+            _encoder_log(
+                "VISION_ROOM_ID_MAPPED",
+                "已映射库房编号",
+                level="DEBUG",
+                room_id=room_id,
+                mapped_room_id=mapped_id,
+            )
         return mapped_id
 
     def _allow_low_quality(self, description: str) -> bool:
@@ -178,8 +331,15 @@ class MushroomImageEncoder:
             return True
         except Exception as e:
             session.rollback()
-            logger.error(
-                f"[IMG-013] 保存文本/质量失败 | 文件: {image_info.file_name} | 错误: {e}"
+            _encoder_log(
+                "VISION_TEXT_QUALITY_SAVE_FAILED",
+                "保存文本与质量记录失败",
+                level="ERROR",
+                image_name=image_info.file_name,
+                room_id=image_info.mushroom_id,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
             )
             return False
         finally:
@@ -187,6 +347,8 @@ class MushroomImageEncoder:
 
     def _init_clip_model(self):
         """初始化CLIP模型"""
+        self._ensure_clip_dependencies_loaded()
+
         # 检查本地模型路径
         # 在容器中，源码直接复制到/app，models挂载到/app/models
         # 在开发环境中，保持原有的相对路径计算
@@ -206,7 +368,13 @@ class MushroomImageEncoder:
         else:
             model_name = "openai/clip-vit-base-patch32"
 
-        logger.debug(f"加载CLIP模型: {model_name}")
+        _encoder_log(
+            "VISION_CLIP_MODEL_LOADING",
+            "开始加载 CLIP 模型",
+            level="DEBUG",
+            model_name=model_name,
+            status="running",
+        )
         import warnings
 
         from transformers import logging as trans_log
@@ -220,14 +388,24 @@ class MushroomImageEncoder:
             self.clip_model = CLIPModel.from_pretrained(model_name).to(self.device)
             self.clip_model.eval()
         except Exception as e:
-            logger.error(f"无法加载CLIP模型 '{model_name}': {e}")
+            _encoder_log(
+                "VISION_CLIP_MODEL_LOAD_FAILED",
+                "CLIP 模型加载失败",
+                level="ERROR",
+                model_name=model_name,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             if model_name == "openai/clip-vit-base-patch32":
-                logger.critical(
-                    f"\n❌ 模型加载失败！\n"
-                    f"系统尝试从 HuggingFace 下载模型但连接超时。\n"
-                    f"请手动下载 'openai/clip-vit-base-patch32' 模型并保存到以下位置之一:\n"
-                    f"1. {container_model_path} (容器环境)\n"
-                    f"2. {local_model_path} (本地开发环境)\n"
+                _encoder_log(
+                    "VISION_CLIP_MODEL_MANUAL_DOWNLOAD_REQUIRED",
+                    "默认 CLIP 模型不可用，需要手动放置本地模型文件",
+                    level="CRITICAL",
+                    model_name=model_name,
+                    container_model_path=str(container_model_path),
+                    local_model_path=str(local_model_path),
+                    status="failed",
                 )
             raise RuntimeError(f"Failed to load CLIP model: {e}") from e
 
@@ -235,15 +413,34 @@ class MushroomImageEncoder:
         trans_log.set_verbosity_warning()
         warnings.resetwarnings()
 
-        logger.debug("CLIP模型加载完成")
+        _encoder_log(
+            "VISION_CLIP_MODEL_READY",
+            "CLIP 模型加载完成",
+            level="DEBUG",
+            model_name=model_name,
+            device=str(self.device),
+            status="success",
+        )
 
     def _init_env_processor(self):
         """初始化环境数据处理器"""
         try:
             self.env_processor = create_env_data_processor()
-            logger.debug("环境数据处理器初始化完成")
+            _encoder_log(
+                "VISION_ENV_PROCESSOR_READY",
+                "环境数据处理器初始化完成",
+                level="DEBUG",
+                status="success",
+            )
         except Exception as e:
-            logger.warning(f"环境数据处理器初始化失败: {e}")
+            _encoder_log(
+                "VISION_ENV_PROCESSOR_INIT_FAILED",
+                "环境数据处理器初始化失败",
+                level="WARNING",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             self.env_processor = None
 
     def _init_llama_client(self):
@@ -253,34 +450,98 @@ class MushroomImageEncoder:
             # Dynaconf 将 'llama-vl' 转换为 'llama_vl'
             if hasattr(settings, "llama_vl"):
                 self.llama_config = settings.llama_vl
-                logger.debug("使用 llama-vl 配置")
+                _encoder_log(
+                    "VISION_LLAMA_CONFIG_READY",
+                    "已加载 llama-vl 配置",
+                    level="DEBUG",
+                )
             else:
-                logger.warning("未找到 LLaMA-VL 配置，视觉描述功能将不可用")
+                _encoder_log(
+                    "VISION_LLAMA_CONFIG_MISSING",
+                    "未找到 LLaMA-VL 配置，视觉描述功能不可用",
+                    level="WARNING",
+                    status="skipped",
+                )
                 self.llama_client = False
                 return
 
             # 检查是否启用LLaMA
             if hasattr(self.llama_config, "enabled") and not self.llama_config.enabled:
-                logger.debug("LLaMA-VL已禁用")
+                _encoder_log(
+                    "VISION_LLAMA_DISABLED",
+                    "LLaMA-VL 已禁用",
+                    level="DEBUG",
+                    status="skipped",
+                )
                 self.llama_client = False
                 return
 
             # 标记LLaMA客户端可用
             self.llama_client = True
-            logger.debug(
-                f"LLaMA-VL客户端初始化完成 | 模型: {getattr(self.llama_config, 'model', 'unknown')} | "
-                f"地址: {getattr(self.llama_config, 'llama_host', 'localhost')}:{getattr(self.llama_config, 'llama_port', '7001')}"
+            _encoder_log(
+                "VISION_LLAMA_CLIENT_READY",
+                "LLaMA-VL 客户端初始化完成",
+                level="DEBUG",
+                status="success",
+                model_name=getattr(self.llama_config, "model", "unknown"),
+                endpoint=(
+                    f"{getattr(self.llama_config, 'llama_host', 'localhost')}:"
+                    f"{getattr(self.llama_config, 'llama_port', '7001')}"
+                ),
             )
 
         except Exception as e:
-            logger.warning(f"LLaMA-VL客户端初始化失败: {e}")
+            _encoder_log(
+                "VISION_LLAMA_CLIENT_INIT_FAILED",
+                "LLaMA-VL 客户端初始化失败",
+                level="WARNING",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             self.llama_client = False
+
+    def _get_llama_generation_options(self) -> dict[str, Any]:
+        """从 llama_vl 配置读取采样参数。"""
+        options: dict[str, Any] = {
+            "temperature": getattr(self.llama_config, "temperature", 0.7),
+            "max_tokens": getattr(self.llama_config, "max_tokens", 1024),
+            "top_p": getattr(self.llama_config, "top_p", 0.9),
+        }
+
+        for key in (
+            "top_k",
+            "min_p",
+            "presence_penalty",
+            "repetition_penalty",
+        ):
+            value = getattr(self.llama_config, key, None)
+            if value is not None:
+                options[key] = value
+
+        return options
+
+    def _get_llama_extra_body(self, model_name: str) -> dict[str, Any] | None:
+        """为 Qwen3 系列关闭 think/reasoning 输出。"""
+        model_lower = str(model_name).lower()
+        if model_lower == "llama-mushroom-medium" or "qwen3" in model_lower:
+            return {
+                "enable_thinking": False,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+        return None
 
     def _apply_prompt_length_guard(self, prompt_text: str) -> str:
         """提示词长度守卫：过长时切换紧凑版提示词。"""
         normalized = str(prompt_text) if prompt_text is not None else ""
         if len(normalized) > 2600:
-            logger.warning("[LLAMA-API] 提示词过长，使用紧凑版提示词以避免接口拒绝")
+            _encoder_log(
+                "VISION_LLAMA_PROMPT_COMPACTED",
+                "提示词过长，切换到紧凑版提示词",
+                level="WARNING",
+                status="partial",
+                total_items=len(normalized),
+            )
             return self._build_compact_v15_prompt()
         return normalized
 
@@ -351,11 +612,24 @@ class MushroomImageEncoder:
         # 绑定专用logger
         perf_logger = logger.bind(type="llama_performance")
 
+        _encoder_log(
+            "VISION_LLAMA_API_START",
+            "开始调用 LLaMA 视觉接口",
+            status="running",
+            run_id=request_id,
+            total_items=len(image_data),
+        )
+
         try:
             # 从API动态获取提示词，如果失败则使用配置文件中的默认值
             prompt = self.get_data.get_mushroom_prompt()
             if not prompt:
-                logger.warning("[LLAMA-API] 无法获取提示词，使用配置文件中的默认值")
+                _encoder_log(
+                    "VISION_LLAMA_PROMPT_FALLBACK",
+                    "无法获取动态提示词，改用默认提示词",
+                    level="WARNING",
+                    status="fallback",
+                )
                 # 尝试从配置获取，如果没有则使用默认值
                 prompt = getattr(
                     self.llama_config,
@@ -367,9 +641,7 @@ class MushroomImageEncoder:
             model = getattr(self.llama_config, "model", "qwen/qwen3-vl-2b")
             model_name = model  # 记录用于日志
 
-            temperature = getattr(self.llama_config, "temperature", 0.7)
-            max_tokens = getattr(self.llama_config, "max_tokens", 1024)
-            top_p = getattr(self.llama_config, "top_p", 0.9)
+            generation_options = self._get_llama_generation_options()
 
             messages = []
             last_user_index = None
@@ -433,12 +705,14 @@ class MushroomImageEncoder:
             payload = {
                 "model": model,
                 "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": temperature,
-                "top_p": top_p,
                 "stream": False,
                 "response_format": {"type": "text"},
             }
+            payload.update(generation_options)
+
+            extra_body = self._get_llama_extra_body(model)
+            if extra_body:
+                payload["extra_body"] = extra_body
 
             headers = {"Content-Type": "application/json"}
 
@@ -501,12 +775,13 @@ class MushroomImageEncoder:
             span_cm = None
             span = None
             try:
+                import base64
+                import copy
+                import os
+                import tempfile
+
                 import mlflow
                 from mlflow.tracing.utils.prompt import TraceTagKey
-                import copy
-                import base64
-                import tempfile
-                import os
 
                 span_cm = mlflow.start_span(
                     name="llama_chat_completions", span_type="LLM"
@@ -565,11 +840,23 @@ class MushroomImageEncoder:
                                             compressed_http_url
                                         )
                     except Exception as e:
-                        logger.debug(
-                            f"[LLAMA-API] Failed to log image artifact for trace: {e}"
+                        _encoder_log(
+                            "VISION_LLAMA_TRACE_ARTIFACT_FAILED",
+                            "写入 MLflow 图像 artifact 失败",
+                            level="DEBUG",
+                            status="partial",
+                            run_id=request_id,
+                            error_type=type(e).__name__,
+                            error_message=str(e),
                         )
                 elif mlflow.active_run() and env == "production":
-                    logger.debug("[LLAMA-API] 生产环境，跳过MLflow图像artifact写入")
+                    _encoder_log(
+                        "VISION_LLAMA_TRACE_ARTIFACT_SKIPPED",
+                        "生产环境跳过 MLflow 图像 artifact 写入",
+                        level="DEBUG",
+                        status="skipped",
+                        run_id=request_id,
+                    )
 
                 span.set_inputs(trace_payload)
 
@@ -589,15 +876,40 @@ class MushroomImageEncoder:
                     except Exception:
                         pass
             except Exception as e:
-                logger.debug(f"[LLAMA-API] MLflow trace setup failed: {e}")
+                _encoder_log(
+                    "VISION_LLAMA_TRACE_SETUP_FAILED",
+                    "MLflow trace 初始化失败",
+                    level="DEBUG",
+                    status="partial",
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                )
                 if span_cm:
                     span_cm.__exit__(None, None, None)
                 span_cm = None
                 span = None
 
             try:
+                _encoder_log(
+                    "VISION_LLAMA_REQUEST_SENT",
+                    "LLaMA 请求已发送",
+                    model_name=model,
+                    run_id=request_id,
+                    timeout_sec=timeout,
+                    status="running",
+                    has_extra_body=bool(extra_body),
+                )
+                request_start = time.time()
                 resp = requests.post(
                     base_url, json=payload, headers=headers, timeout=timeout
+                )
+                _encoder_log(
+                    "VISION_LLAMA_RESPONSE_RECEIVED",
+                    "LLaMA 请求已返回",
+                    status="success" if resp.status_code == 200 else "failed",
+                    run_id=request_id,
+                    error_code=f"http_{resp.status_code}",
+                    duration_ms=round((time.time() - request_start) * 1000, 2),
                 )
                 if span:
                     if resp.status_code == 200:
@@ -611,8 +923,12 @@ class MushroomImageEncoder:
                     resp.status_code == 400
                     and "failed to process image" in (resp.text or "").lower()
                 ):
-                    logger.warning(
-                        "[LLAMA-API] 主提示词请求被拒绝，使用最小兼容提示词重试一次"
+                    _encoder_log(
+                        "VISION_LLAMA_REQUEST_RETRY_MINIMAL",
+                        "主提示词请求被拒绝，使用最小兼容提示词重试一次",
+                        level="WARNING",
+                        status="retrying",
+                        run_id=request_id,
                     )
                     fallback_payload = {
                         "model": model,
@@ -633,12 +949,12 @@ class MushroomImageEncoder:
                                 ],
                             }
                         ],
-                        "max_tokens": max_tokens,
-                        "temperature": temperature,
-                        "top_p": top_p,
                         "stream": False,
                         "response_format": {"type": "text"},
                     }
+                    fallback_payload.update(generation_options)
+                    if extra_body:
+                        fallback_payload["extra_body"] = extra_body
                     resp = requests.post(
                         base_url,
                         json=fallback_payload,
@@ -653,7 +969,7 @@ class MushroomImageEncoder:
                             span.set_outputs(
                                 {"status_code": resp.status_code, "text": resp.text}
                             )
-            except Exception as e:
+            except Exception:
                 import sys
 
                 if span_cm:
@@ -695,7 +1011,14 @@ class MushroomImageEncoder:
                     ):
                         status = "failed"
                         error_details = f"Missing required fields. Keys found: {list(llama_result.keys())}"
-                        logger.error(f"[LLAMA-001] 响应缺少必需字段 | {error_details}")
+                        _encoder_log(
+                            "VISION_LLAMA_RESPONSE_REQUIRED_FIELDS_MISSING",
+                            "LLaMA 响应缺少必需字段",
+                            level="ERROR",
+                            status="failed",
+                            run_id=request_id,
+                            error_message=error_details,
+                        )
                         return {
                             "growth_stage_description": "",
                             "image_quality_score": None,
@@ -709,18 +1032,34 @@ class MushroomImageEncoder:
 
                     # 验证质量评分范围
                     if not isinstance(quality_score, (int, float)):
-                        logger.warning(
-                            f"[LLAMA-002] 质量评分类型无效 | 类型: {type(quality_score)}"
+                        _encoder_log(
+                            "VISION_LLAMA_SCORE_TYPE_INVALID",
+                            "LLaMA 质量评分类型无效，已置空",
+                            level="WARNING",
+                            status="partial",
+                            run_id=request_id,
+                            error_message=str(type(quality_score)),
                         )
                         quality_score = None
                     elif quality_score < 0 or quality_score > 100:
-                        logger.warning(
-                            f"[LLAMA-003] 质量评分超出范围 | 评分: {quality_score}"
+                        _encoder_log(
+                            "VISION_LLAMA_SCORE_OUT_OF_RANGE",
+                            "LLaMA 质量评分超出范围，已裁剪",
+                            level="WARNING",
+                            status="partial",
+                            run_id=request_id,
+                            score=float(quality_score),
                         )
                         quality_score = max(0, min(100, quality_score))
 
-                    logger.trace(
-                        f"LLaMA解析成功: 质量评分={quality_score}, 中文描述={chinese_description}"
+                    _encoder_log(
+                        "VISION_LLAMA_PARSE_OK",
+                        "LLaMA 响应解析成功",
+                        level="DEBUG",
+                        status="success",
+                        run_id=request_id,
+                        score=quality_score,
+                        has_chinese_description=bool(chinese_description),
                     )
                     status = "success"
                     return {
@@ -732,8 +1071,15 @@ class MushroomImageEncoder:
                 except json.JSONDecodeError as e:
                     status = "failed"
                     error_details = f"JSON parse error: {str(e)}"
-                    logger.error(
-                        f"[LLAMA-004] JSON解析失败 | 错误: {e} | 内容: {content[:100]}..."
+                    _encoder_log(
+                        "VISION_LLAMA_JSON_PARSE_FAILED",
+                        "LLaMA 响应 JSON 解析失败",
+                        level="ERROR",
+                        status="failed",
+                        run_id=request_id,
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                        response_preview=content[:100],
                     )
                     return {
                         "growth_stage_description": "",
@@ -743,7 +1089,14 @@ class MushroomImageEncoder:
                 except KeyError as e:
                     status = "failed"
                     error_details = f"Missing key: {str(e)}"
-                    logger.error(f"[LLAMA-005] 响应缺少键 | 键: {e}")
+                    _encoder_log(
+                        "VISION_LLAMA_RESPONSE_KEY_MISSING",
+                        "LLaMA 响应缺少键",
+                        level="ERROR",
+                        status="failed",
+                        run_id=request_id,
+                        error_message=str(e),
+                    )
                     return {
                         "growth_stage_description": "",
                         "image_quality_score": None,
@@ -752,8 +1105,14 @@ class MushroomImageEncoder:
             else:
                 status = "failed"
                 error_details = f"HTTP {resp.status_code}: {resp.text[:200]}"
-                logger.error(
-                    f"[LLAMA-006] API调用失败 | 状态码: {resp.status_code} | 响应: {resp.text[:200]}"
+                _encoder_log(
+                    "VISION_LLAMA_HTTP_FAILED",
+                    "LLaMA API 调用失败",
+                    level="ERROR",
+                    status="failed",
+                    run_id=request_id,
+                    error_code=f"http_{resp.status_code}",
+                    error_message=resp.text[:200],
                 )
                 return {
                     "growth_stage_description": "",
@@ -764,8 +1123,13 @@ class MushroomImageEncoder:
         except requests.exceptions.Timeout:
             status = "failed"
             error_details = "Request timed out"
-            logger.warning(
-                f"[LLAMA-007] API超时 | 超时时间: {getattr(self.llama_config, 'timeout', 600)}秒"
+            _encoder_log(
+                "VISION_LLAMA_TIMEOUT",
+                "LLaMA API 请求超时",
+                level="WARNING",
+                status="failed",
+                run_id=request_id,
+                timeout_sec=getattr(self.llama_config, "timeout", 600),
             )
             return {
                 "growth_stage_description": "",
@@ -775,7 +1139,15 @@ class MushroomImageEncoder:
         except requests.exceptions.ConnectionError as e:
             status = "failed"
             error_details = f"Connection error: {str(e)}"
-            logger.warning(f"[LLAMA-008] 连接错误 | 错误: {e}")
+            _encoder_log(
+                "VISION_LLAMA_CONNECTION_ERROR",
+                "LLaMA API 连接错误",
+                level="WARNING",
+                status="failed",
+                run_id=request_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return {
                 "growth_stage_description": "",
                 "image_quality_score": None,
@@ -784,7 +1156,15 @@ class MushroomImageEncoder:
         except Exception as e:
             status = "failed"
             error_details = f"Unexpected error: {str(e)}"
-            logger.error(f"[LLAMA-009] 调用异常 | 错误: {e}")
+            _encoder_log(
+                "VISION_LLAMA_UNEXPECTED_ERROR",
+                "LLaMA API 调用异常",
+                level="ERROR",
+                status="failed",
+                run_id=request_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return {
                 "growth_stage_description": "",
                 "image_quality_score": None,
@@ -815,14 +1195,27 @@ class MushroomImageEncoder:
 
                 # 检查阈值并触发警告
                 if duration_ms > self.time_threshold:
-                    logger.warning(
-                        f"[LLAMA-PERF] 请求耗时过长 | Duration: {duration_ms:.2f}ms > {self.time_threshold}ms | "
-                        f"Model: {model_name} | ID: {request_id}"
+                    _encoder_log(
+                        "VISION_LLAMA_PERF_SLOW",
+                        "LLaMA 请求耗时超过阈值",
+                        level="WARNING",
+                        status="partial",
+                        run_id=request_id,
+                        duration_ms=round(duration_ms, 2),
+                        model_name=model_name,
                     )
             except Exception as log_err:
-                logger.error(f"写入性能日志失败: {log_err}")
+                _encoder_log(
+                    "VISION_LLAMA_PERF_LOG_FAILED",
+                    "写入 LLaMA 性能日志失败",
+                    level="ERROR",
+                    status="failed",
+                    run_id=request_id,
+                    error_type=type(log_err).__name__,
+                    error_message=str(log_err),
+                )
 
-    def _resize_image_for_llama(self, image: Image.Image) -> Image.Image:
+    def _resize_image_for_llama(self, image: PILImageType) -> PILImageType:
         """
         将图像缩放到指定分辨率用于LLaMA处理，减少运算量
 
@@ -854,26 +1247,43 @@ class MushroomImageEncoder:
             new_height = max(1, int(original_height * scale_ratio))
 
             if new_width == original_width and new_height == original_height:
-                logger.debug(
-                    f"Image already within target bounds, keeping original: {original_width}x{original_height}"
+                _encoder_log(
+                    "VISION_LLAMA_IMAGE_RESIZE_SKIPPED",
+                    "图像已在目标尺寸范围内，保留原始分辨率",
+                    level="DEBUG",
+                    original_width=original_width,
+                    original_height=original_height,
                 )
                 return image
 
             resized_image = image.resize(
                 (new_width, new_height), Image.Resampling.LANCZOS
             )
-            logger.debug(
-                f"Resized image for LLaMA: {original_width}x{original_height} -> {new_width}x{new_height}"
+            _encoder_log(
+                "VISION_LLAMA_IMAGE_RESIZED",
+                "已为 LLaMA 缩放图像尺寸",
+                level="DEBUG",
+                original_width=original_width,
+                original_height=original_height,
+                resized_width=new_width,
+                resized_height=new_height,
             )
 
             return resized_image
 
         except Exception as e:
-            logger.warning(f"Failed to resize image for LLaMA, using original: {e}")
+            _encoder_log(
+                "VISION_LLAMA_IMAGE_RESIZE_FAILED",
+                "LLaMA 图像缩放失败，回退到原图",
+                level="WARNING",
+                status="fallback",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return image
 
     def _compute_ssim(
-        self, source_image: Image.Image, target_image: Image.Image
+        self, source_image: PILImageType, target_image: PILImageType
     ) -> float:
         """计算两张图像的全局SSIM（灰度）。"""
         src_gray = np.asarray(source_image.convert("L"), dtype=np.float64)
@@ -904,7 +1314,7 @@ class MushroomImageEncoder:
             return 0.0
         return float(max(0.0, min(1.0, numerator / denominator)))
 
-    def _encode_jpeg_bytes(self, image: Image.Image, quality: int) -> bytes:
+    def _encode_jpeg_bytes(self, image: PILImageType, quality: int) -> bytes:
         """将图像按指定质量编码为JPEG字节流。"""
         buffer = io.BytesIO()
         image.save(
@@ -917,7 +1327,7 @@ class MushroomImageEncoder:
 
     def _binary_search_quality(
         self,
-        source_image: Image.Image,
+        source_image: PILImageType,
         max_image_bytes: int,
         min_jpeg_quality: int,
         max_jpeg_quality: int,
@@ -970,8 +1380,8 @@ class MushroomImageEncoder:
 
     def _encode_image_for_llama_with_meta(
         self,
-        image: Image.Image,
-    ) -> tuple[str, bytes, Image.Image]:
+        image: PILImageType,
+    ) -> tuple[str, bytes, PILImageType]:
         """将图像编码为适合LLaMA-VL的base64，含体积/质量双约束。"""
         resized_image = self._resize_image_for_llama(image)
 
@@ -1014,10 +1424,17 @@ class MushroomImageEncoder:
 
             if len(image_bytes) <= max_image_bytes:
                 if attempt > 1 or current_ssim < ssim_threshold:
-                    logger.warning(
-                        "[LLAMA-IMG] 自适应压缩完成 | "
-                        f"attempt={attempt}, size={current_image.size}, quality={selected_quality}, "
-                        f"bytes={len(image_bytes)}, ssim={current_ssim:.4f}, target_ssim={ssim_threshold:.4f}"
+                    _encoder_log(
+                        "VISION_LLAMA_ADAPTIVE_COMPRESSION_APPLIED",
+                        "图像已完成自适应压缩",
+                        level="WARNING",
+                        attempt=attempt,
+                        image_size=str(current_image.size),
+                        jpeg_quality=selected_quality,
+                        image_bytes=len(image_bytes),
+                        ssim=round(current_ssim, 4),
+                        target_ssim=round(ssim_threshold, 4),
+                        status="success",
                     )
                 return (
                     base64.b64encode(image_bytes).decode("utf-8"),
@@ -1051,12 +1468,12 @@ class MushroomImageEncoder:
             resized_image,
         )
 
-    def _encode_image_for_llama(self, image: Image.Image) -> str:
+    def _encode_image_for_llama(self, image: PILImageType) -> str:
         """兼容接口：仅返回base64编码字符串。"""
         image_data, _, _ = self._encode_image_for_llama_with_meta(image)
         return image_data
 
-    def _get_llama_description(self, image: Image.Image) -> dict[str, Any]:
+    def _get_llama_description(self, image: PILImageType) -> dict[str, Any]:
         """
         使用LLaMA模型获取蘑菇生长情况描述和图像质量评分
 
@@ -1068,8 +1485,11 @@ class MushroomImageEncoder:
             格式: {"growth_stage_description": str, "image_quality_score": float or None, "chinese_description": str or None}
         """
         if not self.llama_client:
-            logger.warning(
-                "LLaMA client not available, skipping description generation"
+            _encoder_log(
+                "VISION_LLAMA_DESCRIPTION_SKIPPED",
+                "LLaMA 客户端不可用，跳过描述生成",
+                level="WARNING",
+                status="skipped",
             )
             return {
                 "growth_stage_description": "",
@@ -1100,13 +1520,25 @@ class MushroomImageEncoder:
                 image_data,
                 mlflow_images=mlflow_images,
             )
-            logger.trace(
-                f"LLaMA result: description='{result.get('growth_stage_description', '')[:50]}...', quality_score={result.get('image_quality_score')}"
+            _encoder_log(
+                "VISION_LLAMA_DESCRIPTION_READY",
+                "已生成 LLaMA 描述结果",
+                level="DEBUG",
+                status="success",
+                response_preview=result.get("growth_stage_description", "")[:50],
+                score=result.get("image_quality_score"),
             )
             return result
 
         except Exception as e:
-            logger.error(f"Failed to get LLaMA description: {e}")
+            _encoder_log(
+                "VISION_LLAMA_DESCRIPTION_FAILED",
+                "获取 LLaMA 描述失败",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return {
                 "growth_stage_description": "",
                 "image_quality_score": None,
@@ -1114,7 +1546,7 @@ class MushroomImageEncoder:
             }
 
     def get_multimodal_embedding(
-        self, image: Image.Image, text_description: str
+        self, image: PILImageType, text_description: str
     ) -> list[float] | None:
         """
         获取图像和文本的多模态CLIP向量编码
@@ -1127,6 +1559,9 @@ class MushroomImageEncoder:
             512维联合向量列表，失败返回None
         """
         try:
+            self._ensure_clip_model_ready()
+            torch_module = self._ensure_torch_imported()
+
             # 确保图像为RGB格式
             if image.mode != "RGB":
                 image = image.convert("RGB")
@@ -1141,7 +1576,7 @@ class MushroomImageEncoder:
             ).to(self.device)
 
             # 获取图像和文本特征
-            with torch.no_grad():
+            with torch_module.no_grad():
                 image_features = self.clip_model.get_image_features(
                     pixel_values=inputs["pixel_values"]
                 )
@@ -1172,7 +1607,7 @@ class MushroomImageEncoder:
                 and image_features.pooler_output is not None
             ):
                 image_features = image_features.pooler_output
-            elif torch.is_tensor(image_features):
+            elif torch_module.is_tensor(image_features):
                 # Already a tensor, use as-is
                 pass
             else:
@@ -1195,7 +1630,7 @@ class MushroomImageEncoder:
                 and text_features.pooler_output is not None
             ):
                 text_features = text_features.pooler_output
-            elif torch.is_tensor(text_features):
+            elif torch_module.is_tensor(text_features):
                 # Already a tensor, use as-is
                 pass
             else:
@@ -1219,16 +1654,28 @@ class MushroomImageEncoder:
             embedding = multimodal_features.cpu().numpy()[0]
             embedding = embedding / np.linalg.norm(embedding)
 
-            logger.trace(
-                f"Generated multimodal embedding for text: '{text_description[:50]}...'"
+            _encoder_log(
+                "VISION_MULTIMODAL_EMBEDDING_READY",
+                "多模态 embedding 生成完成",
+                level="DEBUG",
+                text_preview=text_description[:50],
+                embedding_dim=len(embedding.tolist()),
+                status="success",
             )
             return embedding.tolist()
 
         except Exception as e:
-            logger.error(f"Failed to get multimodal embedding: {e}")
+            _encoder_log(
+                "VISION_MULTIMODAL_EMBEDDING_FAILED",
+                "多模态 embedding 生成失败",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return None
 
-    def get_image_embedding(self, image: Image.Image) -> list[float] | None:
+    def get_image_embedding(self, image: PILImageType) -> list[float] | None:
         """
         获取纯图像的CLIP向量编码（保留作为备用方法）
 
@@ -1239,6 +1686,9 @@ class MushroomImageEncoder:
             512维向量列表，失败返回None
         """
         try:
+            self._ensure_clip_model_ready()
+            torch_module = self._ensure_torch_imported()
+
             # 确保图像为RGB格式
             if image.mode != "RGB":
                 image = image.convert("RGB")
@@ -1249,7 +1699,7 @@ class MushroomImageEncoder:
             ).to(self.device)
 
             # 获取图像特征
-            with torch.no_grad():
+            with torch_module.no_grad():
                 image_features = self.clip_model.get_image_features(**inputs)
 
             # 确保特征是tensor格式，处理可能的BaseModelOutputWithPooling对象
@@ -1269,7 +1719,7 @@ class MushroomImageEncoder:
                 and image_features.pooler_output is not None
             ):
                 image_features = image_features.pooler_output
-            elif torch.is_tensor(image_features):
+            elif torch_module.is_tensor(image_features):
                 # Already a tensor, use as-is
                 pass
             else:
@@ -1283,7 +1733,14 @@ class MushroomImageEncoder:
             return embedding.tolist()
 
         except Exception as e:
-            logger.error(f"Failed to get image embedding: {e}")
+            _encoder_log(
+                "VISION_IMAGE_EMBEDDING_FAILED",
+                "图像 embedding 生成失败",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return None
 
     def parse_time_from_path(
@@ -1328,8 +1785,12 @@ class MushroomImageEncoder:
             结构化的环境参数字典，失败返回None
         """
         if not self.env_processor:
-            logger.warning(
-                "Environment data processor not initialized, skipping environment data retrieval"
+            _encoder_log(
+                "VISION_ENV_PROCESSOR_UNAVAILABLE",
+                "环境数据处理器未初始化，跳过环境数据查询",
+                level="WARNING",
+                room_id=mushroom_id,
+                status="skipped",
             )
             return None
 
@@ -1343,8 +1804,14 @@ class MushroomImageEncoder:
             # 映射库房号：MinIO中的库房号 -> 环境配置中的库房号
             mapped_room_id = self._map_room_id(mushroom_id)
 
-            logger.trace(
-                f"Querying environment data for room {mushroom_id} (mapped to {mapped_room_id}) at time {collection_time}"
+            _encoder_log(
+                "VISION_ENV_QUERY_START",
+                "开始查询图像对应环境数据",
+                level="DEBUG",
+                room_id=mushroom_id,
+                mapped_room_id=mapped_room_id,
+                trigger_time=collection_time.isoformat(),
+                status="running",
             )
 
             # 使用映射后的库房号查询环境数据
@@ -1356,17 +1823,39 @@ class MushroomImageEncoder:
             )
 
             if env_data:
-                logger.trace(f"获取环境数据成功: 库房{mushroom_id}")
+                _encoder_log(
+                    "VISION_ENV_QUERY_OK",
+                    "已获取图像对应环境数据",
+                    level="DEBUG",
+                    room_id=mushroom_id,
+                    mapped_room_id=mapped_room_id,
+                    status="success",
+                )
                 return env_data
             else:
-                logger.trace(f"未找到环境数据: 库房{mushroom_id}")
+                _encoder_log(
+                    "VISION_ENV_QUERY_EMPTY",
+                    "未找到图像对应环境数据",
+                    level="DEBUG",
+                    room_id=mushroom_id,
+                    mapped_room_id=mapped_room_id,
+                    status="skipped",
+                )
                 return None
 
         except Exception as e:
-            logger.error(f"Failed to get environment data for room {mushroom_id}: {e}")
+            _encoder_log(
+                "VISION_ENV_QUERY_FAILED",
+                "查询图像对应环境数据失败",
+                level="ERROR",
+                room_id=mushroom_id,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return None
 
-    def get_growth_stage_analysis(self, image: Image.Image) -> dict[str, Any]:
+    def get_growth_stage_analysis(self, image: PILImageType) -> dict[str, Any]:
         """
         获取图像的生长阶段分析（公开接口）
 
@@ -1399,10 +1888,24 @@ class MushroomImageEncoder:
             处理结果字典
         """
         try:
+            _encoder_log(
+                "VISION_SINGLE_IMAGE_START",
+                "开始处理单张图像",
+                room_id=image_info.mushroom_id,
+                image_name=image_info.file_name,
+                status="running",
+            )
             # 1. 从MinIO获取图像
             image = self.minio_client.get_image(image_info.file_path)
             if image is None:
-                logger.warning(f"[IMG-010] 获取图像失败 | 文件: {image_info.file_name}")
+                _encoder_log(
+                    "VISION_SINGLE_IMAGE_FETCH_FAILED",
+                    "从 MinIO 获取图像失败",
+                    level="WARNING",
+                    room_id=image_info.mushroom_id,
+                    image_name=image_info.file_name,
+                    status="failed",
+                )
                 return None
 
             # 2. 解析时间信息
@@ -1413,12 +1916,24 @@ class MushroomImageEncoder:
 
             # 4. 检查是否获取到完整环境数据
             if env_data is None:
-                logger.debug(f"无环境数据，使用纯图像编码: {image_info.file_name}")
+                _encoder_log(
+                    "VISION_SINGLE_IMAGE_NO_ENV_DATA",
+                    "未获取到环境数据，切换纯图像编码路径",
+                    level="DEBUG",
+                    room_id=image_info.mushroom_id,
+                    image_name=image_info.file_name,
+                    status="partial",
+                )
                 # 如果没有环境数据，使用纯图像编码
                 embedding = self.get_image_embedding(image)
                 if embedding is None:
-                    logger.error(
-                        f"[IMG-011] 图像编码失败 | 文件: {image_info.file_name}"
+                    _encoder_log(
+                        "VISION_SINGLE_IMAGE_EMBEDDING_FAILED",
+                        "纯图像编码失败",
+                        level="ERROR",
+                        room_id=image_info.mushroom_id,
+                        image_name=image_info.file_name,
+                        status="failed",
                     )
                     return None
 
@@ -1434,16 +1949,26 @@ class MushroomImageEncoder:
 
             # 5. LLaMA服务可用性检查 (Strict Mode)
             if not self.llama_client:
-                logger.warning(
-                    f"[IMG-SKIP] LLaMA服务不可用，跳过处理 | 文件: {image_info.file_name}"
+                _encoder_log(
+                    "VISION_SINGLE_IMAGE_LLAMA_UNAVAILABLE",
+                    "LLaMA 服务不可用，跳过图像处理",
+                    level="WARNING",
+                    room_id=image_info.mushroom_id,
+                    image_name=image_info.file_name,
+                    status="skipped",
                 )
                 return None
 
             # 6. 使用LLaMA模型获取蘑菇生长情况描述和图像质量评分
             if precomputed_analysis:
                 llama_result = precomputed_analysis
-                logger.trace(
-                    f"使用预计算的分析结果: score={llama_result.get('image_quality_score')}"
+                _encoder_log(
+                    "VISION_SINGLE_IMAGE_PRECOMPUTED_ANALYSIS",
+                    "使用预计算的 LLaMA 分析结果",
+                    level="DEBUG",
+                    room_id=image_info.mushroom_id,
+                    image_name=image_info.file_name,
+                    score=llama_result.get("image_quality_score"),
                 )
             else:
                 llama_result = self._get_llama_description(image)
@@ -1455,8 +1980,13 @@ class MushroomImageEncoder:
 
             # 7. 验证LLaMA结果 (No Degradation)
             if not growth_stage_description:
-                logger.warning(
-                    f"[IMG-SKIP] LLaMA未能生成描述，跳过处理 | 文件: {image_info.file_name}"
+                _encoder_log(
+                    "VISION_SINGLE_IMAGE_DESCRIPTION_EMPTY",
+                    "LLaMA 未生成有效描述，跳过处理",
+                    level="WARNING",
+                    room_id=image_info.mushroom_id,
+                    image_name=image_info.file_name,
+                    status="skipped",
                 )
                 return None
 
@@ -1467,12 +1997,23 @@ class MushroomImageEncoder:
                     and llama_quality_score < self.quality_threshold
                 ):
                     if self._allow_low_quality(growth_stage_description):
-                        logger.info(
-                            f"[IMG-QUALITY-OVERRIDE] 低质量但为早期生长阶段，继续处理 | 文件: {image_info.file_name}"
+                        _encoder_log(
+                            "VISION_SINGLE_IMAGE_QUALITY_OVERRIDE",
+                            "低质量但属于允许的早期生长阶段，继续处理",
+                            room_id=image_info.mushroom_id,
+                            image_name=image_info.file_name,
+                            score=llama_quality_score,
+                            status="partial",
                         )
                     else:
-                        logger.warning(
-                            f"[IMG-SKIP-QUALITY] 质量评分过低 ({llama_quality_score} < {self.quality_threshold}) | 文件: {image_info.file_name}"
+                        _encoder_log(
+                            "VISION_SINGLE_IMAGE_QUALITY_TOO_LOW",
+                            "图像质量评分过低，跳过处理",
+                            level="WARNING",
+                            room_id=image_info.mushroom_id,
+                            image_name=image_info.file_name,
+                            score=llama_quality_score,
+                            status="skipped",
                         )
                         return None
 
@@ -1480,8 +2021,14 @@ class MushroomImageEncoder:
             if self.required_keywords:
                 desc_lower = growth_stage_description.lower()
                 if not any(k.lower() in desc_lower for k in self.required_keywords):
-                    logger.warning(
-                        f"[IMG-SKIP-CONTENT] 未检测到相关特征 ({self.required_keywords}) | 描述: {growth_stage_description[:30]}... | 文件: {image_info.file_name}"
+                    _encoder_log(
+                        "VISION_SINGLE_IMAGE_REQUIRED_KEYWORDS_MISSING",
+                        "未检测到必需特征关键词，跳过处理",
+                        level="WARNING",
+                        room_id=image_info.mushroom_id,
+                        image_name=image_info.file_name,
+                        status="skipped",
+                        response_preview=growth_stage_description[:30],
                     )
                     return None
 
@@ -1493,7 +2040,13 @@ class MushroomImageEncoder:
 
             # 结合身份元数据和LLaMA生长阶段描述
             full_text_description = f"{identity_metadata} {growth_stage_description}"
-            logger.trace("使用组合描述: 身份+LLaMA")
+            _encoder_log(
+                "VISION_SINGLE_IMAGE_TEXT_COMPOSED",
+                "已完成身份元数据与 LLaMA 描述拼接",
+                level="DEBUG",
+                room_id=image_info.mushroom_id,
+                image_name=image_info.file_name,
+            )
 
             # 9. 使用多模态编码（图像 + 完整文本描述）
             if not self.clip_model or not self.clip_processor:
@@ -1521,7 +2074,14 @@ class MushroomImageEncoder:
             embedding = self.get_multimodal_embedding(image, full_text_description)
 
             if embedding is None:
-                logger.error(f"[IMG-012] 多模态编码失败 | 文件: {image_info.file_name}")
+                _encoder_log(
+                    "VISION_SINGLE_IMAGE_MULTIMODAL_FAILED",
+                    "多模态编码失败",
+                    level="ERROR",
+                    room_id=image_info.mushroom_id,
+                    image_name=image_info.file_name,
+                    status="failed",
+                )
                 return None
 
             # 8. 将描述和质量评分保存到环境数据中
@@ -1551,17 +2111,38 @@ class MushroomImageEncoder:
                 )
                 result["saved_to_db"] = success
                 if not success:
-                    logger.error(
-                        f"[IMG-013] 保存数据库失败 | 文件: {image_info.file_name}"
+                    _encoder_log(
+                        "VISION_SINGLE_IMAGE_DB_SAVE_FAILED",
+                        "单图处理结果保存数据库失败",
+                        level="ERROR",
+                        room_id=image_info.mushroom_id,
+                        image_name=image_info.file_name,
+                        status="failed",
                     )
             else:
                 result["saved_to_db"] = False
 
+            _encoder_log(
+                "VISION_SINGLE_IMAGE_FINISH",
+                "单张图像处理完成",
+                room_id=image_info.mushroom_id,
+                image_name=image_info.file_name,
+                status="success" if result.get("saved_to_db") else "partial",
+                stored_records=1 if result.get("saved_to_db") else 0,
+            )
+
             return result
 
         except Exception as e:
-            logger.error(
-                f"[IMG-014] 处理异常 | 文件: {image_info.file_name}, 错误: {e}"
+            _encoder_log(
+                "VISION_SINGLE_IMAGE_EXCEPTION",
+                "单张图像处理异常",
+                level="ERROR",
+                room_id=image_info.mushroom_id,
+                image_name=image_info.file_name,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
             )
             return None
 
@@ -1581,7 +2162,12 @@ class MushroomImageEncoder:
         if not images_data:
             return []
 
-        logger.info(f"[IMG-BATCH] 开始批处理 | 图片数: {len(images_data)}")
+        _encoder_log(
+            "VISION_BATCH_PROCESS_START",
+            "开始批量处理图像",
+            total_items=len(images_data),
+            status="running",
+        )
         batch_results = []
 
         try:
@@ -1617,8 +2203,13 @@ class MushroomImageEncoder:
             ]
             without_env_data = [item for item in batch_data if item["env_data"] is None]
 
-            logger.debug(
-                f"[IMG-BATCH] 数据分类 | 有环境数据: {len(with_env_data)}, 无环境数据: {len(without_env_data)}"
+            _encoder_log(
+                "VISION_BATCH_CLASSIFIED",
+                "批量图像已按环境数据分类",
+                level="DEBUG",
+                with_env_count=len(with_env_data),
+                without_env_count=len(without_env_data),
+                total_items=len(batch_data),
             )
 
             # 3. 批量处理有环境数据的图片
@@ -1633,15 +2224,32 @@ class MushroomImageEncoder:
                     self._process_batch_without_env_data(without_env_data, save_to_db)
                 )
 
-            logger.info(
-                f"[IMG-BATCH] 批处理完成 | 成功: {sum(1 for r in batch_results if r['success'])}, "
-                f"失败: {sum(1 for r in batch_results if not r['success'])}"
+            success_count = sum(1 for r in batch_results if r["success"])
+            failed_count = sum(1 for r in batch_results if not r["success"])
+            _encoder_log(
+                "VISION_BATCH_PROCESS_FINISH",
+                "批量图像处理完成",
+                total_items=len(batch_results),
+                successful_items=success_count,
+                failed_items=failed_count,
+                success_rate=round((success_count / len(batch_results) * 100), 2)
+                if batch_results
+                else 0.0,
+                status="success" if failed_count == 0 else "partial",
             )
 
             return batch_results
 
         except Exception as e:
-            logger.error(f"[IMG-BATCH] 批处理异常: {e}")
+            _encoder_log(
+                "VISION_BATCH_PROCESS_FAILED",
+                "批量图像处理异常，开始回退单张处理",
+                level="ERROR",
+                total_items=len(images_data),
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             # 回退到单张处理
             for img_data in images_data:
                 try:
@@ -1655,8 +2263,15 @@ class MushroomImageEncoder:
                         {"success": success, "image_info": img_data["image_info"]}
                     )
                 except Exception as e2:
-                    logger.error(
-                        f"[IMG-BATCH] 回退处理失败: {img_data['image_info'].file_name}, 错误: {e2}"
+                    _encoder_log(
+                        "VISION_BATCH_FALLBACK_ITEM_FAILED",
+                        "批量回退单张处理失败",
+                        level="ERROR",
+                        image_name=img_data["image_info"].file_name,
+                        room_id=img_data["image_info"].mushroom_id,
+                        status="failed",
+                        error_type=type(e2).__name__,
+                        error_message=str(e2),
                     )
                     batch_results.append(
                         {"success": False, "image_info": img_data["image_info"]}
@@ -1673,8 +2288,12 @@ class MushroomImageEncoder:
         try:
             # 0. Strict Check: LLaMA必须可用
             if not self.llama_client:
-                logger.warning(
-                    "[IMG-BATCH-SKIP] LLaMA服务不可用，跳过所有有环境数据的图片"
+                _encoder_log(
+                    "VISION_BATCH_ENV_LLAMA_UNAVAILABLE",
+                    "LLaMA 服务不可用，跳过有环境数据的批处理",
+                    level="WARNING",
+                    total_items=len(batch_data),
+                    status="skipped",
                 )
                 for item in batch_data:
                     results.append({"success": False, "image_info": item["image_info"]})
@@ -1713,8 +2332,13 @@ class MushroomImageEncoder:
 
                 # Strict Check: LLaMA描述必须存在
                 if not growth_stage_description:
-                    logger.warning(
-                        f"[IMG-BATCH-SKIP] LLaMA描述为空: {item['image_info'].file_name}"
+                    _encoder_log(
+                        "VISION_BATCH_ENV_ITEM_SKIPPED_NO_DESCRIPTION",
+                        "LLaMA 描述为空，跳过该图像",
+                        level="WARNING",
+                        image_name=item["image_info"].file_name,
+                        room_id=item["image_info"].mushroom_id,
+                        status="skipped",
                     )
                     results.append({"success": False, "image_info": item["image_info"]})
                     continue
@@ -1726,12 +2350,24 @@ class MushroomImageEncoder:
                         and llama_quality_score < self.quality_threshold
                     ):
                         if self._allow_low_quality(growth_stage_description):
-                            logger.info(
-                                f"[IMG-BATCH-QUALITY-OVERRIDE] 低质量但为早期生长阶段，继续处理 | {item['image_info'].file_name}"
+                            _encoder_log(
+                                "VISION_BATCH_ENV_LOW_QUALITY_OVERRIDDEN",
+                                "低质量图像因早期生长阶段规则被放行",
+                                image_name=item["image_info"].file_name,
+                                room_id=item["image_info"].mushroom_id,
+                                score=llama_quality_score,
+                                status="success",
                             )
                         else:
-                            logger.warning(
-                                f"[IMG-BATCH-SKIP-QUALITY] 质量评分过低 ({llama_quality_score}) | {item['image_info'].file_name}"
+                            _encoder_log(
+                                "VISION_BATCH_ENV_ITEM_SKIPPED_LOW_QUALITY",
+                                "质量评分低于阈值，跳过该图像",
+                                level="WARNING",
+                                image_name=item["image_info"].file_name,
+                                room_id=item["image_info"].mushroom_id,
+                                score=llama_quality_score,
+                                threshold=self.quality_threshold,
+                                status="skipped",
                             )
                             results.append(
                                 {"success": False, "image_info": item["image_info"]}
@@ -1742,8 +2378,14 @@ class MushroomImageEncoder:
                 if self.required_keywords:
                     desc_lower = growth_stage_description.lower()
                     if not any(k.lower() in desc_lower for k in self.required_keywords):
-                        logger.warning(
-                            f"[IMG-BATCH-SKIP-CONTENT] 未检测到相关特征 | {item['image_info'].file_name}"
+                        _encoder_log(
+                            "VISION_BATCH_ENV_ITEM_SKIPPED_CONTENT_MISMATCH",
+                            "未检测到要求的内容特征，跳过该图像",
+                            level="WARNING",
+                            image_name=item["image_info"].file_name,
+                            room_id=item["image_info"].mushroom_id,
+                            required_keywords=",".join(self.required_keywords),
+                            status="skipped",
                         )
                         results.append(
                             {"success": False, "image_info": item["image_info"]}
@@ -1778,8 +2420,13 @@ class MushroomImageEncoder:
                     embedding = embeddings[k] if k < len(embeddings) else None
 
                     if embedding is None:
-                        logger.error(
-                            f"[IMG-BATCH] 编码失败: {item['image_info'].file_name}"
+                        _encoder_log(
+                            "VISION_BATCH_ENV_ITEM_EMBEDDING_FAILED",
+                            "批量多模态编码失败",
+                            level="ERROR",
+                            image_name=item["image_info"].file_name,
+                            room_id=item["image_info"].mushroom_id,
+                            status="failed",
                         )
                         results.append(
                             {"success": False, "image_info": item["image_info"]}
@@ -1818,13 +2465,28 @@ class MushroomImageEncoder:
                     )
 
                 except Exception as e:
-                    logger.error(
-                        f"[IMG-BATCH] 处理单项失败: {item['image_info'].file_name}, 错误: {e}"
+                    _encoder_log(
+                        "VISION_BATCH_ENV_ITEM_FAILED",
+                        "批量处理单项失败",
+                        level="ERROR",
+                        image_name=item["image_info"].file_name,
+                        room_id=item["image_info"].mushroom_id,
+                        status="failed",
+                        error_type=type(e).__name__,
+                        error_message=str(e),
                     )
                     results.append({"success": False, "image_info": item["image_info"]})
 
         except Exception as e:
-            logger.error(f"[IMG-BATCH] 批量处理有环境数据失败: {e}")
+            _encoder_log(
+                "VISION_BATCH_ENV_FAILED",
+                "批量处理有环境数据图像失败，开始回退单张处理",
+                level="ERROR",
+                total_items=len(batch_data),
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             # 回退到单张处理
             for item in batch_data:
                 try:
@@ -1838,8 +2500,15 @@ class MushroomImageEncoder:
                         {"success": success, "image_info": item["image_info"]}
                     )
                 except Exception as e2:
-                    logger.error(
-                        f"[IMG-BATCH] 回退处理失败: {item['image_info'].file_name}, 错误: {e2}"
+                    _encoder_log(
+                        "VISION_BATCH_ENV_FALLBACK_ITEM_FAILED",
+                        "有环境数据批量处理回退单张失败",
+                        level="ERROR",
+                        image_name=item["image_info"].file_name,
+                        room_id=item["image_info"].mushroom_id,
+                        status="failed",
+                        error_type=type(e2).__name__,
+                        error_message=str(e2),
                     )
                     results.append({"success": False, "image_info": item["image_info"]})
 
@@ -1860,27 +2529,29 @@ class MushroomImageEncoder:
                 embedding = embeddings[i] if i < len(embeddings) else None
 
                 if embedding is None:
-                    logger.error(
-                        f"[IMG-BATCH] 纯图像编码失败: {item['image_info'].file_name}"
+                    _encoder_log(
+                        "VISION_BATCH_IMAGE_ITEM_EMBEDDING_FAILED",
+                        "纯图像批量编码失败",
+                        level="ERROR",
+                        image_name=item["image_info"].file_name,
+                        room_id=item["image_info"].mushroom_id,
+                        status="failed",
                     )
                     results.append({"success": False, "image_info": item["image_info"]})
                     continue
 
-                # 构建结果（无环境数据）
-                result = {
-                    "image_info": item["image_info"],
-                    "embedding": embedding,
-                    "time_info": item["time_info"],
-                    "environmental_data": None,
-                    "processed_at": datetime.now(),
-                    "saved_to_db": False,
-                    "skip_reason": "no_environment_data",
-                }
-
                 results.append({"success": True, "image_info": item["image_info"]})
 
         except Exception as e:
-            logger.error(f"[IMG-BATCH] 批量纯图像编码失败: {e}")
+            _encoder_log(
+                "VISION_BATCH_IMAGE_FAILED",
+                "纯图像批量编码失败，开始回退单张编码",
+                level="ERROR",
+                total_items=len(batch_data),
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             # 回退到单张处理
             for item in batch_data:
                 try:
@@ -1890,8 +2561,15 @@ class MushroomImageEncoder:
                         {"success": success, "image_info": item["image_info"]}
                     )
                 except Exception as e2:
-                    logger.error(
-                        f"[IMG-BATCH] 回退纯图像编码失败: {item['image_info'].file_name}, 错误: {e2}"
+                    _encoder_log(
+                        "VISION_BATCH_IMAGE_FALLBACK_ITEM_FAILED",
+                        "纯图像批量编码回退单张失败",
+                        level="ERROR",
+                        image_name=item["image_info"].file_name,
+                        room_id=item["image_info"].mushroom_id,
+                        status="failed",
+                        error_type=type(e2).__name__,
+                        error_message=str(e2),
                     )
                     results.append({"success": False, "image_info": item["image_info"]})
 
@@ -1904,6 +2582,9 @@ class MushroomImageEncoder:
         try:
             if not clip_inputs:
                 return []
+
+            self._ensure_clip_model_ready()
+            torch_module = self._ensure_torch_imported()
 
             # 准备批量输入
             images = [item["image"] for item in clip_inputs]
@@ -1926,7 +2607,7 @@ class MushroomImageEncoder:
             ).to(self.device)
 
             # 批量获取特征
-            with torch.no_grad():
+            with torch_module.no_grad():
                 image_features = self.clip_model.get_image_features(
                     pixel_values=inputs["pixel_values"]
                 )
@@ -1956,7 +2637,7 @@ class MushroomImageEncoder:
                 and image_features.pooler_output is not None
             ):
                 image_features = image_features.pooler_output
-            elif torch.is_tensor(image_features):
+            elif torch_module.is_tensor(image_features):
                 # Already a tensor, use as-is
                 pass
             else:
@@ -1979,7 +2660,7 @@ class MushroomImageEncoder:
                 and text_features.pooler_output is not None
             ):
                 text_features = text_features.pooler_output
-            elif torch.is_tensor(text_features):
+            elif torch_module.is_tensor(text_features):
                 # Already a tensor, use as-is
                 pass
             else:
@@ -2004,20 +2685,37 @@ class MushroomImageEncoder:
                 embedding = embedding / np.linalg.norm(embedding)
                 embeddings.append(embedding.tolist())
 
-            logger.debug(f"[IMG-BATCH] 批量多模态编码完成: {len(embeddings)}个")
+            _encoder_log(
+                "VISION_BATCH_MULTIMODAL_EMBEDDINGS_READY",
+                "批量多模态编码完成",
+                level="DEBUG",
+                total_items=len(embeddings),
+                status="success",
+            )
             return embeddings
 
         except Exception as e:
-            logger.error(f"[IMG-BATCH] 批量多模态编码失败: {e}")
+            _encoder_log(
+                "VISION_BATCH_MULTIMODAL_EMBEDDINGS_FAILED",
+                "批量多模态编码失败",
+                level="ERROR",
+                total_items=len(clip_inputs),
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return [None] * len(clip_inputs)
 
     def _get_image_embeddings_batch(
-        self, images: list[Image.Image]
+        self, images: list[PILImageType]
     ) -> list[list[float] | None]:
         """批量获取纯图像CLIP编码"""
         try:
             if not images:
                 return []
+
+            self._ensure_clip_model_ready()
+            torch_module = self._ensure_torch_imported()
 
             # 确保所有图像为RGB格式
             processed_images = []
@@ -2032,7 +2730,7 @@ class MushroomImageEncoder:
             ).to(self.device)
 
             # 批量获取图像特征
-            with torch.no_grad():
+            with torch_module.no_grad():
                 image_features = self.clip_model.get_image_features(**inputs)
 
             # 确保特征是tensor格式，处理可能的BaseModelOutputWithPooling对象
@@ -2052,7 +2750,7 @@ class MushroomImageEncoder:
                 and image_features.pooler_output is not None
             ):
                 image_features = image_features.pooler_output
-            elif torch.is_tensor(image_features):
+            elif torch_module.is_tensor(image_features):
                 # Already a tensor, use as-is
                 pass
             else:
@@ -2066,14 +2764,28 @@ class MushroomImageEncoder:
                 embedding = embedding / np.linalg.norm(embedding)
                 embeddings.append(embedding.tolist())
 
-            logger.debug(f"[IMG-BATCH] 批量图像编码完成: {len(embeddings)}个")
+            _encoder_log(
+                "VISION_BATCH_IMAGE_EMBEDDINGS_READY",
+                "批量图像编码完成",
+                level="DEBUG",
+                total_items=len(embeddings),
+                status="success",
+            )
             return embeddings
 
         except Exception as e:
-            logger.error(f"[IMG-BATCH] 批量图像编码失败: {e}")
+            _encoder_log(
+                "VISION_BATCH_IMAGE_EMBEDDINGS_FAILED",
+                "批量图像编码失败",
+                level="ERROR",
+                total_items=len(images),
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return [None] * len(images)
 
-    def _get_llama_descriptions_batch(self, images: list[Image.Image]) -> list[dict]:
+    def _get_llama_descriptions_batch(self, images: list[PILImageType]) -> list[dict]:
         """批量获取LLaMA描述"""
         try:
             if not images:
@@ -2086,7 +2798,14 @@ class MushroomImageEncoder:
                     result = self._get_llama_description(image)
                     results.append(result)
                 except Exception as e:
-                    logger.warning(f"[IMG-BATCH] LLaMA描述失败: {e}")
+                    _encoder_log(
+                        "VISION_BATCH_LLAMA_DESCRIPTION_ITEM_FAILED",
+                        "批量 LLaMA 描述单项失败",
+                        level="WARNING",
+                        status="failed",
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                    )
                     results.append(
                         {
                             "growth_stage_description": "",
@@ -2095,11 +2814,25 @@ class MushroomImageEncoder:
                         }
                     )
 
-            logger.debug(f"[IMG-BATCH] 批量LLaMA描述完成: {len(results)}个")
+            _encoder_log(
+                "VISION_BATCH_LLAMA_DESCRIPTIONS_READY",
+                "批量 LLaMA 描述完成",
+                level="DEBUG",
+                total_items=len(results),
+                status="success",
+            )
             return results
 
         except Exception as e:
-            logger.error(f"[IMG-BATCH] 批量LLaMA描述失败: {e}")
+            _encoder_log(
+                "VISION_BATCH_LLAMA_DESCRIPTIONS_FAILED",
+                "批量 LLaMA 描述失败",
+                level="ERROR",
+                total_items=len(images),
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return [
                 {
                     "growth_stage_description": "",
@@ -2153,9 +2886,24 @@ class MushroomImageEncoder:
             image_info = result["image_info"]
             env_data = result["environmental_data"]
 
+            _encoder_log(
+                "VISION_DB_SAVE_START",
+                "开始写入图像处理结果到数据库",
+                room_id=image_info.mushroom_id,
+                image_name=image_info.file_name,
+                status="running",
+            )
+
             # 确保有环境数据才保存
             if not env_data:
-                logger.debug(f"无环境数据，跳过保存: {image_info.file_name}")
+                _encoder_log(
+                    "VISION_DB_SAVE_SKIPPED_NO_ENV",
+                    "无环境数据，跳过数据库保存",
+                    level="DEBUG",
+                    room_id=image_info.mushroom_id,
+                    image_name=image_info.file_name,
+                    status="skipped",
+                )
                 return False
 
             # 检查是否已存在
@@ -2244,8 +2992,13 @@ class MushroomImageEncoder:
                     "semantic_description", "无环境数据。"
                 )
                 existing.updated_at = datetime.now()
-
-                logger.trace(f"更新数据库记录: {image_info.file_name}")
+                _encoder_log(
+                    "VISION_DB_RECORD_UPDATED",
+                    "已更新 mushroom_embedding 记录",
+                    level="DEBUG",
+                    room_id=image_info.mushroom_id,
+                    image_name=image_info.file_name,
+                )
             else:
                 room_for_fallback = env_data.get("room_id", image_info.mushroom_id)
                 fallback_config = _load_latest_room_config_fallback(room_for_fallback)
@@ -2299,7 +3052,13 @@ class MushroomImageEncoder:
                 )
 
                 session.add(new_record)
-                logger.trace(f"创建数据库记录: {image_info.file_name}")
+                _encoder_log(
+                    "VISION_DB_RECORD_CREATED",
+                    "已创建 mushroom_embedding 记录",
+                    level="DEBUG",
+                    room_id=image_info.mushroom_id,
+                    image_name=image_info.file_name,
+                )
 
             session.flush()
 
@@ -2321,14 +3080,23 @@ class MushroomImageEncoder:
                 if quality_record:
                     quality_record.mushroom_embedding_id = embedding_id
                     quality_record.updated_at = func.now()
-                    logger.debug(
-                        "[TOP_QUALITY] 已回填 image_text_quality.mushroom_embedding_id: "
-                        f"quality_id={selected_quality_record_id}, embedding_id={embedding_id}"
+                    _encoder_log(
+                        "VISION_DB_TEXT_QUALITY_LINKED",
+                        "已回填 image_text_quality 与 mushroom_embedding 关联",
+                        level="DEBUG",
+                        room_id=image_info.mushroom_id,
+                        image_name=image_info.file_name,
+                        quality_record_id=selected_quality_record_id,
                     )
                 else:
-                    logger.warning(
-                        "[TOP_QUALITY] 指定的image_text_quality记录不存在，跳过回填: "
-                        f"quality_id={selected_quality_record_id}"
+                    _encoder_log(
+                        "VISION_DB_TEXT_QUALITY_MISSING",
+                        "指定的 image_text_quality 记录不存在，跳过回填",
+                        level="WARNING",
+                        room_id=image_info.mushroom_id,
+                        image_name=image_info.file_name,
+                        quality_record_id=selected_quality_record_id,
+                        status="partial",
                     )
             else:
                 self._insert_text_quality_record(
@@ -2344,10 +3112,25 @@ class MushroomImageEncoder:
                 )
 
             session.commit()
+            _encoder_log(
+                "VISION_DB_SAVE_FINISH",
+                "图像处理结果写库完成",
+                room_id=image_info.mushroom_id,
+                image_name=image_info.file_name,
+                status="success",
+                stored_records=1,
+            )
             return True
 
         except Exception as e:
-            logger.error(f"Failed to save to database: {e}")
+            _encoder_log(
+                "VISION_DB_SAVE_FAILED",
+                "图像处理结果写库失败",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             session.rollback()
             return False
         finally:
@@ -2374,8 +3157,15 @@ class MushroomImageEncoder:
         Returns:
             处理统计结果
         """
-        time_msg = f"[{start_time} ~ {end_time}]" if start_time or end_time else ""
-        logger.info(f"🚀 开始批量处理图像 {time_msg}")
+        _encoder_log(
+            "VISION_BATCH_START",
+            "开始批量处理图像",
+            mushroom_id=mushroom_id,
+            window_start=start_time.isoformat() if start_time else None,
+            window_end=end_time.isoformat() if end_time else None,
+            target_date=date_filter,
+            status="running",
+        )
 
         # 获取所有蘑菇图像
         all_images = self.processor.get_mushroom_images(
@@ -2386,25 +3176,51 @@ class MushroomImageEncoder:
         )
 
         if not all_images:
-            logger.warning(f"⚠️ 未找到符合条件的图像 {time_msg}")
+            _encoder_log(
+                "VISION_BATCH_EMPTY",
+                "未找到符合条件的图像",
+                level="WARNING",
+                mushroom_id=mushroom_id,
+                target_date=date_filter,
+                status="skipped",
+            )
             return {"total": 0, "success": 0, "failed": 0, "skipped": 0}
 
-        logger.info(f"📊 找到 {len(all_images)} 张图像待处理")
+        _encoder_log(
+            "VISION_BATCH_DISCOVERED",
+            "已加载待处理图像列表",
+            mushroom_id=mushroom_id,
+            total_items=len(all_images),
+            status="running",
+        )
 
         stats = {"total": len(all_images), "success": 0, "failed": 0, "skipped": 0}
 
         # 分批处理
         for i in range(0, len(all_images), batch_size):
             batch = all_images[i : i + batch_size]
-            logger.info(
-                f"🔄 处理批次 {i // batch_size + 1}/{(len(all_images) - 1) // batch_size + 1}"
+            _encoder_log(
+                "VISION_BATCH_CHUNK_START",
+                "开始处理图像批次",
+                batch_index=i // batch_size + 1,
+                batch_size=batch_size,
+                total_items=len(batch),
+                status="running",
             )
 
             for image_info in batch:
                 try:
                     # 检查是否已处理过
                     if self._is_already_processed(image_info.file_path):
-                        logger.info(f"⏭️ 跳过已处理图像: {image_info.file_name}")
+                        _encoder_log(
+                            "VISION_IMAGE_SKIPPED",
+                            "图像已处理，跳过",
+                            level="DEBUG",
+                            room_id=image_info.mushroom_id,
+                            image_name=image_info.file_name,
+                            skipped_items=1,
+                            status="skipped",
+                        )
                         stats["skipped"] += 1
                         continue
 
@@ -2417,12 +3233,30 @@ class MushroomImageEncoder:
                         stats["failed"] += 1
 
                 except Exception as e:
-                    logger.error(f"❌ 批处理中处理图像失败 {image_info.file_name}: {e}")
+                    _encoder_log(
+                        "VISION_IMAGE_PROCESS_FAILED",
+                        "批处理中单张图像处理失败",
+                        level="ERROR",
+                        room_id=image_info.mushroom_id,
+                        image_name=image_info.file_name,
+                        failed_items=1,
+                        status="failed",
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                    )
                     stats["failed"] += 1
 
-        logger.info(
-            f"✅ 批量处理完成 - 总计: {stats['total']}, "
-            f"成功: {stats['success']}, 失败: {stats['failed']}, 跳过: {stats['skipped']}"
+        _encoder_log(
+            "VISION_BATCH_FINISH",
+            "图像批量处理完成",
+            total_items=stats["total"],
+            successful_items=stats["success"],
+            failed_items=stats["failed"],
+            skipped_items=stats["skipped"],
+            success_rate=round((stats["success"] / stats["total"] * 100), 2)
+            if stats["total"]
+            else 0.0,
+            status="success" if stats["failed"] == 0 else "partial",
         )
 
         return stats
@@ -2438,8 +3272,15 @@ class MushroomImageEncoder:
         link_mushroom_embedding: bool = True,
     ) -> dict[str, int]:
         """仅计算文本描述和图像质量评分并落库（不做图像编码）"""
-        time_msg = f"[{start_time} ~ {end_time}]" if start_time or end_time else ""
-        logger.info(f"📝 开始批量文本/质量分析 {time_msg}")
+        _encoder_log(
+            "VISION_TEXT_QUALITY_START",
+            "开始批量文本与质量分析",
+            mushroom_id=mushroom_id,
+            window_start=start_time.isoformat() if start_time else None,
+            window_end=end_time.isoformat() if end_time else None,
+            reprocess=reprocess,
+            status="running",
+        )
 
         all_images = self.processor.get_mushroom_images(
             mushroom_id=mushroom_id,
@@ -2449,7 +3290,13 @@ class MushroomImageEncoder:
         )
 
         if not all_images:
-            logger.warning(f"⚠️ 未找到符合条件的图像 {time_msg}")
+            _encoder_log(
+                "VISION_TEXT_QUALITY_EMPTY",
+                "未找到符合条件的图像",
+                level="WARNING",
+                mushroom_id=mushroom_id,
+                status="skipped",
+            )
             return {"total": 0, "success": 0, "failed": 0, "skipped": 0}
 
         # 与最近图片脚本对齐：优先处理最新图片，可选限制数量
@@ -2560,8 +3407,16 @@ class MushroomImageEncoder:
                         )
                         stats["success"] += 1
                     except Exception as e:
-                        logger.error(
-                            f"❌ 文本/质量处理失败 {image_info.file_name}: {e}"
+                        _encoder_log(
+                            "VISION_TEXT_QUALITY_ITEM_FAILED",
+                            "单张图像文本与质量分析失败",
+                            level="ERROR",
+                            room_id=image_info.mushroom_id,
+                            image_name=image_info.file_name,
+                            failed_items=1,
+                            status="failed",
+                            error_type=type(e).__name__,
+                            error_message=str(e),
                         )
                         stats["failed"] += 1
 
@@ -2569,13 +3424,29 @@ class MushroomImageEncoder:
 
         except Exception as e:
             session.rollback()
-            logger.error(f"❌ 批量文本/质量分析失败: {e}")
+            _encoder_log(
+                "VISION_TEXT_QUALITY_FAILED",
+                "批量文本与质量分析失败",
+                level="ERROR",
+                mushroom_id=mushroom_id,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
         finally:
             session.close()
 
-        logger.info(
-            f"✅ 文本/质量分析完成 - 总计: {stats['total']}, 成功: {stats['success']}, "
-            f"失败: {stats['failed']}, 跳过: {stats['skipped']}"
+        _encoder_log(
+            "VISION_TEXT_QUALITY_FINISH",
+            "文本与质量分析完成",
+            total_items=stats["total"],
+            successful_items=stats["success"],
+            failed_items=stats["failed"],
+            skipped_items=stats["skipped"],
+            success_rate=round((stats["success"] / stats["total"] * 100), 2)
+            if stats["total"]
+            else 0.0,
+            status="success" if stats["failed"] == 0 else "partial",
         )
         return stats
 
@@ -2588,7 +3459,14 @@ class MushroomImageEncoder:
         """按库房/日期选取Top-K质量图像进行编码"""
         from global_const.const_config import MUSHROOM_ROOM_IDS
 
-        logger.info(f"📌 开始处理 {target_date} Top-{top_k} 质量图像")
+        _encoder_log(
+            "VISION_TOPK_START",
+            "开始处理指定日期 Top-K 质量图像",
+            target_date=str(target_date),
+            total_items=top_k,
+            batch_size=batch_size,
+            status="running",
+        )
         stats = {"total": 0, "success": 0, "failed": 0, "skipped": 0}
 
         def _normalize_path(path: str | None) -> str:
@@ -2638,9 +3516,13 @@ class MushroomImageEncoder:
                 )
 
                 if not quality_rows:
-                    logger.debug(
-                        f"[TOP_QUALITY] room={room_id} 无可用质量记录, "
-                        f"候选room_id={sorted(candidate_quality_room_ids)}"
+                    _encoder_log(
+                        "VISION_TOPK_ROOM_NO_QUALITY_ROWS",
+                        "当前库房无可用质量记录",
+                        level="DEBUG",
+                        room_id=room_id,
+                        candidate_room_ids=",".join(sorted(candidate_quality_room_ids)),
+                        status="skipped",
                     )
                     continue
 
@@ -2667,9 +3549,14 @@ class MushroomImageEncoder:
                     Path(img.file_path).name: img for img in images if img.file_path
                 }
 
-                logger.info(
-                    f"[TOP_QUALITY] room={room_id}, quality_rows={len(quality_rows)}, "
-                    f"minio_candidates={minio_candidates}, minio_images={len(images)}"
+                _encoder_log(
+                    "VISION_TOPK_ROOM_SCAN_READY",
+                    "已完成库房 Top-K 图像候选收集",
+                    room_id=room_id,
+                    total_items=len(quality_rows),
+                    minio_candidate_count=len(minio_candidates),
+                    minio_image_count=len(images),
+                    status="running",
                 )
 
                 seen_paths = set()
@@ -2691,8 +3578,13 @@ class MushroomImageEncoder:
 
                     if not image_info:
                         stats["failed"] += 1
-                        logger.debug(
-                            f"[TOP_QUALITY] room={room_id} 未匹配到图像: {row.image_path}"
+                        _encoder_log(
+                            "VISION_TOPK_IMAGE_MATCH_MISSING",
+                            "Top-K 图像记录未匹配到 MinIO 图像",
+                            level="DEBUG",
+                            room_id=room_id,
+                            image_path=row.image_path,
+                            status="failed",
                         )
                         continue
 
@@ -2707,9 +3599,14 @@ class MushroomImageEncoder:
                             if row.mushroom_embedding_id != linked_embedding.id:
                                 row.mushroom_embedding_id = linked_embedding.id
                                 row.updated_at = func.now()
-                                logger.debug(
-                                    "[TOP_QUALITY] 图像已编码，已回填关联: "
-                                    f"quality_id={row.id}, embedding_id={linked_embedding.id}"
+                                _encoder_log(
+                                    "VISION_TOPK_EMBEDDING_LINK_BACKFILLED",
+                                    "Top-K 已编码图像已回填 embedding 关联",
+                                    level="DEBUG",
+                                    room_id=room_id,
+                                    quality_record_id=row.id,
+                                    embedding_id=linked_embedding.id,
+                                    status="success",
                                 )
                         stats["skipped"] += 1
                         continue
@@ -2733,9 +3630,17 @@ class MushroomImageEncoder:
                     else:
                         stats["failed"] += 1
 
-            logger.info(
-                f"✅ Top质量编码完成 - 总计: {stats['total']}, 成功: {stats['success']}, "
-                f"失败: {stats['failed']}, 跳过: {stats['skipped']}"
+            _encoder_log(
+                "VISION_TOPK_FINISH",
+                "Top-K 质量图像编码完成",
+                total_items=stats["total"],
+                successful_items=stats["success"],
+                failed_items=stats["failed"],
+                skipped_items=stats["skipped"],
+                success_rate=round((stats["success"] / stats["total"] * 100), 2)
+                if stats["total"]
+                else 0.0,
+                status="success" if stats["failed"] == 0 else "partial",
             )
             return stats
         finally:
@@ -2752,7 +3657,14 @@ class MushroomImageEncoder:
             )
             return existing is not None
         except Exception as e:
-            logger.error(f"❌ 检查处理状态失败: {e}")
+            _encoder_log(
+                "VISION_PROCESS_STATE_CHECK_FAILED",
+                "检查图像处理状态失败",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return False
         finally:
             session.close()
@@ -2762,6 +3674,12 @@ class MushroomImageEncoder:
         session = self.Session()
         try:
             from sqlalchemy import func
+
+            _encoder_log(
+                "VISION_STATS_QUERY_START",
+                "开始查询图像处理统计信息",
+                status="running",
+            )
 
             # 总处理数量
             total_count = session.query(MushroomImageEmbedding).count()
@@ -2813,7 +3731,7 @@ class MushroomImageEncoder:
                 .all()
             )
 
-            return {
+            stats = {
                 "total_processed": total_count,
                 "with_environmental_control": with_env_control,
                 "room_distribution": {
@@ -2829,8 +3747,24 @@ class MushroomImageEncoder:
                 "processing_time": datetime.now().isoformat(),
             }
 
+            _encoder_log(
+                "VISION_STATS_QUERY_FINISH",
+                "图像处理统计信息查询完成",
+                status="success",
+                total_items=total_count,
+                stored_records=total_count,
+            )
+            return stats
+
         except Exception as e:
-            logger.error(f"❌ 获取统计信息失败: {e}")
+            _encoder_log(
+                "VISION_STATS_QUERY_FAILED",
+                "获取图像处理统计信息失败",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return {}
         finally:
             session.close()
@@ -2848,8 +3782,11 @@ class MushroomImageEncoder:
         Returns:
             验证结果统计
         """
-        logger.info(
-            f"Starting system validation with max {max_per_mushroom} images per room"
+        _encoder_log(
+            "VISION_VALIDATION_START",
+            "开始执行系统抽样验证",
+            total_items=max_per_mushroom,
+            status="running",
         )
 
         # 获取所有图像并按库房分组
@@ -2861,8 +3798,12 @@ class MushroomImageEncoder:
                 mushroom_groups[img.mushroom_id] = []
             mushroom_groups[img.mushroom_id].append(img)
 
-        logger.info(
-            f"Found {len(mushroom_groups)} rooms: {sorted(mushroom_groups.keys())}"
+        _encoder_log(
+            "VISION_VALIDATION_ROOMS_READY",
+            "已完成库房分组，准备执行抽样验证",
+            total_items=len(mushroom_groups),
+            room_ids=sorted(mushroom_groups.keys()),
+            status="running",
         )
 
         validation_results = {
@@ -2878,7 +3819,12 @@ class MushroomImageEncoder:
 
         # 对每个库房处理有限数量的图像
         for mushroom_id in sorted(mushroom_groups.keys()):
-            logger.info(f"Validating room {mushroom_id}...")
+            _encoder_log(
+                "VISION_VALIDATION_ROOM_START",
+                "开始验证单个库房",
+                room_id=mushroom_id,
+                status="running",
+            )
 
             images = mushroom_groups[mushroom_id]
             processed_count = 0
@@ -2896,38 +3842,82 @@ class MushroomImageEncoder:
                     # 检查是否已处理
                     if self._is_already_processed(img.file_path):
                         skipped_count += 1
-                        logger.info(
-                            f"Skipping already processed image: {img.file_name}"
+                        _encoder_log(
+                            "VISION_VALIDATION_IMAGE_SKIPPED",
+                            "验证样本已处理，跳过",
+                            room_id=mushroom_id,
+                            image_name=img.file_name,
+                            skipped_items=1,
+                            status="skipped",
                         )
                         continue
 
                     # 处理图像
-                    logger.info(f"Processing image: {img.file_name}")
+                    _encoder_log(
+                        "VISION_VALIDATION_IMAGE_START",
+                        "开始处理验证样本",
+                        room_id=mushroom_id,
+                        image_name=img.file_name,
+                        status="running",
+                    )
                     result = self.process_single_image(img, save_to_db=True)
 
                     if result:
                         if result.get("saved_to_db", False):
                             success_count += 1
-                            logger.info(
-                                f"Successfully processed and saved: {img.file_name}"
+                            _encoder_log(
+                                "VISION_VALIDATION_IMAGE_SUCCESS",
+                                "验证样本处理并保存成功",
+                                room_id=mushroom_id,
+                                image_name=img.file_name,
+                                status="success",
+                                stored_records=1,
                             )
                         elif result.get("skip_reason") == "no_environment_data":
                             no_env_data_count += 1
-                            logger.warning(
-                                f"Processed but no environment data: {img.file_name}"
+                            _encoder_log(
+                                "VISION_VALIDATION_IMAGE_NO_ENV",
+                                "验证样本处理完成但无环境数据",
+                                level="WARNING",
+                                room_id=mushroom_id,
+                                image_name=img.file_name,
+                                status="partial",
                             )
                         else:
                             failed_count += 1
-                            logger.error(f"Processing failed: {img.file_name}")
+                            _encoder_log(
+                                "VISION_VALIDATION_IMAGE_FAILED",
+                                "验证样本处理失败",
+                                level="ERROR",
+                                room_id=mushroom_id,
+                                image_name=img.file_name,
+                                status="failed",
+                            )
                     else:
                         failed_count += 1
-                        logger.error(f"Processing returned None: {img.file_name}")
+                        _encoder_log(
+                            "VISION_VALIDATION_IMAGE_NONE",
+                            "验证样本处理返回空结果",
+                            level="ERROR",
+                            room_id=mushroom_id,
+                            image_name=img.file_name,
+                            status="failed",
+                        )
 
                     processed_count += 1
 
                 except Exception as e:
                     failed_count += 1
-                    logger.error(f"Exception processing {img.file_name}: {e}")
+                    _encoder_log(
+                        "VISION_VALIDATION_IMAGE_EXCEPTION",
+                        "验证样本处理异常",
+                        level="ERROR",
+                        room_id=mushroom_id,
+                        image_name=img.file_name,
+                        status="failed",
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                    )
                     processed_count += 1
 
             # 记录该库房的结果
@@ -2946,15 +3936,27 @@ class MushroomImageEncoder:
             validation_results["total_skipped"] += skipped_count
             validation_results["total_no_env_data"] += no_env_data_count
 
-            logger.info(
-                f"Room {mushroom_id} results: processed={processed_count}, success={success_count}, "
-                f"failed={failed_count}, skipped={skipped_count}, no_env_data={no_env_data_count}"
+            _encoder_log(
+                "VISION_VALIDATION_ROOM_FINISH",
+                "单个库房抽样验证完成",
+                room_id=mushroom_id,
+                status="success" if failed_count == 0 else "partial",
+                total_items=processed_count,
+                successful_items=success_count,
+                failed_items=failed_count,
+                skipped_items=skipped_count,
+                no_env_data=no_env_data_count,
             )
 
-        logger.info(
-            f"System validation completed - total_processed: {validation_results['total_processed']}, "
-            f"success: {validation_results['total_success']}, failed: {validation_results['total_failed']}, "
-            f"skipped: {validation_results['total_skipped']}, no_env_data: {validation_results['total_no_env_data']}"
+        _encoder_log(
+            "VISION_VALIDATION_FINISH",
+            "系统抽样验证完成",
+            status="success" if validation_results["total_failed"] == 0 else "partial",
+            total_items=validation_results["total_processed"],
+            successful_items=validation_results["total_success"],
+            failed_items=validation_results["total_failed"],
+            skipped_items=validation_results["total_skipped"],
+            no_env_data=validation_results["total_no_env_data"],
         )
 
         return validation_results
@@ -2969,45 +3971,75 @@ if __name__ == "__main__":
     try:
         # Initialize encoder
         encoder = create_mushroom_encoder()
-        print("✅ Encoder initialized successfully")
+        _encoder_log(
+            "VISION_ENCODER_SELFTEST_INIT",
+            "编码器自检初始化成功",
+            status="success",
+        )
 
         # Test system validation with limited samples
-        print("🔍 Running system validation with limited samples...")
+        _encoder_log(
+            "VISION_ENCODER_SELFTEST_VALIDATION_START",
+            "开始执行 limited validation 自检",
+            status="running",
+        )
         validation_results = encoder.validate_system_with_limited_samples(
             max_per_mushroom=2
         )
 
-        print("📊 Validation Results:")
-        print(f"   Total mushrooms: {validation_results['total_mushrooms']}")
-        print(f"   Mushroom IDs: {validation_results['mushroom_ids']}")
-        print(f"   Total processed: {validation_results['total_processed']}")
-        print(f"   Total success: {validation_results['total_success']}")
-        print(f"   Total failed: {validation_results['total_failed']}")
-        print(f"   Total skipped: {validation_results['total_skipped']}")
-        print(f"   No env data: {validation_results['total_no_env_data']}")
+        _encoder_log(
+            "VISION_ENCODER_SELFTEST_VALIDATION_FINISH",
+            "limited validation 自检完成",
+            total_mushrooms=validation_results["total_mushrooms"],
+            mushroom_ids=",".join(
+                str(item) for item in validation_results["mushroom_ids"]
+            ),
+            total_items=validation_results["total_processed"],
+            successful_items=validation_results["total_success"],
+            failed_items=validation_results["total_failed"],
+            skipped_items=validation_results["total_skipped"],
+            no_env_data=validation_results["total_no_env_data"],
+            status="success" if validation_results["total_failed"] == 0 else "partial",
+        )
 
-        print("\n📈 Per-mushroom breakdown:")
         for mushroom_id, stats in validation_results["processed_per_mushroom"].items():
-            print(
-                f"   Room {mushroom_id}: processed={stats['processed']}, success={stats['success']}, failed={stats['failed']}, no_env_data={stats['no_env_data']}"
+            _encoder_log(
+                "VISION_ENCODER_SELFTEST_ROOM_BREAKDOWN",
+                "limited validation 库房明细",
+                level="DEBUG",
+                room_id=mushroom_id,
+                processed_items=stats["processed"],
+                successful_items=stats["success"],
+                failed_items=stats["failed"],
+                no_env_data=stats["no_env_data"],
             )
 
         # Get processing statistics
-        print("\n📋 Getting processing statistics...")
         processing_stats = encoder.get_processing_statistics()
-        print(
-            f"   Total records in database: {processing_stats.get('total_processed', 0)}"
-        )
-        print(
-            f"   Records with environmental control: {processing_stats.get('with_environmental_control', 0)}"
+        _encoder_log(
+            "VISION_ENCODER_SELFTEST_STATS",
+            "获取编码器处理统计",
+            total_items=processing_stats.get("total_processed", 0),
+            with_environmental_control=processing_stats.get(
+                "with_environmental_control", 0
+            ),
+            status="success",
         )
 
-        print("\n✅ Multimodal CLIP encoding system test completed successfully!")
+        _encoder_log(
+            "VISION_ENCODER_SELFTEST_FINISH",
+            "编码器自检完成",
+            status="success",
+        )
 
     except Exception as e:
-        print(f"❌ Test failed: {e}")
-        import sys
-        import traceback
-
-        traceback.print_exc()
+        _encoder_log(
+            "VISION_ENCODER_SELFTEST_FAILED",
+            "编码器自检失败",
+            level="ERROR",
+            status="failed",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            traceback=traceback.format_exc(),
+        )
         sys.exit(1)

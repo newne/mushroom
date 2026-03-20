@@ -8,8 +8,6 @@ parameters comply with static_config.json specifications.
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from loguru import logger
-
 from decision_analysis.data_models import (
     AirCoolerRecommendation,
     ControlStrategy,
@@ -27,6 +25,21 @@ from decision_analysis.data_models import (
     ParameterAdjustment,
     RiskAssessment,
 )
+from utils import log_task_event
+
+
+def _output_log(
+    event: str, message: str, level: str = "INFO", **context: object
+) -> None:
+    """输出统一的决策输出处理事件日志。"""
+    log_task_event(
+        "DECISION_ANALYSIS",
+        event,
+        message,
+        level=level,
+        task_type="helper",
+        **context,
+    )
 
 
 class OutputHandler:
@@ -49,7 +62,50 @@ class OutputHandler:
         """
         self.static_config = static_config
         self.monitoring_points_config = monitoring_points_config
-        logger.info("[OutputHandler] Initialized")
+        _output_log("DECISION_OUTPUT_INIT", "输出处理器初始化完成", status="success")
+
+    def _get_enhanced_point_aliases(
+        self, device_type: str, point_alias: str
+    ) -> List[str]:
+        """Return compatible aliases for enhanced-output point matching."""
+        alias_map = {
+            "air_cooler": {
+                "temp_set": ["tem_set"],
+                "temp_diffset": ["tem_diff_set"],
+            },
+            "humidifier": {
+                "on": ["on_threshold"],
+                "off": ["off_threshold"],
+            },
+            "grow_light": {
+                "on_mset": ["on_duration"],
+                "off_mset": ["off_duration"],
+            },
+        }
+        return alias_map.get(device_type, {}).get(point_alias, [])
+
+    def _get_enhanced_param_data(
+        self, params: Dict, device_type: str, point_alias: str, warnings: List[str]
+    ) -> Dict:
+        """Resolve one configured point from the raw enhanced device params."""
+        param_data = params.get(point_alias, {})
+        if isinstance(param_data, dict) and param_data:
+            return param_data
+
+        for alias in self._get_enhanced_point_aliases(device_type, point_alias):
+            alias_data = params.get(alias, {})
+            if isinstance(alias_data, dict) and alias_data:
+                _output_log(
+                    "DECISION_OUTPUT_ALIAS_MATCH",
+                    "使用参数别名匹配增强版模型输出",
+                    level="DEBUG",
+                    device_type=device_type,
+                    point_alias=point_alias,
+                    matched_alias=alias,
+                )
+                return alias_data
+
+        return param_data
 
     def validate_and_format(self, raw_decision: Dict, room_id: str) -> DecisionOutput:
         """
@@ -70,7 +126,12 @@ class OutputHandler:
 
         Requirements: 8.1, 8.4, 8.5
         """
-        logger.info("[OutputHandler] Validating and formatting decision output")
+        _output_log(
+            "DECISION_OUTPUT_VALIDATE_START",
+            "开始校验并格式化决策输出",
+            room_id=room_id,
+            status="running",
+        )
 
         warnings = []
         errors = []
@@ -80,7 +141,14 @@ class OutputHandler:
         for key in required_keys:
             if key not in raw_decision:
                 error_msg = f"Missing required key: {key}"
-                logger.error(f"[OutputHandler] {error_msg}")
+                _output_log(
+                    "DECISION_OUTPUT_REQUIRED_KEY_MISSING",
+                    "决策输出缺少必需字段",
+                    level="ERROR",
+                    room_id=room_id,
+                    status="failed",
+                    error_message=error_msg,
+                )
                 errors.append(error_msg)
 
         # If critical structure is missing, return error status
@@ -121,8 +189,13 @@ class OutputHandler:
             "air_cooler", air_cooler_params
         )
         if not is_valid:
-            logger.warning(
-                f"[OutputHandler] Air cooler validation errors: {validation_errors}"
+            _output_log(
+                "DECISION_OUTPUT_AIR_COOLER_WARNINGS",
+                "冷风机参数校验存在告警",
+                level="WARNING",
+                room_id=room_id,
+                status="partial",
+                warning_count=len(validation_errors),
             )
             warnings.extend(validation_errors)
             air_cooler_params, correction_warnings = self._correct_invalid_params(
@@ -149,8 +222,13 @@ class OutputHandler:
             "fresh_air_fan", fresh_air_params
         )
         if not is_valid:
-            logger.warning(
-                f"[OutputHandler] Fresh air fan validation errors: {validation_errors}"
+            _output_log(
+                "DECISION_OUTPUT_FRESH_AIR_WARNINGS",
+                "新风机参数校验存在告警",
+                level="WARNING",
+                room_id=room_id,
+                status="partial",
+                warning_count=len(validation_errors),
             )
             warnings.extend(validation_errors)
             fresh_air_params, correction_warnings = self._correct_invalid_params(
@@ -178,8 +256,13 @@ class OutputHandler:
             "humidifier", humidifier_params
         )
         if not is_valid:
-            logger.warning(
-                f"[OutputHandler] Humidifier validation errors: {validation_errors}"
+            _output_log(
+                "DECISION_OUTPUT_HUMIDIFIER_WARNINGS",
+                "加湿器参数校验存在告警",
+                level="WARNING",
+                room_id=room_id,
+                status="partial",
+                warning_count=len(validation_errors),
             )
             warnings.extend(validation_errors)
             humidifier_params, correction_warnings = self._correct_invalid_params(
@@ -205,8 +288,13 @@ class OutputHandler:
             "grow_light", grow_light_params
         )
         if not is_valid:
-            logger.warning(
-                f"[OutputHandler] Grow light validation errors: {validation_errors}"
+            _output_log(
+                "DECISION_OUTPUT_GROW_LIGHT_WARNINGS",
+                "补光灯参数校验存在告警",
+                level="WARNING",
+                room_id=room_id,
+                status="partial",
+                warning_count=len(validation_errors),
             )
             warnings.extend(validation_errors)
             grow_light_params, correction_warnings = self._correct_invalid_params(
@@ -250,8 +338,14 @@ class OutputHandler:
         # Determine status
         status = "success" if not errors else "error"
 
-        logger.info(
-            f"[OutputHandler] Validation complete: status={status}, warnings={len(warnings)}, errors={len(errors)}"
+        _output_log(
+            "DECISION_OUTPUT_VALIDATE_FINISH",
+            "决策输出校验完成",
+            room_id=room_id,
+            status=status,
+            total_items=1,
+            warning_count=len(warnings),
+            failed_items=len(errors),
         )
 
         return DecisionOutput(
@@ -760,8 +854,11 @@ class OutputHandler:
 
         Requirements: Enhanced decision analysis with multi-image support
         """
-        logger.info(
-            "[OutputHandler] Validating and formatting enhanced decision output"
+        _output_log(
+            "DECISION_OUTPUT_ENHANCED_VALIDATE_START",
+            "开始校验并格式化增强版决策输出",
+            room_id=room_id,
+            status="running",
         )
 
         warnings = []
@@ -772,7 +869,14 @@ class OutputHandler:
         for key in required_keys:
             if key not in raw_decision:
                 error_msg = f"Missing required key: {key}"
-                logger.error(f"[OutputHandler] {error_msg}")
+                _output_log(
+                    "DECISION_OUTPUT_ENHANCED_REQUIRED_KEY_MISSING",
+                    "增强版决策输出缺少必需字段",
+                    level="ERROR",
+                    room_id=room_id,
+                    status="failed",
+                    error_message=error_msg,
+                )
                 errors.append(error_msg)
 
         # If critical structure is missing, return error status
@@ -838,9 +942,7 @@ class OutputHandler:
 
                 if not device_params:
                     # Device missing in LLM output
-                    # We can choose to warn or create a default "maintain" recommendation
-                    # logger.warning(f"Device {device_alias} missing in recommendations")
-                    # Let's create an empty one which will be filled with defaults/current values if we had them
+                    # 创建空推荐对象，后续由默认值回填。
                     device_params = {}
 
                 validated_device = self._validate_dynamic_device(
@@ -854,7 +956,14 @@ class OutputHandler:
         else:
             # Fallback to empty recommendations if config is missing
             warning_msg = "No monitoring points configuration provided, skipping device validation"
-            logger.warning(f"[OutputHandler] {warning_msg}")
+            _output_log(
+                "DECISION_OUTPUT_ENHANCED_CONFIG_MISSING",
+                "缺少 monitoring points 配置，跳过设备校验",
+                level="WARNING",
+                room_id=room_id,
+                status="skipped",
+                error_message=warning_msg,
+            )
             warnings.append(warning_msg)
 
         enhanced_device_recommendations = EnhancedDeviceRecommendations(
@@ -875,8 +984,14 @@ class OutputHandler:
         # Determine status
         status = "success" if not errors else "error"
 
-        logger.info(
-            f"[OutputHandler] Enhanced validation complete: status={status}, warnings={len(warnings)}, errors={len(errors)}"
+        _output_log(
+            "DECISION_OUTPUT_ENHANCED_VALIDATE_FINISH",
+            "增强版决策输出校验完成",
+            room_id=room_id,
+            status=status,
+            total_items=1,
+            warning_count=len(warnings),
+            failed_items=len(errors),
         )
 
         return EnhancedDecisionOutput(
@@ -921,7 +1036,9 @@ class OutputHandler:
                 continue
 
             # Extract parameter adjustment
-            param_data = params.get(point_alias, {})
+            param_data = self._get_enhanced_param_data(
+                params, device_type, point_alias, warnings
+            )
             param_adj = self._extract_parameter_adjustment(
                 param_data, point_alias, device_type
             )
@@ -1040,24 +1157,42 @@ class OutputHandler:
         # Validate action type
         valid_actions = ["maintain", "adjust", "monitor"]
         if action not in valid_actions:
-            logger.warning(
-                f"[OutputHandler] Invalid action '{action}' for {device_type}.{param_name}, using 'maintain'"
+            _output_log(
+                "DECISION_OUTPUT_INVALID_ACTION",
+                "检测到非法 action，已回退为 maintain",
+                level="WARNING",
+                device_type=device_type,
+                point_alias=param_name,
+                status="partial",
+                invalid_value=action,
             )
             action = "maintain"
 
         # Validate priority
         valid_priorities = ["low", "medium", "high", "critical"]
         if priority not in valid_priorities:
-            logger.warning(
-                f"[OutputHandler] Invalid priority '{priority}' for {device_type}.{param_name}, using 'low'"
+            _output_log(
+                "DECISION_OUTPUT_INVALID_PRIORITY",
+                "检测到非法 priority，已回退为 low",
+                level="WARNING",
+                device_type=device_type,
+                point_alias=param_name,
+                status="partial",
+                invalid_value=priority,
             )
             priority = "low"
 
         # Validate urgency
         valid_urgencies = ["immediate", "within_hour", "within_day", "routine"]
         if urgency not in valid_urgencies:
-            logger.warning(
-                f"[OutputHandler] Invalid urgency '{urgency}' for {device_type}.{param_name}, using 'routine'"
+            _output_log(
+                "DECISION_OUTPUT_INVALID_URGENCY",
+                "检测到非法 urgency，已回退为 routine",
+                level="WARNING",
+                device_type=device_type,
+                point_alias=param_name,
+                status="partial",
+                invalid_value=urgency,
             )
             urgency = "routine"
 

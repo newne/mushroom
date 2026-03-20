@@ -10,7 +10,6 @@
 - 优化性能，避免重复查询
 """
 
-import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List
 
@@ -19,14 +18,33 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.orm import sessionmaker
 
 from global_const.global_const import pgsql_engine
+from utils import build_task_run_id, log_task_event, use_log_context
 from utils.batch_yield_service import resolve_setpoint_batch_info
 from utils.create_table import (
     DecisionAnalysisStaticConfig,
     query_decision_analysis_static_configs,
 )
-from utils.loguru_setting import logger
+from utils.task_common import (
+    TaskResult,
+    create_task_result,
+    ensure_database_connection,
+    execute_task_with_retry,
+    log_task_summary,
+)
 
 _DEVICE_CONFIGS_CACHE: Dict[str, Dict[str, pd.DataFrame]] = {}
+
+
+def _monitor_log(event: str, message: str, level: str = "INFO", **context: Any) -> None:
+    """统一输出监控任务事件日志。"""
+    log_task_event(
+        "SETPOINT_MONITOR",
+        event,
+        message,
+        level=level,
+        task_type="monitoring",
+        **context,
+    )
 
 
 def _enrich_changes_with_batch_info(
@@ -47,7 +65,7 @@ def _enrich_changes_with_batch_info(
     return changes
 
 
-def safe_hourly_setpoint_monitoring() -> None:
+def safe_hourly_setpoint_monitoring() -> TaskResult:
     """
     每小时设定点变更监控任务（基于静态配置表的优化版本）
 
@@ -59,94 +77,113 @@ def safe_hourly_setpoint_monitoring() -> None:
     5. 记录变化并存储到数据库
     6. 具备错误处理机制和性能优化
     """
-    from utils.task_common import check_database_connection
-
-    if not check_database_connection():
-        error_msg = "[SETPOINT_MONITOR] 数据库不可达，任务终止（按配置不启用容错）"
-        logger.error(error_msg)
-        raise RuntimeError(error_msg)
+    task_run_id = build_task_run_id("SETPOINT_MONITOR")
+    ensure_database_connection(
+        "[SETPOINT_MONITOR] 数据库不可达，任务终止（按配置不启用容错）"
+    )
 
     max_retries = 3
     retry_delay = 5  # 秒
 
-    for attempt in range(1, max_retries + 1):
-        try:
-            logger.info(
-                f"[SETPOINT_MONITOR] 开始执行设定点变更监控 (尝试 {attempt}/{max_retries})"
+    def _before_attempt(attempt: int, total_attempts: int) -> None:
+        log_task_event(
+            "SETPOINT_MONITOR",
+            "TASK_ATTEMPT_START",
+            "开始执行设定点变更监控",
+            task_type="monitoring",
+            task_run_id=task_run_id,
+            attempt=attempt,
+            max_retries=total_attempts,
+            status="running",
+        )
+
+    def _run_monitoring(_attempt: int, _max_retries: int) -> TaskResult:
+        start_time = datetime.now()
+        with use_log_context(task_run_id=task_run_id, task_type="monitoring"):
+            log_task_event(
+                "SETPOINT_MONITOR",
+                "TASK_START",
+                "进入设定点变更监控执行阶段",
+                task_type="monitoring",
+                task_run_id=task_run_id,
+                status="running",
             )
-            start_time = datetime.now()
 
             # 执行基于静态配置表的监控
             result = execute_static_config_based_monitoring()
 
-            # 记录执行结果
-            if result["success"]:
-                logger.info(
-                    f"[SETPOINT_MONITOR] 设定点监控完成: 处理 {result['successful_rooms']}/{result['total_rooms']} 个库房"
-                )
-                logger.info(
-                    f"[SETPOINT_MONITOR] 检测到 {result['total_changes']} 个设定点变更，存储 {result['stored_records']} 条记录"
-                )
+        # 记录执行结果
+        changed_rooms: list[str] = []
+        if result["success"]:
+            changed_rooms = [
+                room_id
+                for room_id, count in result["changes_by_room"].items()
+                if count > 0
+            ]
 
-                # 记录有变更的库房
-                changed_rooms = [
-                    room_id
-                    for room_id, count in result["changes_by_room"].items()
-                    if count > 0
-                ]
-                if changed_rooms:
-                    logger.info(f"[SETPOINT_MONITOR] 有变更的库房: {changed_rooms}")
+        failed_rooms_count = len(result.get("error_rooms", []))
+        finish_status = "success" if failed_rooms_count == 0 else "partial"
+        finish_level = "INFO" if failed_rooms_count == 0 else "WARNING"
 
-                if result["error_rooms"]:
-                    logger.warning(
-                        f"[SETPOINT_MONITOR] 处理失败的库房: {result['error_rooms']}"
-                    )
-            else:
-                logger.error("[SETPOINT_MONITOR] 设定点监控执行失败")
+        duration = (datetime.now() - start_time).total_seconds()
+        log_task_event(
+            "SETPOINT_MONITOR",
+            "TASK_FINISH",
+            (
+                "设定点变更监控执行完成"
+                f" | rooms={int(result.get('total_rooms', 0))}"
+                f" success={int(result.get('successful_rooms', 0))}"
+                f" failed={failed_rooms_count}"
+                f" changes={int(result.get('total_changes', 0))}"
+                f" stored={int(result.get('stored_records', 0))}"
+            ),
+            level=finish_level,
+            task_type="monitoring",
+            task_run_id=task_run_id,
+            status=finish_status,
+            total_items=int(result.get("total_rooms", 0)),
+            successful_items=int(result.get("successful_rooms", 0)),
+            failed_items=failed_rooms_count,
+            total_changes=int(result.get("total_changes", 0)),
+            stored_records=int(result.get("stored_records", 0)),
+            changed_rooms=changed_rooms,
+            duration_ms=round(duration * 1000, 2),
+        )
 
-            duration = (datetime.now() - start_time).total_seconds()
-            logger.info(
-                f"[SETPOINT_MONITOR] 设定点变更监控完成，耗时: {duration:.2f}秒"
-            )
+        return create_task_result(
+            success=bool(result.get("success")),
+            total_items=int(result.get("total_rooms", 0)),
+            successful_items=int(result.get("successful_rooms", 0)),
+            failed_items=len(result.get("error_rooms", [])),
+            error_items=result.get("error_rooms", []),
+            processing_time=duration,
+            additional_data={
+                "task_run_id": task_run_id,
+                "total_changes": int(result.get("total_changes", 0)),
+                "changes_by_room": result.get("changes_by_room", {}),
+                "stored_records": int(result.get("stored_records", 0)),
+            },
+        )
 
-            # 成功执行，退出重试循环
-            return
+    def _on_failure(error_msg: str, _attempt: int, _total_attempts: int) -> TaskResult:
+        return create_task_result(
+            success=False,
+            error_items=[error_msg],
+            additional_data={"task_run_id": task_run_id},
+        )
 
-        except Exception as e:
-            error_msg = str(e)
-            logger.error(
-                f"[SETPOINT_MONITOR] 设定点变更监控失败 (尝试 {attempt}/{max_retries}): {error_msg}"
-            )
-
-            # 检查是否是数据库连接错误
-            is_connection_error = any(
-                keyword in error_msg.lower()
-                for keyword in [
-                    "timeout",
-                    "connection",
-                    "connect",
-                    "database",
-                    "server",
-                ]
-            )
-
-            if is_connection_error and attempt < max_retries:
-                logger.warning(
-                    f"[SETPOINT_MONITOR] 检测到连接错误，{retry_delay}秒后重试..."
-                )
-                time.sleep(retry_delay)
-            elif attempt >= max_retries:
-                logger.error(
-                    f"[SETPOINT_MONITOR] 设定点监控任务失败，已达到最大重试次数 ({max_retries})"
-                )
-                # 不再抛出异常，避免调度器崩溃
-                return
-            else:
-                # 非连接错误，不重试
-                logger.error(
-                    "[SETPOINT_MONITOR] 设定点监控任务遇到非连接错误，不再重试"
-                )
-                return
+    result = execute_task_with_retry(
+        task_name="SETPOINT_MONITOR",
+        task_func=_run_monitoring,
+        max_retries=max_retries,
+        retry_delay=retry_delay,
+        task_context={"task_type": "monitoring", "task_run_id": task_run_id},
+        before_attempt=_before_attempt,
+        on_non_retryable=_on_failure,
+        on_exhausted=_on_failure,
+    )
+    log_task_summary("SETPOINT_MONITOR", result)
+    return result
 
 
 def execute_static_config_based_monitoring() -> Dict[str, Any]:
@@ -178,35 +215,49 @@ def execute_static_config_based_monitoring() -> Dict[str, Any]:
     _DEVICE_CONFIGS_CACHE = {}
 
     try:
-        logger.info("[SETPOINT_MONITOR] 🚀 开始基于静态配置表的设定点监控")
+        _monitor_log("MONITOR_PIPELINE_START", "开始基于静态配置表的设定点监控")
 
         # 1. 从静态配置表获取所有测点配置
-        logger.info("[SETPOINT_MONITOR] 📋 从静态配置表获取测点配置...")
+        _monitor_log("STATIC_CONFIG_LOAD_START", "开始加载静态配置表测点配置")
         static_configs = get_static_configs_from_database()
 
         if not static_configs:
-            logger.warning(
-                "[SETPOINT_MONITOR] ⚠️ 静态配置表中没有找到测点配置，使用备用方案"
+            _monitor_log(
+                "STATIC_CONFIG_EMPTY",
+                "静态配置表中没有找到测点配置，切换备用方案",
+                level="WARNING",
+                status="fallback",
             )
             return execute_fallback_monitoring()
 
-        logger.info(
-            f"[SETPOINT_MONITOR] ✅ 从静态配置表获取到 {len(static_configs)} 个测点配置"
+        _monitor_log(
+            "STATIC_CONFIG_LOAD_FINISH",
+            "静态配置表测点配置加载完成",
+            total_items=len(static_configs),
+            successful_items=len(static_configs),
         )
 
         # 2. 按库房分组配置
         configs_by_room = group_configs_by_room(static_configs)
         result["total_rooms"] = len(configs_by_room)
 
-        logger.info(
-            f"[SETPOINT_MONITOR] 📍 涉及 {len(configs_by_room)} 个库房: {list(configs_by_room.keys())}"
+        _monitor_log(
+            "CONFIG_GROUP_SUMMARY",
+            "静态配置按库房分组完成",
+            total_items=len(configs_by_room),
+            room_ids=list(configs_by_room.keys()),
         )
 
         # 3. 设定监控时间范围（最近1小时）
         end_time = datetime.now()
         start_time = end_time - timedelta(hours=1)
 
-        logger.info(f"[SETPOINT_MONITOR] ⏰ 监控时间范围: {start_time} ~ {end_time}")
+        _monitor_log(
+            "MONITOR_WINDOW",
+            "监控时间范围已确定",
+            trigger_time=end_time.isoformat(),
+            window_start=start_time.isoformat(),
+        )
 
         # 4. 逐个库房处理
         all_changes = []
@@ -214,8 +265,12 @@ def execute_static_config_based_monitoring() -> Dict[str, Any]:
 
         for room_id, room_configs in configs_by_room.items():
             try:
-                logger.info(
-                    f"[SETPOINT_MONITOR] 🔍 处理库房 {room_id} ({len(room_configs)} 个测点)"
+                _monitor_log(
+                    "ROOM_START",
+                    "开始处理库房监控",
+                    room_id=room_id,
+                    status="running",
+                    total_items=len(room_configs),
                 )
 
                 # 获取库房的实时数据
@@ -224,19 +279,37 @@ def execute_static_config_based_monitoring() -> Dict[str, Any]:
                 )
 
                 if room_changes:
-                    logger.info(
-                        f"[SETPOINT_MONITOR] ✅ 库房 {room_id}: 检测到 {len(room_changes)} 个变更"
+                    _monitor_log(
+                        "ROOM_CHANGES_DETECTED",
+                        "库房检测到设定点变更",
+                        room_id=room_id,
+                        status="success",
+                        total_changes=len(room_changes),
                     )
                     all_changes.extend(room_changes)
                     result["changes_by_room"][room_id] = len(room_changes)
                 else:
-                    logger.info(f"[SETPOINT_MONITOR] ⚪ 库房 {room_id}: 无变更")
+                    _monitor_log(
+                        "ROOM_NO_CHANGES",
+                        "库房未检测到设定点变更",
+                        room_id=room_id,
+                        status="success",
+                    )
                     result["changes_by_room"][room_id] = 0
 
                 successful_rooms += 1
 
             except Exception as e:
-                logger.error(f"[SETPOINT_MONITOR] ❌ 库房 {room_id} 处理失败: {e}")
+                _monitor_log(
+                    "ROOM_FAILURE",
+                    "库房监控处理失败",
+                    level="ERROR",
+                    room_id=room_id,
+                    status="failed",
+                    error_type=type(e).__name__,
+                    error_code="room_monitor_failed",
+                    error_message=str(e),
+                )
                 result["error_rooms"].append(room_id)
                 result["changes_by_room"][room_id] = 0
                 continue
@@ -246,34 +319,72 @@ def execute_static_config_based_monitoring() -> Dict[str, Any]:
 
         # 5. 存储变更记录到数据库
         if all_changes:
-            logger.info(
-                f"[SETPOINT_MONITOR] 💾 存储 {len(all_changes)} 条变更记录到数据库..."
+            _monitor_log(
+                "DB_STORE_START",
+                "开始存储设定点变更记录",
+                total_changes=len(all_changes),
             )
             stored_count = store_setpoint_changes_to_database(all_changes)
             result["stored_records"] = stored_count
 
             if stored_count == len(all_changes):
-                logger.info(f"[SETPOINT_MONITOR] ✅ 成功存储 {stored_count} 条变更记录")
+                _monitor_log(
+                    "DB_STORE_SUCCESS",
+                    "设定点变更记录存储完成",
+                    stored_records=stored_count,
+                    status="success",
+                )
             else:
-                logger.warning(
-                    f"[SETPOINT_MONITOR] ⚠️ 部分存储失败: {stored_count}/{len(all_changes)}"
+                _monitor_log(
+                    "DB_STORE_PARTIAL",
+                    "设定点变更记录部分存储失败",
+                    level="WARNING",
+                    stored_records=stored_count,
+                    total_changes=len(all_changes),
+                    status="degraded",
                 )
         else:
-            logger.info("[SETPOINT_MONITOR] ℹ️ 无变更记录需要存储")
+            _monitor_log("DB_STORE_SKIPPED", "无变更记录需要存储", status="skipped")
             result["stored_records"] = 0
 
         # 6. 计算处理时间
         result["processing_time"] = (datetime.now() - processing_start).total_seconds()
         result["success"] = True
 
-        logger.info(
-            f"[SETPOINT_MONITOR] 🎯 监控完成: {successful_rooms}/{len(configs_by_room)} 库房成功"
+        pipeline_status = "success" if len(result["error_rooms"]) == 0 else "partial"
+        pipeline_level = "DEBUG" if pipeline_status == "success" else "WARNING"
+
+        _monitor_log(
+            "MONITOR_PIPELINE_FINISH",
+            (
+                "静态配置监控执行完成"
+                f" | rooms={len(configs_by_room)}"
+                f" success={successful_rooms}"
+                f" failed={len(result['error_rooms'])}"
+                f" changes={result['total_changes']}"
+                f" stored={result['stored_records']}"
+            ),
+            level=pipeline_level,
+            status=pipeline_status,
+            successful_items=successful_rooms,
+            total_items=len(configs_by_room),
+            total_changes=result["total_changes"],
+            stored_records=result["stored_records"],
+            duration_ms=round(result["processing_time"] * 1000, 2),
         )
 
         return result
 
     except Exception as e:
-        logger.error(f"[SETPOINT_MONITOR] ❌ 静态配置监控执行失败: {e}")
+        _monitor_log(
+            "MONITOR_PIPELINE_FAILED",
+            "静态配置监控执行失败",
+            level="ERROR",
+            status="failed",
+            error_type=type(e).__name__,
+            error_code="monitor_pipeline_failed",
+            error_message=str(e),
+        )
         result["processing_time"] = (datetime.now() - processing_start).total_seconds()
         result["success"] = False
         return result
@@ -294,7 +405,12 @@ def get_static_configs_from_database() -> List[Dict[str, Any]]:
         )
 
         if not configs:
-            logger.warning("[STATIC_CONFIG] 静态配置表中没有找到启用的配置")
+            _monitor_log(
+                "STATIC_CONFIG_NO_ACTIVE",
+                "静态配置表中没有找到启用的配置",
+                level="WARNING",
+                status="empty",
+            )
             return []
 
         now = datetime.now()
@@ -305,7 +421,12 @@ def get_static_configs_from_database() -> List[Dict[str, Any]]:
         ]
 
         if not valid_configs:
-            logger.warning("[STATIC_CONFIG] 静态配置表中没有有效生效的配置")
+            _monitor_log(
+                "STATIC_CONFIG_NOT_EFFECTIVE",
+                "静态配置表中没有有效生效的配置",
+                level="WARNING",
+                status="empty",
+            )
             return []
 
         # 对同一测点选择最新版本配置（按 config_version / effective_time）
@@ -348,7 +469,12 @@ def get_static_configs_from_database() -> List[Dict[str, Any]]:
             }
             config_dicts.append(config_dict)
 
-        logger.info(f"[STATIC_CONFIG] 成功获取 {len(config_dicts)} 个静态配置")
+        _monitor_log(
+            "STATIC_CONFIG_READY",
+            "静态配置数据准备完成",
+            total_items=len(config_dicts),
+            successful_items=len(config_dicts),
+        )
 
         # 按设备类型统计
         device_type_stats = {}
@@ -356,12 +482,25 @@ def get_static_configs_from_database() -> List[Dict[str, Any]]:
             device_type = config["device_type"]
             device_type_stats[device_type] = device_type_stats.get(device_type, 0) + 1
 
-        logger.debug(f"[STATIC_CONFIG] 设备类型统计: {device_type_stats}")
+        _monitor_log(
+            "STATIC_CONFIG_DEVICE_TYPES",
+            "静态配置设备类型统计完成",
+            level="DEBUG",
+            device_type_stats=device_type_stats,
+        )
 
         return config_dicts
 
     except Exception as e:
-        logger.error(f"[STATIC_CONFIG] 从静态配置表获取配置失败: {e}")
+        _monitor_log(
+            "STATIC_CONFIG_FAILED",
+            "从静态配置表获取配置失败",
+            level="ERROR",
+            status="failed",
+            error_type=type(e).__name__,
+            error_code="static_config_failed",
+            error_message=str(e),
+        )
         return []
 
 
@@ -388,8 +527,13 @@ def group_configs_by_room(
     # 按库房统计
     for room_id, room_configs in configs_by_room.items():
         device_types = set(config["device_type"] for config in room_configs)
-        logger.debug(
-            f"[CONFIG_GROUP] 库房 {room_id}: {len(room_configs)} 个测点, 设备类型: {device_types}"
+        _monitor_log(
+            "CONFIG_GROUP_ROOM_SUMMARY",
+            "库房静态配置分组摘要",
+            level="DEBUG",
+            room_id=room_id,
+            total_items=len(room_configs),
+            device_types=sorted(device_types),
         )
 
     return configs_by_room
@@ -414,7 +558,9 @@ def monitor_room_with_static_configs(
         List[Dict[str, Any]]: 检测到的变更记录
     """
     try:
-        logger.debug(f"[ROOM_MONITOR] 开始监控库房 {room_id}")
+        _monitor_log(
+            "ROOM_MONITOR_START", "开始监控单个库房", level="DEBUG", room_id=room_id
+        )
 
         # 1. 获取实时数据
         realtime_data = get_realtime_setpoint_data(
@@ -422,11 +568,21 @@ def monitor_room_with_static_configs(
         )
 
         if realtime_data.empty:
-            logger.debug(f"[ROOM_MONITOR] 库房 {room_id} 无实时数据")
+            _monitor_log(
+                "ROOM_MONITOR_NO_REALTIME_DATA",
+                "库房无实时数据",
+                level="DEBUG",
+                room_id=room_id,
+                status="empty",
+            )
             return []
 
-        logger.debug(
-            f"[ROOM_MONITOR] 库房 {room_id} 获取到 {len(realtime_data)} 条实时数据"
+        _monitor_log(
+            "ROOM_MONITOR_REALTIME_READY",
+            "库房实时数据加载完成",
+            level="DEBUG",
+            room_id=room_id,
+            total_items=len(realtime_data),
         )
 
         # 2. 检测变更
@@ -435,12 +591,27 @@ def monitor_room_with_static_configs(
         # 3. 绑定批次信息
         changes = _enrich_changes_with_batch_info(changes)
 
-        logger.debug(f"[ROOM_MONITOR] 库房 {room_id} 检测到 {len(changes)} 个变更")
+        _monitor_log(
+            "ROOM_MONITOR_FINISH",
+            "库房监控完成",
+            level="DEBUG",
+            room_id=room_id,
+            total_changes=len(changes),
+        )
 
         return changes
 
     except Exception as e:
-        logger.error(f"[ROOM_MONITOR] 库房 {room_id} 监控失败: {e}")
+        _monitor_log(
+            "ROOM_MONITOR_FAILED",
+            "库房监控失败",
+            level="ERROR",
+            room_id=room_id,
+            status="failed",
+            error_type=type(e).__name__,
+            error_code="room_monitor_failed",
+            error_message=str(e),
+        )
         return []
 
 
@@ -478,14 +649,26 @@ def get_realtime_setpoint_data(
             device_configs = get_all_device_configs(room_id=room_id)
             _DEVICE_CONFIGS_CACHE[room_id] = device_configs
         if not device_configs:
-            logger.warning(f"[REALTIME_DATA] 库房 {room_id} 无设备配置")
+            _monitor_log(
+                "REALTIME_DATA_NO_DEVICE_CONFIG",
+                "库房无设备配置",
+                level="WARNING",
+                room_id=room_id,
+                status="empty",
+            )
             return pd.DataFrame()
 
         # 合并所有设备类型的配置
         all_query_df = pd.concat(device_configs.values(), ignore_index=True)
 
         if all_query_df.empty:
-            logger.warning(f"[REALTIME_DATA] 库房 {room_id} 无设备数据")
+            _monitor_log(
+                "REALTIME_DATA_NO_DEVICE_DATA",
+                "库房无设备数据",
+                level="WARNING",
+                room_id=room_id,
+                status="empty",
+            )
             return pd.DataFrame()
 
         # 只保留静态配置中定义的测点
@@ -505,7 +688,13 @@ def get_realtime_setpoint_data(
         )
 
         if setpoint_df.empty:
-            logger.warning(f"[REALTIME_DATA] 库房 {room_id} 无匹配的设定点数据")
+            _monitor_log(
+                "REALTIME_DATA_NO_SETPOINT_MATCH",
+                "库房无匹配的设定点数据",
+                level="WARNING",
+                room_id=room_id,
+                status="empty",
+            )
             return pd.DataFrame()
 
         # 查询历史数据
@@ -526,7 +715,13 @@ def get_realtime_setpoint_data(
         )
 
         if df.empty:
-            logger.warning(f"[REALTIME_DATA] 库房 {room_id} 无历史数据")
+            _monitor_log(
+                "REALTIME_DATA_NO_HISTORY",
+                "库房无历史数据",
+                level="WARNING",
+                room_id=room_id,
+                status="empty",
+            )
             return pd.DataFrame()
 
         # 添加别名列，保持与查询返回结构一致
@@ -536,12 +731,27 @@ def get_realtime_setpoint_data(
         # 添加库房信息
         df["room_id"] = room_id
 
-        logger.debug(f"[REALTIME_DATA] 库房 {room_id} 获取到 {len(df)} 条实时数据")
+        _monitor_log(
+            "REALTIME_DATA_READY",
+            "库房实时数据获取完成",
+            level="DEBUG",
+            room_id=room_id,
+            total_items=len(df),
+        )
 
         return df
 
     except Exception as e:
-        logger.error(f"[REALTIME_DATA] 获取库房 {room_id} 实时数据失败: {e}")
+        _monitor_log(
+            "REALTIME_DATA_FAILED",
+            "获取库房实时数据失败",
+            level="ERROR",
+            room_id=room_id,
+            status="failed",
+            error_type=type(e).__name__,
+            error_code="realtime_data_failed",
+            error_message=str(e),
+        )
         return pd.DataFrame()
 
 
@@ -577,7 +787,13 @@ def detect_changes_with_static_configs(
         config_df = pd.DataFrame(room_configs)
         required_cols = {"device_alias", "point_alias"}
         if not required_cols.issubset(realtime_df.columns) or config_df.empty:
-            logger.error("[CHANGE_DETECT] 数据结构不匹配，无法进行分组")
+            _monitor_log(
+                "CHANGE_DETECT_INVALID_SCHEMA",
+                "数据结构不匹配，无法进行分组",
+                level="ERROR",
+                status="failed",
+                error_code="change_detect_invalid_schema",
+            )
             return []
 
         merged = realtime_df.merge(
@@ -588,7 +804,12 @@ def detect_changes_with_static_configs(
         )
 
         if merged.empty:
-            logger.debug("[CHANGE_DETECT] 无匹配配置数据")
+            _monitor_log(
+                "CHANGE_DETECT_NO_MATCH",
+                "未匹配到可用于检测的配置数据",
+                level="DEBUG",
+                status="empty",
+            )
             return []
 
         merged = merged.sort_values("time")
@@ -649,18 +870,41 @@ def detect_changes_with_static_configs(
         result_df = result_df.drop_duplicates(subset=dedupe_keys, keep="last")
         duplicate_count = before_dedupe - len(result_df)
         if duplicate_count > 0:
-            logger.warning(
-                f"[CHANGE_DETECT] 检测到并移除 {duplicate_count} 条重复变化（按 {dedupe_keys}）"
+            _monitor_log(
+                "CHANGE_DETECT_DUPLICATES_REMOVED",
+                "检测到并移除重复变化记录",
+                level="WARNING",
+                failed_items=duplicate_count,
+                dedupe_keys=dedupe_keys,
+                status="deduplicated",
             )
 
-        logger.debug(f"[CHANGE_DETECT] 检测到 {len(result_df)} 个变更")
+        _monitor_log(
+            "CHANGE_DETECT_FINISH",
+            "变更检测完成",
+            level="DEBUG",
+            total_changes=len(result_df),
+        )
         return result_df.to_dict("records")
 
     except Exception as e:
-        logger.error(f"[CHANGE_DETECT] 变更检测失败: {e}")
+        _monitor_log(
+            "CHANGE_DETECT_FAILED",
+            "变更检测失败",
+            level="ERROR",
+            status="failed",
+            error_type=type(e).__name__,
+            error_code="change_detect_failed",
+            error_message=str(e),
+        )
         import traceback
 
-        logger.error(f"[CHANGE_DETECT] 错误详情: {traceback.format_exc()}")
+        _monitor_log(
+            "CHANGE_DETECT_TRACEBACK",
+            "变更检测异常堆栈",
+            level="DEBUG",
+            error_stack=traceback.format_exc(),
+        )
         return []
 
 
@@ -740,14 +984,28 @@ def detect_point_changes(
                 }
                 changes.append(change_record)
 
-                logger.debug(
-                    f"[POINT_CHANGE] {config['device_name']}.{config['point_name']}: {change_info}"
+                _monitor_log(
+                    "POINT_CHANGE_DETECTED",
+                    "检测到测点变更",
+                    level="DEBUG",
+                    room_id=config["room_id"],
+                    device_name=config["device_name"],
+                    point_name=config["point_name"],
+                    change_info=change_info,
                 )
 
         return changes
 
     except Exception as e:
-        logger.error(f"[POINT_CHANGE] 测点变更检测失败: {e}")
+        _monitor_log(
+            "POINT_CHANGE_FAILED",
+            "测点变更检测失败",
+            level="ERROR",
+            status="failed",
+            error_type=type(e).__name__,
+            error_code="point_change_failed",
+            error_message=str(e),
+        )
         return []
 
 
@@ -776,7 +1034,12 @@ def store_setpoint_changes_to_database(changes: List[Dict[str, Any]]) -> int:
         df = df.dropna(subset=["change_time"])
 
         if df.empty:
-            logger.warning("[DB_STORE] 变更记录的 change_time 全部无效，跳过入库")
+            _monitor_log(
+                "DB_STORE_INVALID_CHANGE_TIME",
+                "变更记录的 change_time 全部无效，跳过入库",
+                level="WARNING",
+                status="skipped",
+            )
             return 0
 
         # 批内去重：同一批次内重复记录只保留一条
@@ -785,8 +1048,13 @@ def store_setpoint_changes_to_database(changes: List[Dict[str, Any]]) -> int:
         df = df.drop_duplicates(subset=dedupe_keys, keep="last").reset_index(drop=True)
         batch_removed = batch_before - len(df)
         if batch_removed > 0:
-            logger.warning(
-                f"[DB_STORE] 批内去重移除 {batch_removed} 条重复记录（按 {dedupe_keys}）"
+            _monitor_log(
+                "DB_STORE_BATCH_DEDUP",
+                "批内去重移除重复记录",
+                level="WARNING",
+                failed_items=batch_removed,
+                dedupe_keys=dedupe_keys,
+                status="deduplicated",
             )
 
         # 库内幂等：过滤数据库中已经存在的相同主键记录，避免重试/重跑重复写入
@@ -831,12 +1099,20 @@ def store_setpoint_changes_to_database(changes: List[Dict[str, Any]]) -> int:
             df = df[df["_merge"] == "left_only"].drop(columns=["_merge"])
 
             if already_exists > 0:
-                logger.warning(
-                    f"[DB_STORE] 检测到 {already_exists} 条已存在记录，已跳过重复写入"
+                _monitor_log(
+                    "DB_STORE_ALREADY_EXISTS",
+                    "检测到已存在记录，已跳过重复写入",
+                    level="WARNING",
+                    skipped_items=already_exists,
+                    status="deduplicated",
                 )
 
         if df.empty:
-            logger.info("[DB_STORE] 过滤重复后无新记录需要入库")
+            _monitor_log(
+                "DB_STORE_NO_NEW_RECORDS",
+                "过滤重复后无新记录需要入库",
+                status="skipped",
+            )
             return 0
 
         # 存储到数据库
@@ -849,11 +1125,24 @@ def store_setpoint_changes_to_database(changes: List[Dict[str, Any]]) -> int:
             chunksize=1000,
         )
 
-        logger.info(f"[DB_STORE] 成功存储 {len(df)} 条变更记录")
+        _monitor_log(
+            "DB_STORE_FINISH",
+            "设定点变更记录已写入数据库",
+            status="success",
+            stored_records=len(df),
+        )
         return len(df)
 
     except Exception as e:
-        logger.error(f"[DB_STORE] 存储变更记录失败: {e}")
+        _monitor_log(
+            "DB_STORE_FAILED",
+            "存储设定点变更记录失败",
+            level="ERROR",
+            status="failed",
+            error_type=type(e).__name__,
+            error_code="db_store_failed",
+            error_message=str(e),
+        )
         return 0
 
 
@@ -864,7 +1153,9 @@ def execute_fallback_monitoring() -> Dict[str, Any]:
     Returns:
         Dict[str, Any]: 监控结果
     """
-    logger.info("[FALLBACK] 🔄 执行备用监控方案...")
+    _monitor_log(
+        "FALLBACK_START", "执行备用监控方案", level="WARNING", status="fallback"
+    )
 
     try:
         # 导入原有的监控函数
@@ -874,18 +1165,31 @@ def execute_fallback_monitoring() -> Dict[str, Any]:
         end_time = datetime.now()
         start_time = end_time - timedelta(hours=1)
 
-        logger.info(f"[FALLBACK] 监控时间范围: {start_time} ~ {end_time}")
+        _monitor_log(
+            "FALLBACK_WINDOW",
+            "备用监控方案时间范围已确定",
+            trigger_time=end_time.isoformat(),
+            window_start=start_time.isoformat(),
+        )
 
         # 执行批量监控
         result = batch_monitor_setpoint_changes(
             start_time=start_time, end_time=end_time, store_results=True
         )
 
-        logger.info("[FALLBACK] ✅ 备用监控方案执行完成")
+        _monitor_log("FALLBACK_FINISH", "备用监控方案执行完成", status="success")
         return result
 
     except Exception as e:
-        logger.error(f"[FALLBACK] ❌ 备用监控方案失败: {e}")
+        _monitor_log(
+            "FALLBACK_FAILED",
+            "备用监控方案失败",
+            level="ERROR",
+            status="failed",
+            error_type=type(e).__name__,
+            error_code="fallback_failed",
+            error_message=str(e),
+        )
         return {
             "success": False,
             "total_rooms": 0,

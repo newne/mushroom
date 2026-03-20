@@ -1,18 +1,36 @@
-import mlflow
-import pandas as pd
 import json
-from src.vision.offline.runner import Runner
+
+import mlflow
+
+from src.global_const.global_const import settings
+from src.vision.offline.config import Config
+from src.vision.offline.config import config as default_config
 from src.vision.offline.dataset import DatasetLoader
+from src.vision.offline.runner import Runner
 from src.vision.offline.scorers import (
     score_json_format_metric,
-    score_schema_conformity_metric,
 )
-from src.vision.offline.config import Config, config as default_config
-from src.global_const.global_const import settings
+from utils import log_task_event
+
+
+def _comparison_log(event: str, message: str, level: str = "INFO", **context):
+    log_task_event(
+        "VISION_OFFLINE_COMPARISON_EVAL",
+        event,
+        message,
+        level=level,
+        task_type="script",
+        **context,
+    )
 
 
 def run_comparison_eval(limit=20):
-    print("Running comparison evaluation...")
+    _comparison_log(
+        "VISION_OFFLINE_COMPARISON_START",
+        "开始执行离线对比评估",
+        limit=limit,
+        status="running",
+    )
 
     # 1. Load Data
     loader = DatasetLoader()
@@ -34,9 +52,21 @@ def run_comparison_eval(limit=20):
             )
         prompt_obj = mlflow.genai.load_prompt(prompt_uri)
         template = prompt_obj.template
-        print(f"Loaded prompt {prompt_uri} from registry.")
+        _comparison_log(
+            "VISION_OFFLINE_COMPARISON_PROMPT_READY",
+            "对比评估 prompt 加载完成",
+            prompt_uri=prompt_uri,
+            status="success",
+        )
     except Exception as e:
-        print(f"Error loading prompt: {e}")
+        _comparison_log(
+            "VISION_OFFLINE_COMPARISON_PROMPT_FAILED",
+            "对比评估 prompt 加载失败",
+            level="ERROR",
+            status="failed",
+            error_type=type(e).__name__,
+            error_message=str(e),
+        )
         return
 
     eval_df["prompt_template"] = template
@@ -45,7 +75,7 @@ def run_comparison_eval(limit=20):
     # The default score_schema_conformity checks for 6 fields. We need a new one or modified one.
     # Since we can't easily modify the imported function's closure, let's define a specific one here.
 
-    from mlflow.metrics import make_metric, MetricValue
+    from mlflow.metrics import MetricValue, make_metric
 
     def extract_json(text: str) -> str:
         text = str(text).strip()
@@ -96,7 +126,12 @@ def run_comparison_eval(limit=20):
     # I will assume the user meant I should use the profile that has the 4b model.
     # I'll modify Config to allow switching profiles or just instantiate a new Config("development.llama")
 
-    print("Initializing Runner with profile: development.llama (4B Model)...")
+    _comparison_log(
+        "VISION_OFFLINE_COMPARISON_RUNNER_INIT",
+        "开始初始化 4B 模型 Runner",
+        profile="development.llama",
+        status="running",
+    )
 
     # We need to hack the global config or pass config to Runner.
     # Runner uses `from .config import config`.
@@ -109,8 +144,13 @@ def run_comparison_eval(limit=20):
     # Force re-read of properties
     # Config properties (base_url, model, api_key) read from self._config, so this should work.
 
-    print(f"Model: {default_config.model}")
-    print(f"Base URL: {default_config.base_url}")
+    _comparison_log(
+        "VISION_OFFLINE_COMPARISON_CONFIG",
+        "对比评估 Runner 配置已更新",
+        model=default_config.model,
+        base_url=default_config.base_url,
+        status="success",
+    )
 
     runner = Runner()
 
@@ -129,8 +169,12 @@ def run_comparison_eval(limit=20):
             evaluator_config={"col_mapping": {"inputs": "image_path"}},
         )
 
-        print("Evaluation results:")
-        print(results.metrics)
+        _comparison_log(
+            "VISION_OFFLINE_COMPARISON_FINISH",
+            "离线对比评估完成",
+            metrics=str(results.metrics),
+            status="success",
+        )
 
         # Log results to a file for user to see
         mlflow.log_dict(results.metrics, "metrics_4b.json")

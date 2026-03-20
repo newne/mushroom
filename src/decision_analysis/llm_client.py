@@ -7,11 +7,24 @@ decision recommendations based on rendered prompts.
 
 import json
 import re
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 
 import requests
 from dynaconf import Dynaconf
-from loguru import logger
+
+from utils import log_task_event
+
+
+def _llm_log(event: str, message: str, level: str = "INFO", **context: Any) -> None:
+    """输出统一的决策分析 LLM 辅助事件日志。"""
+    log_task_event(
+        "DECISION_ANALYSIS",
+        event,
+        message,
+        level=level,
+        task_type="helper",
+        **context,
+    )
 
 
 class LLMClient:
@@ -44,13 +57,178 @@ class LLMClient:
             self.llama_host, self.llama_port
         )
 
-        logger.info(
-            f"[LLMClient] Initialized with model: {self.model}, "
-            f"endpoint: {self.api_url}"
+        _llm_log(
+            "DECISION_LLM_CLIENT_INIT",
+            "LLM 客户端初始化完成",
+            model_name=self.model,
+            endpoint=self.api_url,
+            status="success",
+        )
+
+    def _get_model_extra_body(self) -> Optional[Dict[str, Any]]:
+        """Return model-specific request options for compatible backends."""
+        model_lower = str(self.model).lower()
+        if model_lower == "llama-mushroom-medium" or "qwen3" in model_lower:
+            return {
+                "enable_thinking": False,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+        return None
+
+    def _get_generation_options(
+        self,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Build request generation options from llama config and call overrides."""
+        llama_settings = self.settings.llama
+        options: Dict[str, Any] = {
+            "temperature": (
+                llama_settings.get("temperature", 0.7)
+                if temperature is None
+                else temperature
+            ),
+        }
+
+        resolved_max_tokens = (
+            llama_settings.get("max_tokens") if max_tokens is None else max_tokens
+        )
+        if resolved_max_tokens is not None and resolved_max_tokens > 0:
+            options["max_tokens"] = resolved_max_tokens
+
+        for key in (
+            "top_p",
+            "top_k",
+            "min_p",
+            "presence_penalty",
+            "repetition_penalty",
+        ):
+            value = llama_settings.get(key)
+            if value is not None:
+                options[key] = value
+
+        return options
+
+    def _sanitize_llm_response_text(self, response_text: str) -> str:
+        """Strip reasoning wrappers and markdown fences before JSON parsing."""
+        sanitized = (response_text or "").strip().lstrip("\ufeff")
+        sanitized = re.sub(r"<think>.*?</think>", "", sanitized, flags=re.DOTALL)
+        sanitized = re.sub(r"^```json\s*", "", sanitized, flags=re.IGNORECASE)
+        sanitized = re.sub(r"^```\s*", "", sanitized)
+        sanitized = re.sub(r"\s*```$", "", sanitized)
+        return sanitized.strip()
+
+    def _looks_like_truncated_json(self, response_text: str) -> bool:
+        """Heuristically detect responses that likely ended before JSON completion."""
+        text = (response_text or "").strip()
+        if not text:
+            return False
+        if text.startswith("{") and not text.endswith("}"):
+            return True
+        if text.count("{") > text.count("}"):
+            return True
+        if text.count('"') % 2 == 1:
+            return True
+        return False
+
+    def _parse_enhanced_candidate(self, candidate_text: str) -> Optional[Dict]:
+        """Try parsing one enhanced JSON candidate and normalize its structure."""
+        if not candidate_text:
+            return None
+
+        try:
+            decision = json.loads(candidate_text)
+        except json.JSONDecodeError:
+            return None
+
+        if self._validate_enhanced_structure(decision):
+            return decision
+        return self._convert_to_enhanced_format(decision)
+
+    def _repair_truncated_json_tail(self, response_text: str) -> Optional[str]:
+        """Trim to the last safe JSON boundary and close any open containers."""
+        text = self._sanitize_llm_response_text(response_text)
+        start_idx = text.find("{")
+        if start_idx == -1:
+            return None
+
+        text = text[start_idx:]
+        stack: list[str] = []
+        in_string = False
+        escape = False
+        last_boundary_index: Optional[int] = None
+        last_boundary_stack: Optional[list[str]] = None
+
+        for index, char in enumerate(text):
+            if escape:
+                escape = False
+                continue
+
+            if char == "\\":
+                escape = True
+                continue
+
+            if char == '"':
+                in_string = not in_string
+                continue
+
+            if in_string:
+                continue
+
+            if char == "{":
+                stack.append("}")
+                continue
+
+            if char == "[":
+                stack.append("]")
+                continue
+
+            if char in "}]":
+                if stack and stack[-1] == char:
+                    stack.pop()
+                    last_boundary_index = index + 1
+                    last_boundary_stack = stack.copy()
+                continue
+
+            if char == ",":
+                last_boundary_index = index
+                last_boundary_stack = stack.copy()
+
+        if last_boundary_index is None or last_boundary_stack is None:
+            return None
+
+        repaired = text[:last_boundary_index].rstrip(", \n\r\t")
+        if not repaired:
+            return None
+
+        repaired += "".join(reversed(last_boundary_stack))
+        repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+
+        if repaired == text:
+            return None
+        return repaired
+
+    def _was_tail_salvaged(self, decision: Dict[str, Any]) -> bool:
+        """Return True when enhanced output was recovered from truncated first-pass JSON."""
+        if not isinstance(decision, dict):
+            return False
+        metadata = decision.get("metadata", {})
+        return bool(isinstance(metadata, dict) and metadata.get("tail_salvaged"))
+
+    def _was_structure_converted(self, decision: Dict[str, Any]) -> bool:
+        """Return True when output only survived by conversion from a weaker structure."""
+        if not isinstance(decision, dict):
+            return False
+        metadata = decision.get("metadata", {})
+        return bool(
+            isinstance(metadata, dict) and metadata.get("converted_from_regular_format")
         )
 
     def generate_decision(
-        self, prompt: str, temperature: float = 0.7, max_tokens: int = -1
+        self,
+        prompt: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Dict:
         """
         Call LLM to generate decision recommendations
@@ -65,24 +243,38 @@ class LLMClient:
 
         Requirements: 7.1, 7.2, 7.3, 7.5
         """
-        logger.info("[LLMClient] Generating decision with LLM")
+        _llm_log(
+            "DECISION_LLM_REQUEST_START",
+            "开始生成决策建议",
+            model_name=self.model,
+            status="running",
+        )
 
         try:
             # Build request payload
             payload = {
                 "model": self.model,
                 "messages": [{"role": "system", "content": prompt}],
-                "temperature": temperature,
                 "stream": False,
             }
+            payload.update(
+                self._get_generation_options(
+                    temperature=temperature, max_tokens=max_tokens
+                )
+            )
 
-            # Add max_tokens if specified
-            if max_tokens > 0:
-                payload["max_tokens"] = max_tokens
+            extra_body = self._get_model_extra_body()
+            if extra_body:
+                payload["extra_body"] = extra_body
 
-            logger.debug(
-                f"[LLMClient] Sending request to {self.api_url} "
-                f"with model={self.model}, temperature={temperature}"
+            _llm_log(
+                "DECISION_LLM_REQUEST_PREPARED",
+                "已构建决策请求负载",
+                level="DEBUG",
+                endpoint=self.api_url,
+                model_name=self.model,
+                temperature=payload.get("temperature"),
+                max_tokens=payload.get("max_tokens"),
             )
 
             # Prepare headers with API key if available
@@ -117,7 +309,14 @@ class LLMClient:
                 error_msg = (
                     f"LLM API returned status {response.status_code}: {response.text}"
                 )
-                logger.error(f"[LLMClient] {error_msg}")
+                _llm_log(
+                    "DECISION_LLM_REQUEST_FAILED",
+                    "决策 LLM 接口返回非 200 状态",
+                    level="ERROR",
+                    status="failed",
+                    error_code=f"http_{response.status_code}",
+                    error_message=error_msg,
+                )
                 return self._get_fallback_decision(f"API error: {response.status_code}")
 
             # Parse response JSON
@@ -125,35 +324,54 @@ class LLMClient:
 
             # Extract content from response
             if "choices" not in response_data or len(response_data["choices"]) == 0:
-                logger.error("[LLMClient] No choices in LLM response")
+                _llm_log(
+                    "DECISION_LLM_NO_CHOICES",
+                    "决策 LLM 响应中缺少 choices",
+                    level="ERROR",
+                    status="failed",
+                )
                 return self._get_fallback_decision("No choices in response")
 
             content = response_data["choices"][0].get("message", {}).get("content", "")
 
             # Detailed logging for debugging
-            logger.info(f"[LLMClient] Response content length: {len(content)} chars")
+            _llm_log(
+                "DECISION_LLM_RESPONSE_RECEIVED",
+                "已收到决策 LLM 响应",
+                total_items=len(content),
+                status="success",
+            )
 
             if not content:
-                logger.error("[LLMClient] Empty content in LLM response")
-                logger.error(
-                    f"[LLMClient] Full response structure: {list(response_data.keys())}"
+                _llm_log(
+                    "DECISION_LLM_EMPTY_CONTENT",
+                    "决策 LLM 响应内容为空",
+                    level="ERROR",
+                    status="failed",
+                    response_keys=list(response_data.keys()),
+                    choice_keys=list(response_data["choices"][0].keys())
+                    if "choices" in response_data and len(response_data["choices"]) > 0
+                    else None,
                 )
-                if "choices" in response_data and len(response_data["choices"]) > 0:
-                    logger.error(
-                        f"[LLMClient] Choice structure: {list(response_data['choices'][0].keys())}"
-                    )
                 return self._get_fallback_decision("Empty content")
 
             if len(content) < 50:
-                logger.warning(
-                    f"[LLMClient] Very short response (may be incomplete): {content}"
+                _llm_log(
+                    "DECISION_LLM_RESPONSE_SHORT",
+                    "决策 LLM 响应较短，可能不完整",
+                    level="WARNING",
+                    status="partial",
+                    total_items=len(content),
+                    response_preview=content,
                 )
             else:
-                logger.info(f"[LLMClient] Response preview: {content[:150]}...")
-
-            logger.info(
-                f"[LLMClient] Received response from LLM (length: {len(content)} chars)"
-            )
+                _llm_log(
+                    "DECISION_LLM_RESPONSE_PREVIEW",
+                    "决策 LLM 响应预览",
+                    level="DEBUG",
+                    total_items=len(content),
+                    response_preview=content[:150],
+                )
 
             # Parse the response content
             parsed_decision = self._parse_response(content)
@@ -161,19 +379,46 @@ class LLMClient:
             return parsed_decision
 
         except requests.exceptions.Timeout:
-            logger.error(f"[LLMClient] Request timeout after {self.timeout} seconds")
+            _llm_log(
+                "DECISION_LLM_TIMEOUT",
+                "决策 LLM 请求超时",
+                level="ERROR",
+                status="failed",
+                error_message=f"timeout after {self.timeout} seconds",
+            )
             return self._get_fallback_decision("Timeout")
 
         except requests.exceptions.ConnectionError as e:
-            logger.error(f"[LLMClient] Connection error: {e}")
+            _llm_log(
+                "DECISION_LLM_CONNECTION_ERROR",
+                "决策 LLM 连接失败",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return self._get_fallback_decision("Connection error")
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"[LLMClient] Request error: {e}")
+            _llm_log(
+                "DECISION_LLM_REQUEST_EXCEPTION",
+                "决策 LLM 请求异常",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return self._get_fallback_decision(f"Request error: {str(e)}")
 
         except Exception as e:
-            logger.error(f"[LLMClient] Unexpected error: {e}", exc_info=True)
+            _llm_log(
+                "DECISION_LLM_UNEXPECTED_ERROR",
+                "决策 LLM 调用发生未预期异常",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return self._get_fallback_decision(f"Unexpected error: {str(e)}")
 
     def _parse_response(self, response_text: str) -> Dict:
@@ -191,33 +436,47 @@ class LLMClient:
 
         Requirements: 7.5
         """
-        logger.info("[LLMClient] Parsing LLM response")
+        _llm_log("DECISION_LLM_PARSE_START", "开始解析决策 LLM 响应", status="running")
 
         # Check for empty response
         if not response_text or not response_text.strip():
-            logger.error("[LLMClient] Empty or whitespace-only response")
+            _llm_log(
+                "DECISION_LLM_PARSE_EMPTY",
+                "决策 LLM 响应为空白文本",
+                level="ERROR",
+                status="failed",
+            )
             return self._get_fallback_decision("Empty response")
 
-        # Strip whitespace
-        response_text = response_text.strip()
+        # Strip whitespace and common reasoning wrappers
+        response_text = self._sanitize_llm_response_text(response_text)
 
         # Log response characteristics
-        logger.debug(
-            f"[LLMClient] Response length: {len(response_text)} chars, "
-            f"starts with: {response_text[:50]}"
+        _llm_log(
+            "DECISION_LLM_PARSE_PROFILE",
+            "决策 LLM 响应解析画像",
+            level="DEBUG",
+            total_items=len(response_text),
+            response_preview=response_text[:50],
         )
 
         try:
             # Try to parse as JSON directly
             decision = json.loads(response_text)
-            logger.info("[LLMClient] Successfully parsed JSON response (direct)")
+            _llm_log(
+                "DECISION_LLM_PARSE_DIRECT_OK", "直接 JSON 解析成功", status="success"
+            )
             return decision
 
         except json.JSONDecodeError as e:
-            logger.warning(
-                f"[LLMClient] Initial JSON parse failed: {e}. "
-                f"Error at line {e.lineno}, column {e.colno}. "
-                "Attempting to extract JSON from text..."
+            _llm_log(
+                "DECISION_LLM_PARSE_RETRY",
+                "首次 JSON 解析失败，尝试从文本中提取 JSON",
+                level="WARNING",
+                status="retrying",
+                error_message=str(e),
+                error_line=e.lineno,
+                error_column=e.colno,
             )
 
             # Try to extract JSON from markdown code blocks
@@ -235,8 +494,10 @@ class LLMClient:
                     for match in matches:
                         try:
                             decision = json.loads(match)
-                            logger.info(
-                                "[LLMClient] Successfully extracted JSON from markdown code block"
+                            _llm_log(
+                                "DECISION_LLM_PARSE_CODEBLOCK_OK",
+                                "从 Markdown 代码块提取 JSON 成功",
+                                status="success",
                             )
                             return decision
                         except json.JSONDecodeError:
@@ -250,24 +511,34 @@ class LLMClient:
                 for obj_text in sorted(json_objects, key=len, reverse=True):
                     try:
                         decision = json.loads(obj_text)
-                        logger.info(
-                            "[LLMClient] Successfully extracted JSON using bracket matching"
+                        _llm_log(
+                            "DECISION_LLM_PARSE_BRACKET_OK",
+                            "通过括号匹配提取 JSON 成功",
+                            status="success",
                         )
                         return decision
                     except json.JSONDecodeError:
                         continue
 
             # If all parsing attempts fail, log the response and return fallback
-            logger.error(
-                f"[LLMClient] Failed to parse response after all attempts. "
-                f"Response length: {len(response_text)}, "
-                f"preview: {response_text[:500]}..."
+            _llm_log(
+                "DECISION_LLM_PARSE_FAILED",
+                "多轮尝试后仍无法解析决策 LLM 响应",
+                level="ERROR",
+                status="failed",
+                total_items=len(response_text),
+                response_preview=response_text[:500],
             )
             return self._get_fallback_decision("JSON parse error")
 
         except Exception as e:
-            logger.error(
-                f"[LLMClient] Unexpected error during parsing: {e}", exc_info=True
+            _llm_log(
+                "DECISION_LLM_PARSE_EXCEPTION",
+                "解析决策 LLM 响应时发生未预期异常",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
             )
             return self._get_fallback_decision(f"Parse error: {str(e)}")
 
@@ -286,8 +557,25 @@ class LLMClient:
         objects = []
         depth = 0
         start = None
+        in_string = False
+        escape = False
 
         for i, char in enumerate(text):
+            if escape:
+                escape = False
+                continue
+
+            if char == "\\":
+                escape = True
+                continue
+
+            if char == '"':
+                in_string = not in_string
+                continue
+
+            if in_string:
+                continue
+
             if char == "{":
                 if depth == 0:
                     start = i
@@ -315,8 +603,12 @@ class LLMClient:
 
         Requirements: 9.2
         """
-        logger.warning(
-            f"[LLMClient] Using fallback decision strategy. Reason: {error_reason}"
+        _llm_log(
+            "DECISION_LLM_FALLBACK",
+            "启用常规回退决策策略",
+            level="WARNING",
+            status="fallback",
+            error_message=error_reason,
         )
 
         # Return a conservative fallback decision
@@ -411,7 +703,10 @@ class LLMClient:
         return fallback
 
     def generate_enhanced_decision(
-        self, prompt: str, temperature: float = 0.3, max_tokens: int = 3072
+        self,
+        prompt: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> Dict:
         """
         Call LLM to generate enhanced decision recommendations with structured output
@@ -429,7 +724,12 @@ class LLMClient:
 
         Requirements: Enhanced decision analysis with structured parameter adjustments
         """
-        logger.info("[LLMClient] Generating enhanced decision with structured output")
+        _llm_log(
+            "DECISION_LLM_ENHANCED_START",
+            "开始生成增强版结构化决策",
+            model_name=self.model,
+            status="running",
+        )
 
         try:
             # Build request payload with enhanced parameters
@@ -438,19 +738,36 @@ class LLMClient:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "你是一个专业的蘑菇种植环境控制专家。请严格按照要求的JSON格式输出结构化的参数调整建议。",
+                        "content": (
+                            "你是一个专业的蘑菇种植环境控制专家。"
+                            "必须仅输出一个完整、合法、可解析的JSON对象。"
+                            "禁止输出<think>、解释文字、Markdown代码块或对象外任何内容。"
+                            "字段值保持简洁，避免冗长描述。"
+                        ),
                     },
                     {"role": "user", "content": prompt},
                 ],
-                "temperature": temperature,
                 "stream": False,
-                "max_tokens": max_tokens,
                 "response_format": self._get_enhanced_json_schema_response_format(),
             }
+            payload.update(
+                self._get_generation_options(
+                    temperature=temperature, max_tokens=max_tokens
+                )
+            )
 
-            logger.debug(
-                f"[LLMClient] Sending enhanced request to {self.api_url} "
-                f"with model={self.model}, temperature={temperature}, max_tokens={max_tokens}"
+            extra_body = self._get_model_extra_body()
+            if extra_body:
+                payload["extra_body"] = extra_body
+
+            _llm_log(
+                "DECISION_LLM_ENHANCED_PREPARED",
+                "已构建增强版结构化决策请求",
+                level="DEBUG",
+                endpoint=self.api_url,
+                model_name=self.model,
+                temperature=payload.get("temperature"),
+                max_tokens=payload.get("max_tokens"),
             )
 
             # Prepare headers with API key if available
@@ -484,8 +801,11 @@ class LLMClient:
                 response.status_code == 400
                 and "response_format" in response.text.lower()
             ):
-                logger.warning(
-                    "[LLMClient] Backend rejected response_format, retrying without schema constraint"
+                _llm_log(
+                    "DECISION_LLM_ENHANCED_SCHEMA_REJECTED",
+                    "后端拒绝 response_format，改为无 schema 约束重试",
+                    level="WARNING",
+                    status="retrying",
                 )
                 payload.pop("response_format", None)
                 response = requests.post(
@@ -499,12 +819,16 @@ class LLMClient:
             if response.status_code == 400 and self._is_context_overflow_error(
                 response.text
             ):
-                logger.warning(
-                    "[LLMClient] Enhanced request hit context overflow, retrying with shortened prompt"
+                _llm_log(
+                    "DECISION_LLM_ENHANCED_CONTEXT_OVERFLOW",
+                    "增强版请求触发上下文溢出，改用缩短提示词重试",
+                    level="WARNING",
+                    status="retrying",
                 )
                 shortened_prompt = self._shorten_prompt_for_context(prompt)
                 payload["messages"][1]["content"] = shortened_prompt
-                payload["max_tokens"] = min(max_tokens, 1024)
+                if payload.get("max_tokens") is not None:
+                    payload["max_tokens"] = min(payload["max_tokens"], 1024)
                 response = requests.post(
                     self.api_url, json=payload, headers=headers, timeout=self.timeout
                 )
@@ -515,7 +839,14 @@ class LLMClient:
                     f"Enhanced LLM API returned status {response.status_code}: "
                     f"{response.text}"
                 )
-                logger.error(f"[LLMClient] {error_msg}")
+                _llm_log(
+                    "DECISION_LLM_ENHANCED_FAILED",
+                    "增强版 LLM 接口返回非 200 状态",
+                    level="ERROR",
+                    status="failed",
+                    error_code=f"http_{response.status_code}",
+                    error_message=error_msg,
+                )
                 return self._get_enhanced_fallback_decision(
                     f"API error: {response.status_code}"
                 )
@@ -525,40 +856,92 @@ class LLMClient:
 
             # Extract content from response
             if "choices" not in response_data or len(response_data["choices"]) == 0:
-                logger.error("[LLMClient] No choices in enhanced LLM response")
+                _llm_log(
+                    "DECISION_LLM_ENHANCED_NO_CHOICES",
+                    "增强版 LLM 响应中缺少 choices",
+                    level="ERROR",
+                    status="failed",
+                )
                 return self._get_enhanced_fallback_decision("No choices in response")
 
             content = response_data["choices"][0].get("message", {}).get("content", "")
+            finish_reason = response_data["choices"][0].get("finish_reason")
 
             # Detailed logging for debugging
-            logger.info(
-                f"[LLMClient] Enhanced response content length: {len(content)} chars"
+            _llm_log(
+                "DECISION_LLM_ENHANCED_RESPONSE",
+                "已收到增强版 LLM 响应",
+                total_items=len(content),
+                status="success",
             )
 
             if not content:
-                logger.error("[LLMClient] Empty content in enhanced LLM response")
+                _llm_log(
+                    "DECISION_LLM_ENHANCED_EMPTY",
+                    "增强版 LLM 响应内容为空",
+                    level="ERROR",
+                    status="failed",
+                )
                 return self._get_enhanced_fallback_decision("Empty content")
 
             if len(content) < 100:
-                logger.warning(
-                    f"[LLMClient] Very short enhanced response (may be incomplete): {content}"
+                _llm_log(
+                    "DECISION_LLM_ENHANCED_SHORT",
+                    "增强版 LLM 响应较短，可能不完整",
+                    level="WARNING",
+                    status="partial",
+                    total_items=len(content),
+                    response_preview=content,
                 )
             else:
-                logger.info(
-                    f"[LLMClient] Enhanced response preview: {content[:200]}..."
+                _llm_log(
+                    "DECISION_LLM_ENHANCED_PREVIEW",
+                    "增强版 LLM 响应预览",
+                    level="DEBUG",
+                    total_items=len(content),
+                    response_preview=content[:200],
                 )
-
-            logger.info(
-                f"[LLMClient] Received enhanced response from LLM "
-                f"(length: {len(content)} chars)"
-            )
+            if finish_reason:
+                _llm_log(
+                    "DECISION_LLM_ENHANCED_FINISH_REASON",
+                    "增强版 LLM 返回 finish_reason",
+                    level="DEBUG",
+                    finish_reason=finish_reason,
+                )
 
             # Parse the enhanced response content
             parsed_decision = self._parse_enhanced_response(content)
 
-            if self._is_parse_fallback(parsed_decision):
-                logger.warning(
-                    "[LLMClient] Enhanced response parsing fallback detected, retrying once with strict JSON constraints"
+            truncated_or_incomplete = str(
+                finish_reason
+            ).lower() == "length" or self._looks_like_truncated_json(content)
+            should_retry_strict = self._is_parse_fallback(parsed_decision) or (
+                truncated_or_incomplete
+                and self._was_structure_converted(parsed_decision)
+                and not self._was_tail_salvaged(parsed_decision)
+            )
+
+            if truncated_or_incomplete and self._was_tail_salvaged(parsed_decision):
+                _llm_log(
+                    "DECISION_LLM_ENHANCED_TAIL_SALVAGED",
+                    "增强版首轮响应已通过尾部修复恢复，跳过严格重试",
+                    status="success",
+                )
+
+            if should_retry_strict:
+                _llm_log(
+                    "DECISION_LLM_ENHANCED_STRICT_RETRY",
+                    "增强版响应触发解析回退，使用严格 JSON 约束重试一次",
+                    level="WARNING",
+                    status="retrying",
+                )
+                retry_prompt = self._shorten_prompt_for_context(prompt)
+                strict_retry_max_tokens = min(
+                    max(
+                        max_tokens or self.settings.llama.get("max_tokens", 3072),
+                        2048,
+                    ),
+                    2560,
                 )
                 retry_payload = {
                     "model": self.model,
@@ -569,18 +952,25 @@ class LLMClient:
                                 "你是一个专业的蘑菇种植环境控制专家。"
                                 "必须仅输出完整合法JSON，不允许任何解释文本。"
                                 "JSON必须包含 strategy、device_recommendations、monitoring_points 三个顶层键。"
+                                "禁止输出<think>、Markdown代码块或对象外文本。"
+                                "保持字段值简短，每个 rationale 最多2条。"
                             ),
                         },
                         {
                             "role": "user",
-                            "content": prompt,
+                            "content": retry_prompt,
                         },
                     ],
-                    "temperature": 0.1,
                     "stream": False,
-                    "max_tokens": min(max_tokens, 1536),
                     "response_format": self._get_enhanced_json_schema_response_format(),
                 }
+                retry_payload.update(
+                    self._get_generation_options(
+                        temperature=0.05, max_tokens=strict_retry_max_tokens
+                    )
+                )
+                if extra_body:
+                    retry_payload["extra_body"] = extra_body
                 retry_response = requests.post(
                     self.api_url,
                     json=retry_payload,
@@ -607,7 +997,10 @@ class LLMClient:
                     retry_payload["messages"][1]["content"] = (
                         self._shorten_prompt_for_context(prompt)
                     )
-                    retry_payload["max_tokens"] = min(retry_payload["max_tokens"], 1024)
+                    if retry_payload.get("max_tokens") is not None:
+                        retry_payload["max_tokens"] = min(
+                            retry_payload["max_tokens"], 1024
+                        )
                     retry_response = requests.post(
                         self.api_url,
                         json=retry_payload,
@@ -617,36 +1010,72 @@ class LLMClient:
 
                 if retry_response.status_code == 200:
                     retry_data = retry_response.json()
+                    retry_finish_reason = retry_data.get("choices", [{}])[0].get(
+                        "finish_reason"
+                    )
                     retry_content = (
                         retry_data.get("choices", [{}])[0]
                         .get("message", {})
                         .get("content", "")
                     )
+                    if retry_finish_reason:
+                        _llm_log(
+                            "DECISION_LLM_ENHANCED_RETRY_FINISH_REASON",
+                            "增强版严格重试返回 finish_reason",
+                            level="DEBUG",
+                            finish_reason=retry_finish_reason,
+                        )
                     retry_parsed_decision = self._parse_enhanced_response(retry_content)
                     if not self._is_parse_fallback(retry_parsed_decision):
                         parsed_decision = retry_parsed_decision
-                        logger.info("[LLMClient] Strict JSON retry succeeded")
+                        _llm_log(
+                            "DECISION_LLM_ENHANCED_RETRY_OK",
+                            "增强版严格 JSON 重试成功",
+                            status="success",
+                        )
 
             return parsed_decision
 
         except requests.exceptions.Timeout:
-            logger.error(
-                f"[LLMClient] Enhanced request timeout after {self.timeout} seconds"
+            _llm_log(
+                "DECISION_LLM_ENHANCED_TIMEOUT",
+                "增强版 LLM 请求超时",
+                level="ERROR",
+                status="failed",
+                error_message=f"timeout after {self.timeout} seconds",
             )
             return self._get_enhanced_fallback_decision("Timeout")
 
         except requests.exceptions.ConnectionError as e:
-            logger.error(f"[LLMClient] Enhanced connection error: {e}")
+            _llm_log(
+                "DECISION_LLM_ENHANCED_CONNECTION_ERROR",
+                "增强版 LLM 连接失败",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return self._get_enhanced_fallback_decision("Connection error")
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"[LLMClient] Enhanced request error: {e}")
+            _llm_log(
+                "DECISION_LLM_ENHANCED_REQUEST_EXCEPTION",
+                "增强版 LLM 请求异常",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return self._get_enhanced_fallback_decision(f"Request error: {str(e)}")
 
         except Exception as e:
-            logger.error(
-                f"[LLMClient] Unexpected error in enhanced generation: {e}",
-                exc_info=True,
+            _llm_log(
+                "DECISION_LLM_ENHANCED_UNEXPECTED_ERROR",
+                "增强版 LLM 调用发生未预期异常",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
             )
             return self._get_enhanced_fallback_decision(f"Unexpected error: {str(e)}")
 
@@ -657,6 +1086,7 @@ class LLMClient:
             "n_keep" in text
             and "n_ctx" in text
             or "context length" in text
+            or "context size has been exceeded" in text
             or "maximum context" in text
             or "prompt too long" in text
             or "token limit" in text
@@ -727,64 +1157,98 @@ class LLMClient:
 
         Requirements: Enhanced decision analysis parsing
         """
-        logger.info("[LLMClient] Parsing enhanced LLM response")
+        _llm_log(
+            "DECISION_LLM_ENHANCED_PARSE_START",
+            "开始解析增强版 LLM 响应",
+            status="running",
+        )
 
         # Check for empty response
         if not response_text or not response_text.strip():
-            logger.error("[LLMClient] Empty or whitespace-only enhanced response")
+            _llm_log(
+                "DECISION_LLM_ENHANCED_PARSE_EMPTY",
+                "增强版 LLM 响应为空白文本",
+                level="ERROR",
+                status="failed",
+            )
             return self._get_enhanced_fallback_decision("Empty response")
 
-        # Strip whitespace
-        response_text = response_text.strip()
+        # Strip whitespace and common reasoning wrappers
+        response_text = self._sanitize_llm_response_text(response_text)
 
         # Log response characteristics
-        logger.debug(
-            f"[LLMClient] Enhanced response length: {len(response_text)} chars, "
-            f"starts with: {response_text[:50]}"
+        _llm_log(
+            "DECISION_LLM_ENHANCED_PARSE_PROFILE",
+            "增强版 LLM 响应解析画像",
+            level="DEBUG",
+            total_items=len(response_text),
+            response_preview=response_text[:50],
         )
 
         try:
             # Try to parse as JSON directly
             decision = json.loads(response_text)
-            logger.info(
-                "[LLMClient] Successfully parsed enhanced JSON response (direct)"
+            _llm_log(
+                "DECISION_LLM_ENHANCED_PARSE_DIRECT_OK",
+                "直接 JSON 解析增强版响应成功",
+                status="success",
             )
-
-            # Validate enhanced structure
             if self._validate_enhanced_structure(decision):
                 return decision
-            else:
-                logger.warning(
-                    "[LLMClient] Enhanced response structure validation failed, attempting conversion"
-                )
-                return self._convert_to_enhanced_format(decision)
+            _llm_log(
+                "DECISION_LLM_ENHANCED_STRUCTURE_CONVERT",
+                "增强版响应结构校验失败，尝试转换格式",
+                level="WARNING",
+                status="retrying",
+            )
+            return self._convert_to_enhanced_format(decision)
 
         except json.JSONDecodeError as e:
-            logger.warning(
-                f"[LLMClient] Enhanced JSON parse failed: {e}. "
-                f"Error at line {e.lineno}, column {e.colno}. "
-                "Attempting to extract JSON from text..."
+            _llm_log(
+                "DECISION_LLM_ENHANCED_PARSE_RETRY",
+                "增强版 JSON 首次解析失败，尝试从文本中提取 JSON",
+                level="WARNING",
+                status="retrying",
+                error_message=str(e),
+                error_line=e.lineno,
+                error_column=e.colno,
             )
 
             # Try to fix common JSON issues before parsing
             fixed_response = self._fix_common_json_issues(response_text)
             if fixed_response != response_text:
-                try:
-                    decision = json.loads(fixed_response)
-                    logger.info(
-                        "[LLMClient] Successfully parsed enhanced JSON after fixing common issues"
+                decision = self._parse_enhanced_candidate(fixed_response)
+                if decision is not None:
+                    _llm_log(
+                        "DECISION_LLM_ENHANCED_PARSE_FIXED_OK",
+                        "修复常见 JSON 问题后解析增强版响应成功",
+                        status="success",
+                    )
+                    return decision
+                else:
+                    _llm_log(
+                        "DECISION_LLM_ENHANCED_PARSE_FIXED_STILL_BAD",
+                        "修复常见 JSON 问题后仍无法解析，继续尝试其他方法",
+                        level="DEBUG",
                     )
 
-                    # Validate and convert if needed
-                    if self._validate_enhanced_structure(decision):
-                        return decision
-                    else:
-                        return self._convert_to_enhanced_format(decision)
-
-                except json.JSONDecodeError:
-                    logger.debug(
-                        "[LLMClient] Fixed JSON still has parsing errors, trying other methods"
+            repaired_response = self._repair_truncated_json_tail(response_text)
+            if repaired_response:
+                decision = self._parse_enhanced_candidate(repaired_response)
+                if decision is not None:
+                    _llm_log(
+                        "DECISION_LLM_ENHANCED_TAIL_REPAIRED",
+                        "通过尾部修复与自动闭合容器成功抢救增强版 JSON",
+                        level="WARNING",
+                        status="partial",
                     )
+                    metadata = decision.setdefault("metadata", {})
+                    if isinstance(metadata, dict):
+                        warnings = metadata.setdefault("warnings", [])
+                        if isinstance(warnings, list):
+                            warnings.append("LLM首轮输出尾部截断，已自动抢救解析")
+                        metadata["tail_salvaged"] = True
+                    return decision
 
             # Try to extract JSON from markdown code blocks (same as regular parsing)
             json_block_patterns = [
@@ -796,53 +1260,48 @@ class LLMClient:
                 matches = re.findall(pattern, response_text, re.DOTALL)
                 if matches:
                     for match in matches:
-                        try:
-                            decision = json.loads(match)
-                            logger.info(
-                                "[LLMClient] Successfully extracted enhanced JSON from markdown code block"
+                        decision = self._parse_enhanced_candidate(match)
+                        if decision is not None:
+                            _llm_log(
+                                "DECISION_LLM_ENHANCED_PARSE_CODEBLOCK_OK",
+                                "从 Markdown 代码块提取增强版 JSON 成功",
+                                status="success",
                             )
-
-                            # Validate and convert if needed
-                            if self._validate_enhanced_structure(decision):
-                                return decision
-                            else:
-                                return self._convert_to_enhanced_format(decision)
-
-                        except json.JSONDecodeError:
-                            continue
+                            return decision
 
             # Try bracket matching extraction
             json_objects = self._extract_json_objects(response_text)
 
             if json_objects:
                 for obj_text in sorted(json_objects, key=len, reverse=True):
-                    try:
-                        decision = json.loads(obj_text)
-                        logger.info(
-                            "[LLMClient] Successfully extracted enhanced JSON using bracket matching"
+                    decision = self._parse_enhanced_candidate(obj_text)
+                    if decision is not None:
+                        _llm_log(
+                            "DECISION_LLM_ENHANCED_PARSE_BRACKET_OK",
+                            "通过括号匹配提取增强版 JSON 成功",
+                            status="success",
                         )
-
-                        # Validate and convert if needed
-                        if self._validate_enhanced_structure(decision):
-                            return decision
-                        else:
-                            return self._convert_to_enhanced_format(decision)
-
-                    except json.JSONDecodeError:
-                        continue
+                        return decision
 
             # If all parsing attempts fail
-            logger.error(
-                f"[LLMClient] Failed to parse enhanced response after all attempts. "
-                f"Response length: {len(response_text)}, "
-                f"preview: {response_text[:500]}..."
+            _llm_log(
+                "DECISION_LLM_ENHANCED_PARSE_FAILED",
+                "多轮尝试后仍无法解析增强版 LLM 响应",
+                level="ERROR",
+                status="failed",
+                total_items=len(response_text),
+                response_preview=response_text[:500],
             )
             return self._get_enhanced_fallback_decision("Enhanced JSON parse error")
 
         except Exception as e:
-            logger.error(
-                f"[LLMClient] Unexpected error during enhanced parsing: {e}",
-                exc_info=True,
+            _llm_log(
+                "DECISION_LLM_ENHANCED_PARSE_EXCEPTION",
+                "解析增强版 LLM 响应时发生未预期异常",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
             )
             return self._get_enhanced_fallback_decision(
                 f"Enhanced parse error: {str(e)}"
@@ -917,7 +1376,14 @@ class LLMClient:
             return False
 
         except Exception as e:
-            logger.warning(f"[LLMClient] Error validating enhanced structure: {e}")
+            _llm_log(
+                "DECISION_LLM_ENHANCED_VALIDATE_ERROR",
+                "校验增强版结构时发生异常",
+                level="WARNING",
+                status="partial",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return False
 
     def _convert_to_enhanced_format(self, decision: Dict) -> Dict:
@@ -930,7 +1396,11 @@ class LLMClient:
         Returns:
             Enhanced decision dictionary
         """
-        logger.info("[LLMClient] Converting regular decision to enhanced format")
+        _llm_log(
+            "DECISION_LLM_CONVERT_TO_ENHANCED_START",
+            "开始将普通决策结果转换为增强版格式",
+            status="running",
+        )
 
         try:
 
@@ -964,6 +1434,12 @@ class LLMClient:
                 "monitoring_points": decision.get("monitoring_points", {}),
                 "metadata": decision.get("metadata", {}),
             }
+
+            metadata = enhanced_decision.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+                enhanced_decision["metadata"] = metadata
+            metadata["converted_from_regular_format"] = True
 
             # 兼容部分模型返回的扁平格式: adjustment_recommendations
             if not enhanced_decision.get("device_recommendations") and isinstance(
@@ -1094,11 +1570,22 @@ class LLMClient:
 
             enhanced_decision["device_recommendations"] = normalized_device_recs
 
-            logger.info("[LLMClient] Successfully converted to enhanced format")
+            _llm_log(
+                "DECISION_LLM_CONVERT_TO_ENHANCED_OK",
+                "普通决策结果已成功转换为增强版格式",
+                status="success",
+            )
             return enhanced_decision
 
         except Exception as e:
-            logger.error(f"[LLMClient] Error converting to enhanced format: {e}")
+            _llm_log(
+                "DECISION_LLM_CONVERT_TO_ENHANCED_FAILED",
+                "普通决策结果转换为增强版格式失败",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return self._get_enhanced_fallback_decision("Conversion error")
 
     def _get_enhanced_fallback_decision(self, error_reason: str) -> Dict:
@@ -1115,8 +1602,12 @@ class LLMClient:
 
         Requirements: Enhanced fallback decision
         """
-        logger.warning(
-            f"[LLMClient] Using enhanced fallback decision strategy. Reason: {error_reason}"
+        _llm_log(
+            "DECISION_LLM_ENHANCED_FALLBACK",
+            "启用增强版回退决策策略",
+            level="WARNING",
+            status="fallback",
+            error_message=error_reason,
         )
 
         # Create default parameter adjustment structure

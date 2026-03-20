@@ -6,15 +6,27 @@
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from loguru import logger
 from sqlalchemy.orm import sessionmaker
 
 from global_const.global_const import pgsql_engine
+from utils import log_task_event
 from utils.create_table import MushroomImageEmbedding
 from utils.minio_client import create_minio_client
 
 from .mushroom_image_encoder import create_mushroom_encoder
 from .mushroom_image_processor import MushroomImagePathParser
+
+
+def _recent_log(event: str, message: str, level: str = "INFO", **context: Any) -> None:
+    """输出统一的最近图片处理器事件日志。"""
+    log_task_event(
+        "VISION_RECENT_IMAGE_PROCESSOR",
+        event,
+        message,
+        level=level,
+        task_type="helper",
+        **context,
+    )
 
 
 class RecentImageProcessor:
@@ -40,7 +52,12 @@ class RecentImageProcessor:
 
         self._latest_in_date_cache: dict[str, datetime | None] = {}
 
-        logger.debug("图片处理器初始化完成")
+        _recent_log(
+            "VISION_RECENT_PROCESSOR_INIT",
+            "最近图片处理器初始化完成",
+            level="DEBUG",
+            status="success",
+        )
 
     def _get_latest_in_date(self, room_id: str) -> datetime | None:
         """获取库房最近入库日期（缓存）"""
@@ -60,7 +77,15 @@ class RecentImageProcessor:
             self._latest_in_date_cache[room_id] = latest_in_date
             return latest_in_date
         except Exception as e:
-            logger.warning(f"[IMG-000] 入库记录查询失败 | 库房: {room_id} | 错误: {e}")
+            _recent_log(
+                "VISION_RECENT_IN_DATE_QUERY_FAILED",
+                "查询最近入库日期失败",
+                level="WARNING",
+                room_id=room_id,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             self._latest_in_date_cache[room_id] = None
             return None
         finally:
@@ -153,7 +178,12 @@ class RecentImageProcessor:
         3. 生长阶段评分 (Relevance Score)
         4. Top-5 选取
         """
-        logger.info(f"执行AI优选策略: 从 {len(images)} 张图片中筛选 Top 5")
+        _recent_log(
+            "VISION_RECENT_AI_SELECTION_START",
+            "开始执行 AI 优选 Top-5",
+            total_items=len(images),
+            status="running",
+        )
 
         scored_candidates = []
         skipped_count = 0
@@ -180,8 +210,14 @@ class RecentImageProcessor:
                 # 质量过滤
                 if self.encoder.quality_threshold > 0:
                     if score is None or score < self.encoder.quality_threshold:
-                        logger.debug(
-                            f"[FILTER] Quality fail: {score} < {self.encoder.quality_threshold} | {img_dict.get('object_name')}"
+                        _recent_log(
+                            "VISION_RECENT_AI_SELECTION_QUALITY_FILTERED",
+                            "图片因质量评分不足被过滤",
+                            level="DEBUG",
+                            image_path=img_dict.get("object_name"),
+                            score=score,
+                            threshold=self.encoder.quality_threshold,
+                            status="skipped",
                         )
                         skipped_count += 1
                         continue
@@ -192,8 +228,14 @@ class RecentImageProcessor:
                     if not any(
                         k.lower() in desc_lower for k in self.encoder.required_keywords
                     ):
-                        logger.debug(
-                            f"[FILTER] Keyword fail: '{description[:50]}...' not in {self.encoder.required_keywords} | {img_dict.get('object_name')}"
+                        _recent_log(
+                            "VISION_RECENT_AI_SELECTION_KEYWORD_FILTERED",
+                            "图片因关键词不匹配被过滤",
+                            level="DEBUG",
+                            image_path=img_dict.get("object_name"),
+                            description_preview=description[:50],
+                            required_keywords=",".join(self.encoder.required_keywords),
+                            status="skipped",
                         )
                         skipped_count += 1
                         continue
@@ -210,7 +252,15 @@ class RecentImageProcessor:
                 )
 
             except Exception as e:
-                logger.error(f"优选过程出错 {img_dict.get('object_name')}: {e}")
+                _recent_log(
+                    "VISION_RECENT_AI_SELECTION_ITEM_FAILED",
+                    "AI 优选单项处理失败",
+                    level="ERROR",
+                    image_path=img_dict.get("object_name"),
+                    status="failed",
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                )
                 continue
 
         # 2. 排序并取 Top 5
@@ -218,8 +268,14 @@ class RecentImageProcessor:
         top_candidates = scored_candidates[:5]
 
         selected_images = [cand["img_dict"] for cand in top_candidates]
-        logger.info(
-            f"优选完成: 选中 {len(selected_images)} 张 (筛选池: {len(images)}, 过滤: {skipped_count}, 最高分: {scored_candidates[0]['score'] if scored_candidates else 'N/A'})"
+        _recent_log(
+            "VISION_RECENT_AI_SELECTION_FINISH",
+            "AI 优选完成",
+            total_items=len(images),
+            selected_items=len(selected_images),
+            skipped_items=skipped_count,
+            top_score=scored_candidates[0]["score"] if scored_candidates else None,
+            status="success",
         )
 
         return selected_images
@@ -247,20 +303,36 @@ class RecentImageProcessor:
         Returns:
             包含摘要和处理结果的统计
         """
-        logger.info(f"[IMG-001] 开始处理图片 | 时间范围: 最近{hours}小时")
+        _recent_log(
+            "VISION_RECENT_PROCESS_START",
+            "开始处理最近图片",
+            hours=hours,
+            status="running",
+        )
 
         # 解析批处理配置
         batch_enabled = batch_config and batch_config.get("enabled", False)
         batch_size = batch_config.get("batch_size", 10) if batch_config else 10
 
         if batch_enabled:
-            logger.info(f"[IMG-001-BATCH] 批处理模式启用 | 批大小: {batch_size}")
+            _recent_log(
+                "VISION_RECENT_BATCH_ENABLED",
+                "最近图片处理启用批处理模式",
+                batch_size=batch_size,
+                status="running",
+            )
 
         # 一次性获取所有图片数据
         recent_images = self._get_recent_images_cached(hours=hours)
 
         if not recent_images:
-            logger.warning(f"[IMG-002] 未找到图片 | 时间范围: 最近{hours}小时")
+            _recent_log(
+                "VISION_RECENT_NO_IMAGES",
+                "最近图片处理未找到图像",
+                level="WARNING",
+                hours=hours,
+                status="skipped",
+            )
             return {
                 "summary": {
                     "total_images": 0,
@@ -299,8 +371,12 @@ class RecentImageProcessor:
                 room_groups[room_id] = []
             room_groups[room_id].append(img)
 
-        logger.info(
-            f"[IMG-003] 图片分布 | 库房: {sorted(room_groups.keys())}, 总数: {len(recent_images)}张"
+        _recent_log(
+            "VISION_RECENT_ROOM_DISTRIBUTION",
+            "最近图片已完成库房分组",
+            room_ids=",".join(sorted(room_groups.keys())),
+            total_items=len(recent_images),
+            status="running",
         )
 
         # 处理统计
@@ -326,10 +402,14 @@ class RecentImageProcessor:
                 image_list = [
                     img.get("object_name") for img in images if img.get("object_name")
                 ]
-                logger.warning(
-                    f"[IMG-003] 空库房/未入库场景 | 库房: {room_id} | "
-                    "入库时间超过30天窗口，跳过处理 | 图片列表: "
-                    f"{image_list}"
+                _recent_log(
+                    "VISION_RECENT_ROOM_STALE_SKIPPED",
+                    "库房已超出入库窗口期，跳过最近图片处理",
+                    level="WARNING",
+                    room_id=room_id,
+                    image_paths=",".join(image_list),
+                    skipped_items=len(images),
+                    status="skipped",
                 )
                 processing_stats["room_stats"][room_id] = {
                     "found": len(images),
@@ -359,15 +439,27 @@ class RecentImageProcessor:
 
                 # Check trigger condition per day
                 if len(daily_images) > 10:
-                    logger.info(
-                        f"[IMG-OPT] 库房 {room_id} 在 {date_str} 图片数量 {len(daily_images)} > 10，启用AI智能优选 (Top 5)"
+                    _recent_log(
+                        "VISION_RECENT_DAILY_OPTIMIZATION_TRIGGERED",
+                        "单日图片过多，启用 AI 优选",
+                        room_id=room_id,
+                        collection_date=date_str,
+                        total_items=len(daily_images),
+                        status="running",
                     )
                     try:
                         selected = self._select_best_images(daily_images)
                         optimized_images.extend(selected)
                     except Exception as e:
-                        logger.error(
-                            f"[IMG-OPT] {date_str} AI优选失败，回退到普通处理: {e}"
+                        _recent_log(
+                            "VISION_RECENT_DAILY_OPTIMIZATION_FAILED",
+                            "AI 优选失败，回退到普通处理",
+                            level="ERROR",
+                            room_id=room_id,
+                            collection_date=date_str,
+                            status="failed",
+                            error_type=type(e).__name__,
+                            error_message=str(e),
                         )
                         optimized_images.extend(daily_images)
                 else:
@@ -381,8 +473,12 @@ class RecentImageProcessor:
             if max_images_per_room:
                 images = images[:max_images_per_room]
 
-            logger.info(
-                f"[IMG-004] 开始处理库房 | 库房: {room_id}, 图片数: {len(images)}张"
+            _recent_log(
+                "VISION_RECENT_ROOM_PROCESS_START",
+                "开始处理单个库房的最近图片",
+                room_id=room_id,
+                total_items=len(images),
+                status="running",
             )
 
             if batch_enabled:
@@ -414,18 +510,34 @@ class RecentImageProcessor:
                 avg_batch_time = sum(batch_stats["batch_processing_times"]) / len(
                     batch_stats["batch_processing_times"]
                 )
-                logger.info(
-                    f"[IMG-005-BATCH] 批处理统计 | 总批数: {batch_stats['total_batches']}, "
-                    f"平均批大小: {batch_stats['avg_batch_size']:.1f}, 平均批处理时间: {avg_batch_time:.2f}s"
+                _recent_log(
+                    "VISION_RECENT_BATCH_STATS",
+                    "最近图片批处理统计完成",
+                    total_batches=batch_stats["total_batches"],
+                    avg_batch_size=round(batch_stats["avg_batch_size"], 2),
+                    avg_batch_time=round(avg_batch_time, 2),
+                    status="success",
                 )
 
-        logger.info(
-            f"[IMG-005] 处理完成 | "
-            f"找到: {processing_stats['total_found']}张, "
-            f"处理: {processing_stats['total_processed']}张, "
-            f"成功: {processing_stats['total_success']}张, "
-            f"失败: {processing_stats['total_failed']}张, "
-            f"跳过: {processing_stats['total_skipped']}张"
+        _recent_log(
+            "VISION_RECENT_PROCESS_FINISH",
+            "最近图片处理完成",
+            total_found=processing_stats["total_found"],
+            total_items=processing_stats["total_processed"],
+            successful_items=processing_stats["total_success"],
+            failed_items=processing_stats["total_failed"],
+            skipped_items=processing_stats["total_skipped"],
+            success_rate=round(
+                (
+                    processing_stats["total_success"]
+                    / processing_stats["total_processed"]
+                    * 100
+                ),
+                2,
+            )
+            if processing_stats["total_processed"]
+            else 0.0,
+            status="success" if processing_stats["total_failed"] == 0 else "partial",
         )
 
         result = {"summary": summary, "processing": processing_stats}
@@ -478,18 +590,42 @@ class RecentImageProcessor:
 
     def _print_summary(self, summary: dict[str, Any]):
         """打印摘要信息"""
-        print(f"总图片数: {summary['total_images']}")
-        print(
-            f"时间范围: {summary['time_range']['start']} ~ {summary['time_range']['end']}"
+        _recent_log(
+            "VISION_RECENT_SUMMARY",
+            "最近图片摘要",
+            total_items=summary["total_images"],
+            time_start=str(summary["time_range"]["start"]),
+            time_end=str(summary["time_range"]["end"]),
+            room_count=len(summary["room_stats"]),
+            status="success",
         )
-        print("各库房统计:")
         for room_id, stats in summary["room_stats"].items():
-            print(f"库房{room_id}: {stats['count']}张 (最新: {stats['latest_time']})")
+            _recent_log(
+                "VISION_RECENT_SUMMARY_ROOM",
+                "最近图片摘要库房明细",
+                level="DEBUG",
+                room_id=room_id,
+                total_items=stats["count"],
+                latest_time=str(stats["latest_time"]),
+                earliest_time=str(stats["earliest_time"]),
+                status="success",
+            )
 
     def _process_room_images(
         self, room_id: str, images: list[dict], save_to_db: bool
     ) -> dict[str, int]:
         """处理单个库房的图片"""
+
+        def _is_success_result(result: dict[str, Any] | None) -> bool:
+            """统一 recent 单图处理成功判定。"""
+            if not result:
+                return False
+            if not save_to_db:
+                return True
+            if result.get("saved_to_db", False):
+                return True
+            return result.get("skip_reason") == "no_environment_data"
+
         room_stats = {
             "found": len(images),
             "processed": 0,
@@ -504,7 +640,14 @@ class RecentImageProcessor:
                 image_info = self.parser.parse_path(img["object_name"])
 
                 if not image_info:
-                    logger.warning(f"无法解析图片路径: {img['object_name']}")
+                    _recent_log(
+                        "VISION_RECENT_ROOM_IMAGE_PARSE_FAILED",
+                        "无法解析最近图片路径",
+                        level="WARNING",
+                        room_id=room_id,
+                        image_path=img["object_name"],
+                        status="failed",
+                    )
                     room_stats["failed"] += 1
                     continue
 
@@ -520,40 +663,86 @@ class RecentImageProcessor:
                     image_info, save_to_db=save_to_db
                 )
 
-                if result:
-                    if result.get("saved_to_db", False):
-                        room_stats["success"] += 1
-                        logger.info(
-                            f"[IMG-006] 处理成功 | 文件: {image_info.file_name}"
+                if _is_success_result(result):
+                    room_stats["success"] += 1
+                    if result and result.get("saved_to_db", False):
+                        _recent_log(
+                            "VISION_RECENT_ROOM_IMAGE_SUCCESS",
+                            "最近图片处理成功并已保存",
+                            room_id=room_id,
+                            image_name=image_info.file_name,
+                            image_path=image_info.file_path,
+                            status="success",
                         )
-                    elif result.get("skip_reason") == "no_environment_data":
-                        room_stats["success"] += 1
-                        logger.debug(f"处理成功但无环境数据: {image_info.file_name}")
+                    elif result and result.get("skip_reason") == "no_environment_data":
+                        _recent_log(
+                            "VISION_RECENT_ROOM_IMAGE_NO_ENV",
+                            "最近图片处理成功但无环境数据",
+                            level="DEBUG",
+                            room_id=room_id,
+                            image_name=image_info.file_name,
+                            image_path=image_info.file_path,
+                            status="success",
+                        )
                     else:
-                        room_stats["failed"] += 1
-                        logger.warning(
-                            f"[IMG-007] 处理失败 | 文件: {image_info.file_name}"
+                        _recent_log(
+                            "VISION_RECENT_ROOM_IMAGE_SUCCESS_NO_SAVE",
+                            "最近图片处理成功（测试模式未保存）",
+                            level="DEBUG",
+                            room_id=room_id,
+                            image_name=image_info.file_name,
+                            image_path=image_info.file_path,
+                            status="success",
                         )
                 else:
                     room_stats["failed"] += 1
-                    logger.error(
-                        f"[IMG-008] 处理异常 | 文件: {image_info.file_name}, 返回: None"
-                    )
+                    if result:
+                        _recent_log(
+                            "VISION_RECENT_ROOM_IMAGE_FAILED",
+                            "最近图片处理返回失败状态",
+                            level="WARNING",
+                            room_id=room_id,
+                            image_name=image_info.file_name,
+                            image_path=image_info.file_path,
+                            status="failed",
+                        )
+                    else:
+                        _recent_log(
+                            "VISION_RECENT_ROOM_IMAGE_NONE_RESULT",
+                            "最近图片处理返回空结果",
+                            level="ERROR",
+                            room_id=room_id,
+                            image_name=image_info.file_name,
+                            image_path=image_info.file_path,
+                            status="failed",
+                        )
 
                 room_stats["processed"] += 1
 
             except Exception as e:
-                logger.error(f"处理图片异常 {img['object_name']}: {e}")
+                _recent_log(
+                    "VISION_RECENT_ROOM_IMAGE_EXCEPTION",
+                    "最近图片处理异常",
+                    level="ERROR",
+                    room_id=room_id,
+                    image_path=img["object_name"],
+                    status="failed",
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                )
                 room_stats["failed"] += 1
                 room_stats["processed"] += 1
 
-        logger.info(
-            f"[IMG-009] 库房处理完成 | "
-            f"库房: {room_id}, "
-            f"处理: {room_stats['processed']}张, "
-            f"成功: {room_stats['success']}张, "
-            f"失败: {room_stats['failed']}张, "
-            f"跳过: {room_stats['skipped']}张"
+        _recent_log(
+            "VISION_RECENT_ROOM_PROCESS_FINISH",
+            "单个库房最近图片处理完成",
+            room_id=room_id,
+            total_items=room_stats["processed"],
+            successful_items=room_stats["success"],
+            failed_items=room_stats["failed"],
+            skipped_items=room_stats["skipped"],
+            found_items=room_stats["found"],
+            status="success" if room_stats["failed"] == 0 else "partial",
         )
 
         return room_stats
@@ -580,9 +769,15 @@ class RecentImageProcessor:
             batch = images[i : i + batch_size]
             batch_num = (i // batch_size) + 1
 
-            logger.info(
-                f"[IMG-BATCH-{batch_num}] 处理批次 | 库房: {room_id}, 批大小: {len(batch)}, "
-                f"进度: {i + len(batch)}/{len(images)}"
+            _recent_log(
+                "VISION_RECENT_ROOM_BATCH_START",
+                "开始处理最近图片批次",
+                room_id=room_id,
+                batch_number=batch_num,
+                batch_size=len(batch),
+                processed_items=i + len(batch),
+                total_items=len(images),
+                status="running",
             )
 
             # 预处理批次：检查哪些图片需要处理
@@ -593,7 +788,15 @@ class RecentImageProcessor:
                     image_info = self.parser.parse_path(img["object_name"])
 
                     if not image_info:
-                        logger.warning(f"无法解析图片路径: {img['object_name']}")
+                        _recent_log(
+                            "VISION_RECENT_ROOM_BATCH_PARSE_FAILED",
+                            "批处理预处理阶段无法解析图片路径",
+                            level="WARNING",
+                            room_id=room_id,
+                            image_path=img["object_name"],
+                            batch_number=batch_num,
+                            status="failed",
+                        )
                         room_stats["failed"] += 1
                         continue
 
@@ -607,7 +810,17 @@ class RecentImageProcessor:
                     batch_to_process.append((img, image_info))
 
                 except Exception as e:
-                    logger.error(f"预处理图片异常 {img['object_name']}: {e}")
+                    _recent_log(
+                        "VISION_RECENT_ROOM_BATCH_PREPARE_FAILED",
+                        "批处理预处理图片异常",
+                        level="ERROR",
+                        room_id=room_id,
+                        image_path=img["object_name"],
+                        batch_number=batch_num,
+                        status="failed",
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                    )
                     room_stats["failed"] += 1
 
             # 如果批次中有需要处理的图片，进行批处理
@@ -627,19 +840,27 @@ class RecentImageProcessor:
             batch_stats["processing_times"].append(batch_processing_time)
             batch_stats["batches"] += 1
 
-            logger.info(
-                f"[IMG-BATCH-{batch_num}] 批次完成 | 耗时: {batch_processing_time:.2f}s, "
-                f"处理: {len(batch_to_process)}张"
+            _recent_log(
+                "VISION_RECENT_ROOM_BATCH_FINISH",
+                "最近图片批次处理完成",
+                room_id=room_id,
+                batch_number=batch_num,
+                batch_size=len(batch),
+                processed_items=len(batch_to_process),
+                processing_time=round(batch_processing_time, 2),
+                status="success",
             )
 
-        logger.info(
-            f"[IMG-009-BATCH] 库房批处理完成 | "
-            f"库房: {room_id}, "
-            f"批数: {batch_stats['batches']}, "
-            f"处理: {room_stats['processed']}张, "
-            f"成功: {room_stats['success']}张, "
-            f"失败: {room_stats['failed']}张, "
-            f"跳过: {room_stats['skipped']}张"
+        _recent_log(
+            "VISION_RECENT_ROOM_BATCH_SUMMARY",
+            "单个库房最近图片批处理完成",
+            room_id=room_id,
+            total_batches=batch_stats["batches"],
+            total_items=room_stats["processed"],
+            successful_items=room_stats["success"],
+            failed_items=room_stats["failed"],
+            skipped_items=room_stats["skipped"],
+            status="success" if room_stats["failed"] == 0 else "partial",
         )
 
         return room_stats, batch_stats
@@ -657,8 +878,13 @@ class RecentImageProcessor:
                 # 从MinIO获取图像
                 image = self.minio_client.get_image(image_info.file_path)
                 if image is None:
-                    logger.warning(
-                        f"[IMG-BATCH] 获取图像失败 | 文件: {image_info.file_name}"
+                    _recent_log(
+                        "VISION_RECENT_BATCH_IMAGE_FETCH_FAILED",
+                        "批量处理阶段获取图像失败",
+                        level="WARNING",
+                        image_name=image_info.file_name,
+                        image_path=image_info.file_path,
+                        status="failed",
                     )
                     batch_results.append({"success": False, "image_info": image_info})
                     continue
@@ -668,8 +894,15 @@ class RecentImageProcessor:
                 )
 
             except Exception as e:
-                logger.error(
-                    f"[IMG-BATCH] 获取图像异常 | 文件: {image_info.file_name}, 错误: {e}"
+                _recent_log(
+                    "VISION_RECENT_BATCH_IMAGE_FETCH_EXCEPTION",
+                    "批量处理阶段获取图像异常",
+                    level="ERROR",
+                    image_name=image_info.file_name,
+                    image_path=image_info.file_path,
+                    status="failed",
+                    error_type=type(e).__name__,
+                    error_message=str(e),
                 )
                 batch_results.append({"success": False, "image_info": image_info})
 
@@ -684,7 +917,15 @@ class RecentImageProcessor:
                     )
                     batch_results.extend(batch_processing_results)
                 except Exception as e:
-                    logger.error(f"[IMG-BATCH] 批量处理失败，回退到单张处理: {e}")
+                    _recent_log(
+                        "VISION_RECENT_BATCH_ENCODER_FAILED",
+                        "编码器批量处理失败，回退到单张处理",
+                        level="ERROR",
+                        total_items=len(images_data),
+                        status="failed",
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                    )
                     # 回退到单张处理
                     for img_data in images_data:
                         try:
@@ -701,8 +942,15 @@ class RecentImageProcessor:
                                 }
                             )
                         except Exception as e2:
-                            logger.error(
-                                f"[IMG-BATCH] 单张处理也失败: {img_data['image_info'].file_name}, 错误: {e2}"
+                            _recent_log(
+                                "VISION_RECENT_BATCH_FALLBACK_ITEM_FAILED",
+                                "批量回退单张处理失败",
+                                level="ERROR",
+                                image_name=img_data["image_info"].file_name,
+                                image_path=img_data["image_info"].file_path,
+                                status="failed",
+                                error_type=type(e2).__name__,
+                                error_message=str(e2),
                             )
                             batch_results.append(
                                 {"success": False, "image_info": img_data["image_info"]}
@@ -722,17 +970,34 @@ class RecentImageProcessor:
                         )
 
                         if success:
-                            logger.debug(
-                                f"[IMG-BATCH] 处理成功 | 文件: {img_data['image_info'].file_name}"
+                            _recent_log(
+                                "VISION_RECENT_BATCH_ITEM_SUCCESS",
+                                "非批量编码器路径下单张处理成功",
+                                level="DEBUG",
+                                image_name=img_data["image_info"].file_name,
+                                image_path=img_data["image_info"].file_path,
+                                status="success",
                             )
                         else:
-                            logger.warning(
-                                f"[IMG-BATCH] 处理失败 | 文件: {img_data['image_info'].file_name}"
+                            _recent_log(
+                                "VISION_RECENT_BATCH_ITEM_FAILED",
+                                "非批量编码器路径下单张处理失败",
+                                level="WARNING",
+                                image_name=img_data["image_info"].file_name,
+                                image_path=img_data["image_info"].file_path,
+                                status="failed",
                             )
 
                     except Exception as e:
-                        logger.error(
-                            f"[IMG-BATCH] 处理异常 | 文件: {img_data['image_info'].file_name}, 错误: {e}"
+                        _recent_log(
+                            "VISION_RECENT_BATCH_ITEM_EXCEPTION",
+                            "非批量编码器路径下单张处理异常",
+                            level="ERROR",
+                            image_name=img_data["image_info"].file_name,
+                            image_path=img_data["image_info"].file_path,
+                            status="failed",
+                            error_type=type(e).__name__,
+                            error_message=str(e),
                         )
                         batch_results.append(
                             {"success": False, "image_info": img_data["image_info"]}
@@ -791,9 +1056,13 @@ class RecentImageProcessor:
             }
 
         summary = self._generate_summary(recent_images, hours)
-        logger.info(
-            f"最近 {hours} 小时图片摘要: 总计 {len(recent_images)} 张, "
-            f"涉及库房 {sorted(summary['room_stats'].keys())}"
+        _recent_log(
+            "VISION_RECENT_SUMMARY_READY",
+            "最近图片摘要已生成",
+            hours=hours,
+            total_items=len(recent_images),
+            room_ids=",".join(sorted(summary["room_stats"].keys())),
+            status="success",
         )
 
         return summary
@@ -817,7 +1086,13 @@ class RecentImageProcessor:
         Returns:
             处理结果统计
         """
-        logger.info(f"处理库房 {room_id} 最近 {hours} 小时的图片")
+        _recent_log(
+            "VISION_RECENT_ROOM_DIRECT_START",
+            "开始处理指定库房最近图片",
+            room_id=room_id,
+            hours=hours,
+            status="running",
+        )
 
         # 获取指定库房的最近图片
         recent_images = self.minio_client.list_recent_images(
@@ -825,7 +1100,14 @@ class RecentImageProcessor:
         )
 
         if not recent_images:
-            logger.warning(f"库房 {room_id} 未找到最近 {hours} 小时的图片")
+            _recent_log(
+                "VISION_RECENT_ROOM_DIRECT_NO_IMAGES",
+                "指定库房未找到最近图片",
+                level="WARNING",
+                room_id=room_id,
+                hours=hours,
+                status="skipped",
+            )
             return {
                 "room_id": room_id,
                 "found": 0,
@@ -835,8 +1117,13 @@ class RecentImageProcessor:
                 "skipped": 0,
             }
 
-        logger.info(
-            f"库房 {room_id} 找到最近 {hours} 小时的图片: {len(recent_images)} 张"
+        _recent_log(
+            "VISION_RECENT_ROOM_DIRECT_FOUND",
+            "指定库房最近图片查询完成",
+            room_id=room_id,
+            hours=hours,
+            total_items=len(recent_images),
+            status="success",
         )
 
         # 按时间排序，处理最新的图片
@@ -845,7 +1132,14 @@ class RecentImageProcessor:
         # 限制处理数量
         if max_images:
             recent_images = recent_images[:max_images]
-            logger.info(f"限制库房 {room_id} 处理数量为: {len(recent_images)} 张")
+            _recent_log(
+                "VISION_RECENT_ROOM_DIRECT_LIMIT_APPLIED",
+                "指定库房最近图片已应用处理数量限制",
+                room_id=room_id,
+                total_items=len(recent_images),
+                max_images=max_images,
+                status="success",
+            )
 
         stats = {
             "room_id": room_id,
@@ -862,7 +1156,14 @@ class RecentImageProcessor:
                 image_info = self.parser.parse_path(img["object_name"])
 
                 if not image_info:
-                    logger.warning(f"无法解析图片路径: {img['object_name']}")
+                    _recent_log(
+                        "VISION_RECENT_ROOM_DIRECT_PARSE_FAILED",
+                        "指定库房处理时无法解析图片路径",
+                        level="WARNING",
+                        room_id=room_id,
+                        image_path=img["object_name"],
+                        status="failed",
+                    )
                     stats["failed"] += 1
                     continue
 
@@ -870,40 +1171,117 @@ class RecentImageProcessor:
                 if save_to_db and self.encoder._is_already_processed(
                     image_info.file_path
                 ):
-                    logger.info(f"跳过已处理图片: {image_info.file_name}")
+                    _recent_log(
+                        "VISION_RECENT_ROOM_DIRECT_ITEM_SKIPPED",
+                        "指定库房处理时跳过已处理图片",
+                        room_id=room_id,
+                        image_name=image_info.file_name,
+                        image_path=image_info.file_path,
+                        status="skipped",
+                    )
                     stats["skipped"] += 1
                     continue
 
                 # 处理图片
-                logger.info(f"处理图片: {image_info.file_name}")
+                _recent_log(
+                    "VISION_RECENT_ROOM_DIRECT_ITEM_START",
+                    "开始处理指定库房图片",
+                    room_id=room_id,
+                    image_name=image_info.file_name,
+                    image_path=image_info.file_path,
+                    status="running",
+                )
                 result = self.encoder.process_single_image(
                     image_info, save_to_db=save_to_db
                 )
 
-                if result:
-                    if result.get("saved_to_db", False):
+                success = bool(result) and (
+                    (not save_to_db)
+                    or result.get("saved_to_db", False)
+                    or result.get("skip_reason") == "no_environment_data"
+                )
+
+                if success:
+                    if result and result.get("saved_to_db", False):
                         stats["success"] += 1
-                        logger.info(f"成功处理并保存: {image_info.file_name}")
-                    elif result.get("skip_reason") == "no_environment_data":
+                        _recent_log(
+                            "VISION_RECENT_ROOM_DIRECT_ITEM_SUCCESS",
+                            "指定库房图片处理成功并已保存",
+                            room_id=room_id,
+                            image_name=image_info.file_name,
+                            image_path=image_info.file_path,
+                            status="success",
+                        )
+                    elif result and result.get("skip_reason") == "no_environment_data":
                         stats["success"] += 1  # 算作成功，只是没有环境数据
-                        logger.info(f"成功处理但无环境数据: {image_info.file_name}")
+                        _recent_log(
+                            "VISION_RECENT_ROOM_DIRECT_ITEM_NO_ENV",
+                            "指定库房图片处理成功但无环境数据",
+                            room_id=room_id,
+                            image_name=image_info.file_name,
+                            image_path=image_info.file_path,
+                            status="success",
+                        )
                     else:
-                        stats["failed"] += 1
-                        logger.warning(f"处理失败: {image_info.file_name}")
+                        stats["success"] += 1
+                        _recent_log(
+                            "VISION_RECENT_ROOM_DIRECT_ITEM_SUCCESS_NO_SAVE",
+                            "指定库房图片处理成功（测试模式未保存）",
+                            level="DEBUG",
+                            room_id=room_id,
+                            image_name=image_info.file_name,
+                            image_path=image_info.file_path,
+                            status="success",
+                        )
                 else:
                     stats["failed"] += 1
-                    logger.error(f"处理返回None: {image_info.file_name}")
+                    if result:
+                        _recent_log(
+                            "VISION_RECENT_ROOM_DIRECT_ITEM_FAILED",
+                            "指定库房图片处理失败",
+                            level="WARNING",
+                            room_id=room_id,
+                            image_name=image_info.file_name,
+                            image_path=image_info.file_path,
+                            status="failed",
+                        )
+                    else:
+                        _recent_log(
+                            "VISION_RECENT_ROOM_DIRECT_ITEM_NONE_RESULT",
+                            "指定库房图片处理返回空结果",
+                            level="ERROR",
+                            room_id=room_id,
+                            image_name=image_info.file_name,
+                            image_path=image_info.file_path,
+                            status="failed",
+                        )
 
                 stats["processed"] += 1
 
             except Exception as e:
-                logger.error(f"处理图片异常 {img['object_name']}: {e}")
+                _recent_log(
+                    "VISION_RECENT_ROOM_DIRECT_ITEM_EXCEPTION",
+                    "指定库房图片处理异常",
+                    level="ERROR",
+                    room_id=room_id,
+                    image_path=img["object_name"],
+                    status="failed",
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                )
                 stats["failed"] += 1
                 stats["processed"] += 1
 
-        logger.info(
-            f"库房 {room_id} 处理完成: 找到={stats['found']}, 处理={stats['processed']}, "
-            f"成功={stats['success']}, 失败={stats['failed']}, 跳过={stats['skipped']}"
+        _recent_log(
+            "VISION_RECENT_ROOM_DIRECT_FINISH",
+            "指定库房最近图片处理完成",
+            room_id=room_id,
+            found_items=stats["found"],
+            total_items=stats["processed"],
+            successful_items=stats["success"],
+            failed_items=stats["failed"],
+            skipped_items=stats["skipped"],
+            status="success" if stats["failed"] == 0 else "partial",
         )
 
         return stats
@@ -918,7 +1296,12 @@ class RecentImageProcessor:
         Returns:
             摘要信息
         """
-        logger.info(f"获取最近 {hours} 小时的图片摘要")
+        _recent_log(
+            "VISION_RECENT_SUMMARY_QUERY_START",
+            "开始获取最近图片摘要",
+            hours=hours,
+            status="running",
+        )
 
         # 获取最近的图片
         recent_images = self.minio_client.list_recent_images(hours=hours)
@@ -969,9 +1352,13 @@ class RecentImageProcessor:
             "room_stats": room_stats,
         }
 
-        logger.info(
-            f"最近 {hours} 小时图片摘要: 总计 {len(recent_images)} 张, "
-            f"涉及库房 {sorted(room_stats.keys())}"
+        _recent_log(
+            "VISION_RECENT_SUMMARY_QUERY_FINISH",
+            "最近图片摘要获取完成",
+            hours=hours,
+            total_items=len(recent_images),
+            room_ids=",".join(sorted(room_stats.keys())),
+            status="success",
         )
 
         return summary
@@ -994,9 +1381,14 @@ def create_recent_image_processor(
 
 if __name__ == "__main__":
     # 测试代码 - 使用优化后的整合方法
-    print("=== 初始化共享组件 ===")
     from utils.minio_client import create_minio_client
     from vision.mushroom_image_encoder import create_mushroom_encoder
+
+    _recent_log(
+        "VISION_RECENT_SELFTEST_INIT",
+        "开始初始化 recent image processor 自检组件",
+        status="running",
+    )
 
     # 创建共享实例，避免重复初始化
     shared_encoder = create_mushroom_encoder(load_clip=False)
@@ -1007,23 +1399,31 @@ if __name__ == "__main__":
     )
 
     # 使用整合的方法：一次调用完成摘要和处理
-    print("\n=== 整合处理最近1小时图片 ===")
     result = processor.get_recent_image_summary_and_process(
         hours=1, max_images_per_room=1, save_to_db=True, show_summary=True
     )
 
-    print(
-        f"\n处理结果: 找到={result['processing']['total_found']}, "
-        f"处理={result['processing']['total_processed']}, "
-        f"成功={result['processing']['total_success']}, "
-        f"失败={result['processing']['total_failed']}, "
-        f"跳过={result['processing']['total_skipped']}"
+    _recent_log(
+        "VISION_RECENT_SELFTEST_FINISH",
+        "recent image processor 自检完成",
+        total_found=result["processing"]["total_found"],
+        total_items=result["processing"]["total_processed"],
+        successful_items=result["processing"]["total_success"],
+        failed_items=result["processing"]["total_failed"],
+        skipped_items=result["processing"]["total_skipped"],
+        status="success" if result["processing"]["total_failed"] == 0 else "partial",
     )
 
-    print("各库房详情:")
     for room_id, stats in result["processing"]["room_stats"].items():
-        print(
-            f"  库房{room_id}: 找到={stats.get('found', 0)}, "
-            f"处理={stats.get('processed', 0)}, 成功={stats.get('success', 0)}, "
-            f"失败={stats.get('failed', 0)}, 跳过={stats.get('skipped', 0)}"
+        _recent_log(
+            "VISION_RECENT_SELFTEST_ROOM_DETAIL",
+            "recent image processor 自检库房明细",
+            level="DEBUG",
+            room_id=room_id,
+            found_items=stats.get("found", 0),
+            total_items=stats.get("processed", 0),
+            successful_items=stats.get("success", 0),
+            failed_items=stats.get("failed", 0),
+            skipped_items=stats.get("skipped", 0),
+            status="success" if stats.get("failed", 0) == 0 else "partial",
         )

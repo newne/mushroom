@@ -1,127 +1,38 @@
-"""
-@Project ：load_prediction
-@File    ：global_const.py
-@IDE     ：PyCharm
-@Author  ：niucg1@lenovo.com
-@Date    ：2024/10/22 19:35
-@Desc     :
-"""
+"""全局常量与资源导出（兼容层）。"""
 
-import os
-from pathlib import Path
-from urllib.parse import quote_plus
-import sys
+from importlib import import_module
 
-import redis
-import sqlalchemy
-from dynaconf import Dynaconf
-from loguru import logger
+_paths = import_module("global_const.paths")
+_environment = import_module("global_const.environment")
+_config_loader = import_module("global_const.config_loader")
+_db_engines = import_module("global_const.db_engines")
+_cache_client = import_module("global_const.cache_client")
 
-BASE_DIR = Path(__file__).absolute().parent.parent
+BASE_DIR = _paths.BASE_DIR
+IMAGE_DIR = _paths.IMAGE_DIR
+ensure_src_path = _paths.ensure_src_path
 
+str_to_bool = _environment.str_to_bool
+get_environment = _environment.get_environment
+env = _environment.env
 
-def ensure_src_path():
-    """确保src目录在Python路径中，用于统一的模块导入"""
-    src_path = str(BASE_DIR)
-    if src_path not in sys.path:
-        sys.path.insert(0, src_path)
-    return BASE_DIR
+settings = _config_loader.settings
+static_settings = _config_loader.static_settings
+
+DB_CONNECT_TIMEOUT = _db_engines.DB_CONNECT_TIMEOUT
+DB_POOL_TIMEOUT = _db_engines.DB_POOL_TIMEOUT
+engine_url = _db_engines.engine_url
+mysql_engine = _db_engines.mysql_engine
+pg_engine_url = _db_engines.pg_engine_url
+pgsql_engine = _db_engines.pgsql_engine
+
+pool = _cache_client.pool
+conn = _cache_client.conn
 
 
 def _str_to_bool(value: str) -> bool:
-    """Convert string to boolean, treating 'true' (case insensitive) as True, everything else as False"""
-    return str(value).lower() == "true"
-
-
-def get_environment() -> str:
-    """获取当前环境"""
-    return (
-        "production" if _str_to_bool(os.environ.get("prod", "false")) else "development"
-    )
-
-
-# Convert prod env var to boolean, default to False if not set
-env = get_environment()
-
-
-def _get_int_env(name: str, default: int) -> int:
-    """读取整型环境变量，非法值时回退默认值。"""
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-        return value if value > 0 else default
-    except ValueError:
-        logger.warning(f"环境变量 {name}={raw} 非法，使用默认值 {default}")
-        return default
-
-
-DB_CONNECT_TIMEOUT = _get_int_env("DB_CONNECT_TIMEOUT", 30)
-DB_POOL_TIMEOUT = _get_int_env("DB_POOL_TIMEOUT", 60)
-
-logger.info(
-    f"[DB-CONFIG] connect_timeout={DB_CONNECT_TIMEOUT}s, pool_timeout={DB_POOL_TIMEOUT}s"
-)
-
-config_dir_path = BASE_DIR / "configs"
-logger.info(f"[9.9.1] 已加载配置文件目录：{config_dir_path}")
-
-settings = Dynaconf(
-    root_path=str(BASE_DIR),
-    envvar_prefix="mushroom_environments",
-    environments=True,
-    env=env,
-    merge_enabled=True,
-    settings_files=[
-        str(config_dir_path / "settings.toml"),
-        str(config_dir_path / ".secrets.toml"),
-    ],
-)
-
-static_settings = Dynaconf(
-    root_path=str(BASE_DIR),
-    envvar_prefix="mushroom_environments",
-    settings_files=[str(config_dir_path / "static_config.json")],
-)
-
-# redis config
-try:
-    pool = redis.ConnectionPool(
-        host=settings.redis.host,
-        port=settings.redis.port,
-        password=settings.redis.password,
-        decode_responses=True,
-        socket_connect_timeout=10,
-        socket_timeout=10,
-        retry_on_timeout=True,
-        health_check_interval=30,
-    )
-    conn = redis.Redis(connection_pool=pool)
-    logger.info(f"Redis连接池创建成功: {settings.redis.host}:{settings.redis.port}")
-except AttributeError as e:
-    logger.warning(f"Redis配置访问失败: {e}")
-    # 使用环境变量作为备用配置
-    redis_host = os.environ.get("REDIS_HOST", "172.17.0.1")
-    redis_port = int(os.environ.get("REDIS_PORT", "26379"))
-    redis_password = "Pl5SpB72sllM8DsT"  # 生产环境默认密码
-
-    pool = redis.ConnectionPool(
-        host=redis_host,
-        port=redis_port,
-        password=redis_password,
-        decode_responses=True,
-        socket_connect_timeout=10,
-        socket_timeout=10,
-        retry_on_timeout=True,
-        health_check_interval=30,
-    )
-    conn = redis.Redis(connection_pool=pool)
-    logger.info(f"使用环境变量Redis配置: {redis_host}:{redis_port}")
-except Exception as e:
-    logger.error(f"Redis连接池创建失败: {e}")
-    # 创建一个空的连接对象，避免后续代码报错
-    conn = None
+    """向后兼容函数别名。"""
+    return str_to_bool(value)
 
 
 # 数据查询服务接口 - 延迟初始化，避免循环导入
@@ -153,40 +64,26 @@ add_reduction_chiller_key = dict(
     ready_to_stop="add_reduction_chiller:ready_to_stop:phase_{phase}",
     ready_to_start="add_reduction_chiller:ready_to_start:phase_{phase}",
 )
-# 假设settings.mysql是一个包含数据库配置的对象
-engine_url = f"{settings.mysql.database_type}+{settings.mysql.driver}://{settings.mysql.username}:{quote_plus(settings.mysql.password)}@{settings.mysql.host}:{settings.mysql.port}/{settings.mysql.database_name}"
-
-# MySQL引擎配置 - 针对Docker网络环境优化
-mysql_engine = sqlalchemy.create_engine(
-    engine_url,
-    pool_pre_ping=True,  # 连接前检查连接是否有效
-    pool_recycle=1800,  # 连接回收时间（30分钟）
-    pool_size=5,  # 连接池大小
-    max_overflow=10,  # 最大溢出连接数
-    pool_timeout=DB_POOL_TIMEOUT,  # 获取连接的超时时间（秒）
-    connect_args={
-        "connect_timeout": DB_CONNECT_TIMEOUT  # TCP连接超时（秒）- 适应Docker网络
-    },
-    echo=False,  # 不输出SQL日志
-)
-pg_engine_url = f"{settings.pgsql.database_type}+{settings.pgsql.driver}://{settings.pgsql.username}:{quote_plus(settings.pgsql.password)}@{settings.pgsql.host}:{settings.pgsql.port}/{settings.pgsql.database_name}"
-
-# PostgreSQL引擎配置 - 针对Docker网络环境优化
-pgsql_engine = sqlalchemy.create_engine(
-    pg_engine_url,
-    pool_pre_ping=True,  # 连接前检查连接是否有效
-    pool_recycle=1800,  # 连接回收时间（30分钟）
-    pool_size=5,  # 连接池大小
-    max_overflow=10,  # 最大溢出连接数
-    pool_timeout=DB_POOL_TIMEOUT,  # 获取连接的超时时间（秒）
-    connect_args={
-        "connect_timeout": DB_CONNECT_TIMEOUT,  # TCP连接超时（秒）- 适应Docker网络
-        "options": "-c statement_timeout=300000 -c client_encoding=UTF8",  # SQL语句超时（5分钟）+ UTF8编码
-        "client_encoding": "utf8",  # 明确设置客户端编码为UTF-8
-    },
-    echo=False,  # 不输出SQL日志
-    future=True,  # 使用SQLAlchemy 2.0风格
-)
-
-
-IMAGE_DIR = BASE_DIR.parent / "data"
+__all__ = [
+    "BASE_DIR",
+    "IMAGE_DIR",
+    "ensure_src_path",
+    "_str_to_bool",
+    "get_environment",
+    "env",
+    "DB_CONNECT_TIMEOUT",
+    "DB_POOL_TIMEOUT",
+    "settings",
+    "static_settings",
+    "pool",
+    "conn",
+    "create_get_data",
+    "table_name",
+    "redis_key",
+    "mushroom_redis_key",
+    "add_reduction_chiller_key",
+    "engine_url",
+    "mysql_engine",
+    "pg_engine_url",
+    "pgsql_engine",
+]

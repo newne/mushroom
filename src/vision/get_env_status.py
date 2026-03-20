@@ -6,11 +6,26 @@ from typing import List, Dict, Any, Tuple
 import numpy as np
 import pandas as pd
 
+from utils import log_task_event
 from utils.data_preprocessing import (
     query_data_by_batch_time,
 )
 # 按设备类型获取配置
 from utils.dataframe_utils import get_all_device_configs
+
+
+def _env_status_log(
+    event: str, message: str, level: str = "INFO", **context: Any
+) -> None:
+    """输出环境状态转换辅助日志。"""
+    log_task_event(
+        "VISION_ENV_STATUS",
+        event,
+        message,
+        level=level,
+        task_type="helper",
+        **context,
+    )
 
 
 def parse_iot_dataframe_to_records(
@@ -187,4 +202,10 @@ if __name__ == "__main__":
     df['room']=df['device_name'].apply(lambda x:x.split('_')[-1])
     df1=df.pivot_table(index='time',columns=['room','device_name','point_name'],values='value')
     res=parse_iot_dataframe_to_records(df1, {}, df1.index)
-    print(res)
+        _env_status_log(
+            "VISION_ENV_STATUS_SELFTEST_FINISH",
+            "环境状态记录转换自检完成",
+            total_items=len(res),
+            preview=json.dumps(res[:2], ensure_ascii=False, default=str) if res else "[]",
+            status="success",
+        )

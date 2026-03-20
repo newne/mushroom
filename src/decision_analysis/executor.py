@@ -1,10 +1,6 @@
-"""
-决策分析任务执行器
+"""决策分析任务执行器。"""
 
-专门负责蘑菇房的决策分析处理。
-"""
-
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict
 
 from global_const.const_config import (
@@ -18,7 +14,14 @@ from scripts.analysis.run_enhanced_decision_analysis import (
 )
 from tasks.base_task import BaseTask
 from utils.create_table import store_decision_analysis_results
-from utils.loguru_setting import logger
+from utils.task_logging import log_task_event
+
+
+def _decision_log(
+    event: str, message: str, level: str = "INFO", **context: Any
+) -> None:
+    """输出统一的决策任务事件日志。"""
+    log_task_event("DECISION_ANALYSIS", event, message, level=level, **context)
 
 
 class DecisionAnalysisTask(BaseTask):
@@ -44,7 +47,12 @@ class DecisionAnalysisTask(BaseTask):
         Returns:
             Dict[str, Any]: 分析结果
         """
-        logger.info(f"[{self.task_name}] 开始执行决策分析: 库房{room_id}")
+        _decision_log(
+            "DECISION_ROOM_START",
+            "开始执行单库房决策分析",
+            room_id=room_id,
+            status="running",
+        )
 
         try:
             ensure_src_path()
@@ -61,9 +69,14 @@ class DecisionAnalysisTask(BaseTask):
 
             # 记录执行结果
             if result.success:
-                logger.info(
-                    f"[{self.task_name}] 决策分析完成: 库房{room_id}, "
-                    f"成功={result.success}, 多图像数量={result.metadata.get('multi_image_count', 0)}"
+                _decision_log(
+                    "DECISION_ROOM_FINISH",
+                    "单库房决策分析完成",
+                    room_id=room_id,
+                    status="success",
+                    successful_items=1,
+                    total_items=1,
+                    multi_image_count=result.metadata.get("multi_image_count", 0),
                 )
 
                 # 存储动态结果到数据库
@@ -81,8 +94,13 @@ class DecisionAnalysisTask(BaseTask):
             else:
                 # 分析执行但有错误
                 error_msg = result.error_message or "未知错误"
-                logger.error(
-                    f"[{self.task_name}] 决策分析失败: 库房{room_id}, 错误={error_msg}"
+                _decision_log(
+                    "DECISION_ROOM_FAILED",
+                    "单库房决策分析失败",
+                    level="ERROR",
+                    room_id=room_id,
+                    status="failed",
+                    error_message=error_msg,
                 )
 
                 return {
@@ -93,11 +111,27 @@ class DecisionAnalysisTask(BaseTask):
                 }
 
         except ImportError as e:
-            logger.error(f"[{self.task_name}] 导入决策分析模块失败: {e}")
+            _decision_log(
+                "DECISION_IMPORT_FAILED",
+                "导入决策分析模块失败",
+                level="ERROR",
+                room_id=room_id,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return {"success": False, "room_id": room_id, "error": f"导入模块失败: {e}"}
 
         except Exception as e:
-            logger.error(f"[{self.task_name}] 决策分析异常: 库房{room_id}, 错误={e}")
+            _decision_log(
+                "DECISION_ROOM_EXCEPTION",
+                "单库房决策分析异常",
+                level="ERROR",
+                room_id=room_id,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return {"success": False, "room_id": room_id, "error": str(e)}
 
     def execute_task(self) -> Dict[str, Any]:
@@ -107,13 +141,14 @@ class DecisionAnalysisTask(BaseTask):
         Returns:
             Dict[str, Any]: 批量分析结果
         """
-        logger.info(f"[{self.task_name}] ==========================================")
-        logger.info(f"[{self.task_name}] 开始批量决策分析任务")
-        logger.info(f"[{self.task_name}] 待分析库房: {self.rooms}")
-        logger.info(
-            f"[{self.task_name}] 功能: 多图像分析, 结构化参数调整, 风险评估, 仅动态结果存储（优化版）"
+        _decision_log(
+            "DECISION_BATCH_START",
+            "开始批量决策分析任务",
+            status="running",
+            room_ids=list(self.rooms),
+            total_items=len(self.rooms),
+            output_scope="dynamic_results_only",
         )
-        logger.info(f"[{self.task_name}] ==========================================")
 
         batch_start_time = datetime.now()
         results = {}
@@ -134,36 +169,54 @@ class DecisionAnalysisTask(BaseTask):
                     "error": str(e),
                     "duration": (datetime.now() - room_start_time).total_seconds(),
                 }
-                logger.error(f"[{self.task_name}] 库房{room_id}分析异常: {e}")
+                _decision_log(
+                    "DECISION_BATCH_ROOM_EXCEPTION",
+                    "批量任务中的库房分析异常",
+                    level="ERROR",
+                    room_id=room_id,
+                    status="failed",
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                )
 
         # 汇总报告
         batch_duration = (datetime.now() - batch_start_time).total_seconds()
         success_count = sum(1 for r in results.values() if r.get("success", False))
         failed_count = len(results) - success_count
 
-        logger.info(f"[{self.task_name}] ==========================================")
-        logger.info(f"[{self.task_name}] 批量决策分析完成")
-        logger.info(
-            f"[{self.task_name}] 成功: {success_count}/{len(self.rooms)}, 失败: {failed_count}/{len(self.rooms)}"
+        _decision_log(
+            "DECISION_BATCH_FINISH",
+            "批量决策分析完成",
+            status="success" if failed_count == 0 else "partial",
+            total_items=len(self.rooms),
+            successful_items=success_count,
+            failed_items=failed_count,
+            success_rate=round((success_count / len(self.rooms)) * 100, 2)
+            if self.rooms
+            else 0,
+            duration_ms=round(batch_duration * 1000, 2),
         )
-        logger.info(f"[{self.task_name}] 总耗时: {batch_duration:.2f}秒")
 
         for room_id, result in results.items():
-            status_icon = "✓" if result.get("success", False) else "✗"
-            logger.info(
-                f"[{self.task_name}]   库房{room_id}: [{status_icon}] {result.get('duration', 0):.2f}秒"
+            _decision_log(
+                "DECISION_BATCH_ROOM_SUMMARY",
+                "库房决策分析结果",
+                room_id=room_id,
+                status="success" if result.get("success", False) else "failed",
+                duration_ms=round(result.get("duration", 0) * 1000, 2),
+                error_message=result.get("error"),
             )
 
         # 数据库存储统计（如果有成功的分析）
         if success_count > 0:
-            logger.info(
-                f"[{self.task_name}] 数据库存储: {success_count}个库房的动态结果已自动存储"
+            _decision_log(
+                "DECISION_STORAGE_SUMMARY",
+                "批量决策动态结果已写入数据库",
+                status="success",
+                stored_records=success_count,
+                total_dynamic_results=success_count,
+                storage_scope="dynamic_results_only",
             )
-            logger.info(
-                f"[{self.task_name}] 存储内容: 仅动态结果表（静态配置已优化跳过）"
-            )
-
-        logger.info(f"[{self.task_name}] ==========================================")
 
         return self._create_success_result(
             total_rooms=len(self.rooms),
@@ -189,7 +242,12 @@ class DecisionAnalysisTask(BaseTask):
             Dict[str, Any]: 存储结果
         """
         try:
-            logger.info(f"[{self.task_name}] 开始存储动态结果到数据库: 库房{room_id}")
+            _decision_log(
+                "DECISION_STORAGE_START",
+                "开始存储决策动态结果",
+                room_id=room_id,
+                status="running",
+            )
 
             ensure_src_path()
 
@@ -197,8 +255,13 @@ class DecisionAnalysisTask(BaseTask):
             if hasattr(result, "data") and result.data:
                 json_data = result.data
             else:
-                logger.warning(
-                    f"[{self.task_name}] 结果数据为空，跳过数据库存储: 库房{room_id}"
+                _decision_log(
+                    "DECISION_STORAGE_SKIPPED",
+                    "结果数据为空，跳过数据库存储",
+                    level="WARNING",
+                    room_id=room_id,
+                    status="skipped",
+                    skipped_items=1,
                 )
                 return {"success": False, "message": "结果数据为空"}
 
@@ -210,18 +273,20 @@ class DecisionAnalysisTask(BaseTask):
                     analysis_time=analysis_datetime,
                 )
 
-                logger.info(f"[{self.task_name}] 动态结果存储完成: 库房{room_id}")
-                logger.info(
-                    f"[{self.task_name}]   - 批次ID: {storage_result.get('batch_id')}"
-                )
-                logger.info(
-                    f"[{self.task_name}]   - 静态配置: {storage_result.get('static_configs_stored', 0)}条"
-                )
-                logger.info(
-                    f"[{self.task_name}]   - 动态结果: {storage_result.get('dynamic_results_count', 0)}条"
-                )
-                logger.info(
-                    f"[{self.task_name}]   - 变更记录: {storage_result.get('change_count', 0)}条"
+                _decision_log(
+                    "DECISION_STORAGE_FINISH",
+                    "动态结果存储完成",
+                    room_id=room_id,
+                    status="success",
+                    batch_id=storage_result.get("batch_id"),
+                    stored_records=storage_result.get("dynamic_results_count", 0),
+                    total_dynamic_results=storage_result.get(
+                        "dynamic_results_count", 0
+                    ),
+                    total_change_count=storage_result.get("change_count", 0),
+                    static_configs_stored=storage_result.get(
+                        "static_configs_stored", 0
+                    ),
                 )
 
                 return storage_result
@@ -230,8 +295,14 @@ class DecisionAnalysisTask(BaseTask):
 
         except Exception as storage_error:
             # 数据库存储失败不影响分析任务的成功状态
-            logger.error(
-                f"[{self.task_name}] 动态结果存储失败: 库房{room_id}, 错误={storage_error}"
+            _decision_log(
+                "DECISION_STORAGE_FAILED",
+                "动态结果存储失败",
+                level="ERROR",
+                room_id=room_id,
+                status="failed",
+                error_type=type(storage_error).__name__,
+                error_message=str(storage_error),
             )
             return {
                 "success": False,
@@ -325,7 +396,14 @@ class DecisionAnalysisTask(BaseTask):
             return summary
 
         except Exception as e:
-            logger.error(f"[{self.task_name}] 获取分析摘要失败: {e}")
+            _decision_log(
+                "DECISION_SUMMARY_FAILED",
+                "获取决策分析摘要失败",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return {"error": str(e), "query_time": datetime.now().isoformat()}
 
     def validate_analysis_quality(self, room_id: str, days: int = 1) -> Dict[str, Any]:
@@ -417,7 +495,15 @@ class DecisionAnalysisTask(BaseTask):
                     }
 
         except Exception as e:
-            logger.error(f"[{self.task_name}] 验证分析质量失败: {e}")
+            _decision_log(
+                "DECISION_VALIDATION_FAILED",
+                "验证决策分析质量失败",
+                level="ERROR",
+                room_id=room_id,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return {"room_id": room_id, "error": str(e)}
 
 
@@ -435,11 +521,21 @@ def safe_decision_analysis_for_room(room_id: str) -> None:
     result = decision_analysis_task.execute_single_room_analysis(room_id)
 
     if not result.get("success", False):
-        logger.error(
-            f"[DECISION_TASK] 库房{room_id}决策分析失败: {result.get('error', '未知错误')}"
+        _decision_log(
+            "DECISION_COMPAT_ROOM_FAILED",
+            "兼容接口单库房决策分析失败",
+            level="ERROR",
+            room_id=room_id,
+            status="failed",
+            error_message=result.get("error", "未知错误"),
         )
     else:
-        logger.info(f"[DECISION_TASK] 库房{room_id}决策分析成功完成")
+        _decision_log(
+            "DECISION_COMPAT_ROOM_FINISH",
+            "兼容接口单库房决策分析成功完成",
+            room_id=room_id,
+            status="success",
+        )
 
 
 def safe_batch_decision_analysis(
@@ -455,11 +551,24 @@ def safe_batch_decision_analysis(
     result = decision_analysis_task.run()
 
     if not result.get("success", False):
-        logger.error(
-            f"[DECISION_TASK] 批量决策分析失败: {result.get('error', '未知错误')}"
+        _decision_log(
+            "DECISION_COMPAT_BATCH_FAILED",
+            "兼容接口批量决策分析失败",
+            level="ERROR",
+            status="failed",
+            task_run_id=result.get("task_run_id"),
+            error_message=result.get("error", "未知错误"),
         )
     else:
-        logger.info("[DECISION_TASK] 批量决策分析成功完成")
+        _decision_log(
+            "DECISION_COMPAT_BATCH_FINISH",
+            "兼容接口批量决策分析成功完成",
+            status="success",
+            task_run_id=result.get("task_run_id"),
+            total_items=result.get("total_rooms", 0),
+            successful_items=result.get("successful_rooms", 0),
+            failed_items=result.get("failed_rooms", 0),
+        )
 
 
 def get_decision_analysis_summary(days: int = 7) -> Dict[str, Any]:

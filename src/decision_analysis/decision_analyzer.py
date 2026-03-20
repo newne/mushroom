@@ -1198,139 +1198,46 @@ class DecisionAnalyzer:
                         f"[DecisionAnalyzer] Found device_recommendations: {type(device_recs)}"
                     )
 
-                    # Convert air cooler recommendations
-                    if hasattr(device_recs, "air_cooler") and device_recs.air_cooler:
-                        air_cooler = device_recs.air_cooler
-                        decision_dict["device_recommendations"]["air_cooler"] = {}
+                    for device_type in [
+                        "air_cooler",
+                        "fresh_air_fan",
+                        "humidifier",
+                        "grow_light",
+                    ]:
+                        dynamic_device = getattr(device_recs, device_type, None)
+                        if not dynamic_device:
+                            continue
+
                         logger.debug(
-                            f"[DecisionAnalyzer] Processing air_cooler: {type(air_cooler)}"
+                            f"[DecisionAnalyzer] Processing {device_type}: {type(dynamic_device)}"
                         )
+                        parameters = getattr(dynamic_device, "parameters", {}) or {}
+                        if not parameters:
+                            logger.debug(
+                                f"[DecisionAnalyzer] {device_type} has empty parameters"
+                            )
+                            continue
 
-                        # Map enhanced recommendations to configuration format
-                        air_cooler_mappings = {
-                            "tem_set": "temp_set",
-                            "tem_diff_set": "temp_diffset",
-                            "cyc_on_off": "cyc_on_off",
-                            "cyc_on_time": "cyc_on_time",
-                            "cyc_off_time": "cyc_off_time",
-                            "ar_on_off": "air_on_off",
-                            "hum_on_off": "hum_on_off",
-                        }
-
-                        for attr_name, point_alias in air_cooler_mappings.items():
-                            if hasattr(air_cooler, attr_name):
-                                param_adj = getattr(air_cooler, attr_name)
+                        decision_dict["device_recommendations"][device_type] = {}
+                        for point_alias, param_adj in parameters.items():
+                            if not hasattr(param_adj, "recommended_value"):
                                 logger.debug(
-                                    f"[DecisionAnalyzer] Processing {attr_name}: {type(param_adj)}"
+                                    f"[DecisionAnalyzer] {device_type}.{point_alias} missing recommended_value"
                                 )
-                                if hasattr(param_adj, "recommended_value"):
-                                    value = param_adj.recommended_value
-                                    decision_dict["device_recommendations"][
-                                        "air_cooler"
-                                    ][point_alias] = value
-                                    logger.debug(
-                                        f"[DecisionAnalyzer] Mapped {attr_name} -> {point_alias}: {value}"
-                                    )
-                                else:
-                                    logger.warning(
-                                        f"[DecisionAnalyzer] ParameterAdjustment {attr_name} missing recommended_value"
-                                    )
-                            else:
-                                logger.debug(
-                                    f"[DecisionAnalyzer] air_cooler missing attribute: {attr_name}"
-                                )
+                                continue
 
-                    # Convert fresh air fan recommendations
-                    if (
-                        hasattr(device_recs, "fresh_air_fan")
-                        and device_recs.fresh_air_fan
-                    ):
-                        fresh_air = device_recs.fresh_air_fan
-                        decision_dict["device_recommendations"]["fresh_air_fan"] = {}
-                        logger.debug(
-                            f"[DecisionAnalyzer] Processing fresh_air_fan: {type(fresh_air)}"
-                        )
+                            value = param_adj.recommended_value
+                            decision_dict["device_recommendations"][device_type][
+                                point_alias
+                            ] = value
+                            logger.debug(
+                                f"[DecisionAnalyzer] Mapped {device_type}.{point_alias}: {value}"
+                            )
 
-                        fresh_air_mappings = {
-                            "model": "mode",
-                            "control": "control",
-                            "co2_on": "co2_on",
-                            "co2_off": "co2_off",
-                            "on": "on",
-                            "off": "off",
-                        }
-
-                        for attr_name, point_alias in fresh_air_mappings.items():
-                            if hasattr(fresh_air, attr_name):
-                                param_adj = getattr(fresh_air, attr_name)
-                                if hasattr(param_adj, "recommended_value"):
-                                    value = param_adj.recommended_value
-                                    decision_dict["device_recommendations"][
-                                        "fresh_air_fan"
-                                    ][point_alias] = value
-                                    logger.debug(
-                                        f"[DecisionAnalyzer] Mapped {attr_name} -> {point_alias}: {value}"
-                                    )
-
-                    # Convert humidifier recommendations
-                    if hasattr(device_recs, "humidifier") and device_recs.humidifier:
-                        humidifier = device_recs.humidifier
-                        decision_dict["device_recommendations"]["humidifier"] = {}
-                        logger.debug(
-                            f"[DecisionAnalyzer] Processing humidifier: {type(humidifier)}"
-                        )
-
-                        humidifier_mappings = {
-                            "model": "mode",
-                            "on": "on",
-                            "off": "off",
-                        }
-
-                        for attr_name, point_alias in humidifier_mappings.items():
-                            if hasattr(humidifier, attr_name):
-                                param_adj = getattr(humidifier, attr_name)
-                                if hasattr(param_adj, "recommended_value"):
-                                    value = param_adj.recommended_value
-                                    decision_dict["device_recommendations"][
-                                        "humidifier"
-                                    ][point_alias] = value
-                                    logger.debug(
-                                        f"[DecisionAnalyzer] Mapped {attr_name} -> {point_alias}: {value}"
-                                    )
-
-                    # Convert grow light recommendations
-                    if hasattr(device_recs, "grow_light") and device_recs.grow_light:
-                        grow_light = device_recs.grow_light
-                        decision_dict["device_recommendations"]["grow_light"] = {}
-                        logger.debug(
-                            f"[DecisionAnalyzer] Processing grow_light: {type(grow_light)}"
-                        )
-
-                        grow_light_mappings = {
-                            "model": "model",
-                            "on_mset": "on_mset",
-                            "off_mset": "off_mset",
-                            "on_off_1": "on_off1",
-                            "on_off_2": "on_off2",
-                            "on_off_3": "on_off3",
-                            "on_off_4": "on_off4",
-                            "choose_1": "choose1",
-                            "choose_2": "choose2",
-                            "choose_3": "choose3",
-                            "choose_4": "choose4",
-                        }
-
-                        for attr_name, point_alias in grow_light_mappings.items():
-                            if hasattr(grow_light, attr_name):
-                                param_adj = getattr(grow_light, attr_name)
-                                if hasattr(param_adj, "recommended_value"):
-                                    value = param_adj.recommended_value
-                                    decision_dict["device_recommendations"][
-                                        "grow_light"
-                                    ][point_alias] = value
-                                    logger.debug(
-                                        f"[DecisionAnalyzer] Mapped {attr_name} -> {point_alias}: {value}"
-                                    )
+                        if not decision_dict["device_recommendations"][device_type]:
+                            decision_dict["device_recommendations"].pop(
+                                device_type, None
+                            )
 
                 logger.info(
                     f"[DecisionAnalyzer] Extracted device recommendations: {list(decision_dict['device_recommendations'].keys())}"

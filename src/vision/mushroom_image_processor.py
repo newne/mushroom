@@ -10,14 +10,28 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from loguru import logger
 from sqlalchemy.orm import sessionmaker
 
 from global_const.global_const import pgsql_engine
+from utils import log_task_event
 from utils.create_table import MushroomImageEmbedding
 
 # from utils.minio_service import create_minio_service
 from vision.clip_app import get_image_embedding
+
+
+def _image_processor_log(
+    event: str, message: str, level: str = "INFO", **context: Any
+) -> None:
+    """输出统一的图像处理器事件日志。"""
+    log_task_event(
+        "VISION_IMAGE_PROCESSOR",
+        event,
+        message,
+        level=level,
+        task_type="helper",
+        **context,
+    )
 
 
 @dataclass
@@ -86,7 +100,15 @@ class MushroomImagePathParser:
             self._latest_in_date_cache[mushroom_id] = latest_in_date
             return latest_in_date
         except Exception as e:
-            logger.warning(f"入库记录查询失败: {e} | 库房: {mushroom_id}")
+            _image_processor_log(
+                "VISION_PATH_PARSER_IN_DATE_QUERY_FAILED",
+                "查询最近入库日期失败",
+                level="WARNING",
+                room_id=mushroom_id,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             self._latest_in_date_cache[mushroom_id] = None
             return None
         finally:
@@ -164,7 +186,6 @@ class MushroomImagePathParser:
 
         # 验证候选日期
         valid_candidates = []
-        thirty_days = timedelta(days=30)
 
         max_date_gap_days = 120
 
@@ -190,10 +211,15 @@ class MushroomImagePathParser:
                     if non_future_candidates:
                         best_candidate = max(non_future_candidates, key=lambda x: x)
                         normalized = best_candidate.strftime("%Y%m%d")
-                        logger.warning(
-                            "空库房/未入库场景：采集日期超出30天窗口，"
-                            f"降级为宽松解析 {collection_date} -> {normalized} "
-                            f"(参考: {detailed_time}, 库房: {mushroom_id})"
+                        _image_processor_log(
+                            "VISION_PATH_PARSER_RELAXED_DATE_NORMALIZATION",
+                            "空库房场景使用宽松日期解析",
+                            level="WARNING",
+                            room_id=mushroom_id,
+                            collection_date=collection_date,
+                            normalized_date=normalized,
+                            detailed_time=detailed_time,
+                            status="success",
                         )
                         return normalized
                 raise ValueError(
@@ -206,8 +232,14 @@ class MushroomImagePathParser:
         best_candidate = max(valid_candidates, key=lambda x: x)
 
         normalized = best_candidate.strftime("%Y%m%d")
-        logger.debug(
-            f"日期标准化: {collection_date} -> {normalized} (参考: {detailed_time})"
+        _image_processor_log(
+            "VISION_PATH_PARSER_DATE_NORMALIZED",
+            "采集日期标准化完成",
+            level="DEBUG",
+            collection_date=collection_date,
+            normalized_date=normalized,
+            detailed_time=detailed_time,
+            status="success",
         )
         return normalized
 
@@ -223,8 +255,12 @@ class MushroomImagePathParser:
         """
         match = self.path_pattern.match(file_path)
         if not match:
-            logger.warning(
-                f"路径格式不匹配: '{file_path}' | 期望格式: <库房号>/<日期文件夹>/<库房号>_<IP>_<采集日期7-8位>_<详细时间14位>.jpg"
+            _image_processor_log(
+                "VISION_PATH_PARSER_PATH_FORMAT_INVALID",
+                "图像路径格式不匹配",
+                level="WARNING",
+                image_path=file_path,
+                status="failed",
             )
             return None
 
@@ -232,8 +268,14 @@ class MushroomImagePathParser:
 
         # 验证蘑菇库号一致性
         if groups["mushroom_id"] != groups["mushroom_id_2"]:
-            logger.warning(
-                f"路径中库房号不一致: 文件夹={groups['mushroom_id']}, 文件名={groups['mushroom_id_2']} | 路径: {file_path}"
+            _image_processor_log(
+                "VISION_PATH_PARSER_ROOM_ID_MISMATCH",
+                "图像路径中的库房号不一致",
+                level="WARNING",
+                folder_room_id=groups["mushroom_id"],
+                file_room_id=groups["mushroom_id_2"],
+                image_path=file_path,
+                status="failed",
             )
             return None
 
@@ -245,7 +287,15 @@ class MushroomImagePathParser:
                 groups["mushroom_id"],
             )
         except ValueError as e:
-            logger.error(f"日期解析失败: {e} | 路径: {file_path}")
+            _image_processor_log(
+                "VISION_PATH_PARSER_DATE_PARSE_FAILED",
+                "解析图像路径日期失败",
+                level="ERROR",
+                image_path=file_path,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return None
 
         return MushroomImageInfo(
@@ -274,8 +324,12 @@ class MushroomImagePathParser:
         """
         match = self.filename_pattern.match(filename)
         if not match:
-            logger.warning(
-                f"文件名格式不匹配: '{filename}' | 期望格式: <库房号>_<IP>_<采集日期7-8位>_<详细时间14位>.jpg"
+            _image_processor_log(
+                "VISION_PATH_PARSER_FILENAME_FORMAT_INVALID",
+                "图像文件名格式不匹配",
+                level="WARNING",
+                file_name=filename,
+                status="failed",
             )
             return None
 
@@ -283,8 +337,14 @@ class MushroomImagePathParser:
 
         # 如果提供了蘑菇库号，验证一致性
         if mushroom_id and groups["mushroom_id"] != mushroom_id:
-            logger.warning(
-                f"文件名中库房号不一致: 参数={mushroom_id}, 文件名={groups['mushroom_id']} | 文件: {filename}"
+            _image_processor_log(
+                "VISION_PATH_PARSER_FILENAME_ROOM_ID_MISMATCH",
+                "图像文件名中的库房号与参数不一致",
+                level="WARNING",
+                expected_room_id=mushroom_id,
+                file_room_id=groups["mushroom_id"],
+                file_name=filename,
+                status="failed",
             )
             return None
 
@@ -296,7 +356,15 @@ class MushroomImagePathParser:
                 groups["mushroom_id"],
             )
         except ValueError as e:
-            logger.error(f"日期解析失败: {e} | 文件: {filename}")
+            _image_processor_log(
+                "VISION_PATH_PARSER_FILENAME_DATE_PARSE_FAILED",
+                "解析图像文件名日期失败",
+                level="ERROR",
+                file_name=filename,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return None
 
         # 构建完整路径
@@ -400,8 +468,15 @@ class MushroomImageProcessor:
         time_range_msg = (
             f"[{start_time} ~ {end_time}]" if start_time or end_time else "[全部时间]"
         )
-        logger.info(
-            f"找到 {len(mushroom_images)} 个蘑菇图像文件 {time_range_msg} (原始总数: {len(image_files)})"
+        _image_processor_log(
+            "VISION_IMAGE_LIST_READY",
+            "已获取蘑菇图像列表",
+            room_id=mushroom_id,
+            date_filter=date_filter,
+            time_range=time_range_msg,
+            total_items=len(mushroom_images),
+            raw_items=len(image_files),
+            status="success",
         )
         return mushroom_images
 
@@ -422,7 +497,15 @@ class MushroomImageProcessor:
             # 从MinIO获取图像
             image = self.minio_client.get_image(image_info.file_path)
             if not image:
-                logger.error(f"无法从MinIO获取图像: {image_info.file_path}")
+                _image_processor_log(
+                    "VISION_IMAGE_FETCH_FAILED",
+                    "无法从 MinIO 获取图像",
+                    level="ERROR",
+                    image_path=image_info.file_path,
+                    image_name=image_info.file_name,
+                    room_id=image_info.mushroom_id,
+                    status="failed",
+                )
                 return False
 
             # 获取图像向量
@@ -433,7 +516,15 @@ class MushroomImageProcessor:
             try:
                 embedding = get_image_embedding(temp_path)
                 if embedding is None:
-                    logger.error(f"向量化失败: {image_info.file_path}")
+                    _image_processor_log(
+                        "VISION_IMAGE_EMBEDDING_FAILED",
+                        "图像向量化失败",
+                        level="ERROR",
+                        image_path=image_info.file_path,
+                        image_name=image_info.file_name,
+                        room_id=image_info.mushroom_id,
+                        status="failed",
+                    )
                     return False
             finally:
                 # 清理临时文件
@@ -456,7 +547,14 @@ class MushroomImageProcessor:
                 existing.embedding = embedding
                 existing.description = description
                 existing.file_name = image_info.file_name
-                logger.info(f"更新图像记录: {image_info.file_name}")
+                _image_processor_log(
+                    "VISION_IMAGE_RECORD_UPDATED",
+                    "已更新图像记录",
+                    image_name=image_info.file_name,
+                    image_path=image_info.file_path,
+                    room_id=image_info.mushroom_id,
+                    status="success",
+                )
             else:
                 # 创建新记录
                 new_record = MushroomImageEmbedding(
@@ -467,13 +565,30 @@ class MushroomImageProcessor:
                     growth_day=self._calculate_growth_day(image_info),
                 )
                 self.session.add(new_record)
-                logger.info(f"添加图像记录: {image_info.file_name}")
+                _image_processor_log(
+                    "VISION_IMAGE_RECORD_CREATED",
+                    "已新增图像记录",
+                    image_name=image_info.file_name,
+                    image_path=image_info.file_path,
+                    room_id=image_info.mushroom_id,
+                    status="success",
+                )
 
             self.session.commit()
             return True
 
         except Exception as e:
-            logger.error(f"处理图像失败 {image_info.file_path}: {e}")
+            _image_processor_log(
+                "VISION_IMAGE_PROCESS_FAILED",
+                "处理单张图像失败",
+                level="ERROR",
+                image_path=image_info.file_path,
+                image_name=image_info.file_name,
+                room_id=image_info.mushroom_id,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             self.session.rollback()
             return False
 
@@ -496,7 +611,16 @@ class MushroomImageProcessor:
         results = {"total": len(images), "success": 0, "failed": 0, "skipped": 0}
 
         for i, image_info in enumerate(images):
-            logger.info(f"处理进度: {i + 1}/{len(images)} - {image_info.file_name}")
+            _image_processor_log(
+                "VISION_IMAGE_BATCH_PROGRESS",
+                "批量图像处理进度",
+                level="DEBUG",
+                processed_items=i + 1,
+                total_items=len(images),
+                image_name=image_info.file_name,
+                room_id=image_info.mushroom_id,
+                status="running",
+            )
 
             # 检查是否已处理
             existing = (
@@ -506,7 +630,14 @@ class MushroomImageProcessor:
             )
 
             if existing and existing.embedding:
-                logger.info(f"跳过已处理的图像: {image_info.file_name}")
+                _image_processor_log(
+                    "VISION_IMAGE_BATCH_ITEM_SKIPPED",
+                    "跳过已处理图像",
+                    image_name=image_info.file_name,
+                    image_path=image_info.file_path,
+                    room_id=image_info.mushroom_id,
+                    status="skipped",
+                )
                 results["skipped"] += 1
                 continue
 
@@ -517,9 +648,27 @@ class MushroomImageProcessor:
 
             # 批量提交
             if (i + 1) % batch_size == 0:
-                logger.info(f"批量提交进度: {i + 1}/{len(images)}")
+                _image_processor_log(
+                    "VISION_IMAGE_BATCH_CHECKPOINT",
+                    "批量图像处理检查点",
+                    processed_items=i + 1,
+                    total_items=len(images),
+                    batch_size=batch_size,
+                    status="running",
+                )
 
-        logger.info(f"批量处理完成: {results}")
+        _image_processor_log(
+            "VISION_IMAGE_BATCH_FINISH",
+            "批量图像处理完成",
+            total_items=results["total"],
+            successful_items=results["success"],
+            failed_items=results["failed"],
+            skipped_items=results["skipped"],
+            success_rate=round((results["success"] / results["total"] * 100), 2)
+            if results["total"]
+            else 0.0,
+            status="success" if results["failed"] == 0 else "partial",
+        )
         return results
 
     def _generate_description(self, image_info: MushroomImageInfo) -> str:
@@ -562,7 +711,14 @@ class MushroomImageProcessor:
             }
 
         except Exception as e:
-            logger.error(f"获取统计信息失败: {e}")
+            _image_processor_log(
+                "VISION_IMAGE_STATS_FAILED",
+                "获取图像处理统计失败",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return {}
 
     def search_similar_images(
@@ -582,7 +738,13 @@ class MushroomImageProcessor:
             # 获取查询图像的向量
             query_image = self.minio_client.get_image(query_image_path)
             if not query_image:
-                logger.error(f"无法获取查询图像: {query_image_path}")
+                _image_processor_log(
+                    "VISION_IMAGE_SEARCH_QUERY_FETCH_FAILED",
+                    "无法获取查询图像",
+                    level="ERROR",
+                    image_path=query_image_path,
+                    status="failed",
+                )
                 return []
 
             # 临时保存并向量化
@@ -618,7 +780,16 @@ class MushroomImageProcessor:
             return results
 
         except Exception as e:
-            logger.error(f"搜索相似图像失败: {e}")
+            _image_processor_log(
+                "VISION_IMAGE_SEARCH_FAILED",
+                "搜索相似图像失败",
+                level="ERROR",
+                image_path=query_image_path,
+                top_k=top_k,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return []
 
 
@@ -636,15 +807,30 @@ if __name__ == "__main__":
     image_info = processor.parser.parse_path(test_path)
 
     if image_info:
-        print("解析成功:")
-        print(f"  蘑菇库号: {image_info.mushroom_id}")
-        print(f"  采集IP: {image_info.collection_ip}")
-        print(f"  采集日期: {image_info.collection_date}")
-        print(f"  详细时间: {image_info.detailed_time}")
-        print(f"  采集时间: {image_info.collection_datetime}")
+        _image_processor_log(
+            "VISION_IMAGE_PROCESSOR_SELFTEST_PARSE_SUCCESS",
+            "路径解析自检成功",
+            room_id=image_info.mushroom_id,
+            collection_ip=image_info.collection_ip,
+            collection_date=image_info.collection_date,
+            detailed_time=image_info.detailed_time,
+            collection_datetime=image_info.collection_datetime.isoformat(),
+            status="success",
+        )
     else:
-        print("路径解析失败")
+        _image_processor_log(
+            "VISION_IMAGE_PROCESSOR_SELFTEST_PARSE_FAILED",
+            "路径解析自检失败",
+            level="ERROR",
+            image_path=test_path,
+            status="failed",
+        )
 
     # 获取图像列表
     images = processor.get_mushroom_images()
-    print(f"找到 {len(images)} 个图像文件")
+    _image_processor_log(
+        "VISION_IMAGE_PROCESSOR_SELFTEST_LIST",
+        "图像列表自检完成",
+        total_items=len(images),
+        status="success",
+    )

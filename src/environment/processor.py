@@ -9,7 +9,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from global_const.global_const import pgsql_engine
-from utils.loguru_setting import logger
+from utils.task_logging import log_task_event
+
+
+def _env_log(event: str, message: str, level: str = "INFO", **context: Any) -> None:
+    """输出统一的环境处理事件日志。"""
+    log_task_event("ENVIRONMENT_STATS", event, message, level=level, **context)
 
 
 class EnvDataProcessor:
@@ -18,7 +23,7 @@ class EnvDataProcessor:
     def __init__(self):
         """初始化环境数据处理器"""
         self.engine = pgsql_engine
-        logger.debug("环境数据处理器初始化完成")
+        _env_log("ENV_PROCESSOR_INIT", "环境数据处理器初始化完成", level="DEBUG")
 
     def process_daily_stats(self, room_id: str, stat_date: date) -> Dict[str, Any]:
         """处理每日环境统计"""
@@ -176,8 +181,14 @@ class EnvDataProcessor:
                         int(growth_day) if growth_day is not None else 0
                     )
             except Exception as info_error:
-                logger.warning(
-                    f"[ENV_PROCESSOR] 获取批次信息失败 room={room_id}: {info_error}"
+                _env_log(
+                    "ENV_BATCH_INFO_FAILED",
+                    "获取批次信息失败",
+                    level="WARNING",
+                    room_id=room_id,
+                    status="partial",
+                    error_type=type(info_error).__name__,
+                    error_message=str(info_error),
                 )
 
             # 2. 获取设备配置（环境传感器 + 四类控制设备）
@@ -272,10 +283,19 @@ class EnvDataProcessor:
                 if "device_alias" not in env_config.columns:
                     if env_config.index.name == "device_alias":
                         env_config = env_config.reset_index()
-                        logger.debug("已将 device_alias 从索引重置为列")
+                        _env_log(
+                            "ENV_DEVICE_ALIAS_RESET",
+                            "已将 device_alias 从索引重置为列",
+                            level="DEBUG",
+                            room_id=room_id,
+                        )
                     else:
-                        logger.warning(
-                            f"[ENV_PROCESSOR] 库房 {room_id} 配置缺失 device_alias 列，跳过环境数据查询"
+                        _env_log(
+                            "ENV_DEVICE_ALIAS_MISSING",
+                            "环境配置缺失 device_alias 列，跳过环境数据查询",
+                            level="WARNING",
+                            room_id=room_id,
+                            status="skipped",
                         )
                         return env_data
 
@@ -343,7 +363,15 @@ class EnvDataProcessor:
             return env_data
 
         except Exception as e:
-            logger.error(f"[ENV_PROCESSOR] 获取环境数据失败: {e}")
+            _env_log(
+                "ENV_CONTEXT_DATA_FAILED",
+                "获取时间点环境数据失败",
+                level="ERROR",
+                room_id=room_id,
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             return None
 
     def calculate_statistics(self, env_data: pd.DataFrame) -> Dict[str, Any]:
@@ -370,14 +398,27 @@ def process_daily_env_stats(room_id: str, stat_date: date) -> Dict[str, Any]:
         Dict[str, Any]: 处理结果
     """
     try:
-        logger.info(f"[ENV_PROCESSOR] 处理库房 {room_id} 的环境统计，日期: {stat_date}")
+        _env_log(
+            "ENV_DAILY_STATS_START",
+            "开始处理每日环境统计",
+            room_id=room_id,
+            stat_date=str(stat_date),
+            status="running",
+        )
 
         # 获取环境数据
         env_data = get_room_env_data(room_id, stat_date)
         info_data = get_room_mushroom_info(room_id, stat_date)
 
         if env_data.empty:
-            logger.warning(f"[ENV_PROCESSOR] 库房 {room_id} 在 {stat_date} 无环境数据")
+            _env_log(
+                "ENV_DAILY_STATS_NO_DATA",
+                "当日无环境数据",
+                level="WARNING",
+                room_id=room_id,
+                stat_date=str(stat_date),
+                status="skipped",
+            )
             return {"success": True, "records_count": 0, "message": "No data available"}
 
         # 计算统计指标
@@ -403,14 +444,28 @@ def process_daily_env_stats(room_id: str, stat_date: date) -> Dict[str, Any]:
         # 存储统计结果
         record_count = store_env_statistics(room_id, stat_date, stats)
 
-        logger.info(
-            f"[ENV_PROCESSOR] 库房 {room_id} 环境统计完成，生成 {record_count} 条记录"
+        _env_log(
+            "ENV_DAILY_STATS_FINISH",
+            "每日环境统计处理完成",
+            room_id=room_id,
+            stat_date=str(stat_date),
+            status="success",
+            stored_records=record_count,
         )
 
         return {"success": True, "records_count": record_count, "stats_summary": stats}
 
     except Exception as e:
-        logger.error(f"[ENV_PROCESSOR] 库房 {room_id} 环境统计失败: {e}")
+        _env_log(
+            "ENV_DAILY_STATS_FAILED",
+            "每日环境统计处理失败",
+            level="ERROR",
+            room_id=room_id,
+            stat_date=str(stat_date),
+            status="failed",
+            error_type=type(e).__name__,
+            error_message=str(e),
+        )
         return {"success": False, "error": str(e), "records_count": 0}
 
 
@@ -430,7 +485,14 @@ def get_room_env_data(room_id: str, stat_date: date) -> pd.DataFrame:
         # 1. 获取环境传感器配置
         device_configs = get_all_device_configs(room_id=room_id)
         if not device_configs or "mushroom_env_status" not in device_configs:
-            logger.warning(f"[ENV_PROCESSOR] 未找到库房 {room_id} 的环境传感器配置")
+            _env_log(
+                "ENV_SENSOR_CONFIG_MISSING",
+                "未找到环境传感器配置",
+                level="WARNING",
+                room_id=room_id,
+                stat_date=str(stat_date),
+                status="skipped",
+            )
             return pd.DataFrame()
 
         env_config = device_configs["mushroom_env_status"]
@@ -452,8 +514,12 @@ def get_room_env_data(room_id: str, stat_date: date) -> pd.DataFrame:
             df = pd.DataFrame()
 
         if df.empty:
-            logger.debug(
-                f"[ENV_PROCESSOR] 库房 {room_id} 在 {stat_date} 无原始环境数据"
+            _env_log(
+                "ENV_RAW_DATA_EMPTY",
+                "未获取到原始环境数据",
+                level="DEBUG",
+                room_id=room_id,
+                stat_date=str(stat_date),
             )
             return pd.DataFrame()
 
@@ -484,14 +550,37 @@ def get_room_env_data(room_id: str, stat_date: date) -> pd.DataFrame:
         # 6. 排序
         pivot_df = pivot_df.sort_values("time")
 
-        logger.debug(f"[ENV_PROCESSOR] 获取到 {len(pivot_df)} 条环境数据记录")
+        _env_log(
+            "ENV_RAW_DATA_READY",
+            "环境数据查询完成",
+            level="DEBUG",
+            room_id=room_id,
+            stat_date=str(stat_date),
+            total_items=len(pivot_df),
+        )
         return pivot_df
 
     except Exception as e:
-        logger.error(f"[ENV_PROCESSOR] 获取环境数据失败: {e}")
+        _env_log(
+            "ENV_RAW_DATA_FAILED",
+            "获取环境数据失败",
+            level="ERROR",
+            room_id=room_id,
+            stat_date=str(stat_date),
+            status="failed",
+            error_type=type(e).__name__,
+            error_message=str(e),
+        )
         import traceback
 
-        logger.error(traceback.format_exc())
+        _env_log(
+            "ENV_RAW_DATA_TRACEBACK",
+            "环境数据异常堆栈",
+            level="ERROR",
+            room_id=room_id,
+            stat_date=str(stat_date),
+            error_message=traceback.format_exc(),
+        )
         return pd.DataFrame()
 
 
@@ -621,7 +710,16 @@ def get_room_mushroom_info(room_id: str, stat_date: date) -> Dict[str, Any]:
         return derive_in_day_num_from_info(info_df, stat_date)
 
     except Exception as exc:
-        logger.error(f"[ENV_PROCESSOR] 获取mushroom_info失败: {exc}")
+        _env_log(
+            "ENV_MUSHROOM_INFO_FAILED",
+            "获取 mushroom_info 失败",
+            level="ERROR",
+            room_id=room_id,
+            stat_date=str(stat_date),
+            status="failed",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
         return {"in_day_num": None, "in_date": None, "in_num": None}
 
 
@@ -715,10 +813,22 @@ def calculate_env_statistics(
         else:
             stats["is_growth_phase"] = bool(1 <= int(in_day_num) <= 27)
 
-        logger.debug(f"[ENV_PROCESSOR] 计算统计指标完成: {len(stats)} 个指标")
+        _env_log(
+            "ENV_STATS_CALCULATED",
+            "环境统计指标计算完成",
+            level="DEBUG",
+            total_items=len(stats),
+        )
 
     except Exception as e:
-        logger.error(f"[ENV_PROCESSOR] 计算统计指标失败: {e}")
+        _env_log(
+            "ENV_STATS_CALC_FAILED",
+            "环境统计指标计算失败",
+            level="ERROR",
+            status="failed",
+            error_type=type(e).__name__,
+            error_message=str(e),
+        )
 
     return stats
 
@@ -790,9 +900,13 @@ def store_env_statistics(room_id: str, stat_date: date, stats: Dict[str, Any]) -
                 ):
                     raise
 
-                logger.warning(
-                    "[ENV_PROCESSOR] ON CONFLICT 不可用（缺少唯一约束），"
-                    "回退到 UPDATE->INSERT 兼容路径"
+                _env_log(
+                    "ENV_STORE_UPSERT_FALLBACK",
+                    "ON CONFLICT 不可用，回退到 UPDATE->INSERT 兼容路径",
+                    level="WARNING",
+                    room_id=room_id,
+                    stat_date=str(stat_date),
+                    status="partial",
                 )
                 conn.rollback()
 
@@ -822,11 +936,27 @@ def store_env_statistics(room_id: str, stat_date: date, stats: Dict[str, Any]) -
                         )
                         conn.execute(insert_sql, insert_data)
 
-        logger.debug("[ENV_PROCESSOR] 环境统计数据存储完成")
+        _env_log(
+            "ENV_STORE_FINISH",
+            "环境统计数据存储完成",
+            level="DEBUG",
+            room_id=room_id,
+            stat_date=str(stat_date),
+            stored_records=1,
+        )
         return 1
 
     except Exception as e:
-        logger.error(f"[ENV_PROCESSOR] 存储环境统计失败: {e}")
+        _env_log(
+            "ENV_STORE_FAILED",
+            "存储环境统计失败",
+            level="ERROR",
+            room_id=room_id,
+            stat_date=str(stat_date),
+            status="failed",
+            error_type=type(e).__name__,
+            error_message=str(e),
+        )
         return 0
 
 
@@ -875,7 +1005,15 @@ def get_env_trend_analysis(room_id: str, days: int = 7) -> Dict[str, Any]:
         return trend_analysis
 
     except Exception as e:
-        logger.error(f"[ENV_PROCESSOR] 获取环境趋势分析失败: {e}")
+        _env_log(
+            "ENV_TREND_ANALYSIS_FAILED",
+            "获取环境趋势分析失败",
+            level="ERROR",
+            room_id=room_id,
+            status="failed",
+            error_type=type(e).__name__,
+            error_message=str(e),
+        )
         return {"error": str(e)}
 
 
@@ -910,5 +1048,12 @@ def calculate_trend(data: pd.Series) -> Dict[str, Any]:
         return trend_info
 
     except Exception as e:
-        logger.error(f"[ENV_PROCESSOR] 计算趋势失败: {e}")
+        _env_log(
+            "ENV_TREND_CALC_FAILED",
+            "计算趋势失败",
+            level="ERROR",
+            status="failed",
+            error_type=type(e).__name__,
+            error_message=str(e),
+        )
         return {"trend": "calculation_error", "error": str(e)}

@@ -10,7 +10,7 @@
 # ============================================================================
 # Stage 1: UV工具准备阶段
 # ============================================================================
-FROM ghcr.io/astral-sh/uv:0.9.24 AS uv-tool
+FROM ghcr.io/astral-sh/uv:0.10.7 AS uv-tool
 
 # ============================================================================
 # Stage 2: 依赖缓存构建阶段
@@ -64,6 +64,7 @@ WORKDIR /app
 # 安装系统依赖（健康检查需要curl）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
 # 从依赖构建阶段复制虚拟环境

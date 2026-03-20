@@ -1,8 +1,11 @@
 import logging
+import os
 import sys
 
 from loguru import logger
+
 from global_const.global_const import env
+from utils.task_logging import TASK_LOG_EXTRA_DEFAULTS
 
 
 class InterceptHandler(logging.Handler):
@@ -15,28 +18,41 @@ class InterceptHandler(logging.Handler):
 # Global flag to prevent duplicate loguru setting initialization
 _loguru_initialized = False
 
+
+def _patch_record(record):
+    """为所有日志补齐统一 extra 字段，避免格式化缺失。"""
+    extra = record["extra"]
+    for key, default_value in TASK_LOG_EXTRA_DEFAULTS.items():
+        extra.setdefault(key, default_value)
+
+
 def loguru_setting(production=env):
     global _loguru_initialized
-    
+
     # Prevent duplicate initialization
     if _loguru_initialized:
         return
-    
+
     # Mark as initialized
     _loguru_initialized = True
-    
-    folder_ = "./Logs/"
+
+    folder_ = "./logs/"
     prefix_ = "mushroom_solution-"
     rotation_ = "00:00"
     retention_ = "30 days"
     encoding_ = "utf-8"
-    backtrace_ = True
-    diagnose_ = True
+    backtrace_ = not production
+    diagnose_ = not production
+
+    os.makedirs(folder_, exist_ok=True)
 
     # 格式里面添加了process和thread记录，方便查看多进程和线程程序
     format_ = (
         "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> "
         "| <magenta>{process}</magenta>:<yellow>{thread}</yellow> "
+        "| task=<cyan>{extra[task_name]}</cyan> event=<cyan>{extra[event]}</cyan> "
+        "run=<cyan>{extra[task_run_id]}</cyan> room=<cyan>{extra[room_id]}</cyan> "
+        "status=<cyan>{extra[status]}</cyan> "
         "| <cyan>{name}</cyan>:<cyan>{function}</cyan>:<yellow>{line}</yellow> - <level>{message}</level>"
     )
 
@@ -45,6 +61,7 @@ def loguru_setting(production=env):
 
     # 移除默认处理器，防止重复日志
     logger.remove()
+    logger.configure(patcher=_patch_record)
 
     ## loguru 接管所有日志（包括第三方库）。 但是日志数量比较大，基本上作用不大，选择关掉
     # class InterceptHandler(logging.Handler):
@@ -61,10 +78,9 @@ def loguru_setting(production=env):
     #     if '.' not in logger_name:
     #         logging.getLogger(logger_name).addHandler(InterceptHandler())
 
-    # 这里面采用了层次式的日志记录方式，就是低级日志文件会记录比他高的所有级别日志，这样可以做到低等级日志最丰富，高级别日志更少更关键
-    # debug
+    # 应用文本日志
     logger.add(
-        folder_ + prefix_ + "debug.log",
+        folder_ + prefix_ + "app.log",
         level=log_level,
         backtrace=backtrace_,
         diagnose=diagnose_,
@@ -73,38 +89,10 @@ def loguru_setting(production=env):
         rotation=rotation_,
         retention=retention_,
         encoding=encoding_,
-        filter=lambda record: record["level"].no >= logger.level(log_level).no,
+        enqueue=True,
     )
 
-    # info
-    logger.add(
-        folder_ + prefix_ + "info.log",
-        level="INFO",
-        backtrace=backtrace_,
-        diagnose=diagnose_,
-        format=format_,
-        colorize=False,
-        rotation=rotation_,
-        retention=retention_,
-        encoding=encoding_,
-        filter=lambda record: record["level"].no >= logger.level("INFO").no,
-    )
-
-    # warning
-    logger.add(
-        folder_ + prefix_ + "warning.log",
-        level="WARNING",
-        backtrace=backtrace_,
-        diagnose=diagnose_,
-        format=format_,
-        colorize=False,
-        rotation=rotation_,
-        retention=retention_,
-        encoding=encoding_,
-        filter=lambda record: record["level"].no >= logger.level("WARNING").no,
-    )
-
-    # error
+    # 错误日志
     logger.add(
         folder_ + prefix_ + "error.log",
         level="ERROR",
@@ -115,21 +103,20 @@ def loguru_setting(production=env):
         rotation=rotation_,
         retention=retention_,
         encoding=encoding_,
-        filter=lambda record: record["level"].no >= logger.level("ERROR").no,
+        enqueue=True,
     )
 
-    # critical
+    # JSON 结构化日志，供采集和检索系统使用
     logger.add(
-        folder_ + prefix_ + "critical.log",
-        level="CRITICAL",
+        folder_ + prefix_ + "app.jsonl",
+        level=log_level,
         backtrace=backtrace_,
-        diagnose=diagnose_,
-        format=format_,
-        colorize=False,
+        diagnose=False,
         rotation=rotation_,
         retention=retention_,
         encoding=encoding_,
-        filter=lambda record: record["level"].no >= logger.level("CRITICAL").no,
+        serialize=True,
+        enqueue=True,
     )
 
     # 控制台输出级别根据环境决定
@@ -142,4 +129,5 @@ def loguru_setting(production=env):
         format=format_,
         colorize=True,
         filter=lambda record: record["level"].no >= logger.level(console_level).no,
+        enqueue=True,
     )

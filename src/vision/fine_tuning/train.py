@@ -10,11 +10,11 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import torch
-from loguru import logger
 from torch.cuda.amp import GradScaler, autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 
+from utils import log_task_event
 from utils.loguru_setting import loguru_setting
 
 from .config import apply_overrides, build_experiment_config, load_yaml_config
@@ -25,7 +25,22 @@ from .model import CLIPFineTuner
 from .optim import build_optimizer, build_warmup_cosine_scheduler
 
 
-def run_training(config_path: str, overrides: Optional[List[str]] = None) -> Dict[str, float]:
+def _fine_tune_train_log(
+    event: str, message: str, level: str = "INFO", **context
+) -> None:
+    log_task_event(
+        "VISION_FINE_TUNING_TRAIN",
+        event,
+        message,
+        level=level,
+        task_type="helper",
+        **context,
+    )
+
+
+def run_training(
+    config_path: str, overrides: Optional[List[str]] = None
+) -> Dict[str, float]:
     """执行微调训练流程，返回最佳验证集损失。"""
     overrides = overrides or []
     base_config = load_yaml_config(config_path)
@@ -88,7 +103,9 @@ def run_training(config_path: str, overrides: Optional[List[str]] = None) -> Dic
             max_samples=config.train.max_val_samples,
         )
 
-    train_sampler = DistributedSampler(train_dataset, shuffle=True) if world_size > 1 else None
+    train_sampler = (
+        DistributedSampler(train_dataset, shuffle=True) if world_size > 1 else None
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.data.batch_size,
@@ -100,7 +117,9 @@ def run_training(config_path: str, overrides: Optional[List[str]] = None) -> Dic
     )
     val_loader = None
     if val_dataset:
-        val_sampler = DistributedSampler(val_dataset, shuffle=False) if world_size > 1 else None
+        val_sampler = (
+            DistributedSampler(val_dataset, shuffle=False) if world_size > 1 else None
+        )
         val_loader = DataLoader(
             val_dataset,
             batch_size=config.eval.batch_size,
@@ -118,7 +137,9 @@ def run_training(config_path: str, overrides: Optional[List[str]] = None) -> Dic
     )
     total_steps = config.scheduler.total_steps
     if total_steps <= 0:
-        total_steps = (len(train_loader) * config.train.epochs) // config.train.grad_accum_steps
+        total_steps = (
+            len(train_loader) * config.train.epochs
+        ) // config.train.grad_accum_steps
     scheduler = build_warmup_cosine_scheduler(
         optimizer,
         warmup_steps=config.scheduler.warmup_steps,
@@ -154,7 +175,9 @@ def run_training(config_path: str, overrides: Optional[List[str]] = None) -> Dic
         for step, batch in enumerate(train_loader):
             images = [item["image"] for item in batch]
             texts = [item["text"] for item in batch]
-            inputs = model.module.processor if isinstance(model, DDP) else model.processor
+            inputs = (
+                model.module.processor if isinstance(model, DDP) else model.processor
+            )
             encoded = inputs(
                 images=images,
                 text=texts,
@@ -165,7 +188,9 @@ def run_training(config_path: str, overrides: Optional[List[str]] = None) -> Dic
             ).to(device)
             with autocast(enabled=config.train.amp and device.type == "cuda"):
                 image_features, text_features, logit_scale = model(
-                    encoded["pixel_values"], encoded["input_ids"], encoded["attention_mask"]
+                    encoded["pixel_values"],
+                    encoded["input_ids"],
+                    encoded["attention_mask"],
                 )
                 loss = loss_fn(image_features, text_features, logit_scale)
                 loss = loss / config.train.grad_accum_steps
@@ -186,14 +211,26 @@ def run_training(config_path: str, overrides: Optional[List[str]] = None) -> Dic
                     "lr": scheduler.get_last_lr()[0],
                 }
                 _append_jsonl(train_log_path, log_record)
-                logger.info(
-                    f"[TRAIN] epoch={epoch} step={global_step} loss={log_record['loss']:.6f} lr={log_record['lr']:.6e}"
+                _fine_tune_train_log(
+                    "VISION_FINE_TUNING_TRAIN_PROGRESS",
+                    "训练过程日志",
+                    epoch=epoch,
+                    step=global_step,
+                    loss=round(log_record["loss"], 6),
+                    lr=log_record["lr"],
+                    status="running",
                 )
 
         if val_loader and (epoch + 1) % config.train.eval_interval == 0:
             val_loss = _evaluate_loss(model, val_loader, loss_fn, device, config)
             if is_main_process():
-                logger.info(f"[VAL] epoch={epoch} loss={val_loss:.6f}")
+                _fine_tune_train_log(
+                    "VISION_FINE_TUNING_VALIDATION",
+                    "验证集评估完成",
+                    epoch=epoch,
+                    val_loss=round(val_loss, 6),
+                    status="success",
+                )
                 _append_jsonl(train_log_path, {"epoch": epoch, "val_loss": val_loss})
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
@@ -211,7 +248,15 @@ def run_training(config_path: str, overrides: Optional[List[str]] = None) -> Dic
                 else:
                     patience += 1
                     if patience >= config.train.early_stopping_patience:
-                        logger.warning("触发早停机制")
+                        _fine_tune_train_log(
+                            "VISION_FINE_TUNING_EARLY_STOP",
+                            "触发早停机制",
+                            level="WARNING",
+                            epoch=epoch,
+                            patience=patience,
+                            threshold=config.train.early_stopping_patience,
+                            status="stopped",
+                        )
                         break
 
         if is_main_process() and (epoch + 1) % config.train.save_every == 0:
@@ -248,7 +293,9 @@ def _evaluate_loss(model, loader, loss_fn, device, config) -> float:
         for batch in loader:
             images = [item["image"] for item in batch]
             texts = [item["text"] for item in batch]
-            inputs = model.module.processor if isinstance(model, DDP) else model.processor
+            inputs = (
+                model.module.processor if isinstance(model, DDP) else model.processor
+            )
             encoded = inputs(
                 images=images,
                 text=texts,
@@ -278,7 +325,9 @@ def _save_checkpoint(
 ) -> None:
     """保存训练 checkpoint，支持断点续训。"""
     state = {
-        "model_state_dict": model.module.state_dict() if isinstance(model, DDP) else model.state_dict(),
+        "model_state_dict": model.module.state_dict()
+        if isinstance(model, DDP)
+        else model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
         "scaler_state_dict": scaler.state_dict(),
@@ -300,7 +349,12 @@ def main() -> None:
     """训练脚本 CLI 入口。"""
     parser = argparse.ArgumentParser(description="CLIP Fine-tuning Training")
     parser.add_argument("--config", required=True, help="YAML 配置路径")
-    parser.add_argument("--override", action="append", default=[], help="覆盖配置项，例如 train.epochs=5")
+    parser.add_argument(
+        "--override",
+        action="append",
+        default=[],
+        help="覆盖配置项，例如 train.epochs=5",
+    )
     args = parser.parse_args()
     run_training(args.config, args.override)
 

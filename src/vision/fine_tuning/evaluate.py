@@ -12,19 +12,36 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import torch
-from loguru import logger
+from PIL import Image
 from torch.utils.data import DataLoader
 
+from utils import log_task_event
 from utils.loguru_setting import loguru_setting
 
 from .config import apply_overrides, build_experiment_config, load_yaml_config
 from .data import ImageTextPairDataset
-from PIL import Image
 from .distributed import get_device, init_distributed, is_main_process
 from .metrics import accuracy, retrieval_metrics
 from .model import CLIPFineTuner
 from .report import generate_comparison_report, generate_report
-from .visualization import generate_attention_heatmap, plot_training_curves, visualize_tsne
+from .visualization import (
+    generate_attention_heatmap,
+    plot_training_curves,
+    visualize_tsne,
+)
+
+
+def _fine_tune_eval_log(
+    event: str, message: str, level: str = "INFO", **context
+) -> None:
+    log_task_event(
+        "VISION_FINE_TUNING_EVALUATE",
+        event,
+        message,
+        level=level,
+        task_type="helper",
+        **context,
+    )
 
 
 def run_evaluation(
@@ -78,8 +95,12 @@ def run_evaluation(
         collate_fn=lambda batch: batch,
     )
 
-    image_embeddings, text_embeddings, labels = _extract_embeddings(model, loader, device, config)
-    similarity = torch.from_numpy(image_embeddings) @ torch.from_numpy(text_embeddings).t()
+    image_embeddings, text_embeddings, labels = _extract_embeddings(
+        model, loader, device, config
+    )
+    similarity = (
+        torch.from_numpy(image_embeddings) @ torch.from_numpy(text_embeddings).t()
+    )
     metrics = retrieval_metrics(similarity, config.eval.recall_k)
 
     if config.eval.classification_labels:
@@ -102,7 +123,9 @@ def run_evaluation(
         if labels:
             tsne_labels = labels[: config.eval.tsne_samples]
         else:
-            tsne_labels = ["sample"] * min(config.eval.tsne_samples, len(image_embeddings))
+            tsne_labels = ["sample"] * min(
+                config.eval.tsne_samples, len(image_embeddings)
+            )
         tsne_output = Path(config.visualization.tsne_output_dir)
         tsne_path = visualize_tsne(
             embeddings=image_embeddings[: config.eval.tsne_samples],
@@ -114,29 +137,48 @@ def run_evaluation(
         figures.append(tsne_path)
 
         attention_root = Path(config.visualization.attention_output_dir)
-        attention_paths = _generate_attention_examples(model, dataset, attention_root, config)
+        attention_paths = _generate_attention_examples(
+            model, dataset, attention_root, config
+        )
         figures.extend(attention_paths)
 
         train_log = output_dir / "train_metrics.jsonl"
         if train_log.exists():
-            curves_path = plot_training_curves(str(train_log), str(output_dir / "training_curves.html"))
+            curves_path = plot_training_curves(
+                str(train_log), str(output_dir / "training_curves.html")
+            )
             if curves_path:
                 figures.append(curves_path)
 
         report_path = generate_report(str(output_dir), metrics, figures)
-        logger.info(f"评估报告已生成: {report_path}")
+        _fine_tune_eval_log(
+            "VISION_FINE_TUNING_REPORT_READY",
+            "评估报告已生成",
+            report_path=str(report_path),
+            status="success",
+        )
 
         if baseline_report:
             baseline_metrics = _load_metrics(baseline_report)
             compare_path = generate_comparison_report(
-                str(output_dir), baseline_metrics=baseline_metrics, finetuned_metrics=metrics
+                str(output_dir),
+                baseline_metrics=baseline_metrics,
+                finetuned_metrics=metrics,
             )
-            logger.info(f"对比报告已生成: {compare_path}")
+            _fine_tune_eval_log(
+                "VISION_FINE_TUNING_COMPARISON_REPORT_READY",
+                "对比报告已生成",
+                report_path=str(compare_path),
+                baseline_report=str(baseline_report),
+                status="success",
+            )
 
     return metrics
 
 
-def run_inference(config_path: str, checkpoint_path: str, image_path: str, text: str) -> Dict[str, float]:
+def run_inference(
+    config_path: str, checkpoint_path: str, image_path: str, text: str
+) -> Dict[str, float]:
     """执行单次图文相似度推理。"""
     base_config = load_yaml_config(config_path)
     config = build_experiment_config(base_config)
@@ -160,7 +202,9 @@ def run_inference(config_path: str, checkpoint_path: str, image_path: str, text:
     model.load_state_dict(state["model_state_dict"], strict=False)
 
     image = Image.open(image_path).convert("RGB")
-    inputs = model.processor(images=image, text=[text], return_tensors="pt", padding=True).to(device)
+    inputs = model.processor(
+        images=image, text=[text], return_tensors="pt", padding=True
+    ).to(device)
     with torch.no_grad():
         image_features, text_features, logit_scale = model(
             inputs["pixel_values"], inputs["input_ids"], inputs["attention_mask"]
@@ -206,16 +250,26 @@ def _zero_shot_classification(
     device,
 ) -> float:
     """使用文本提示实现 zero-shot 分类评估。"""
-    prompt_texts = [prompt.format(label=label) for label in labels for prompt in prompts]
+    prompt_texts = [
+        prompt.format(label=label) for label in labels for prompt in prompts
+    ]
     label_map = []
     for label in labels:
         for _ in prompts:
             label_map.append(label)
-    encoded = model.processor(text=prompt_texts, return_tensors="pt", padding=True).to(device)
+    encoded = model.processor(text=prompt_texts, return_tensors="pt", padding=True).to(
+        device
+    )
     with torch.no_grad():
-        text_features = model.encode_text(encoded["input_ids"], encoded["attention_mask"]).cpu().numpy()
+        text_features = (
+            model.encode_text(encoded["input_ids"], encoded["attention_mask"])
+            .cpu()
+            .numpy()
+        )
     text_features = text_features / np.linalg.norm(text_features, axis=1, keepdims=True)
-    image_features = image_embeddings / np.linalg.norm(image_embeddings, axis=1, keepdims=True)
+    image_features = image_embeddings / np.linalg.norm(
+        image_embeddings, axis=1, keepdims=True
+    )
     logits = image_features @ text_features.T
     pred_indices = logits.argmax(axis=1)
     predictions = [label_map[idx] for idx in pred_indices]
@@ -245,8 +299,12 @@ def _model_complexity(model, config, device) -> Dict[str, float]:
 
 def _measure_latency(model, device, config) -> float:
     """测量单次推理延迟。"""
-    dummy_image = torch.randn(1, 3, config.augment.image_size, config.augment.image_size, device=device)
-    dummy_text = model.processor(text=["test"], return_tensors="pt", padding=True).to(device)
+    dummy_image = torch.randn(
+        1, 3, config.augment.image_size, config.augment.image_size, device=device
+    )
+    dummy_text = model.processor(text=["test"], return_tensors="pt", padding=True).to(
+        device
+    )
     runs = config.eval.complexity_num_runs
     for _ in range(5):
         model(dummy_image, dummy_text["input_ids"], dummy_text["attention_mask"])
@@ -265,7 +323,9 @@ def _estimate_flops(model, device) -> float:
     try:
         with torch.profiler.profile(with_flops=True) as prof:
             dummy_image = torch.randn(1, 3, 224, 224, device=device)
-            dummy_text = model.processor(text=["test"], return_tensors="pt", padding=True).to(device)
+            dummy_text = model.processor(
+                text=["test"], return_tensors="pt", padding=True
+            ).to(device)
             model(dummy_image, dummy_text["input_ids"], dummy_text["attention_mask"])
         return float(sum(event.flops for event in prof.key_averages()))
     except Exception:
@@ -306,7 +366,9 @@ def main() -> None:
     parser.add_argument("--config", required=True, help="YAML 配置路径")
     parser.add_argument("--checkpoint", default=None, help="模型 checkpoint 路径")
     parser.add_argument("--override", action="append", default=[], help="覆盖配置项")
-    parser.add_argument("--baseline-report", default=None, help="基线评估报告路径，用于对比")
+    parser.add_argument(
+        "--baseline-report", default=None, help="基线评估报告路径，用于对比"
+    )
     parser.add_argument("--mode", choices=["evaluate", "infer"], default="evaluate")
     parser.add_argument("--image", help="推理模式下的图像路径")
     parser.add_argument("--text", help="推理模式下的文本输入")
@@ -318,7 +380,9 @@ def main() -> None:
         result = run_inference(args.config, args.checkpoint, args.image, args.text)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
-        run_evaluation(args.config, args.checkpoint, args.override, args.baseline_report)
+        run_evaluation(
+            args.config, args.checkpoint, args.override, args.baseline_report
+        )
 
 
 if __name__ == "__main__":

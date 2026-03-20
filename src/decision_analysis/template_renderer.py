@@ -11,9 +11,23 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import pandas as pd
-from loguru import logger
 
 from decision_analysis.data_models import SimilarCase
+from utils import log_task_event
+
+
+def _template_log(
+    event: str, message: str, level: str = "INFO", **context: object
+) -> None:
+    """输出统一的模板渲染事件日志。"""
+    log_task_event(
+        "DECISION_ANALYSIS",
+        event,
+        message,
+        level=level,
+        task_type="helper",
+        **context,
+    )
 
 
 class TemplateRenderer:
@@ -65,7 +79,12 @@ class TemplateRenderer:
         # Build enum mapping cache for faster lookups
         self._build_enum_cache()
 
-        logger.info(f"[TemplateRenderer] 初始化完成，使用模板: {template_path}")
+        _template_log(
+            "DECISION_TEMPLATE_INIT",
+            "模板渲染器初始化完成",
+            template_path=str(template_path),
+            status="success",
+        )
 
     def _escape_json_examples(self, content: str) -> str:
         """
@@ -133,11 +152,19 @@ class TemplateRenderer:
         """Build cache of enum mappings for faster lookup"""
         self.enum_cache = {}
         if not self.monitoring_points_config:
-            logger.warning("[TemplateRenderer] No monitoring points config provided")
+            _template_log(
+                "DECISION_TEMPLATE_CONFIG_MISSING",
+                "未提供 monitoring points 配置",
+                level="WARNING",
+                status="skipped",
+            )
             return
 
-        logger.debug(
-            f"[TemplateRenderer] Building enum cache from config with keys: {list(self.monitoring_points_config.keys())}"
+        _template_log(
+            "DECISION_TEMPLATE_ENUM_CACHE_BUILD",
+            "开始构建枚举缓存",
+            level="DEBUG",
+            total_items=len(list(self.monitoring_points_config.keys())),
         )
 
         for device_id, device_info in self.monitoring_points_config.items():
@@ -155,8 +182,11 @@ class TemplateRenderer:
                 if "enum" in point:
                     self.enum_cache[device_type][point_alias] = point["enum"]
 
-        logger.debug(
-            f"[TemplateRenderer] Built enum cache for {len(self.enum_cache)} device types"
+        _template_log(
+            "DECISION_TEMPLATE_ENUM_CACHE_READY",
+            "枚举缓存构建完成",
+            level="DEBUG",
+            total_items=len(self.enum_cache),
         )
 
     def render(
@@ -181,7 +211,9 @@ class TemplateRenderer:
 
         Requirements: 6.3, 6.4, 6.5
         """
-        logger.info("[TemplateRenderer] 正在渲染决策提示词模板")
+        _template_log(
+            "DECISION_TEMPLATE_RENDER_START", "开始渲染决策提示词模板", status="running"
+        )
 
         try:
             # Map data to template variables
@@ -206,17 +238,34 @@ class TemplateRenderer:
             # Render template using Python format strings
             rendered_text = self.template_content.format(**template_vars)
 
-            logger.info(
-                f"[TemplateRenderer] 成功渲染模板 (长度: {len(rendered_text)} 字符)"
+            _template_log(
+                "DECISION_TEMPLATE_RENDER_FINISH",
+                "决策提示词模板渲染完成",
+                status="success",
+                total_items=len(rendered_text),
             )
 
             return rendered_text
 
         except KeyError as e:
-            logger.error(f"[TemplateRenderer] 缺少模板变量: {e}")
+            _template_log(
+                "DECISION_TEMPLATE_RENDER_KEY_ERROR",
+                "模板渲染缺少变量",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             raise
         except Exception as e:
-            logger.error(f"[TemplateRenderer] 渲染过程中发生意外错误: {e}")
+            _template_log(
+                "DECISION_TEMPLATE_RENDER_EXCEPTION",
+                "模板渲染过程中发生异常",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             raise
 
     def _map_variables(
@@ -247,7 +296,7 @@ class TemplateRenderer:
 
         Requirements: 5.1, 5.2, 5.3, 5.4, 5.5
         """
-        logger.debug("[TemplateRenderer] Mapping data to template variables")
+        _template_log("DECISION_TEMPLATE_MAP_VARS", "开始映射模板变量", level="DEBUG")
 
         variables = {}
 
@@ -273,7 +322,12 @@ class TemplateRenderer:
         # 5. Add placeholder for documentation examples
         variables["xxx"] = "变量名"  # Placeholder used in template documentation
 
-        logger.debug(f"[TemplateRenderer] Mapped {len(variables)} template variables")
+        _template_log(
+            "DECISION_TEMPLATE_MAP_VARS_DONE",
+            "模板变量映射完成",
+            level="DEBUG",
+            total_items=len(variables),
+        )
 
         return variables
 
@@ -694,8 +748,10 @@ class TemplateRenderer:
 
         Requirements: Enhanced decision analysis with multi-image support
         """
-        logger.info(
-            "[TemplateRenderer] 正在渲染增强版决策提示词模板（包含多图像上下文）"
+        _template_log(
+            "DECISION_TEMPLATE_ENHANCED_START",
+            "开始渲染增强版决策提示词模板",
+            status="running",
         )
 
         try:
@@ -737,20 +793,42 @@ class TemplateRenderer:
             # Render template using Python format strings
             rendered_text = self.template_content.format(**template_vars)
 
-            logger.info(
-                f"[TemplateRenderer] 成功渲染增强版模板 "
-                f"(长度: {len(rendered_text)} 字符, 多图像分析: {multi_image_analysis is not None})"
+            _template_log(
+                "DECISION_TEMPLATE_ENHANCED_FINISH",
+                "增强版决策提示词模板渲染完成",
+                status="success",
+                total_items=len(rendered_text),
+                multi_image_enabled=multi_image_analysis is not None,
             )
 
             return rendered_text
 
         except KeyError as e:
-            logger.error(f"[TemplateRenderer] 增强版渲染中缺少模板变量: {e}")
+            _template_log(
+                "DECISION_TEMPLATE_ENHANCED_KEY_ERROR",
+                "增强版模板渲染缺少变量",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             # Fallback to regular render
-            logger.warning("[TemplateRenderer] 降级到普通渲染模式")
+            _template_log(
+                "DECISION_TEMPLATE_ENHANCED_FALLBACK",
+                "增强版模板渲染失败，降级到普通渲染模式",
+                level="WARNING",
+                status="retrying",
+            )
             return self.render(current_data, env_stats, device_changes, similar_cases)
         except Exception as e:
-            logger.error(f"[TemplateRenderer] 增强版渲染过程中发生意外错误: {e}")
+            _template_log(
+                "DECISION_TEMPLATE_ENHANCED_EXCEPTION",
+                "增强版模板渲染过程中发生异常",
+                level="ERROR",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             raise
 
     def _map_multi_image_context(
@@ -765,8 +843,10 @@ class TemplateRenderer:
         Returns:
             Dictionary of multi-image template variables
         """
-        logger.debug(
-            "[TemplateRenderer] Mapping multi-image context to template variables"
+        _template_log(
+            "DECISION_TEMPLATE_MAP_MULTI_IMAGE",
+            "开始映射多图像上下文变量",
+            level="DEBUG",
         )
 
         # Format image aggregation information

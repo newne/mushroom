@@ -20,55 +20,68 @@
 from .database_utils import (
     DatabaseManager,
     DatabaseRetryManager,
-    get_database_manager,
+    check_database_health,
     execute_with_retry,
-    check_database_health
+    get_database_manager,
 )
-
 from .monitoring_utils import (
+    HealthChecker,
     SystemMonitor,
     TaskMonitor,
-    HealthChecker,
+    get_health_checker,
     get_system_monitor,
     get_task_monitor,
-    get_health_checker,
-    quick_health_check
+    quick_health_check,
 )
-
 from .task_common import (
-    task_retry_wrapper,
-    create_task_result,
-    log_task_summary,
+    TASK_RESULT_STABLE_FIELDS,
+    TaskExecutionContext,
     check_database_connection,
+    create_task_result,
     get_time_range_for_task,
+    log_task_summary,
+    task_retry_wrapper,
     validate_room_ids,
-    TaskExecutionContext
+)
+from .task_logging import (
+    TASK_LOG_EXTRA_DEFAULTS,
+    build_task_run_id,
+    get_current_log_context,
+    log_scheduler_event,
+    log_task_event,
+    use_log_context,
 )
 
 # 工具类列表
 __all__ = [
     # 数据库工具
-    'DatabaseManager',
-    'DatabaseRetryManager', 
-    'get_database_manager',
-    'execute_with_retry',
-    'check_database_health',
-    
+    "DatabaseManager",
+    "DatabaseRetryManager",
+    "get_database_manager",
+    "execute_with_retry",
+    "check_database_health",
     # 监控工具
-    'SystemMonitor',
-    'TaskMonitor',
-    'HealthChecker',
-    'get_system_monitor',
-    'get_task_monitor', 
-    'get_health_checker',
-    'quick_health_check',
-    
+    "SystemMonitor",
+    "TaskMonitor",
+    "HealthChecker",
+    "get_system_monitor",
+    "get_task_monitor",
+    "get_health_checker",
+    "quick_health_check",
     # 任务公共组件
-    'task_retry_wrapper',
-    'create_task_result',
-    'log_task_summary',
-    'check_database_connection',
-    'get_time_range_for_task',
-    'validate_room_ids',
-    'TaskExecutionContext',
+    "task_retry_wrapper",
+    "create_task_result",
+    "log_task_summary",
+    "check_database_connection",
+    "get_time_range_for_task",
+    "validate_room_ids",
+    "TaskExecutionContext",
+    "TASK_RESULT_STABLE_FIELDS",
+    # 日志协议工具
+    "TASK_LOG_EXTRA_DEFAULTS",
+    "build_task_run_id",
+    "get_current_log_context",
+    "log_task_event",
+    "log_scheduler_event",
+    "use_log_context",
 ]

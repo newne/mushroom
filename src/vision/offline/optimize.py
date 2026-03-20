@@ -1,13 +1,23 @@
 import mlflow
-import os
-import pandas as pd
-from typing import Optional
-from mlflow.entities import Run
-from .runner import Runner
-from .dataset import DatasetLoader
-from .scorers import score_json_format, score_schema_conformity, morphology_quality
-from .config import config
+
 from src.global_const.global_const import settings
+from utils import log_task_event
+
+from .config import config
+from .dataset import DatasetLoader
+from .runner import Runner
+from .scorers import score_json_format, score_schema_conformity
+
+
+def _optimize_log(event: str, message: str, level: str = "INFO", **context):
+    log_task_event(
+        "VISION_OFFLINE_OPTIMIZE",
+        event,
+        message,
+        level=level,
+        task_type="script",
+        **context,
+    )
 
 
 class Optimizer:
@@ -31,15 +41,33 @@ class Optimizer:
         3. Generate improved prompt
         4. Repeat
         """
-        print(f"Starting optimization for prompt: {self.prompt_name}")
+        _optimize_log(
+            "VISION_OFFLINE_OPTIMIZE_START",
+            "开始执行 prompt 优化",
+            prompt_name=self.prompt_name,
+            iterations=iterations,
+            sample_size=sample_size,
+            status="running",
+        )
 
         try:
             import mlflow.openai as mlflow_openai
 
             mlflow_openai.autolog()
-            print("MLflow OpenAI Autologging enabled.")
+            _optimize_log(
+                "VISION_OFFLINE_OPTIMIZE_AUTOLOG_READY",
+                "MLflow OpenAI autolog 已启用",
+                status="success",
+            )
         except Exception as e:
-            print(f"Failed to enable MLflow OpenAI Autologging: {e}")
+            _optimize_log(
+                "VISION_OFFLINE_OPTIMIZE_AUTOLOG_FAILED",
+                "MLflow OpenAI autolog 启用失败",
+                level="WARNING",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
 
         def _render_user_message(user_template: str) -> str:
             text = str(user_template)
@@ -73,9 +101,21 @@ class Optimizer:
             )
             current_system = str(base_system)
             current_user_template = str(base_user)
-            print(f"Loaded prompt {self.prompt_name}/3 from registry.")
+            _optimize_log(
+                "VISION_OFFLINE_OPTIMIZE_PROMPT_READY",
+                "已从 registry 加载优化基线 prompt",
+                prompt_name=self.prompt_name,
+                status="success",
+            )
         except Exception as e:
-            print(f"Warning: Failed to load prompt from registry ({e}). Using default.")
+            _optimize_log(
+                "VISION_OFFLINE_OPTIMIZE_PROMPT_FALLBACK",
+                "加载优化基线 prompt 失败，回退默认 prompt",
+                level="WARNING",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
             current_system = "Analyze the provided image and output a strict JSON object with keys growth_stage_description, chinese_description, image_quality_score. No extra text."
             current_user_template = "Please analyze the image provided and generate the JSON output.\n\nImage input: [image attached]\n"
             base_system = current_system
@@ -92,7 +132,13 @@ class Optimizer:
 
         for i in range(iterations):
             with mlflow.start_run(run_name=f"optimization_iter_{i}"):
-                print(f"--- Iteration {i + 1}/{iterations} ---")
+                _optimize_log(
+                    "VISION_OFFLINE_OPTIMIZE_ITERATION_START",
+                    "开始执行 prompt 优化迭代",
+                    iteration=i + 1,
+                    total_iterations=iterations,
+                    status="running",
+                )
 
                 # 1. Evaluate
                 prompt_messages = [
@@ -152,8 +198,14 @@ class Optimizer:
                         "finish_reason_length_count", float(len(length_finishes))
                     )
 
-                print(
-                    f"Score: {total_score:.4f} (JSON: {avg_json:.2f}, Schema: {avg_schema:.2f})"
+                _optimize_log(
+                    "VISION_OFFLINE_OPTIMIZE_ITERATION_SCORE",
+                    "prompt 优化迭代得分",
+                    iteration=i + 1,
+                    total_score=round(total_score, 4),
+                    avg_json=round(avg_json, 4),
+                    avg_schema=round(avg_schema, 4),
+                    status="success",
                 )
 
                 if total_score > best_score:
@@ -161,7 +213,12 @@ class Optimizer:
                     best_system = current_system
 
                 if total_score == 1.0:
-                    print("Perfect score achieved.")
+                    _optimize_log(
+                        "VISION_OFFLINE_OPTIMIZE_PERFECT_SCORE",
+                        "已达到满分，提前结束优化",
+                        iteration=i + 1,
+                        status="success",
+                    )
                     break
 
                 # 3. Generate new prompt (Optimization Step)
@@ -216,15 +273,33 @@ class Optimizer:
                             lines = lines[:-1]
                         new_template = "\n".join(lines).strip()
 
-                    print(f"Generated new prompt: {new_template[:100]}...")
+                    _optimize_log(
+                        "VISION_OFFLINE_OPTIMIZE_NEW_PROMPT",
+                        "已生成新的 prompt 候选",
+                        iteration=i + 1,
+                        prompt_preview=new_template[:100],
+                        status="success",
+                    )
                     current_system = new_template
                 except Exception as e:
-                    print(f"Error generating new prompt: {e}")
+                    _optimize_log(
+                        "VISION_OFFLINE_OPTIMIZE_GENERATE_FAILED",
+                        "生成新 prompt 失败",
+                        level="ERROR",
+                        iteration=i + 1,
+                        status="failed",
+                        error_type=type(e).__name__,
+                        error_message=str(e),
+                    )
                     break
 
-        print("Optimization complete.")
-        print(f"Best Score: {best_score}")
-        print(f"Best System Prompt: {best_system}")
+        _optimize_log(
+            "VISION_OFFLINE_OPTIMIZE_FINISH",
+            "prompt 优化完成",
+            best_score=best_score,
+            best_prompt_preview=best_system[:120],
+            status="success",
+        )
 
         best_prompt_messages = [
             {"role": "system", "content": best_system},
@@ -257,11 +332,21 @@ class Optimizer:
                 commit_message="offline optimize (chat prompt, local dataset)",
                 tags={"source": "offline.optimize", "base": base_prompt},
             )
-            print(
-                f"Registered new prompt version: prompts:/{registered.name}/{registered.version}"
+            _optimize_log(
+                "VISION_OFFLINE_OPTIMIZE_PROMPT_REGISTERED",
+                "已注册新的 prompt 版本",
+                prompt_uri=f"prompts:/{registered.name}/{registered.version}",
+                status="success",
             )
         except Exception as e:
-            print(f"Failed to register prompt version via registry API: {e}")
+            _optimize_log(
+                "VISION_OFFLINE_OPTIMIZE_REGISTER_FAILED",
+                "通过 registry API 注册 prompt 版本失败",
+                level="WARNING",
+                status="failed",
+                error_type=type(e).__name__,
+                error_message=str(e),
+            )
 
         return best_prompt_messages
 

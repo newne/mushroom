@@ -10,15 +10,28 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
-from loguru import logger
 from torch import nn
 from transformers import CLIPModel, CLIPProcessor
+
+from utils import log_task_event
 
 from .lora import apply_lora
 
 
+def _fine_tune_model_log(event: str, message: str, level: str = "INFO", **context):
+    log_task_event(
+        "VISION_FINE_TUNING_MODEL",
+        event,
+        message,
+        level=level,
+        task_type="helper",
+        **context,
+    )
+
+
 class CLIPFineTuner(nn.Module):
     """CLIP 微调封装，支持冻结与 LoRA。"""
+
     def __init__(
         self,
         model_name_or_path: str,
@@ -47,16 +60,26 @@ class CLIPFineTuner(nn.Module):
             self._freeze_module(self.clip.visual_projection)
             self._freeze_module(self.clip.text_projection)
         if use_lora:
-            apply_lora(self.clip, lora_target_modules, r=lora_r, alpha=lora_alpha, dropout=lora_dropout)
+            apply_lora(
+                self.clip,
+                lora_target_modules,
+                r=lora_r,
+                alpha=lora_alpha,
+                dropout=lora_dropout,
+            )
 
     def encode_image(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """生成归一化图像特征。"""
         features = self.clip.get_image_features(pixel_values=pixel_values)
         return features / features.norm(dim=-1, keepdim=True)
 
-    def encode_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+    def encode_text(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
         """生成归一化文本特征。"""
-        features = self.clip.get_text_features(input_ids=input_ids, attention_mask=attention_mask)
+        features = self.clip.get_text_features(
+            input_ids=input_ids, attention_mask=attention_mask
+        )
         return features / features.norm(dim=-1, keepdim=True)
 
     def forward(
@@ -81,14 +104,34 @@ class CLIPFineTuner(nn.Module):
 def resolve_clip_path(model_name_or_path: str) -> str:
     """解析本地或远程 CLIP 模型路径。"""
     container_model_path = Path("/app/models/clip-vit-base-patch32")
-    local_model_path = Path(__file__).parent.parent.parent.parent / "models" / "clip-vit-base-patch32"
+    local_model_path = (
+        Path(__file__).parent.parent.parent.parent / "models" / "clip-vit-base-patch32"
+    )
     if model_name_or_path != "openai/clip-vit-base-patch32":
         return model_name_or_path
     if container_model_path.exists():
-        logger.debug(f"使用容器模型路径: {container_model_path}")
+        _fine_tune_model_log(
+            "VISION_FINE_TUNING_MODEL_PATH_CONTAINER",
+            "使用容器内 CLIP 模型路径",
+            level="DEBUG",
+            model_path=str(container_model_path),
+            status="success",
+        )
         return str(container_model_path)
     if local_model_path.exists():
-        logger.debug(f"使用本地模型路径: {local_model_path}")
+        _fine_tune_model_log(
+            "VISION_FINE_TUNING_MODEL_PATH_LOCAL",
+            "使用本地 CLIP 模型路径",
+            level="DEBUG",
+            model_path=str(local_model_path),
+            status="success",
+        )
         return str(local_model_path)
-    logger.debug("使用默认 HuggingFace CLIP 模型")
+    _fine_tune_model_log(
+        "VISION_FINE_TUNING_MODEL_PATH_REMOTE",
+        "使用默认 HuggingFace CLIP 模型",
+        level="DEBUG",
+        model_path=model_name_or_path,
+        status="success",
+    )
     return model_name_or_path

@@ -8,16 +8,18 @@
 
 请在项目根目录运行以下命令：
 
+- **运行约定**: 所有 Python 命令需加 `PYTHONPATH=/mnt/d/code/mushroom/src`（确保可正确导入 `vision`、`decision_analysis` 等模块）。
+
 - **环境安装**: `uv sync` (使用 `uv` 管理依赖，注意 `pyproject.toml` 中的 `cpu`/`cu129` extra)。
-- **启动服务**: `python src/main.py` (启动 API 服务并自动运行后台调度器)。
+- **启动服务**: `PYTHONPATH=/mnt/d/code/mushroom/src python src/main.py` (启动 API 服务并自动运行后台调度器)。
 - **CLI 工具**:
-  - 健康检查: `python src/scripts/mushroom_cli.py health`
-  - 列出图片: `python src/scripts/mushroom_cli.py list --mushroom-id 611`
-  - 批量处理: `python src/scripts/mushroom_cli.py process --mushroom-id 611`
-  - 路径验证: `python src/scripts/mushroom_cli.py validate -p <path>`
+  - 健康检查: `PYTHONPATH=/mnt/d/code/mushroom/src python src/scripts/mushroom_cli.py health`
+  - 列出图片: `PYTHONPATH=/mnt/d/code/mushroom/src python src/scripts/mushroom_cli.py list --mushroom-id 611`
+  - 批量处理: `PYTHONPATH=/mnt/d/code/mushroom/src python src/scripts/mushroom_cli.py process --mushroom-id 611`
+  - 路径验证: `PYTHONPATH=/mnt/d/code/mushroom/src python src/scripts/mushroom_cli.py validate -p <path>`
 - **测试**:
-  - 运行所有单元测试: `pytest tests/unit`
-  - 运行集成测试: `pytest tests/integration`
+  - 运行所有单元测试: `PYTHONPATH=/mnt/d/code/mushroom/src pytest tests/unit`
+  - 运行集成测试: `PYTHONPATH=/mnt/d/code/mushroom/src pytest tests/integration`
 
 # 核心架构 (Big Picture)
 
