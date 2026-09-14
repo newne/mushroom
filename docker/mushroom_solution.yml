@@ -225,6 +225,8 @@ services:
     environment:
       - PATROL_ANALYSIS=${PATROL_ANALYSIS:-http://172.17.0.1:8000}
       - PATROL_CAPTURE_HOST=${PATROL_CAPTURE_HOST:-172.17.0.1:7003}
+      # 算法侧的调度器打的地址（register_patrol_jobs.py 读同名环境变量）
+      - PATROL_RUN_URL=${PATROL_RUN_URL:-http://mushroom_console:8001/api/patrol/run}
     volumes:
       # 只读挂配置与数据：console 不改任何东西
       - ../mushroom_patrol/configs:/app/configs:ro

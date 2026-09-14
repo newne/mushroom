@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +32,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from patrol.room import RoomStateError, load_room_state
 from patrol.stations import GRID_ANGLES, grid_geometry, load_stations
 from patrol.store import JsonlStore
+
+from deploy.patrol_trigger import TriggerStore
 
 #: 心跳超过这么久没更新 ⇒ 不认为"正在巡检"（一轮约 11 分钟，逐站心跳是秒级）
 HEARTBEAT_STALE_S = 180.0
@@ -52,6 +54,8 @@ class ConsoleDeps:
     enclosures: dict = field(default_factory=dict)
     # 传输：patrol.links.Transport 形状（部署侧注入；测试里给假的）
     transport: object | None = None
+    # 触发请求的落盘目录（跑一轮的入口；见 deploy/patrol_trigger.py）
+    trigger_dir: str = "/app/data/trigger"
     now: object = datetime.now
 
     def envelope(self) -> dict:
@@ -288,6 +292,7 @@ def deps_from_env() -> ConsoleDeps:
         analysis_url=analysis_url,
         capture_host=os.environ.get("PATROL_CAPTURE_HOST", "172.17.0.1:7003"),
         transport=HttpxTransport(allowed_hosts={host_port(analysis_url)}),
+        trigger_dir=os.environ.get("PATROL_TRIGGER_DIR", "/app/data/trigger"),
     )
 
 
@@ -329,6 +334,35 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
         if not page.exists():
             return "<h1>console 静态页缺失</h1>"
         return page.read_text(encoding="utf-8")
+
+    @app.post("/api/patrol/run", status_code=202)
+    def api_patrol_run(reason: str = "", by: str = "scheduler") -> JSONResponse:
+        """投一个"跑一轮"的请求：**立刻返回**，绝不等巡检跑完。
+
+        为什么必须快进快出：调用方是算法工程的 APScheduler（`max_instances=1`、
+        `misfire_grace_time=300s`），而我们一轮 11 分钟——job 里等结果会让下一次触发
+        被判 misfire 丢掉。同一时刻只允许一个待处理请求，重复触发回 409 + 现有请求，
+        **不排队**（排队会让两次挤在一起连跑 22 分钟）。
+        """
+        store = TriggerStore(dir_path=deps.trigger_dir, now=deps.now)
+        req, created = store.request(by=by, reason=reason)
+        body = {"accepted": created, "job": {**asdict(req), "pending": req.pending},
+                "pending_age_s": store.age_s(req)}
+        if not created:
+            console.note(f"重复触发被拒（{req.id} 已在待处理）", level="warn")
+            return JSONResponse(body, status_code=409)
+        console.note(f"收到巡检请求 {req.id}（来自 {by}{'：' + reason if reason else ''}）")
+        return JSONResponse(body, status_code=202)
+
+    @app.get("/api/patrol/run")
+    def api_patrol_run_state() -> dict:
+        """这个请求现在什么状态（调度器与被触发的执行方都看它）。"""
+        store = TriggerStore(dir_path=deps.trigger_dir, now=deps.now)
+        req = store.current()
+        return {"job": {**asdict(req), "pending": req.pending} if req else None,
+                "pending": bool(req and req.pending),
+                "age_s": store.age_s(req),
+                "stale": store.is_stale(req)}
 
     @app.get("/api/events")
     def api_events() -> JSONResponse:
