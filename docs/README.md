@@ -7,7 +7,7 @@
 | `patrol/` | **巡检工程**的文档与现场记录 |
 | `patrol/console-ui/` | 巡检台规格（`spec.md`）、单页原型（`prototype.html`）、jsdom 回归（`verify.js`）、五张实施票 |
 | `patrol/fmc4030-camera-scan/` | 一期扫描功能的规格与计划（`spec.md` / `plan.md` / 八张票） |
-| `patrol/prod-deploy/` | 现场上机记录：`gap-list.md`（欠账清单）、Y 轴排查清单、采图服务修复、各次实测脚本与产物 |
+| `patrol/prod-deploy/` | 现场上机记录：`gap-list.md`（欠账清单）、`container-cutover.md`（容器上机切换手册）、Y 轴排查清单、采图服务修复、各次实测脚本与产物 |
 | `technical/` `algorithms/` `business/` | **算法工程**的文档（既有，未改动） |
 
 ## 代码在哪
