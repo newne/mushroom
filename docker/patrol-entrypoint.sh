@@ -34,6 +34,11 @@ case "${role}" in
     exec uvicorn analysis.api:create_app --factory \
       --host 0.0.0.0 --port "${ANALYSIS_PORT:-8000}"
     ;;
+  console)
+    # 巡检台页面 + 只读接口。单 worker：状态是进程内事件缓冲，多 worker 会各说各话。
+    exec uvicorn deploy.console:create_app --factory \
+      --host 0.0.0.0 --port "${CONSOLE_PORT:-8001}"
+    ;;
   shell)
     exec bash
     ;;

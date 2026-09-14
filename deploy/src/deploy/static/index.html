@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>蘑菇房巡检台</title>
+<style>
+  :root{--bg:#12161c;--panel:#1a2029;--line:#2a3340;--fg:#e6edf3;--dim:#8b98a5;
+        --ok:#3fb950;--warn:#d29922;--bad:#f85149;--accent:#58a6ff;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,"Microsoft YaHei",sans-serif}
+  header{display:flex;align-items:center;gap:16px;padding:10px 18px;background:var(--panel);
+         border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+  h1{font-size:17px;margin:0;font-weight:600}
+  .pill{padding:3px 12px;border-radius:999px;font-size:13px;border:1px solid var(--line)}
+  .pill.idle{color:var(--dim)} .pill.run{color:var(--accent);border-color:var(--accent)}
+  .pill.ok{color:var(--ok);border-color:var(--ok)} .pill.bad{color:var(--bad);border-color:var(--bad)}
+  .pill.warn{color:var(--warn);border-color:var(--warn)}
+  #gate{padding:8px 18px;font-size:14px;border-bottom:1px solid var(--line)}
+  #gate.allow{background:#0d2a17;color:#7ee2a8} #gate.deny{background:#2a1416;color:#ffb3ae}
+  main{display:grid;grid-template-columns:360px 1fr 340px;gap:14px;padding:14px 18px;align-items:start}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:14px}
+  .card h2{font-size:13px;margin:0 0 10px;color:var(--dim);font-weight:600;letter-spacing:.04em}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px}
+  .kv b{color:var(--dim);font-weight:400}
+  .mono{font-family:ui-monospace,Consolas,monospace}
+  #map{width:100%;height:auto;display:block}
+  .stn{display:flex;justify-content:space-between;padding:5px 8px;border-radius:5px;cursor:pointer;
+       font-size:13px;border:1px solid transparent}
+  .stn:hover{background:#212936} .stn.sel{background:#1f3350;border-color:var(--accent)}
+  .stn .cur{color:var(--accent);font-weight:700}
+  .layer{padding:6px 0 2px;color:var(--dim);font-size:12px}
+  .imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+  .im{background:#0e1319;border:1px solid var(--line);border-radius:6px;overflow:hidden;font-size:12px}
+  .im img{width:100%;height:110px;object-fit:cover;display:block;background:#000}
+  .im .m{padding:5px 7px;color:var(--dim)} .im .m b{color:var(--fg);font-weight:500}
+  .im.fail{outline:1px solid var(--bad)} .im.local .m::after{content:" · 本地待同步";color:var(--warn)}
+  #log{max-height:220px;overflow:auto;font-size:12.5px}
+  #log div{padding:2px 0;border-bottom:1px solid #202834;color:var(--dim)}
+  .empty{color:var(--dim);font-size:13px;padding:8px 0}
+  .bar{height:8px;background:#0e1319;border-radius:4px;overflow:hidden;margin-top:6px}
+  .bar i{display:block;height:100%;background:var(--accent)}
+</style>
+</head>
+<body>
+<header>
+  <h1>蘑菇房巡检台</h1>
+  <span id="pill" class="pill idle">连接中…</span>
+  <span id="posn" class="mono" style="color:var(--dim)">位置 —</span>
+  <span id="roundinfo" style="color:var(--dim)"></span>
+</header>
+<div id="gate">门禁状态读取中…</div>
+
+<main>
+  <section>
+    <div class="card">
+      <h2>导轨平面图（Y 向右 · Z 向上）</h2>
+      <svg id="map" viewBox="0 0 320 150" preserveAspectRatio="xMidYMid meet"></svg>
+      <div class="empty" id="maphint">点位与巡检当前站位</div>
+    </div>
+    <div class="card">
+      <h2>站位（按层）</h2>
+      <div id="list" class="empty">读取中…</div>
+    </div>
+  </section>
+
+  <section>
+    <div class="card">
+      <h2>上一轮 / 本轮</h2>
+      <div class="kv" id="round">—</div>
+      <div class="bar" id="progresswrap" style="display:none"><i id="progress" style="width:0%"></i></div>
+    </div>
+    <div class="card">
+      <h2>历史图像 <span id="imgtitle" style="color:var(--dim);font-weight:400"></span></h2>
+      <div class="imgs" id="imgs"><div class="empty">点左侧任一站位查看它的历史图</div></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="card">
+      <h2>机器</h2>
+      <div class="kv" id="machine">—</div>
+    </div>
+    <div class="card">
+      <h2>事件</h2>
+      <div id="log" class="empty">—</div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+let stations = [], grid = null, selected = null, lastStatus = null;
+
+async function jget(url){
+  const r = await fetch(url);
+  if(!r.ok) throw new Error(url + ' → HTTP ' + r.status);
+  return r.json();
+}
+
+function pill(text, cls){ const p = $('#pill'); p.textContent = text; p.className = 'pill ' + cls; }
+
+function drawMap(){
+  const svg = $('#map'); if(!grid){ return; }
+  const {cols, layers, y_min, y_max, z_min, z_max} = grid;
+  const W = 320, H = 150, pad = 14;
+  const X = y => pad + (y - y_min) / (y_max - y_min) * (W - 2*pad);
+  const Y = z => pad + (z - z_min) / (z_max - z_min) * (H - 2*pad);   // Z 向上：z 越小越靠下
+  let s = '';
+  // 层带
+  for(let L = 1; L <= layers; L++){
+    const y0 = Y(z_max - (L-1)*(z_max-z_min)/layers), y1 = Y(z_max - L*(z_max-z_min)/layers);
+    if(L % 2 === 1) s += `<rect x="${pad}" y="${y0}" width="${W-2*pad}" height="${y1-y0}" fill="#1e2632"/>`;
+  }
+  // 网格线
+  for(let c = 0; c <= cols; c++){
+    const x = pad + c*(W-2*pad)/cols;
+    s += `<line x1="${x}" y1="${pad}" x2="${x}" y2="${H-pad}" stroke="#2a3340"/>`;
+  }
+  for(let L = 0; L <= layers; L++){
+    const y = pad + L*(H-2*pad)/layers;
+    s += `<line x1="${pad}" y1="${y}" x2="${W-pad}" y2="${y}" stroke="#2a3340"/>`;
+  }
+  // 站位点
+  const cur = lastStatus?.patrol?.current_station;
+  for(const st of stations){
+    const sel = st.id === selected, isCur = st.id === cur;
+    s += `<circle cx="${X(st.target_y)}" cy="${Y(st.target_z)}" r="${sel||isCur?6:3.2}"
+            fill="${isCur ? '#58a6ff' : (sel ? '#7ee2a8' : '#4a5766')}"
+            stroke="${sel?'#7ee2a8':'none'}" data-id="${st.id}"><title>${st.id} · ${st.box_id} ·
+            第${st.layer}层第${st.col}框 · Y=${st.target_y.toFixed(1)} Z=${st.target_z.toFixed(1)}</title></circle>`;
+  }
+  s += `<text x="${pad}" y="${H-2}" fill="#8b98a5" font-size="9">Y ${y_min} → ${y_max} mm</text>`;
+  s += `<text x="${W-86}" y="${H-2}" fill="#8b98a5" font-size="9">Z ${z_min} → ${z_max} mm</text>`;
+  svg.innerHTML = s;
+  svg.querySelectorAll('circle').forEach(c => c.onclick = () => selectStation(c.dataset.id));
+}
+
+function drawList(){
+  const byLayer = {};
+  for(const st of stations) (byLayer[st.layer] ||= []).push(st);
+  const cur = lastStatus?.patrol?.current_station;
+  $('#list').className = '';
+  $('#list').innerHTML = Object.keys(byLayer).sort().map(L => {
+    const rows = byLayer[L].sort((a,b)=>a.col-b.col).map(st => `
+      <div class="stn ${st.id===selected?'sel':''}" data-id="${st.id}">
+        <span>${st.id===cur?`<span class="cur">▶ </span>`:''}${st.id}</span>
+        <span class="mono" style="color:var(--dim)">${st.target_y.toFixed(0)}, ${st.target_z.toFixed(1)}
+        ${(st.trim_y||st.trim_z)?'⇥':''}</span>
+      </div>`).join('');
+    return `<div class="layer">第 ${L} 层</div>${rows}`;
+  }).join('');
+  $('#list').querySelectorAll('.stn').forEach(el => el.onclick = () => selectStation(el.dataset.id));
+}
+
+async function selectStation(id){
+  selected = id; drawList(); drawMap();
+  $('#imgtitle').textContent = '· ' + id;
+  $('#imgs').innerHTML = '<div class="empty">读取中…</div>';
+  try{
+    const data = await jget('/api/images?station_id=' + encodeURIComponent(id));
+    if(!data.rows.length){ $('#imgs').innerHTML = '<div class="empty">这个站位还没有图像索引</div>'; return; }
+    $('#imgs').innerHTML = data.rows.map(r => {
+      const url = r.cloud_url || '';
+      const ok = r.ok !== false && r.ok !== 0;
+      return `<div class="im ${ok?'':'fail'} ${r.source==='local'?'local':''}">
+        ${url ? `<a href="${url}" target="_blank"><img loading="lazy" src="${url}"></a>` : '<div style="height:110px"></div>'}
+        <div class="m"><b>${(r.ts||'').replace('T',' ')}</b><br>${r.object_name || (ok?'':'<span style="color:#f85149">采图失败</span>')}
+        <br>${r.source==='local'?'本地':'prod'}</div></div>`;
+    }).join('');
+    if(data.prod_error) $('#imgs').insertAdjacentHTML('afterbegin',
+      `<div class="empty">⚠ prod 查询失败（只显示了本地待同步的）：${data.prod_error}</div>`);
+  }catch(e){ $('#imgs').innerHTML = `<div class="empty">读取失败：${e.message}</div>`; }
+}
+
+function renderStatus(s){
+  lastStatus = s;
+  const p = s.patrol || {}, m = s.machine || {}, r = s.room || {};
+  // 门禁带（现场第一疑问：机器今天该不该动）
+  const g = $('#gate');
+  if(!r.ok){ g.className = 'deny'; g.textContent = '⛔ ' + (r.text || r.error || '门禁不可用'); }
+  else {
+    g.className = r.allowed ? 'allow' : 'deny';
+    g.textContent = (r.allowed ? '✅ ' : '⛔ ') +
+      `库房 ${r.room_id} · 入库 ${r.entry_date} · 第 ${r.day} 天 · ${r.text}`;
+  }
+  if(p.active){
+    pill('巡检中', 'run');
+    const pct = p.station_total ? (100 * (p.station_index||0) / p.station_total) : 0;
+    $('#progresswrap').style.display = ''; $('#progress').style.width = pct.toFixed(1) + '%';
+    $('#roundinfo').textContent = `第 ${p.station_index||'?'}/${p.station_total||'?'} 站 · ${p.current_station||''}`;
+  } else {
+    $('#progresswrap').style.display = 'none'; $('#roundinfo').textContent = '';
+    pill(p.status === 'ok' ? '待机（上轮正常）' : (p.known ? '待机' : '待机（无取证）'),
+         p.status === 'ok' ? 'ok' : (p.known ? 'idle' : 'warn'));
+  }
+  $('#posn').textContent = m.real_pos
+    ? `位置 Y=${m.real_pos[0].toFixed(1)} Z=${m.real_pos[1].toFixed(1)}` +
+      (m.pos_source === 'station' ? '（站位目标值）' : '')
+    : '位置 —';
+  const rows = [
+    ['状态', p.reason || '—'],
+    ['本轮开始', p.started_at || '—'],
+    ['已过站', p.n_stations_seen ?? '—'],
+    ['结果', p.status || (p.active ? '进行中' : '—')],
+    ['失败站', p.n_failures ?? '—'],
+    ['取证文件', p.file || '—'],
+  ];
+  $('#round').innerHTML = rows.map(([k,v]) => `<b>${k}</b><span>${v}</span>`).join('');
+  $('#machine').innerHTML = [
+    ['页面状态', m.state], ['控制器连接', m.connected ? '已连' : '未连（巡检进行中时刻意不连）'],
+    ['位置来源', m.pos_source], ['相机服务', m.host],
+  ].map(([k,v]) => `<b>${k}</b><span>${v ?? '—'}</span>`).join('');
+  const ev = (s.events||[]).slice().reverse();
+  $('#log').className = ev.length ? '' : 'empty';
+  $('#log').innerHTML = ev.length ? ev.map(e => `<div>${e.ts} ${e.text}</div>`).join('') : '—';
+}
+
+async function tick(){
+  try{
+    const s = await jget('/api/status');
+    renderStatus(s); drawMap();
+    if(document.querySelector('#list .stn')) {
+      const cur = s.patrol?.current_station;
+      document.querySelectorAll('#list .stn').forEach(el => {
+        const on = el.dataset.id === cur;
+        if(on !== el.dataset.wascur){ el.dataset.wascur = on; drawList(); }
+      });
+    }
+  }catch(e){ pill('接口不通', 'bad'); }
+}
+
+(async function init(){
+  try{
+    const data = await jget('/api/stations');
+    if(!data.ok){ $('#list').innerHTML = `<div class="empty">${data.error}</div>`; return; }
+    stations = data.stations; grid = data.grid; drawMap(); drawList();
+  }catch(e){ $('#list').innerHTML = `<div class="empty">站位表读取失败：${e.message}</div>`; }
+  tick(); setInterval(tick, 1000);
+})();
+</script>
+</body>
+</html>

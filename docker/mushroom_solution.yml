@@ -211,6 +211,34 @@ services:
     mem_limit: 1g
     cpus: 2.0
 
+  # 巡检台页面 + 只读接口（上位机从这里看状态与历史图）。
+  # 同一个镜像、不同角色；**不接控制器**（巡检进行中它会刻意不连，见 deploy/console.py）。
+  mushroom_console:
+    <<: *base
+    profiles: ["patrol"]
+    image: "${PATROL_IMAGE:-registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0}"
+    container_name: mushroom_console
+    command: ["console"]
+    ports:
+      # 上位机直接访问 http://<服务器IP>:8001/
+      - "${CONSOLE_PORT:-8001}:8001"
+    environment:
+      - PATROL_ANALYSIS=${PATROL_ANALYSIS:-http://172.17.0.1:8000}
+      - PATROL_CAPTURE_HOST=${PATROL_CAPTURE_HOST:-172.17.0.1:7003}
+    volumes:
+      # 只读挂配置与数据：console 不改任何东西
+      - ../mushroom_patrol/configs:/app/configs:ro
+      - ../mushroom_patrol/data:/app/data:ro
+      - ../mushroom_patrol/Logs:/app/Logs:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    mem_limit: 512m
+    cpus: 1.0
+
 # 数据卷（根级别，关键修复！）
 volumes:
   postgre_data_v18:
