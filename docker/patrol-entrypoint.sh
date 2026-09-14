@@ -34,6 +34,19 @@ case "${role}" in
     exec uvicorn analysis.api:create_app --factory \
       --host 0.0.0.0 --port "${ANALYSIS_PORT:-8000}"
     ;;
+  patrol-serve)
+    # 触发请求的执行方：**持有控制器的那一个进程**（单实例）。
+    # 巡检不是自己排时刻表，而是由算法侧每 3 小时投一次请求驱动。
+    exec python3 -m deploy.patrol_serve \
+      --trigger-dir "${PATROL_TRIGGER_DIR:-/app/data/trigger}" \
+      --room "${PATROL_ROOM:-/app/configs/room.yaml}" \
+      --stations "${PATROL_STATIONS:-/app/configs/stations.yaml}" \
+      --outbox "${PATROL_OUTBOX:-/app/data/outbox.jsonl}" \
+      --log "${PATROL_LOG:-/app/Logs/m1.log}" \
+      --capture-host "${PATROL_CAPTURE_HOST:-172.17.0.1:7003}" \
+      --ingest "${PATROL_INGEST:-http://172.17.0.1:8000/ingest}" \
+      "$@"
+    ;;
   console)
     # 巡检台页面 + 只读接口。单 worker：状态是进程内事件缓冲，多 worker 会各说各话。
     exec uvicorn deploy.console:create_app --factory \

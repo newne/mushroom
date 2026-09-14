@@ -186,7 +186,7 @@ services:
     container_name: mushroom_patrol
     # 一轮约 11 分钟、每 3 小时由算法侧的调度器触发一次（ADR-0012 §6）。
     # 这里给的是"被触发时怎么跑"，不是自己的时刻表——自己排时刻表会让两边各有一套节奏。
-    command: ["patrol", "--once"]
+    command: ["patrol-serve"]
     environment:
       - PROD_INGEST=${PROD_INGEST:-http://172.17.0.1:8000/ingest}
       # 采图服务发布在宿主上：容器里 127.0.0.1 不是宿主，必须走网桥网关
