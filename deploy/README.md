@@ -256,7 +256,7 @@ systemctl daemon-reload && systemctl enable --now patrol-m1
 | 差别 | 原因 |
 | --- | --- |
 | `ExecStart` 用 `/opt/mushroom-patrol/.venv/bin/python3` | 系统 python3 没有 httpx，`import deploy.m1` 直接崩 |
-| `ExecStart` 不带 `--no-sync` | `/ingest` 端点已就位（见 §6），跑完就同步 |
+| `ExecStart` 不带 `--no-sync` | `/ingest` 端点已就位（见 §7），跑完就同步 |
 
 > ⚠️ **不要** `enable` 采图那两份遗留单元（`xcloud-capture.service` 等）——它们指向
 > 另一套安装且抢同一个 `:99` 与 `:7003`，见 ADR-0009。
@@ -310,7 +310,44 @@ deploy-flush-outbox --outbox /opt/mushroom-patrol/outbox.jsonl             # 真
 
 ---
 
-## 6. 已知边界
+## 6. 手动控制（巡检台页面 → 机构）
+
+页面上点一下，实际走的是这条路（**细节与理由见 ADR-0016**）：
+
+```
+页面 → console（写 data/cmd/） → patrol-serve（唯一持有控制器） → FMC4030 → 写回 result.json
+```
+
+| 环节 | 干什么 | 不干什么 |
+| --- | --- | --- |
+| 巡检台页面（`web/console/`） | 发 `POST /api/cmd {kind,args}`、轮询 `GET /api/cmd` | 不认识控制器与 SDK |
+| console（`deploy.console`） | 收指令、落盘、巡检中当场拒绝、读写会话与急停 | **绝不连控制器**（单会话设备，会踢掉正在跑的那一轮） |
+| patrol-serve（`deploy.manual_exec`） | 领指令 → 校验 → 动机构 → 写回结果 | 不在轮内领指令 |
+
+```
+python3 -m deploy.patrol_serve --cmd-dir /app/data/cmd      # 容器里的 patrol-serve 角色
+```
+
+**四条必须记住的语义**：
+
+1. **急停是闩锁，而且能打断正在跑的那一轮**。急停写 `data/cmd/ESTOP`（独立文件，不进
+   指令队列）；`patrol` 的等待原语每轮询一次 `abort` 回调，为真立刻抛 `MotionAborted`，
+   执行方随即 `stop_everything()`。置位期间只有"关灯"和"再停一次"被放行，**复位必须
+   显式做**（`DELETE /api/stop`）。延迟约 1 秒（0.5 s 轮询 + 0.1–0.2 s 检查）——
+   这是**软件急停**，不替代硬件急停回路。
+2. **指令有新鲜度**：提交后 60 秒才被领走的一律不执行（判"已过期"）。正常路径上执行方
+   0.5 秒轮询一次，只有"中间隔着 11 分钟的一轮"才可能超时——那正是我们希望它别执行的情形。
+3. **巡检进行中不许手动**：console 当场回 409 + "预计 x 分钟后可用"；除急停外连补光灯和
+   抓拍也拒（相机链路与曝光窗口都归那一轮）。
+4. **放开会话 = 回零 + 撤权**：手动挪过之后坐标系只有回零能重新对齐硬限位。排不上回零
+   （轮内/通道忙）时接口会**明说**没排上。
+
+关掉急停联动只在排障时说得通：`patrol-m1 --no-estop`（**正常运行不要用**——那会让"有人
+按了急停"拦不住正在跑的那一轮）。
+
+---
+
+## 7. 已知边界
 
 - **`--ingest` 端点已就位**（2026-09-13 关掉 gap-list G1）：`http://10.77.77.39:8000/ingest`，
   由 `mushroom-analysis.service` 提供（`analysis.api`，落在 `/opt/mushroom-analysis/mushrooms.db`）。

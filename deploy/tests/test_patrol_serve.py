@@ -110,3 +110,104 @@ def test_reason_is_logged_for_the_field(tmp_path):
                   sleep=lambda _s: None, log=logs.append)
     joined = "\n".join(logs)
     assert "scheduler" in joined and "每 3 小时定时巡检" in joined
+
+
+# ---------- 手动通道（ADR-0013：轮间随时可用，轮内不让动） ----------
+
+
+class FakeManual:
+    """假执行方：只统计"被照看了几次、处理了几条"，以及处理的次序。"""
+
+    def __init__(self, pending: int = 0, order: list[str] | None = None, boom: bool = False):
+        self.pending = pending
+        self.order = order if order is not None else []
+        self.boom = boom
+        self.calls = 0
+
+    def service_once(self):
+        self.calls += 1
+        self.order.append("manual")
+        if self.boom:
+            raise RuntimeError("通道文件读坏了")
+        if self.pending > 0:
+            self.pending -= 1
+            return object()             # 处理了一条
+        return None
+
+
+def fake_clock():
+    """可控时钟：sleep 会推进它，于是"空闲分片"是可断言的行为而不是靠真实等待。"""
+    state = {"t": 0.0}
+    slept: list[float] = []
+
+    def clock() -> float:
+        return state["t"]
+
+    def sleep(s: float) -> None:
+        slept.append(s)
+        state["t"] += s
+        if len(slept) > 40:
+            raise KeyboardInterrupt
+
+    return clock, sleep, slept
+
+
+def test_manual_channel_is_serviced_while_idle(tmp_path):
+    """没有巡检请求时，手动通道照样被高频照看：人点了"点动"不该等 5 秒。"""
+    store = make_store(tmp_path)
+    manual = FakeManual()
+    clock, sleep, slept = fake_clock()
+    try:
+        serve_forever(store=store, run_once=lambda: 0, manual=manual,
+                      sleep=sleep, clock=clock, log=lambda _m: None)
+    except KeyboardInterrupt:
+        pass
+    assert manual.calls >= 3
+    assert slept and all(s == 0.5 for s in slept), "空闲时按 manual_poll_s 分片，而不是睡满 5 秒"
+
+
+def test_manual_command_goes_first_when_a_round_is_waiting(tmp_path):
+    """人的动作优先于巡检请求：两者同时在，先做人的那一条。"""
+    store = make_store(tmp_path)
+    store.request(by="scheduler")
+    order: list[str] = []
+    manual = FakeManual(pending=1, order=order)
+
+    def run_once():
+        order.append("round")
+        return 0
+
+    serve_forever(store=store, run_once=run_once, manual=manual, max_rounds=1,
+                  sleep=lambda _s: None, clock=lambda: 0.0, log=lambda _m: None)
+    assert order[0] == "manual" and "round" in order
+
+
+def test_a_broken_manual_channel_does_not_kill_the_runner(tmp_path):
+    """手动通道出问题只是它自己的事：执行方要继续活着等下一次触发。"""
+    store = make_store(tmp_path)
+    logs: list[str] = []
+    clock, sleep, _slept = fake_clock()
+    try:
+        serve_forever(store=store, run_once=lambda: 0, manual=FakeManual(boom=True),
+                      sleep=sleep, clock=clock, log=logs.append)
+    except KeyboardInterrupt:
+        pass
+    assert any("手动指令处理异常" in m for m in logs)
+    assert any("就绪" in m for m in logs)
+
+
+def test_no_manual_channel_keeps_the_plain_sleep(tmp_path):
+    """不接手动通道时，循环行为与从前**完全一致**（一次睡满 poll_s）。"""
+    store = make_store(tmp_path)
+    slept: list[float] = []
+
+    def sleep(s):
+        slept.append(s)
+        if len(slept) >= 3:
+            raise KeyboardInterrupt
+
+    try:
+        serve_forever(store=store, run_once=lambda: 0, sleep=sleep, log=lambda _m: None)
+    except KeyboardInterrupt:
+        pass
+    assert slept == [5.0, 5.0, 5.0]

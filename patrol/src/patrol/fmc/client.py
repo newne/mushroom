@@ -37,6 +37,7 @@ from patrol.fmc.device_para import (
 from patrol.fmc.errors import (
     FmcError,
     HomeTimeoutError,
+    MotionAborted,
     MotionTimeoutError,
     SoftLimitMismatchError,
     TravelLimitError,
@@ -47,6 +48,16 @@ from patrol.fmc.status import MachineStatus, MachineStatusStruct, parse_machine_
 from patrol.motion_profile import CONTROLLER_IP, CONTROLLER_PORT, DEVICE_ID, M1
 
 Limits = tuple[float, float]
+
+
+def _check_abort(abort: Callable[[], bool] | None, what: str) -> None:
+    """有人在等的时候要求停下（急停）——立刻抛，别把"马上停"拖成"等它跑完"。
+
+    ``abort`` 由上层注入（执行方传的是"急停标志文件还在不在"）。判断本身不做任何
+    阻塞动作：**停下是调用方的事**（它才知道要不要 ``stop_everything``）。
+    """
+    if abort is not None and abort():
+        raise MotionAborted(what)
 
 # 「起转窗口」：指令下发后，控制器开始处理之前的一小段时间。这段时间里读到的
 # 一切位置/状态标志都还是**上一条指令的残值**，不是这次动作的结果。
@@ -241,6 +252,7 @@ class Fmc4030:
         wait: bool = True,
         timeout_s: float | None = None,
         poll_s: float = 0.2,
+        abort: Callable[[], bool] | None = None,
     ) -> None:
         """两轴依次回零（默认本机接线轴 Y、Z），**默认等待回零完成**。
 
@@ -250,11 +262,12 @@ class Fmc4030:
         """
         targets = M1.axis_indices if axes is None else tuple(axes)
         for axis in targets:
+            _check_abort(abort, f"回零（{M1.by_index(axis).name} 轴下发前）")
             self.home_axis(axis)
         if not wait:
             return
         timeout = M1.home_timeout if timeout_s is None else timeout_s
-        if not self.wait_home(targets, timeout_s=timeout, poll_s=poll_s):
+        if not self.wait_home(targets, timeout_s=timeout, poll_s=poll_s, abort=abort):
             names = "、".join(M1.by_index(a).name for a in targets)
             raise MotionTimeoutError(f"回零到位确认超时（{names}，{timeout:g}s 内未完成）")
 
@@ -265,6 +278,7 @@ class Fmc4030:
         timeout_s: float | None = None,
         poll_s: float = 0.2,
         start_timeout_s: float = HOME_START_TIMEOUT_S,
+        abort: Callable[[], bool] | None = None,
     ) -> bool:
         """等待各轴回零完成；返回 False 表示主机侧等待超时。
 
@@ -288,6 +302,7 @@ class Fmc4030:
         start_deadline = time.monotonic() + start_timeout_s
         started = dict.fromkeys(targets, False)
         while True:
+            _check_abort(abort, "等待回零")
             st = self.get_status()  # 顺带充当 1 分钟无交互断连的保活
             overtime = [a for a in targets if st.axes[a].home_overtime]
             if overtime:
@@ -309,7 +324,8 @@ class Fmc4030:
     def wait_stop(self, axes: Iterable[int] | None = None, *, timeout_s: float = 60.0,
                   poll_s: float = 0.05, start_grace_s: float = START_GRACE_S,
                   settle_s: float = SETTLE_S, settle_speed: float = SETTLE_SPEED_MM_S,
-                  settle_poll_s: float = 0.02) -> bool:
+                  settle_poll_s: float = 0.02,
+                  abort: Callable[[], bool] | None = None) -> bool:
         """轮询等待轴**真正停稳**；超时返回 False。默认等本机两轴（Y、Z）。
 
         ## 为什么不能只看 running 位（2026-09-13 实测）
@@ -340,6 +356,7 @@ class Fmc4030:
         # 阶段 2：running 已清零后的"速度归零"确认
         quiet_since: float | None = None
         while time.monotonic() < deadline:
+            _check_abort(abort, "等待到位")
             st = self.get_status()
             busy = any(st.axes[a].running for a in targets)
             fastest = max((abs(st.real_speed[a]) for a in targets), default=0.0)
@@ -392,6 +409,7 @@ class Fmc4030:
         approach_speed: float | None = None,
         approach_acc: float | None = None,
         timeout_s: float = M1.travel_timeout,
+        abort: Callable[[], bool] | None = None,
     ) -> None:
         """两段速到达 (y, z)：**巡检段**全速走空程，**接近段**降速走最后 offset mm。
 
@@ -411,18 +429,20 @@ class Fmc4030:
         到位确认由本方法负责；超时抛 MotionTimeoutError，调用方无需再 wait_stop。
         """
         self.check_travel(y, z)
+        _check_abort(abort, "巡检段（下发前）")
         target = (y, z)
         start = from_point if from_point is not None else self.current_yz()
         offset = M1.approach_offset if approach_offset is None else approach_offset
         mid = approach_point(start, target, offset)
         if mid != target:
-            self._goto_segment(start, mid, M1.travel_limits, speed, acc, "巡检段", timeout_s)
+            self._goto_segment(start, mid, M1.travel_limits, speed, acc, "巡检段", timeout_s,
+                               abort=abort)
             return self._goto_segment(
                 mid, target, M1.approach_limits, approach_speed, approach_acc,
-                "接近段", timeout_s,
+                "接近段", timeout_s, abort=abort,
             )
         return self._goto_segment(
-            start, target, M1.travel_limits, speed, acc, "巡检段", timeout_s
+            start, target, M1.travel_limits, speed, acc, "巡检段", timeout_s, abort=abort
         )
 
     def _goto_segment(
@@ -434,14 +454,17 @@ class Fmc4030:
         acc: float | None,
         label: str,
         timeout_s: float,
+        *,
+        abort: Callable[[], bool] | None = None,
     ) -> None:
         """下发一段绝对运动并等它停稳（``goto`` 的两段共用）。"""
+        _check_abort(abort, f"{label}（下发前）")
         v, a = self._segment_limits(segment_delta(start, end), limits, speed, acc)
         self._check(
             self._lib.FMC4030_Line_2Axis(self.id, M1.axis_mask, end[0], end[1], v, a, a),
             f"goto:{label}",
         )
-        if not self.wait_stop(timeout_s=timeout_s):
+        if not self.wait_stop(timeout_s=timeout_s, abort=abort):
             raise MotionTimeoutError(f"{label}到位确认超时 ({end[0]}, {end[1]})")
         self._verify_arrival(end, label)
 
@@ -519,6 +542,7 @@ class Fmc4030:
         acc: float | None = None,
         dec: float | None = None,
         timeout_s: float = M1.jog_timeout,
+        abort: Callable[[], bool] | None = None,
     ) -> None:
         """单轴绝对定位（M0）：把 axis 轴移动到绝对坐标 pos mm。
 
@@ -526,6 +550,7 @@ class Fmc4030:
         """
         spec = M1.by_index(axis)
         self.check_axis_travel(axis, pos)
+        _check_abort(abort, f"定位（{spec.name} 轴下发前）")
         self._check(
             self._lib.FMC4030_Jog_Single_Axis(
                 self.id, axis, pos,
@@ -536,9 +561,8 @@ class Fmc4030:
             ),
             f"move_axis({axis}, pos={pos})",
         )
-        if not self.wait_stop(axes=(axis,), timeout_s=timeout_s):
+        if not self.wait_stop(axes=(axis,), timeout_s=timeout_s, abort=abort):
             raise MotionTimeoutError(f"单轴到位确认超时 (axis={axis}, pos={pos})")
-        spec = M1.by_index(axis)
         actual = self.get_status().real_pos[axis]
         if abs(pos - actual) > ARRIVAL_TOL_MM:
             raise TravelShortfallError(spec.name, pos, actual, ARRIVAL_TOL_MM)
@@ -552,6 +576,7 @@ class Fmc4030:
         acc: float | None = None,
         dec: float | None = None,
         timeout_s: float = M1.jog_timeout,
+        abort: Callable[[], bool] | None = None,
     ) -> None:
         """双轴直线插补绝对定位（M0）：单段直达虚拟坐标 (y, z) mm。
 
@@ -559,6 +584,7 @@ class Fmc4030:
         单段到位，不做 M1 的两段降速。
         """
         self.check_travel(y, z)
+        _check_abort(abort, "双轴定位（下发前）")
         v_default, a_default = composite_limits(
             segment_delta(self.current_yz(), (y, z)), M1.jog_limits
         )
@@ -569,7 +595,7 @@ class Fmc4030:
             self._lib.FMC4030_Line_2Axis(self.id, M1.axis_mask, y, z, v, a, d),
             "goto_2axis",
         )
-        if not self.wait_stop(timeout_s=timeout_s):
+        if not self.wait_stop(timeout_s=timeout_s, abort=abort):
             raise MotionTimeoutError(f"双轴到位确认超时 ({y}, {z})")
         self._verify_arrival((y, z), "goto_2axis")
 

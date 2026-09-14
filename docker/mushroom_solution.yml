@@ -232,6 +232,12 @@ services:
       - ../mushroom_patrol/configs:/app/configs:ro
       - ../mushroom_patrol/data:/app/data:ro
       - ../mushroom_patrol/Logs:/app/Logs:ro
+      # ⚠️ 但这两处**协调文件**它必须能写（ADR-0011/0013 的文件通道，console 没有 SDK）：
+      # data/trigger = 巡检触发请求；data/cmd = 手动指令 / 结果 / 会话 / ESTOP。
+      # 子目录单独放 rw，父目录仍然 ro：outbox 与 runs/ 这些"证据"文件，console
+      # 一个字节都改不了——这比"整棵 data 放开"更接近我们想要的那条线。
+      - ../mushroom_patrol/data/trigger:/app/data/trigger:rw
+      - ../mushroom_patrol/data/cmd:/app/data/cmd:rw
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/healthz"]
       interval: 30s

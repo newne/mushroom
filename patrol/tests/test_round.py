@@ -1,5 +1,7 @@
+import pytest
 from fmc_fakes import FakeFmcLib
 from patrol.capture_client import CaptureError
+from patrol.fmc import MotionAborted
 from patrol.round import PatrolRound
 from patrol.stations import Station, record_station, upsert_station
 
@@ -19,13 +21,22 @@ class FakeStationCapture:
 
 
 class FakeFmc:
+    """记录调用的假控制器；`abort` 为真时像真客户端一样抛 MotionAborted。"""
+
     def __init__(self):
         self.events: list[tuple] = []
+        self.abort = None            # 由 PatrolRound 透传进来（被测的就是这个透传）
 
-    def home_all(self):
+    def home_all(self, **kw):
+        self.abort = kw.get("abort")
+        if self.abort is not None and self.abort():
+            raise MotionAborted("测试：回零前已急停")
         self.events.append(("home",))
 
     def goto(self, y, z, **kw):
+        self.abort = kw.get("abort")
+        if self.abort is not None and self.abort():
+            raise MotionAborted("测试：移动前已急停")
         self.events.append(("goto", y, z))
 
     def wait_stop(self, axes=None, **kw):
@@ -83,6 +94,53 @@ def test_round_no_return_home_option():
                          return_home=False).run()
     assert not report.aborted
     assert all(e[0] != "goto" for e in fmc.events)
+
+
+# ---------- 急停请求：能打断正在跑的那一轮 ----------
+
+
+class EstopStationCapture(FakeStationCapture):
+    """在某一站的采图闭环里冒出 MotionAborted —— 站内运动被急停打断的样子。"""
+
+    def __init__(self, station_id: str):
+        super().__init__()
+        self.station_id = station_id
+
+    def run(self, station, ts=None):
+        if station.id == self.station_id:
+            self.ran.append(station.id)
+            raise MotionAborted(f"测试：{station.id} 运动中按了急停")
+        return super().run(station, ts)
+
+
+def test_estop_mid_round_is_reported_separately_and_does_not_go_home():
+    """急停打断一轮：抛 MotionAborted、心跳标 estop、**不回原位**。
+
+    为什么必须单独测：回原位是每轮的正常收尾，而"按下急停之后机器又走了一段"是现场
+    最难解释的行为之一。abort 在下发前就拦住 goto，所以这里连一条 goto 都不该有。
+    """
+    fmc = FakeFmc()
+    heartbeats: list[dict] = []
+    round_ = PatrolRound(
+        fmc, None, make_stations(3), station_capture=EstopStationCapture("S02"),
+        on_station=lambda i, n, **f: heartbeats.append(f),
+    )
+    with pytest.raises(MotionAborted):
+        round_.run()
+
+    assert [e[0] for e in fmc.events] == ["home"]        # 只有开场回零，没有回原位
+    assert heartbeats[-1]["station_id"] == "S02"
+    assert heartbeats[-1]["abort"] == "estop"            # 与"运动失败"分开，别让人去查导轨
+
+
+def test_estop_already_raised_stops_before_home():
+    """急停已置位时连回零都不做（第一件事就被拦下）——不给自己"先动一下"的机会。"""
+    fmc = FakeFmc()
+    with pytest.raises(MotionAborted):
+        PatrolRound(fmc, None, make_stations(2), station_capture=FakeStationCapture(),
+                    abort=lambda: True).run()
+    assert fmc.events == []
+    assert fmc.abort is not None        # 回调确实透到了控制器那一层
 
 
 # ---------- 示教（并入 stations） ----------

@@ -48,6 +48,7 @@ class StationCapture:
                  lamp_io: int = 0,
                  framing: FramingHook | None = None,
                  framing_limits: tuple[float, float, float, float] | None = None,
+                 abort: Callable[[], bool] | None = None,
                  log: Callable[[str], None] = print,
                  sleep=time.sleep):
         self.fmc = fmc
@@ -57,6 +58,9 @@ class StationCapture:
         self.retries = retries
         self.lamp_io = lamp_io
         self.framing = framing
+        # 急停请求（可选）：透给每一次运动。**不在这里处理"停下"**——等待原语抛
+        # MotionAborted，由守护进程/执行方去急停，因为只有它们知道该怎么收尾。
+        self.abort = abort
         self.framing_limits = framing_limits or (
             M1.y.travel_min, M1.y.travel_max, M1.z.travel_min, M1.z.travel_max
         )
@@ -112,7 +116,9 @@ class StationCapture:
         # trim 是"上次微调学到的小偏移"，叠加在推导坐标上。它是站位表的一部分，
         # 所以手动示教过、或从没微调过的站位（trim=0）行为与从前完全一致。
         base = (station.y + station.trim_y, station.z + station.trim_z)
-        self.fmc.goto(*base)  # 到位确认由 goto 负责（超时抛 MotionTimeoutError 等）
+        # 到位确认由 goto 负责（超时抛 MotionTimeoutError 等）；abort 让急停能打断
+        # 这一段几十秒的定位，而不是等它走完。
+        self.fmc.goto(*base, abort=self.abort)
         self._sleep(self.decay_s)
 
         outcome = None
@@ -127,7 +133,7 @@ class StationCapture:
                     nominal=base,
                     recipe=self.framing.recipe,
                     limits=self.framing_limits,
-                    move=self.fmc.goto,
+                    move=lambda y, z: self.fmc.goto(y, z, abort=self.abort),
                     shoot=self._shoot(station, ts),
                     evaluate=self._evaluate,
                     log=self.log,

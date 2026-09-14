@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from patrol.capture_client import CaptureClient, CaptureError
-from patrol.fmc import Fmc4030, FmcError
+from patrol.fmc import Fmc4030, FmcError, MotionAborted
 from patrol.fmc.errors import TravelShortfallError
 from patrol.orchestrator import FramingHook, StationCapture
 from patrol.stations import Station
@@ -63,6 +63,7 @@ class PatrolRound:
         return_home: bool = True,
         station_capture: StationCapture | None = None,  # 内部缝：测试注入
         framing: FramingHook | None = None,             # 图像微调（第二步定位）
+        abort: Callable[[], bool] | None = None,        # 急停请求：透给每一次运动
         sleep=time.sleep,
         log: Callable[[str], None] | None = None,
         on_station: Callable[..., None] | None = None,  # 逐站心跳（结构化，供取证）
@@ -76,6 +77,7 @@ class PatrolRound:
         # 微调钩子原样透给 StationCapture：不传 = 只走"第一步"（推导坐标），
         # 行为与没有这个功能时完全一致。
         self.framing = framing
+        self.abort = abort
         self._sleep = sleep
         self._log_sink = log
         self._on_station = on_station
@@ -96,9 +98,10 @@ class PatrolRound:
         现场就靠它回答"走到哪一站了"。两者分开：日志文案会改，取证字段不该跟着改。
         """
         report = RoundReport(started_at=datetime.now())
-        self.fmc.home_all()
+        self.fmc.home_all(abort=self.abort)
         cap = self._station_capture or StationCapture(
-            self.fmc, self.capture_client, sleep=self._sleep, framing=self.framing
+            self.fmc, self.capture_client, sleep=self._sleep, framing=self.framing,
+            abort=self.abort,
         )
         consecutive = 0
         total = len(self.stations)
@@ -106,6 +109,20 @@ class PatrolRound:
             t0 = time.monotonic()
             try:
                 meta = cap.run(st)
+            except MotionAborted as e:
+                # **急停请求**：它不是"这一站没走对"，而是有人要求整轮停下。单独分类，
+                # 以免现场在日志里看到"运动失败"而去找导轨的毛病（找错方向最费时间）。
+                report.aborted = True
+                report.failures.append(
+                    {"station_id": st.id, "box_id": st.box_id, "error": str(e)}
+                )
+                self._log(f"[{i}/{total}] 收到急停请求，中止本轮：{e}")
+                self._heartbeat(
+                    i, total, station_id=st.id, box_id=st.box_id, ok=False,
+                    elapsed_s=round(time.monotonic() - t0, 2), object_name=None,
+                    error=str(e), abort="estop",
+                )
+                raise
             except TravelShortfallError as e:
                 # **这一次移动没有按指令完成**——跳过该站，继续下一站（与采图失败同级）。
                 # 依据：实测它不具预测性（20 趟里 2 趟，异常后的下一趟通常正常），而且
@@ -178,7 +195,9 @@ class PatrolRound:
                 object_name=meta.get("object_name"), error=None,
             )
         if self.return_home:
-            self.fmc.goto(0.0, 0.0)
+            # 回原位同样可被打断：急停之后**不能**再往原点走——那正是"要求停下"的
+            # 反面。abort 会在下发前就抛，不会有半段运动。
+            self.fmc.goto(0.0, 0.0, abort=self.abort)
         report.ended_at = datetime.now()
         return report
 

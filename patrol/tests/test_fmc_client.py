@@ -4,6 +4,7 @@ from patrol.fmc import (
     Fmc4030,
     FmcError,
     HomeTimeoutError,
+    MotionAborted,
     MotionTimeoutError,
     SoftLimitMismatchError,
     TravelLimitError,
@@ -101,6 +102,66 @@ def test_lamp_on_off():
     client.lamp(True)
     client.lamp(False)
     assert lib.calls_of("set_output") == [(1, 0, 1), (1, 0, 0)]
+
+
+# ---------- 急停请求（abort）：等待可以被打断，且下发前就要拦住 ----------
+
+
+def test_abort_before_move_never_touches_controller():
+    """急停已置位时，**一步都不该下发**——先拦再动，而不是动完再说。"""
+    client, lib = make_client()
+
+    def abort() -> bool:
+        return True
+
+    with pytest.raises(MotionAborted):
+        client.goto(100.0, 0.0, abort=abort)
+    with pytest.raises(MotionAborted):
+        client.goto_2axis(100.0, 0.0, abort=abort)
+    with pytest.raises(MotionAborted):
+        client.move_axis(1, 100.0, abort=abort)
+    with pytest.raises(MotionAborted):
+        client.home_all(abort=abort)
+    assert lib.calls_of("line2") == []
+    assert lib.calls_of("jog") == []
+    assert lib.calls_of("home") == []       # 连回零都没下发
+
+    # 不传 abort 时一切照旧（默认参数不改变既有行为）
+    client.goto(100.0, 0.0)
+    assert lib.calls_of("line2")
+
+
+def test_abort_during_wait_stops_waiting():
+    """运动已下发、轴还在跑时按急停：立刻抛，不再等它走完。
+
+    这条是"急停不能排在队尾"的核心：`wait_stop` 的默认超时是 60s，没有 abort 就得
+    等满——现场看到的是"按了急停，机器又走了半分钟"。
+    """
+    client, _ = make_client(stop_after_status_calls=10_000)   # 永远"没停"
+    calls = {"n": 0}
+
+    def abort() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 2        # 前两次放行（模拟"运行中才按下去"）
+
+    with pytest.raises(MotionAborted):
+        client.wait_stop(timeout_s=30.0, poll_s=0.001, settle_poll_s=0.001, abort=abort)
+    assert calls["n"] < 10          # 确实提前退出，而不是把 30s 等满
+
+
+def test_abort_between_goto_segments_skips_the_approach_segment():
+    """两段速到达：急停在两段之间生效，接近段**不再下发**。"""
+    client, lib = make_client()
+    calls = {"n": 0}
+
+    def abort() -> bool:
+        calls["n"] += 1
+        return calls["n"] > 2
+
+    with pytest.raises(MotionAborted):
+        client.goto(200.0, 0.0, abort=abort)      # 默认走"巡检段 + 接近段"
+    (line,) = lib.calls_of("line2")
+    assert line[2:4] == (195.0, 0.0)              # 只发了巡检段（到距目标 5mm 处）
 
 
 def test_line_failure_raises_fmc_error():

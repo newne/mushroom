@@ -47,6 +47,7 @@ from patrol.sync import PROD_INGEST_URL, SyncClient
 
 from deploy.framing_wire import build as build_framing
 from deploy.framing_wire import make_apply_trim
+from deploy.manual import ManualChannel
 from deploy.transport import HttpxTransport, host_port
 
 DEFAULT_STATIONS_PATH = "/opt/mushroom-patrol/stations.yaml"
@@ -96,6 +97,48 @@ class _NullSync:
 
     def flush(self, store: JsonlStore) -> int:
         return 0
+
+
+def make_capture(args) -> CaptureClient:
+    """采图客户端。抽成工厂是因为**手动抓拍要用同一个**（同一台相机、同一个服务）：
+    两处各建一个客户端，迟早会在"重试次数/错误分类"上漂移。
+
+    accept_json_errors：采图服务用 HTTP 500 表示"**这一次**没拍成"（body 仍是完整
+    信封），不是"服务挂了"。放它按链路故障抛错会把业务失败误判成基础设施故障，
+    也会丢掉重试所需的 error_code/message。交给 CaptureClient._interpret 分类。
+    """
+    transport: Transport = HttpxTransport(
+        allowed_hosts={args.capture_host}, accept_json_errors=("success",)
+    )
+    return CaptureClient(transport=transport)
+
+
+def make_sync(args) -> SyncClient | _NullSync:
+    """outbox → prod 的同步器；``--no-sync`` 时给一个什么都不做的占位。"""
+    if args.no_sync:
+        return _NullSync()
+    sync_transport = RetryingTransport(
+        HttpxTransport(allowed_hosts={host_port(args.ingest)}), attempts=3, backoff_s=2.0
+    )
+    return SyncClient(endpoint=args.ingest, transport=sync_transport)
+
+
+def make_estop_check(cmd_dir: str | None, *, disabled: bool = False, log=None):
+    """急停标志文件的检查函数（`deploy.manual.ManualChannel` 的 ESTOP）。
+
+    为什么在 deploy 层做：`patrol` 库里不许有"标志文件"这种部署概念，它只接受一个
+    ``abort()`` 回调。这个函数就是那个回调的**部署侧实现**——console 写文件、执行方
+    读文件，两边对路径的理解都来自 `ManualChannel`（一处定义）。
+
+    关掉它（``--no-estop``）只在排障时说得通：正常运行下，"有人按了急停"必须能打断
+    正在跑的那一轮。
+    """
+    if disabled or not cmd_dir:
+        return None
+    channel = ManualChannel(cmd_dir)
+    if log is not None:
+        log(f"急停标志：{channel.estop_path}（巡检中每等一步都看它一眼）")
+    return channel.raised
 
 
 def next_run_delay(now: datetime, at_minute: int) -> float:
@@ -168,6 +211,11 @@ def build_parser() -> argparse.ArgumentParser:
                     help="prod 接收端点")
     ap.add_argument("--capture-host", default=DEFAULT_CAPTURE_HOST,
                     help="采图服务的 host:port（容器里要用宿主网桥地址，如 172.17.0.1:7003）")
+    ap.add_argument("--cmd-dir", default=os.environ.get("PATROL_CMD_DIR", "/app/data/cmd"),
+                    help="手动指令通道目录：其中的 ESTOP 标志文件是**急停**，"
+                         "巡检中每等一步都看它一眼（没有该文件就退化成纯巡检）")
+    ap.add_argument("--no-estop", action="store_true",
+                    help="忽略急停标志文件（排障用；正常运行**不要**关掉它）")
     ap.add_argument("--no-sync", action="store_true",
                     help="禁用向 prod 同步（outbox 只累积，待端点确定后补传）")
 
@@ -291,14 +339,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # ---------- 装配依赖 ----------
-    # accept_json_errors：采图服务用 HTTP 500 表示"**这一次**没拍成"（body 仍是完整
-    # 信封），不是"服务挂了"。放它按链路故障抛错会把业务失败误判成基础设施故障，
-    # 也会丢掉重试所需的 error_code/message。交给 CaptureClient._interpret 分类。
-    capture_transport: Transport = HttpxTransport(
-        allowed_hosts={args.capture_host}, accept_json_errors=("success",)
-    )
-    capture = CaptureClient(transport=capture_transport)
-
+    capture = make_capture(args)
     store = JsonlStore(args.outbox)
     log(f"outbox {args.outbox}：{len(store.pending())} 条待同步")
 
@@ -306,10 +347,7 @@ def main(argv: list[str] | None = None) -> int:
         sync: object = _NullSync()
         log("同步已禁用（outbox 只累积，待 prod 端点确定后用同一 store 补传）")
     else:
-        sync_transport = RetryingTransport(
-            HttpxTransport(allowed_hosts={host_port(args.ingest)}), attempts=3, backoff_s=2.0
-        )
-        sync = SyncClient(endpoint=args.ingest, transport=sync_transport)
+        sync = make_sync(args)
 
     daemon = PatrolDaemon(
         open_fmc=open_fmc,
@@ -323,6 +361,8 @@ def main(argv: list[str] | None = None) -> int:
         room_state_path=args.room,
         framing=framing_wire.hook,
         apply_trim=apply_trim,
+        # 急停：console 按下 → 标志文件 → 这里每等一步看一眼 → 正在跑的那一轮被打断。
+        abort=make_estop_check(args.cmd_dir, disabled=args.no_estop, log=log),
         log=log,
     )
 

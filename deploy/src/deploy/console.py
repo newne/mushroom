@@ -35,13 +35,18 @@ from patrol.stations import GRID_ANGLES, grid_geometry, load_stations
 from patrol.store import JsonlStore
 from pydantic import BaseModel
 
-from deploy.manual import SESSION_TTL_S, ManualChannel
+from deploy.manual import ALL_KINDS, SESSION_TTL_S, ManualChannel
 from deploy.patrol_trigger import TriggerStore
 
 #: 心跳超过这么久没更新 ⇒ 不认为"正在巡检"（一轮约 11 分钟，逐站心跳是秒级）
 HEARTBEAT_STALE_S = 180.0
 #: 最近事件环形缓冲的条数（前端底栏日志）
 EVENT_BUFFER = 50
+
+#: 巡检进行中被拒的指令：**除急停以外的全部**（ADR-0013）。
+#: 为什么连补光灯和抓拍也拒：轮内机构和相机链路都归那一轮——插一张抓拍会进历史、
+#: 抢一次采图会话，而灯被人拨一下会打乱那一站的曝光窗口。
+MANUAL_GATED_KINDS = frozenset(ALL_KINDS) - {"stop"}
 
 
 class CmdBody(BaseModel):
@@ -169,6 +174,35 @@ def _first(events: list[dict], kind: str, key: str):
         if e.get("event") == kind:
             return e.get(key)
     return None
+
+
+#: 一轮的典型时长（秒）。只用于"还要等多久"的**粗略**估计：进度可用时按已完成站数
+#: 外推，拿不到进度时用它兜底。宁可说"大约"，也不要给一个精确到秒的假数。
+ROUND_TYPICAL_S = 11 * 60
+
+
+def round_eta_s(patrol: dict, *, now: datetime) -> int | None:
+    """这一轮大概还要多少秒（拿不到开始时间就返回 None）。"""
+    started = patrol.get("started_at")
+    if not started:
+        return None
+    try:
+        t0 = datetime.fromisoformat(started)
+    except (TypeError, ValueError):
+        return None
+    elapsed = (now - t0).total_seconds()
+    index, total = patrol.get("station_index"), patrol.get("station_total")
+    if isinstance(index, int) and isinstance(total, int) and 0 < index < total and elapsed > 0:
+        return max(0, int(elapsed / index * (total - index)))
+    return max(0, int(ROUND_TYPICAL_S - elapsed))
+
+
+def eta_text(patrol: dict, *, now: datetime) -> str:
+    """给操作者的一句话："大约还要等多久"（ADR-0013：拒绝时必须说清楚，别只回"忙"）。"""
+    eta = round_eta_s(patrol, now=now)
+    if eta is None:
+        return "预计几分钟后可用"
+    return f"预计 {max(1, round(eta / 60))} 分钟后可用"
 
 
 def room_state(room_path: str, *, now=None) -> dict:
@@ -383,12 +417,34 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
 
     @app.delete("/api/session")
     def api_session_close() -> dict:
-        """放开会话。**真正的"先回零再放开"由执行方完成**（它才碰得到控制器）：
-        这里只撤销授权，并把回零排成一条指令。"""
+        """放开会话：**先排一条回零**，再撤销授权。
+
+        为什么"放开"里含回零：手动点动之后，坐标系与实际位置的关系只有操作者心里有；
+        而本机无编码器，两端硬限位是**唯一**的物理基准，回零是唯一能把两者重新对齐的
+        动作。所以放开的语义是"回零 + 撤权"，不是单纯撤权。
+
+        排不进（通道上还有指令在跑 / 巡检进行中）就**如实说**，绝不静默跳过——那会让
+        人以为机器已经回零了。真正的回零由执行方做（只有它持有控制器）。
+        """
         ch = channel()
+        active = ch.active_session()
+        patrol = patrol_state(deps.runs_dir)
+        queued: dict | None = None
+        if active is None:
+            detail = "没有有效会话，无需回零"
+        elif patrol.get("active"):
+            detail = (f"巡检进行中（{eta_text(patrol, now=deps.now())}）——"
+                      "本轮结束时它自己会回原位，未另排回零")
+        else:
+            cmd, why = ch.submit("home", by="operator", session=active.token)
+            if cmd.kind == "home":
+                queued = asdict(cmd)
+                detail = "已排回零：执行方到位后写回结果（GET /api/cmd 看进度）"
+            else:
+                detail = f"回零没排上（{why}）——放开前请确认机器现在的位置"
         ch.close_session()
-        console.note("操作者已放开会话")
-        return {"closed": True}
+        console.note(f"操作者已放开会话（{detail}）")
+        return {"closed": True, "home_command": queued, "detail": detail}
 
     @app.post("/api/stop")
     def api_stop(reason: str = "") -> dict:
@@ -421,12 +477,26 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
 
     @app.post("/api/cmd", status_code=202)
     def api_cmd(body: CmdBody) -> JSONResponse:
-        """提交一条手动指令（goto/jog/abs/home/lamp/capture）。
+        """提交一条手动指令（goto/jog/home/lamp/capture/stop）。
 
         **异步**：这里只把指令写进共享目录就返回 202，执行方（持有控制器的那个进程）
         领走后写回结果。之所以不是同步的：控制器是单会话设备，console 一旦自己去连，
         就可能把正在跑的那一轮巡检踢掉。页面按 `GET /api/cmd` 轮询结果。
+
+        **巡检进行中拒绝会动机构的指令**（ADR-0013）：轮内机构归那一轮，等人家的 11
+        分钟跑完再动。在这里当场回 409 是为了让页面立刻能说清"现在为什么不能动"——
+        只靠执行方那边的过期判定，操作者要等到轮末才知道自己被拒了。
         """
+        patrol = patrol_state(deps.runs_dir)
+        if patrol.get("active") and body.kind in MANUAL_GATED_KINDS:
+            return JSONResponse(
+                {
+                    "error": "巡检进行中：机构由这一轮占用，" + eta_text(patrol, now=deps.now()),
+                    "patrol": patrol,
+                    "retry_hint": "轮间（约 94% 的时间）随时可手动操作；急停永远可用",
+                },
+                status_code=409,
+            )
         ch = channel()
         active = ch.active_session()
         try:

@@ -121,6 +121,33 @@ def test_daemon_cycle_ok_and_sync(tmp_path):
     assert len(store) == 0
 
 
+def test_daemon_estop_aborts_the_round_before_any_motion(tmp_path):
+    """急停置位时：一轮**一步都不动**，判 failed，且日志里认得出是急停。
+
+    端到端（daemon → round → 等待原语）验一次：以前急停只在"下一轮开始前"有效，
+    正在跑的那一轮谁也拦不住——现场看到的是"按了急停，机器又走了一站"。
+    """
+    lib = FakeFmcLib(soft_limits=COMMISSIONED_SOFT_LIMITS)
+    store = JsonlStore(str(tmp_path / "outbox.jsonl"))
+    logs: list[str] = []
+    daemon = PatrolDaemon(
+        room_state=ALLOWED_ROOM,
+        now=_allowed_now,
+        open_fmc=lambda: Fmc4030(lib),
+        stations=[Station(id="S01", box_id="B01", y=10.0, z=0.0)],
+        capture_client=SyncClientAndCaptureStub(),
+        store=store,
+        sync=SyncClient(transport=lambda url, body=None: None),
+        abort=lambda: True,                       # console 写下的 ESTOP 标志
+        log=logs.append,
+    )
+
+    assert daemon.run_cycle() == "failed"
+    assert any("急停" in m for m in logs)
+    assert lib.calls_of("home") == [] and lib.calls_of("line2") == []
+    assert len(store) == 0, "没跑成就不该写结果"
+
+
 def test_daemon_refuses_to_move_when_soft_limits_are_not_commissioned(tmp_path):
     """ADR-0008 的闸门要在**每一轮**生效，不是只在启动预检里。
 

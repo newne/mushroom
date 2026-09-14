@@ -13,7 +13,14 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from deploy.console import ConsoleDeps, create_app, patrol_state, room_state
+from deploy.console import (
+    ConsoleDeps,
+    create_app,
+    eta_text,
+    patrol_state,
+    room_state,
+    round_eta_s,
+)
 from fastapi.testclient import TestClient
 
 NOW = datetime(2026, 9, 14, 10, 0, 0)
@@ -224,3 +231,98 @@ def test_images_filter_by_station(tmp_path):
     with make_client(tmp_path) as c:
         got = c.get("/api/images?station_id=S102").json()
     assert [r["station_id"] for r in got["rows"]] == ["S102"]
+
+
+# ---------- 手动面：巡检进行中的拒绝（ADR-0013） ----------
+
+
+def test_motion_is_refused_while_a_round_runs(tmp_path):
+    """轮内不让动机构，而且要说清"还要等多久"——只回一句"忙"在现场等于没说。"""
+    write_run(tmp_path / "runs", "20260914-100000-1.jsonl", [
+        {"event": "start", "ts": "2026-09-14T09:58:00", "stations": 60},
+        {"event": "station", "index": 12, "total": 60, "station_id": "S105"},
+    ])
+    with make_client(tmp_path) as c:
+        r = c.post("/api/cmd", json={"kind": "goto", "args": {"y": 100.0, "z": 0.0}})
+        assert r.status_code == 409
+        body = r.json()
+        assert "巡检进行中" in body["error"]
+        assert "分钟后可用" in body["error"]
+        assert body["patrol"]["active"] is True
+        # 连"抓拍"和"补光灯"也拒：相机链路与曝光窗口都归那一轮
+        assert c.post("/api/cmd", json={"kind": "capture",
+                                        "args": {"station_id": "S101"}}).status_code == 409
+        assert c.post("/api/cmd", json={"kind": "lamp", "args": {"on": True}}).status_code == 409
+
+
+def test_estop_is_never_gated_by_a_running_round(tmp_path):
+    """急停不走指令通道，任何时候都能置上（ADR-0013）。"""
+    write_run(tmp_path / "runs", "20260914-100000-2.jsonl", [
+        {"event": "start", "ts": "2026-09-14T09:58:00", "stations": 60},
+        {"event": "station", "index": 3, "total": 60, "station_id": "S103"},
+    ])
+    with make_client(tmp_path) as c:
+        assert c.post("/api/stop", params={"reason": "轮内按下"}).status_code == 200
+        assert c.get("/api/cmd").json()["estop"] is True
+        # stop 作为指令提交也不被轮次拦（它是"停下"，不是"移动"）
+        assert c.post("/api/cmd", json={"kind": "stop"}).status_code == 202
+
+
+def test_manual_is_allowed_between_rounds(tmp_path):
+    """轮间（约 94% 的时间）随时可用：结束了就不该再拦人。"""
+    write_run(tmp_path / "runs", "20260914-090000-3.jsonl", [
+        {"event": "start", "ts": "2026-09-14T09:45:00", "stations": 60},
+        {"event": "end", "ts": "2026-09-14T09:56:00", "status": "ok", "n_results": 60},
+    ])
+    with make_client(tmp_path) as c:
+        c.post("/api/session")
+        r = c.post("/api/cmd", json={"kind": "goto", "args": {"y": 100.0, "z": 0.0}})
+    assert r.status_code == 202
+    assert r.json()["command"]["kind"] == "goto"
+
+
+def test_eta_is_extrapolated_from_progress_then_falls_back():
+    """估算两条路：有进度按已完成站数外推；没进度按典型时长兜底。"""
+    started = NOW.replace(hour=9, minute=49)      # 已经跑了 11 分钟
+    progress = {"started_at": started.isoformat(), "station_index": 30, "station_total": 60}
+    assert round_eta_s(progress, now=NOW) == 660          # 一半站用了 11 分钟 ⇒ 再来 11 分钟
+    assert "11 分钟后可用" in eta_text(progress, now=NOW)
+
+    no_progress = {"started_at": started.isoformat()}
+    assert round_eta_s(no_progress, now=NOW) == 0          # 已超过典型时长 ⇒ 不报负数
+    assert eta_text({}, now=NOW) == "预计几分钟后可用"      # 连开始时间都没有，就别装精确
+
+
+def test_closing_the_session_queues_a_home_move(tmp_path):
+    """放开会话 = 回零 + 撤权：手动挪过之后，只有回零能把参照拉回硬限位。"""
+    with make_client(tmp_path) as c:
+        c.post("/api/session")
+        r = c.delete("/api/session").json()
+    assert r["closed"] is True
+    assert r["home_command"]["kind"] == "home"
+    assert "已排回零" in r["detail"]
+    # 会话确实撤了，但回零那条指令还在通道里等着执行方
+    with make_client(tmp_path) as c:
+        state = c.get("/api/cmd").json()
+    assert state["session_active"] is False
+    assert state["inflight"]["kind"] == "home"
+
+
+def test_closing_the_session_without_one_says_so(tmp_path):
+    with make_client(tmp_path) as c:
+        r = c.delete("/api/session").json()
+    assert r["closed"] is True and r["home_command"] is None
+    assert "没有有效会话" in r["detail"]
+
+
+def test_closing_the_session_during_a_round_does_not_queue_home(tmp_path):
+    """轮内不排回零：本轮结束时它自己会回原位，此时再插一条绝对运动是危险的。"""
+    write_run(tmp_path / "runs", "20260914-100000-9.jsonl", [
+        {"event": "start", "ts": "2026-09-14T09:58:00", "stations": 60},
+        {"event": "station", "index": 5, "total": 60, "station_id": "S105"},
+    ])
+    with make_client(tmp_path) as c:
+        c.post("/api/session")
+        r = c.delete("/api/session").json()
+    assert r["home_command"] is None
+    assert "巡检进行中" in r["detail"] and "未另排回零" in r["detail"]

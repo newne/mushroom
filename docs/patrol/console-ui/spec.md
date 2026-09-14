@@ -328,6 +328,24 @@ batch_no`，但表里原先没有这三列，写入时被**静默丢弃**——�
 | §5.3 / §6.3 查询 | `?angle&date_from&date_to&limit`、每行 `source/url/thumb` | 已实现的是 `analysis/api.py` 的 `/images?station_id&box_id&room_id&limit`，每行 `cloud_url`；`source/url/thumb` 属于 console 层要补的 |
 | 原型 `stnSpeed='1.8 s'` | 写死的单站耗时 | 实测单站 p50 **8.8 s**、整轮 **652.7 s**；原型改读 `elapsed_s` |
 | 原型 mock | 60 个逐站 IP、`round_ts` 筛选、`run_mode:'M1'` | 按 10.1 前几行改；mock 行的字段形状对齐 `daemon` 真实产出的 `image_index` 行 |
+| §6 控制端点 | 每个动作一个端点（`/api/goto`、`/api/jog`、`/api/lamp`、`/api/capture`…） | 实现成**一个** `POST /api/cmd {kind, args}`（`goto/jog/home/lamp/capture/stop`）+ `GET /api/cmd` 轮询结果；动词集与执行层只维护一份（`deploy/manual.py` 的 `ALL_KINDS`），页面不必随动词增加而改 |
+| §6 「放开会话」 | 只撤销授权 | **回零 + 撤权**（ADR-0016）：手动挪过之后坐标系只有回零能重新对齐硬限位；排不上回零时接口会**明说**没排上 |
+
+### 10.4 手动控制的执行侧（2026-09-14 落地，ADR-0016）
+
+页面上的每个动作，实际走的是这条链：
+
+```
+页面 → console（写 data/cmd） → patrol-serve（唯一持有控制器） → FMC4030 → 写回 result.json → 页面
+```
+
+几条与页面直接相关的语义（细节见 `docs/adr/0016-manual-control-execution.md`）：
+
+* **巡检进行中**：除急停外一律 409，并带上"预计 x 分钟后可用"（`console.round_eta_s`）；
+* **急停**：独立标志文件，不走指令队列，**能打断正在跑的那一轮**（等待原语被中止）；
+  急停是**闩锁**——置位期间只有"关灯"和"再停一次"被放行，必须显式复位；
+* **指令有新鲜度**：提交后 60 秒才被领走的指令不执行（手动操作是"此时此地"的动作）；
+* **`capture` 不移动机构**：拍的是当前位置，站位号是操作者给的归属，记录里存实际坐标。
 
 ### 10.2 页面缺的、系统已经有的（按 价值/成本 排序）
 

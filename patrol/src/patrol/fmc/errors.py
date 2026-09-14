@@ -55,6 +55,27 @@ class TravelLimitError(FmcError):
         return self.detail
 
 
+class MotionAborted(MotionTimeoutError):
+    '''等待运动到位时被**外部请求**打断（不是超时，也不是设备故障）。
+
+    唯一的来源是"急停"这类由人按下、或由上层标志文件触发的请求：等待循环每轮问一次
+    ``abort()``，为真就立刻抛本异常，不再等下去。与 `MotionTimeoutError` 的区别很
+    重要——超时意味着"我不知道它现在什么状态"，而被中止意味着"**有人要求停下**"，
+    调用方（执行方/守护进程）的处置也不同：后者必须立刻急停并如实上报，绝不能
+    当成"慢慢等下一次"。
+
+    作为 `MotionTimeoutError`/`FmcError` 的子类，既有的 ``except FmcError`` 全都能
+    接住它（不会因为多了一种异常而漏掉某一层的清理）。
+    '''
+
+    def __init__(self, action: str = '') -> None:
+        self.detail = f'等待运动被中止（急停请求）: {action}' if action else '等待运动被中止（急停请求）'
+        FmcError.__init__(self, code=0, action=self.detail)
+
+    def __str__(self) -> str:
+        return self.detail
+
+
 class HomeTimeoutError(MotionTimeoutError):
     '''回零未在期限内完成（读回「轴回零超时」位，见 FMC4030.h MACHINE_HOME_OVERTIME）。
 

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Protocol
 
 from patrol.capture_client import CaptureClient
-from patrol.fmc import Fmc4030, FmcError, MotionTimeoutError
+from patrol.fmc import Fmc4030, FmcError, MotionAborted, MotionTimeoutError
 from patrol.framing import clamp_trim
 from patrol.journal import RoundJournal
 from patrol.orchestrator import FramingHook
@@ -80,6 +80,7 @@ class PatrolDaemon:
         room_state_path: str | Path | None = None,
         apply_trim: Callable[[dict[str, tuple[float, float]]], None] | None = None,
         framing: FramingHook | None = None,
+        abort: Callable[[], bool] | None = None,
         now: Callable[[], datetime] = datetime.now,
         sleep: Callable[[float], None] = time.sleep,
         log: Callable[[str], None] = print,
@@ -106,6 +107,9 @@ class PatrolDaemon:
         self.apply_trim = apply_trim
         # 图像微调（第二步定位）：None = 只走推导坐标，行为与从前一致。
         self.framing = framing
+        # 急停请求（可选）：为真时**正在跑的这一轮会被打断**（等待原语抛 MotionAborted）。
+        # patrol 不知道它从哪来（console 写下的标志文件？某个按钮？），只知道"该停了"。
+        self.abort = abort
         # 默认：outbox 旁边的 runs/；要关掉必须显式传 JOURNAL_DISABLED
         if journal_dir is JOURNAL_DISABLED:
             self.journal_dir: Path | None = None
@@ -170,7 +174,7 @@ class PatrolDaemon:
                 journal.start(stations=len(self.stations), extra=self._room_fields())
             report = PatrolRound(
                 fmc, self.capture_client, self.stations, log=note, on_station=heartbeat,
-                framing=self.framing,
+                framing=self.framing, abort=self.abort,
             ).run()
         except BaseException as e:  # noqa: BLE001 - 分类后转 failed，绝不静默
             stopped = self._emergency_stop(fmc)
@@ -181,6 +185,11 @@ class PatrolDaemon:
                 journal.exception(e, where="round")
             if isinstance(e, KeyboardInterrupt):
                 self.log(f"收到中断，本轮作废；急停{stopped}")
+                return "failed"
+            if isinstance(e, MotionAborted):
+                # **急停请求**：不是故障，是有人要求停下。日志要一眼能分辨，
+                # 否则现场会去查导轨、查网络，而真正的原因在别处。
+                self.log(f"收到急停请求，本轮中止（未继续移动机构）：{e}；急停{stopped}")
                 return "failed"
             if isinstance(e, (FmcError, MotionTimeoutError)):
                 self.log(f"本轮中止（回零/运动失败）: {e}；急停{stopped}")

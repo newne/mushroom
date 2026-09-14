@@ -12,6 +12,7 @@ from patrol.fmc.device_para import DevicePara, SoftLimitIssue, parse_device_para
 from patrol.fmc.errors import (
     FmcError,
     HomeTimeoutError,
+    MotionAborted,
     MotionTimeoutError,
     SoftLimitMismatchError,
     TravelLimitError,
@@ -26,6 +27,7 @@ __all__ = [
     "FmcError",
     "HomeTimeoutError",
     "MachineStatus",
+    "MotionAborted",
     "MotionTimeoutError",
     "SoftLimitIssue",
     "SoftLimitMismatchError",
