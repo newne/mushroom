@@ -111,13 +111,50 @@ EOF
             if [ -d "dist/src" ] && [ "$(ls -A dist/src 2>/dev/null)" ]; then
                 echo "CodeEnigma obfuscation completed successfully"
                 
-                # 处理运行时文件（兼容不同输出路径）
-                runtime_file=$(find dist -maxdepth 4 -type f -name "codeenigma_runtime*.so" | head -n 1 || true)
+                # 处理运行时文件（兼容不同平台和输出形态）
+                runtime_found=false
+
+                # 1) 先查找目录形态的运行时（例如 codeenigma_runtime/）
+                runtime_dir=$(find dist -maxdepth 4 -type d -name "codeenigma_runtime*" | head -n 1 || true)
+                if [ -n "$runtime_dir" ] && [ -d "$runtime_dir" ]; then
+                    target_runtime_dir="dist/src/$(basename "$runtime_dir")"
+                    if [ "$runtime_dir" != "$target_runtime_dir" ]; then
+                        echo "Moving CodeEnigma runtime directory to src: $runtime_dir"
+                        rm -rf "$target_runtime_dir"
+                        mv "$runtime_dir" "$target_runtime_dir"
+                    fi
+                    runtime_found=true
+                fi
+
+                # 2) 再查找常见二进制运行时文件
+                runtime_file=$(find dist -maxdepth 6 -type f \( \
+                    -name "codeenigma_runtime*.so" -o \
+                    -name "codeenigma_runtime*.pyd" -o \
+                    -name "codeenigma_runtime*.dll" -o \
+                    -name "codeenigma_runtime*.dylib" \
+                \) | head -n 1 || true)
+
                 if [ -n "$runtime_file" ] && [ -f "$runtime_file" ]; then
-                    echo "Moving CodeEnigma runtime file to src directory: $runtime_file"
-                    mv "$runtime_file" dist/src/
-                else
-                    echo "Error: CodeEnigma runtime file not found, falling back to unencrypted build" >&2
+                    # 若存在 runtime 包目录，优先把二进制放入包内，避免与同名包/模块冲突。
+                    runtime_pkg_dir="dist/src/codeenigma_runtime"
+                    if [ -d "$runtime_pkg_dir" ]; then
+                        target_runtime_file="$runtime_pkg_dir/$(basename "$runtime_file")"
+                        if [ "$runtime_file" = "$target_runtime_file" ]; then
+                            echo "CodeEnigma runtime binary already in package directory: $runtime_file"
+                        else
+                            echo "Moving CodeEnigma runtime binary to package directory: $runtime_file"
+                            mv "$runtime_file" "$runtime_pkg_dir/"
+                        fi
+                    else
+                        echo "Moving CodeEnigma runtime binary to src directory: $runtime_file"
+                        mv "$runtime_file" dist/src/
+                    fi
+                    runtime_found=true
+                fi
+
+                # 3) 若仍未找到，则回退未加密构建
+                if [ "$runtime_found" = false ]; then
+                    echo "Error: CodeEnigma runtime artifact not found (.so/.pyd/.dll/.dylib or runtime dir), falling back to unencrypted build" >&2
                     ENCRYPT="false"
                 fi
                 

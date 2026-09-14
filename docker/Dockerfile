@@ -92,14 +92,14 @@ COPY dist/src/ ./
 
 # 验证运行时文件是否存在（加密构建必须包含 runtime）
 RUN if [ "$ENCRYPTED" = "true" ]; then \
-    if [ -f codeenigma_runtime.cpython-312-x86_64-linux-gnu.so ]; then \
+    if ls codeenigma_runtime*.so codeenigma_runtime/codeenigma_runtime*.so >/dev/null 2>&1; then \
     echo "✓ CodeEnigma runtime file found and copied"; \
     else \
     echo "Error: CodeEnigma runtime file not found for encrypted build"; \
     exit 1; \
     fi; \
     else \
-    if [ -f codeenigma_runtime.cpython-312-x86_64-linux-gnu.so ]; then \
+    if ls codeenigma_runtime*.so codeenigma_runtime/codeenigma_runtime*.so >/dev/null 2>&1; then \
     echo "Note: runtime present in unencrypted build"; \
     else \
     echo "Info: runtime not required for unencrypted build"; \
