@@ -16,11 +16,11 @@
 .vscode
 .validation
 .trae
-.scratch
+docs
 models
 data
 notebooks
-legacy
+archive
 progress.mk
 *.tar
 *.tgz

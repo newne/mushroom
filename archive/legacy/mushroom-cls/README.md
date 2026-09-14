@@ -1,7 +1,7 @@
 # mushroom-cls（已冻结归档）
 
 > **状态：已过时，代码冻结不再维护**（2026-08-30，随仓库治理归档）。
-> 本目录是上一阶段"YOLO 按周龄分类"方案的训练代码，已被 `.scratch/fmc4030-camera-scan/spec.md`
+> 本目录是上一阶段"YOLO 按周龄分类"方案的训练代码，已被 `docs/patrol/fmc4030-camera-scan/spec.md`
 > 描述的新一代巡检测量系统取代。
 
 保留价值（供新系统 `measure/` 包复用，见票 05）：

@@ -1,33 +1,28 @@
-# 项目文档中心
+# 文档索引
 
-本文档中心包含项目的业务文档、技术文档和算法说明。
+| 目录 | 内容 |
+| --- | --- |
+| `adr/` | 架构决策记录（0001–0013）。跨两个子系统的决策也放这里 |
+| `agents/` | 给协作代理看的流程约定：issue 追踪、triage 标签、领域文档规范 |
+| `patrol/` | **巡检工程**的文档与现场记录 |
+| `patrol/console-ui/` | 巡检台规格（`spec.md`）、单页原型（`prototype.html`）、jsdom 回归（`verify.js`）、五张实施票 |
+| `patrol/fmc4030-camera-scan/` | 一期扫描功能的规格与计划（`spec.md` / `plan.md` / 八张票） |
+| `patrol/prod-deploy/` | 现场上机记录：`gap-list.md`（欠账清单）、Y 轴排查清单、采图服务修复、各次实测脚本与产物 |
+| `technical/` `algorithms/` `business/` | **算法工程**的文档（既有，未改动） |
 
-## 目录结构
+## 代码在哪
 
-### [Business (业务文档)](./business/README.md)
-包含产品功能说明、使用指南、业务流程等非技术类文档。
-- 系统概览
-- 功能说明
-- 用户指南
+两个子系统各有自己的目录，文档不混进去：
 
-### [Technical (技术文档)](./technical/README.md)
-包含系统架构、数据库设计、部署指南、开发规范等技术类文档。
-- **Architecture**: 系统架构与流程图
-- **Database**: 数据库设计文档
-- **Deployment**: 部署指南与环境配置
-- **Development**: 开发记录与规范
-- **Fixes**: 问题修复记录
-- **Guides**: 技术操作指南
-- **Optimization**: 系统优化记录
-- **Reports**: 各类技术报告（验证、监控等）
-- **Troubleshooting**: 故障排查与解决方案
+| 子系统 | 代码 | 构建 | 文档 |
+| --- | --- | --- | --- |
+| 算法工程（调度 / 视觉 / 决策） | `../src/`、`../tests/` | `../pyproject.toml`、`../uv.lock`、`../docker/` | `technical/`、`algorithms/`、`business/` |
+| 巡检工程（导轨 / 采图 / 接收 API） | `../patrol/`、`../deploy/`、`../measure/`、`../analysis/` | `../patrol-workspace/`（独立 uv 项目）、`../docker/Dockerfile.patrol` | `patrol/` |
 
-### [Algorithms (算法文档)](./algorithms/README.md)
-包含核心算法逻辑、数学模型和数据处理流程说明。
+其它顶层目录：`third_party/`（vendored：相机截图服务 `capture/`）、`archive/`（冻结归档 `legacy/`）、
+`models/`、`data/`、`examples/`、`notebooks/`。
 
-## 文档维护规范
-
-1. **格式**: 统一使用 Markdown (`.md`) 格式。
-2. **命名**: 文件名使用英文或拼音，单词间用下划线 `_` 分隔。
-3. **更新**: 每次代码变更涉及功能或架构调整时，请同步更新相应文档。
-4. **版本**: 在文档开头注明最后更新日期和版本号。
+> 2026-09-14 整理：原先散在仓库根的 `.scratch/`（设计草稿与现场记录）并入 `docs/patrol/`，
+> vendored 的 `capture/` 进 `third_party/`，冻结的 `legacy/` 进 `archive/`。
+> 算法工程的 `src/`、`tests/`、`docker/` **一律未动**——它们的路径写进了生产构建脚本
+> （`docker/build.sh` 混淆 `src/`、Dockerfile 拷 `dist/src/`），挪动会直接打断现场发版。

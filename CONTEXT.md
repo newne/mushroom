@@ -1,7 +1,7 @@
 # CONTEXT — 蘑菇房相机巡检系统
 
 领域词汇表。工程技能（架构评审、grilling、issue 编写）在命名输出时应使用这些术语。
-完整设计见 `.scratch/fmc4030-camera-scan/spec.md`。
+完整设计见 `docs/patrol/fmc4030-camera-scan/spec.md`。
 
 ## 术语
 

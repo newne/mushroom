@@ -162,26 +162,26 @@ docker/mlflow_data/
 # 本地状态与工具目录
 .mimosa/
 .workbuddy/
-.scratch/_ref/
+docs/patrol/_ref/
 # 本地 SQLite（analysis 的接收库、试跑产物）
 *.db
 # pytest 临时目录
 .ptmp-*
 # 现场部署的构建产物（离线 wheel 与源码包，可重新生成；脚本与实测取证保留）
-.scratch/prod-deploy/wheels/
-.scratch/prod-deploy/*.tgz
-.scratch/prod-deploy/_m1dist/
-.scratch/prod-deploy/__pycache__/
+docs/patrol/prod-deploy/wheels/
+docs/patrol/prod-deploy/*.tgz
+docs/patrol/prod-deploy/_m1dist/
+docs/patrol/prod-deploy/__pycache__/
 # 打包暂存目录（每次 tar 前现生成；已误入库过 _analysis/_m1src）
-.scratch/prod-deploy/_*/
+docs/patrol/prod-deploy/_*/
 # 一次性现场探针脚本（_ 前缀；结论已落 gap-list）
-.scratch/prod-deploy/_*.py
+docs/patrol/prod-deploy/_*.py
 # 现场帧的分析产物与单帧派生图（可重新抓取）
-.scratch/prod-deploy/look/
-.scratch/prod-deploy/captures/_*
-.scratch/prod-deploy/captures/realtime_*
+docs/patrol/prod-deploy/look/
+docs/patrol/prod-deploy/captures/_*
+docs/patrol/prod-deploy/captures/realtime_*
 # 远程执行包装（含主机密钥/口令用法，属本机工具产物）
-.scratch/prod-deploy/_*_exec.ps1
+docs/patrol/prod-deploy/_*_exec.ps1
 
 # ---------- 巡检工程的测试必须入库 ----------
 # 上面 `test_*.py` / `*_test.py` 是给算法侧的临时脚本设的，但它会连带忽略巡检的整套测试：
@@ -200,4 +200,4 @@ docker/mlflow_data/
 # 冻结归档里的版本钉子（合并时被通用规则吞掉，一处收尾）
 !legacy/mushroom-cls/.python-version
 # 容器验证用的临时配置目录（探针产物）
-.scratch/prod-deploy/pc-cfg/
+docs/patrol/prod-deploy/pc-cfg/

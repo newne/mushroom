@@ -5,7 +5,7 @@
 所以网络实现只在这里。
 
 本文是库房主机（`10.77.77.39`，Ubuntu 24.04 / x86_64 / Python 3.12）上的操作手册。
-现场环境与实测结论见 `.scratch/prod-deploy/gap-list.md` 与 `docs/adr/`。
+现场环境与实测结论见 `docs/patrol/prod-deploy/gap-list.md` 与 `docs/adr/`。
 
 ---
 
@@ -39,7 +39,7 @@ cd /opt/mushroom-patrol
 
 > ⚠️ **必须用这个 venv 跑，别用 `/usr/bin/python3`**：`deploy.m1` 顶层就 `import httpx`
 > （`deploy.transport`），系统解释器上没有 httpx，会**在导入阶段就崩**——systemd 只会
-> 看到一串重启，看不出原因。装依赖若走离线包，用 `.scratch/prod-deploy/wheels/`
+> 看到一串重启，看不出原因。装依赖若走离线包，用 `docs/patrol/prod-deploy/wheels/`
 > 里的 10 个 wheel（`pip install --no-index --find-links wheels httpx pyyaml`）。
 
 源码按 `PYTHONPATH` 直接用（三个包都放在 `src/` 下：`patrol` / `deploy` / `measure`）：
@@ -300,7 +300,7 @@ deploy-flush-outbox --outbox /opt/mushroom-patrol/outbox.jsonl             # 真
    - `curl localhost:8000/images?station_id=S101` → 能按站位查到刚拍的那几张。
 
    ⚠️ **别用 stdout 当证据**：`--once | tee` 只保当前会话。跑之前先确认 `--log` 落到了盘上。
-5. 补做**丢步验证**（`.scratch/prod-deploy/travel-speed-check.py`，限位基准法，阈值 0.2 mm）：
+5. 补做**丢步验证**（`docs/patrol/prod-deploy/travel-speed-check.py`，限位基准法，阈值 0.2 mm）：
    巡检档 150 mm/s 的现场验收**不含**"无丢步"，静默丢步只认这个判据。
 6. 常驻：systemd 起 `patrol-m1`，观察 ≥1 个调度周期。
 
@@ -324,7 +324,7 @@ deploy-flush-outbox --outbox /opt/mushroom-patrol/outbox.jsonl             # 真
   → `MeasurementRecord.from_box_stats`；真模型（票 05）到位后一次接完。
   **影响**：`/growth` 与 `/growth/room` 现在返回空 / 全部 `no_prev`——这是诚实结果不是故障；
   生长判断的逻辑、判词与接口都已就绪（`analysis.growth`，UI 规格见
-  `.scratch/console-ui/spec.md` §12）。
+  `docs/patrol/console-ui/spec.md` §12）。
 - **图像索引已落库**（ADR-0005/0011）：`run_cycle` 每帧落一条 `kind:"image_index"`
   （成功/失败各一行，失败带 `ok:false` + `error`），随 outbox → `/ingest` 进 `analysis`
   的 `images` 表，`/images?station_id=&box_id=&room_id=` 可按站位/框/库房回溯，

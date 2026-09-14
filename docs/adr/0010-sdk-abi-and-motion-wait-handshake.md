@@ -2,8 +2,8 @@
 
 日期：2026-09-13
 状态：已接受并现场验证（prod `10.77.77.39`，控制器 `192.168.1.239:8088`）
-相关：`.scratch/prod-deploy/motor-command-review.md`（F5/F9/F10）、`patrol/fmc/sdk.py`、
-`patrol/fmc/client.py`、`.scratch/prod-deploy/m0-commission.py`
+相关：`docs/patrol/prod-deploy/motor-command-review.md`（F5/F9/F10）、`patrol/fmc/sdk.py`、
+`patrol/fmc/client.py`、`docs/patrol/prod-deploy/m0-commission.py`
 
 ## 背景
 

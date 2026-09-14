@@ -1,7 +1,7 @@
 # ADR-0009：采图服务的虚拟显示加固——失败必须可见、可自愈
 
 状态：已实施并验证（2026-09-12，prod `10.77.77.39`）
-相关：`capture/INTEGRATION.md`、`.scratch/prod-deploy/gap-list.md`、ADR-0002（参数单源）
+相关：`capture/INTEGRATION.md`、`docs/patrol/prod-deploy/gap-list.md`、ADR-0002（参数单源）
 
 ## 背景
 

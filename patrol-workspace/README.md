@@ -32,7 +32,7 @@ uv lock                     # 只在巡检依赖变化时；不要碰根目录�
 | `../analysis/` | prod 侧接收 API 与分析（FastAPI + SQLite） |
 | `../docs/adr/` | 架构决策（0001–0013） |
 | `../CONTEXT.md` | 领域词汇表（术语以它为准） |
-| `../.scratch/` | 设计草稿与现场记录：`console-ui/`（巡检台规格与原型）、`prod-deploy/gap-list.md`（现场欠账清单） |
+| `../docs/patrol/` | 设计草稿与现场记录：`console-ui/`（巡检台规格与原型）、`prod-deploy/gap-list.md`（现场欠账清单） |
 
 ## 两条不能破的线
 

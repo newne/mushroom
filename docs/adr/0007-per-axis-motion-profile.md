@@ -98,7 +98,7 @@ M1 与 M2 共用同一段序（单源原则），段序由断言钉住：
 `motor-command-review.md` §2.5 原先写"一轮时长下界 ≈ 86 s"，那是**只算了一层**的横向空程
 （4118 mm）。蛇形遍历 5 层，每层都要横着走满一遍：真实 Y 空程 = 5 × 4118 = **20.8 m**。
 口径错 5 倍会把"提速值不值得"的结论直接带偏，所以模型固化成可重跑的脚本
-`.scratch/prod-deploy/speed-tune.py`，而不是文档里一行字。
+`docs/patrol/prod-deploy/speed-tune.py`，而不是文档里一行字。
 
 ### 三、巡检档 50 → 150（Y）
 
@@ -133,7 +133,7 @@ M1 与 M2 共用同一段序（单源原则），段序由断言钉住：
 控制器位置计数器只数**发出去的脉冲**，丢步时 `real_pos` 照样报"到位"，表现为**采图偏位**而非报错。
 所以"速度可接受"这一验收结论**不蕴含**"没有丢步"。定量判据只有一个：**限位基准法**
 （用硬限位当物理基准，阈值 0.2 mm，见 `motor-command-review.md` §2.2.1 第 2 步），
-建议在首轮全量巡检后顺手补做一次。脚本保留：`.scratch/prod-deploy/travel-speed-check.py`。
+建议在首轮全量巡检后顺手补做一次。脚本保留：`docs/patrol/prod-deploy/travel-speed-check.py`。
 
 ---
 
@@ -169,5 +169,5 @@ M1 与 M2 共用同一段序（单源原则），段序由断言钉住：
 4. **`home_done` 不会被普通运动作废**：Y 点动到 100 mm 后它依然为 True。它的语义是
    "坐标系已建立"，不是"现在位于原点"。这一条是 ADR-0010 那个竞态的根源。
 
-现场流程与逐阶段输出见 `.scratch/prod-deploy/m0-commission.py`（默认只读，`--go` 才动作）。
+现场流程与逐阶段输出见 `docs/patrol/prod-deploy/m0-commission.py`（默认只读，`--go` 才动作）。
 

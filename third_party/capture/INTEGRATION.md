@@ -6,7 +6,7 @@
 > 现场部署的**加固与运维说明**见 `docs/adr/0009-capture-service-virtual-display-hardening.md`。
 > 现场服务**不是**用本目录的源码起容器，而是厂商离线镜像 `xcloudsdk-py:0.1.0`。
 
-## patrol 如何调用（设计约定见 ../.scratch/fmc4030-camera-scan/spec.md §4.2）
+## patrol 如何调用（设计约定见 ../docs/patrol/fmc4030-camera-scan/spec.md §4.2）
 
 - 采图入口二选一（**四个端点的参数口径完全一致**，实测）：
   - `GET http://<主机>:7003/pool_capture?ip=<相机IP>&user=admin&pwd=&storage=cloud&filename=<对象名>`

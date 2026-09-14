@@ -27,7 +27,7 @@ line-length = 100
 target-version = "py312"
 # legacy 冻结归档、capture 为 vendored 原样组件、.scratch 为设计草稿区，均不参与 lint
 # （路径相对本目录，包体在上一级）
-extend-exclude = ["../legacy", "../capture", "../.scratch"]
+extend-exclude = ["../archive/legacy", "../third_party/capture", "../docs/patrol"]
 
 [tool.ruff.lint]
 # DTZ：全链路约定使用库房当地时间（naive datetime），不做时区混用
