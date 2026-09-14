@@ -1,0 +1,40 @@
+# =============================================================================
+# 加固覆盖层：compose 会自动把本文件与厂商的 docker-compose.yml 合并。
+# 厂商文件保持原样，将来厂商更新镜像/配置时不会冲突。
+#
+# 用法：  cd <本目录> && docker compose up -d
+#   ⚠️ 不要写成 `docker compose -f docker-compose.yml up -d`——显式 -f 会跳过本覆盖层。
+#
+#   ⚠️ ./capture-entrypoint.sh 与 ./capture-healthcheck.py 必须**先存在于本目录**再 up，
+#      否则 Docker 会把不存在的 bind-mount 源创建成**目录**，挂进容器就成了目录而不是文件。
+#
+# 回滚：  docker compose up -d --force-recreate 之前删掉本文件即可（回到厂商原入口）。
+# =============================================================================
+services:
+  xcloud-capture:
+    # 覆盖镜像内 ENTRYPOINT：Xvfb 起不来就 exit，不再静默降级成 headless
+    entrypoint: ["/bin/sh", "/app/capture-entrypoint.sh"]
+
+    # 用 tini 当 PID 1：正确的信号转发 + 回收僵尸进程（本入口不再 exec，需要它）
+    init: true
+
+    environment:
+      # 容器内时钟默认 UTC，日志与宿主差 8h；固定 CST 便于和宿主/旧系统日志对照
+      TZ: "Asia/Shanghai"
+      # 让 healthcheck 与入口用的是同一个 display
+      XVFB_DISPLAY: ":99"
+
+    volumes:
+      - ./capture-entrypoint.sh:/app/capture-entrypoint.sh:ro
+      - ./capture-healthcheck.py:/app/capture-healthcheck.py:ro
+
+    healthcheck:
+      # 双查「X socket 真能连」+「HTTP /healthz ok」。
+      # 故意不抓拍：单 worker 串行且相机与老系统共用。
+      test: ["CMD", "python3", "/app/capture-healthcheck.py"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 60s
+
+    stop_grace_period: 15s

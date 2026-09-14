@@ -1,0 +1,31 @@
+services:
+  xcloud-capture:
+    platform: linux/amd64
+    build: .
+    image: xcloudsdk-py:latest
+    ports:
+      - "27003:7003"
+    environment:
+      PORT: "7003"
+      HOST: "0.0.0.0"
+      LIB_PATH: "/app/lib/x86_64/Release/libXCloudSDK.so"
+      SDK_CONFIG_PATH: "/app/XCloudSDKTest_config.ini"
+      MINIO_CONFIG_PATH: "/app/minio_config.json"
+      PICTURE_DIR: "/app/saved_datas/picture"
+      # 默认会启动 Xvfb（写入 /app/log/xvfb.log），如果你确认不需要虚拟显示可禁用：
+      # USE_XVFB: "0"
+      # XVFB_DISPLAY: ":99"
+      # XVFB_SERVER_ARGS: "-screen 0 1920x1080x24 -ac"
+      # DISABLE_POOL: "1"
+    volumes:
+      # 把厂商 SDK so 放到同目录的 lib/ 下（可复用现有 C++ 项目里的目录）
+      - ./lib/x86_64/Release:/app/lib/x86_64/Release:ro
+      # SDK 可能依赖本地密钥文件（如 Device/eketfo.txt、Device/local_eketkey.txt）
+      - ./Device:/app/Device:ro
+      # 配置文件（建议以文件方式挂载）
+      - ./XCloudSDKTest_config.ini:/app/XCloudSDKTest_config.ini:ro
+      - ./minio_config.json:/app/minio_config.json:ro
+      # 截图与日志持久化
+      - ./saved_datas:/app/saved_datas
+      - ./log:/app/log
+    restart: unless-stopped

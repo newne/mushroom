@@ -1,0 +1,31 @@
+[Unit]
+Description=蘑菇房 M1 巡检（主机调度）
+Documentation=file:/opt/mushroom-patrol/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+# 采图服务（:7003）与 prod 接收 API（:8000）都不是硬依赖：前者挂了只会让本轮
+# 逐站失败并在连续 3 次后中止（数据不丢），后者挂了 outbox 会累积待补传
+# （ADR-0001 at-least-once）。所以这里**不写 Requires**——为一个可恢复的下游
+# 把整条巡检拖住，比让它跑一轮不完整的数据更糟。
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mushroom-patrol
+# ⚠️ 必须用这个 venv，不能用 /usr/bin/python3：`deploy.m1` 顶层就 `import httpx`
+#    （`deploy.transport`），而系统 python3 上没有 httpx，用系统解释器会**在导入阶段
+#    就崩**，systemd 只会看到一串重启。venv 里锁着 httpx + pyyaml（见 README §2）。
+Environment=PYTHONPATH=/opt/mushroom-patrol/src
+Environment=FMC4030_LIB_PATH=/opt/mushroom-patrol/lib/libFMC4030_2009_1.so
+# 凭据一律走 EnvironmentFile，不进仓库（gap-list D8）
+EnvironmentFile=-/opt/mushroom-patrol/patrol.env
+ExecStart=/opt/mushroom-patrol/.venv/bin/python3 -m deploy.m1
+# 准入判定不过时进程以 0 退出（"明确不动"不是故障），所以 on-failure 不会让它在
+# 库房空置期反复重启；真正的故障（连不上控制器、软限位没整定）才重启。
+Restart=on-failure
+RestartSec=30
+# 急停链：SIGTERM 让主循环在本轮结束后退出，不会把轴丢在运动中途
+KillSignal=SIGTERM
+TimeoutStopSec=600
+
+[Install]
+WantedBy=multi-user.target

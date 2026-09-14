@@ -1,0 +1,27 @@
+services:
+  xcloud-capture:
+    platform: linux/amd64
+    # 注意：离线机器不要 build；先 docker load 导入镜像后直接用 image 启动
+    image: xcloudsdk-py:0.1.0
+    ports:
+      # 宿主机端口可通过环境变量覆盖：HOST_PORT=7003 docker compose up -d
+      - "${HOST_PORT:-27003}:7003"
+    environment:
+      PORT: "7003"
+      HOST: "0.0.0.0"
+      LIB_PATH: "/app/lib/x86_64/Release/libXCloudSDK.so"
+      SDK_CONFIG_PATH: "/app/XCloudSDKTest_config.ini"
+      MINIO_CONFIG_PATH: "/app/minio_config.json"
+      PICTURE_DIR: "/app/saved_datas/picture"
+      # 默认会启动 Xvfb（写入 /app/log/xvfb.log），如果你确认不需要虚拟显示可禁用：
+      # USE_XVFB: "0"
+      # XVFB_DISPLAY: ":99"
+      # XVFB_SERVER_ARGS: "-screen 0 1920x1080x24 -ac"
+    volumes:
+      - ./lib/x86_64/Release:/app/lib/x86_64/Release:ro
+      - ./Device:/app/Device:ro
+      - ./XCloudSDKTest_config.ini:/app/XCloudSDKTest_config.ini:ro
+      - ./minio_config.json:/app/minio_config.json:ro
+      - ./saved_datas:/app/saved_datas
+      - ./log:/app/log
+    restart: unless-stopped

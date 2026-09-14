@@ -1,0 +1,1563 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>蘑菇房巡检台 · 交互原型</title>
+<style>
+  :root{
+    --bg:#eef0f4; --panel:#ffffff; --panel-2:#f7f8fa; --line:#dfe3ea; --line-2:#eceff4;
+    --ink:#1b1f27; --ink-2:#5a6272; --ink-3:#8b93a3;
+    --accent:#1f6feb; --accent-soft:#e8f0fe;
+    --ok:#1a7f4b; --ok-soft:#e6f4ec;
+    --warn:#a86300; --warn-soft:#fdf3e2;
+    --danger:#c62828; --danger-soft:#fbeaea;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+    --radius:8px; --shadow:0 1px 2px rgba(20,25,35,.06),0 1px 8px rgba(20,25,35,.04);
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:13px/1.5 -apple-system,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  button{font:inherit;color:inherit;cursor:pointer}
+  input,select{font:inherit;color:inherit}
+
+  /* ---------- 顶栏 ---------- */
+  .topbar{
+    height:52px; flex:0 0 52px; display:flex; align-items:center; gap:16px;
+    padding:0 14px; background:var(--panel); border-bottom:1px solid var(--line);
+  }
+  .brand{display:flex; align-items:baseline; gap:9px; font-weight:650; letter-spacing:.2px}
+  .brand .sub{font-weight:400; color:var(--ink-3); font-size:12px}
+  .tag{
+    font-size:11px; color:var(--ink-2); background:var(--panel-2);
+    border:1px solid var(--line); border-radius:999px; padding:2px 8px;
+  }
+  .spacer{flex:1}
+  .seg{display:flex; background:var(--panel-2); border:1px solid var(--line); border-radius:var(--radius); padding:2px}
+  .seg button{
+    border:0; background:transparent; padding:7px 16px; border-radius:6px; color:var(--ink-2); min-height:34px;
+  }
+  .seg button[aria-pressed="true"]{background:var(--panel); color:var(--ink); font-weight:600; box-shadow:var(--shadow)}
+  .pill{
+    display:inline-flex; align-items:center; gap:7px; border-radius:999px; padding:5px 12px;
+    font-size:12px; font-weight:600; border:1px solid transparent;
+  }
+  .pill .dot{width:8px;height:8px;border-radius:50%;background:currentColor}
+  .pill.scheduled{background:var(--accent-soft); color:#14538f}
+  .pill.yielding{background:var(--warn-soft); color:var(--warn)}
+  .pill.manual{background:var(--ok-soft); color:var(--ok)}
+  .pill.fault{background:var(--danger-soft); color:var(--danger)}
+  .linkbar{display:flex; gap:12px; font-size:11.5px; color:var(--ink-3); font-family:var(--mono)}
+  .linkbar .up{color:var(--ok)} .linkbar .down{color:var(--danger)}
+  .demo{display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--ink-2)}
+
+  /* ---------- 三栏 ---------- */
+  /* 左栏刻意加宽（236 → 320）：平面图要画 12 框 × 5 层，窄栏里点会挤成一排 */
+  main{flex:1; min-height:0; display:grid; grid-template-columns:320px minmax(0,1fr) 320px}
+  .col{min-height:0; overflow-y:auto; background:var(--panel)}
+  .col.left{border-right:1px solid var(--line); display:flex; flex-direction:column; overflow:hidden}
+  #stnList{flex:1; min-height:0; overflow-y:auto}
+  .col.right{border-left:1px solid var(--line); background:var(--panel-2)}
+  .col-head{
+    position:sticky; top:0; z-index:3; background:inherit;
+    padding:10px 12px 8px; border-bottom:1px solid var(--line-2);
+    font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3);
+    display:flex; justify-content:space-between; align-items:center;
+  }
+
+  /* ---------- 导轨平面图（两轴位置可视化） ----------
+     画的是 12 框（横）× 5 层（竖）的货架网格：每格一个站位，
+     格心坐标由 patrol.stations.col_y / layer_z 的同一套公式归一化得到。 */
+  .mapcard{padding:12px 14px 12px; border-bottom:1px solid var(--line-2); flex:0 0 auto}
+  .maphead{
+    display:flex; justify-content:space-between; align-items:baseline; gap:6px; margin-bottom:7px;
+    font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-3);
+  }
+  .maphead b{font-family:var(--mono); font-size:10px; font-weight:400; letter-spacing:0; text-transform:none}
+  .maphead i{font-style:normal; font-size:10px; letter-spacing:0; color:var(--ink-3); opacity:.75}
+  #gmap{display:block; width:100%; height:auto}
+  #gmap .gm-bg{fill:#fbfcfd; stroke:var(--line)}
+  #gmap .gm-band{fill:#f5f8fc}
+  #gmap .gm-cellline{stroke:#dbe3ef; stroke-width:.8}
+  #gmap .gm-frame{stroke:#c7d2e2; stroke-width:1}
+  #gmap .gm-path{fill:none; stroke:#b9c6da; stroke-width:.9; stroke-dasharray:2 1.6}
+  #gmap .gm-ax{font-family:var(--mono); fill:var(--ink-3)}
+  #gmap .gm-ax-col{font-size:5.6px}
+  #gmap .gm-ax-row{font-size:6.2px}
+  #gmap .gm-stn{cursor:pointer}
+  #gmap .gm-stn .pt{stroke:#fff; stroke-width:1.1}
+  #gmap .gm-stn.top0 .pt{fill:#1f6feb}
+  #gmap .gm-stn.top45 .pt{fill:#6b5bd2}
+  #gmap .gm-stn.has-fail .pt{stroke:var(--danger); stroke-width:1.7}
+  #gmap .gm-stn:hover .pt{stroke:#12305e; stroke-width:1.7}
+  #gmap .gm-stn[aria-selected="true"] .pt{stroke:#12305e; stroke-width:1.7}
+  #gmap .gm-stn .halo{fill:none; stroke:var(--accent); stroke-width:1.3}
+  #gmap .gm-stn .lbl{
+    font-family:var(--mono); font-size:6.5px; fill:var(--ink-2);
+    opacity:0; pointer-events:none; paint-order:stroke; stroke:#fbfcfd; stroke-width:1.4;
+  }
+  #gmap .gm-stn:hover .lbl, #gmap .gm-stn[aria-selected="true"] .lbl{opacity:1}
+  #gmap .gm-live line{stroke:#d94a3d; stroke-width:1}
+  #gmap .gm-live .link{stroke:#d94a3d; stroke-width:1; stroke-dasharray:2.4 2; opacity:.55}
+  #gmap .gm-live circle{fill:#d94a3d; stroke:#fff; stroke-width:1}
+  .maptip{display:flex; align-items:center; gap:11px; margin-top:7px; font-size:10.5px; color:var(--ink-3)}
+  .maptip i{display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:4px; vertical-align:-1px}
+  .maptip i.d0{background:#1f6feb}
+  .maptip i.d45{background:#6b5bd2}
+  .maptip i.dfail{background:#fff; border:2px solid var(--danger); width:6px; height:6px}
+
+  /* 站位列表 */
+  .boxgroup{margin-bottom:2px}
+  .boxgroup-head{
+    display:flex; justify-content:space-between; padding:8px 12px 4px;
+    font-size:11.5px; color:var(--ink-3); font-family:var(--mono);
+  }
+  .stn{
+    width:100%; text-align:left; border:0; background:transparent;
+    padding:8px 12px 8px 14px; display:grid; grid-template-columns:auto 1fr auto;
+    gap:8px; align-items:center; border-left:3px solid transparent;
+  }
+  .stn:hover{background:var(--panel-2)}
+  .stn[aria-selected="true"]{background:var(--accent-soft); border-left-color:var(--accent)}
+  .stn .id{font-family:var(--mono); font-weight:600}
+  .stn .meta{display:flex; gap:6px; align-items:center; flex-wrap:wrap}
+  .stn .last{font-size:11px; color:var(--ink-3); font-family:var(--mono)}
+  .chip{
+    font-size:10.5px; padding:1px 6px; border-radius:4px; border:1px solid var(--line);
+    background:var(--panel-2); color:var(--ink-2); white-space:nowrap;
+  }
+  .chip.top0{background:#eef4ff; border-color:#cfe0ff; color:#1c4f9c}
+  .chip.top45{background:#f2f0fb; border-color:#ddd8f5; color:#4b3f9e}
+  .stn .badge{font-size:10.5px; color:var(--ink-3); font-family:var(--mono)}
+  .stn.warn .badge{color:var(--danger)}
+
+  /* ---------- 中栏 ---------- */
+  .stage{padding:14px; display:flex; flex-direction:column; gap:12px; height:100%}
+  .stage-head{
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    font-family:var(--mono); font-size:12px; color:var(--ink-2);
+  }
+  .stage-head .strong{color:var(--ink); font-weight:600}
+  .card{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow)}
+  .viewer{
+    position:relative; background:#191712; border-radius:var(--radius); overflow:hidden;
+    border:1px solid var(--line); aspect-ratio:4/3; max-height:44vh; min-height:220px;
+    display:flex; align-items:center; justify-content:center; cursor:zoom-in;
+  }
+  .viewer img{
+    max-width:100%; max-height:100%; display:block;
+    transform-origin:center center; transition:transform .12s ease-out;
+    -webkit-user-drag:none; user-select:none;
+  }
+  .viewer.grabbing{cursor:grabbing}
+  .viewer-hud{
+    position:absolute; left:10px; bottom:10px; display:flex; gap:6px; align-items:center;
+    background:rgba(18,16,12,.62); color:#f4f1ea; border-radius:6px; padding:4px 9px;
+    font-family:var(--mono); font-size:11px; backdrop-filter:blur(3px);
+  }
+  .viewer-hud .rec{width:7px;height:7px;border-radius:50%;background:#e2574c}
+  .viewer-hint{
+    position:absolute; right:10px; bottom:10px; background:rgba(18,16,12,.62); color:#efece5;
+    border-radius:6px; padding:4px 9px; font-size:11px;
+  }
+  .readouts{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:10px}
+  .ro{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:9px 11px}
+  .ro .k{font-size:11px; color:var(--ink-3)}
+  .ro .v{font-family:var(--mono); font-size:16px; margin-top:2px}
+  .ro .v small{font-size:11px; color:var(--ink-3)}
+  .ro.hi{border-color:#cfe0ff; background:#fbfdff}
+  .bar{height:6px; border-radius:99px; background:var(--line-2); overflow:hidden; margin-top:8px}
+  .bar > i{display:block; height:100%; background:var(--accent); width:0%; transition:width .18s linear}
+
+  /* 时间轴 */
+  .timeline{display:flex; gap:8px; overflow-x:auto; padding:10px; align-items:flex-start; min-height:104px}
+  .tl-day{display:flex; flex-direction:column; gap:6px; padding-right:10px; border-right:1px dashed var(--line); flex:0 0 auto}
+  .tl-day:last-child{border-right:0}
+  .tl-day .d{font-family:var(--mono); font-size:10.5px; color:var(--ink-3)}
+  .tl-day .row{display:flex; gap:8px}
+  .tl-item{
+    border:1px solid var(--line); background:var(--panel); border-radius:6px; padding:0; overflow:hidden;
+    flex:0 0 auto; position:relative; line-height:0;
+  }
+  .tl-item img{width:104px; height:78px; object-fit:cover; display:block; filter:saturate(.95)}
+  .tl-item[aria-selected="true"]{outline:2px solid var(--accent); outline-offset:1px}
+  .tl-item .cap{
+    position:absolute; left:0; right:0; bottom:0; background:rgba(18,16,12,.66); color:#f2efe8;
+    font-family:var(--mono); font-size:10px; padding:2px 5px; line-height:1.3; display:flex; justify-content:space-between;
+  }
+  .tl-item.failed img{filter:grayscale(1) brightness(.55)}
+  .tl-item .failtag{
+    position:absolute; left:0; top:0; background:var(--danger); color:#fff; font-size:10px;
+    padding:1px 5px; border-bottom-right-radius:5px; line-height:1.5;
+  }
+  .src-local{color:#a86300} .src-prod{color:#8b93a3}
+
+  /* 曲线 */
+  .chartwrap{padding:6px 10px 10px}
+  .chart-tip{
+    position:fixed; pointer-events:none; background:rgba(24,22,18,.9); color:#f4f1ea;
+    border-radius:6px; padding:6px 9px; font-family:var(--mono); font-size:11px; line-height:1.45;
+    transform:translate(-50%,-115%); opacity:0; transition:opacity .1s; z-index:50; white-space:nowrap;
+  }
+  .legend{display:flex; gap:14px; font-size:11.5px; color:var(--ink-2); padding:0 4px 4px}
+  .legend i{display:inline-block; width:14px; height:3px; border-radius:2px; vertical-align:middle; margin-right:5px}
+
+  /* ---------- 右栏 ---------- */
+  .ops{padding:12px; display:flex; flex-direction:column; gap:12px}
+  .estop{
+    width:100%; min-height:58px; border:0; border-radius:var(--radius);
+    background:var(--danger); color:#fff; font-size:16px; font-weight:700; letter-spacing:.06em;
+    box-shadow:0 2px 0 #9e1f1f;
+  }
+  .estop:active{transform:translateY(1px); box-shadow:none}
+  .estop[disabled]{background:#e3e6eb; color:#9aa1ac; box-shadow:none; cursor:not-allowed}
+  .sect{background:var(--panel); border:1px solid var(--line); border-radius:var(--radius)}
+  .sect > h4{
+    margin:0; padding:9px 11px 7px; font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--ink-3); border-bottom:1px solid var(--line-2); font-weight:600;
+  }
+  .sect > .body{padding:11px; display:flex; flex-direction:column; gap:10px}
+  .kv{display:flex; justify-content:space-between; font-size:12px; gap:10px}
+  .kv .k{color:var(--ink-2)} .kv .v{font-family:var(--mono)}
+  .row2{display:grid; grid-template-columns:1fr 1fr; gap:8px}
+  .field{display:flex; flex-direction:column; gap:4px}
+  .field label{font-size:11px; color:var(--ink-3)}
+  .field input{
+    width:100%; padding:9px 10px; border:1px solid var(--line); border-radius:6px;
+    background:var(--panel); font-family:var(--mono); min-height:40px;
+  }
+  .field input:focus{outline:2px solid var(--accent-soft); border-color:var(--accent)}
+  .field input.bad{border-color:var(--danger); background:var(--danger-soft)}
+  .err{font-size:11px; color:var(--danger); min-height:14px}
+  .btn{
+    border:1px solid var(--line); background:var(--panel); border-radius:6px;
+    padding:10px 12px; min-height:44px; font-weight:600; color:var(--ink);
+  }
+  .btn:hover{background:var(--panel-2)}
+  .btn.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  .btn.primary:hover{filter:brightness(1.06)}
+  .btn.warn{background:var(--panel); border-color:#e6cfa6; color:var(--warn)}
+  .btn[disabled]{opacity:.45; cursor:not-allowed}
+  .btn.sm{min-height:34px; padding:7px 10px; font-weight:500}
+  .joggrid{display:grid; grid-template-columns:repeat(3,1fr); gap:6px; justify-items:stretch}
+  .joggrid button{
+    aspect-ratio:1/1; border:1px solid var(--line); background:var(--panel); border-radius:8px;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .joggrid button:hover{background:var(--panel-2)}
+  .joggrid .hub{
+    border-color:var(--line-2); background:var(--panel-2); flex-direction:column;
+    font-family:var(--mono); font-size:11px; color:var(--ink-2); cursor:default;
+  }
+  .chips{display:flex; gap:6px; flex-wrap:wrap}
+  .chips button{
+    border:1px solid var(--line); background:var(--panel); border-radius:999px; padding:6px 12px;
+    font-size:12px; font-family:var(--mono); min-height:36px;
+  }
+  .chips button[aria-pressed="true"]{background:var(--accent-soft); border-color:#bcd4ff; color:#14538f; font-weight:600}
+  .toggle{display:flex; align-items:center; justify-content:space-between; gap:10px}
+  .switch{width:46px; height:26px; border-radius:99px; border:1px solid var(--line); background:var(--panel-2); position:relative}
+  .switch i{position:absolute; top:2px; left:2px; width:20px; height:20px; border-radius:50%; background:#fff; box-shadow:var(--shadow); transition:left .14s}
+  .switch[aria-pressed="true"]{background:var(--warn); border-color:var(--warn)}
+  .switch[aria-pressed="true"] i{left:22px}
+  .note{font-size:11px; color:var(--ink-3); line-height:1.5}
+  .banner{
+    display:flex; gap:9px; align-items:flex-start; padding:10px 11px; border-radius:var(--radius);
+    font-size:12px; line-height:1.5;
+  }
+  .banner.warn{background:var(--warn-soft); color:#6f4400; border:1px solid #f0dcb8}
+  .banner.ok{background:var(--ok-soft); color:#0f5c36; border:1px solid #c8e6d5}
+  .banner.danger{background:var(--danger-soft); color:#8f1f1f; border:1px solid #f0cfcf}
+
+  /* ---------- 底栏日志 ---------- */
+  .logbar{
+    flex:0 0 138px; background:#fafbfc; border-top:1px solid var(--line); display:flex; flex-direction:column; min-height:0;
+  }
+  .logbar .head{
+    display:flex; align-items:center; gap:10px; padding:6px 12px; border-bottom:1px solid var(--line-2);
+    font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-3);
+  }
+  .loglist{flex:1; overflow-y:auto; font-family:var(--mono); font-size:11.5px; padding:4px 0}
+  .loglist .l{display:flex; gap:10px; padding:2px 12px; white-space:nowrap}
+  .loglist .l .t{color:var(--ink-3); flex:0 0 66px}
+  .loglist .l .m{overflow:hidden; text-overflow:ellipsis}
+  .loglist .l.ok .m{color:var(--ok)}
+  .loglist .l.warn .m{color:var(--warn)}
+  .loglist .l.err .m{color:var(--danger)}
+  .loglist .l .obj{color:var(--ink-3)}
+
+  /* 弹窗与提示 */
+  .modal-root{position:fixed; inset:0; z-index:100; display:none}
+  .modal-root.open{display:block}
+  .modal-mask{position:absolute; inset:0; background:rgba(20,24,32,.36)}
+  .modal{
+    position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    width:min(420px,92vw); background:var(--panel); border-radius:12px; padding:20px;
+    box-shadow:0 12px 40px rgba(20,25,35,.24);
+  }
+  .modal h3{margin:0 0 8px; font-size:15px}
+  .modal p{margin:0 0 16px; font-size:12.5px; color:var(--ink-2); line-height:1.6}
+  .modal .acts{display:flex; gap:10px; justify-content:flex-end}
+  .toasts{position:fixed; right:16px; bottom:154px; z-index:200; display:flex; flex-direction:column; gap:8px; align-items:flex-end}
+  .toast{
+    background:var(--panel); border:1px solid var(--line); border-left:3px solid var(--accent);
+    border-radius:6px; padding:9px 13px; font-size:12.5px; box-shadow:var(--shadow); max-width:330px;
+  }
+  .toast.ok{border-left-color:var(--ok)} .toast.warn{border-left-color:var(--warn)} .toast.err{border-left-color:var(--danger)}
+  .empty{padding:20px 14px; color:var(--ink-3); font-size:12px; line-height:1.7}
+  .mono{font-family:var(--mono)}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">蘑菇房巡检台 <span class="sub">库房 A · 双轴导轨</span></div>
+  <span class="tag">原型 · mock 数据</span>
+  <div class="spacer"></div>
+  <div class="seg" id="modeSeg">
+    <button data-action="mode" data-mode="realtime">实时模式</button>
+    <button data-action="mode" data-mode="history">历史模式</button>
+  </div>
+  <div class="pill" id="pill"><span class="dot"></span><span id="pillText">待机</span></div>
+  <div class="linkbar" id="linkbar"></div>
+  <label class="demo"><input type="checkbox" id="patrolToggle"> 模拟巡检进行中</label>
+</header>
+
+<main>
+  <aside class="col left">
+    <div class="mapcard">
+      <div class="maphead"><span>导轨平面 <i>Y → · Z ↑</i></span><b id="mapRange"></b></div>
+      <svg id="gmap" viewBox="0 0 200 110" role="img"
+           aria-label="两轴导轨货架平面：横向 Y（原点 0 在左端，向右到 4492 mm）分 12 框，竖向 Z（原点 0 在顶端，向下到 -212 mm）分 5 层；第 1 层在最上，每格中心一个拍照站位">
+        <rect class="gm-bg" x="9" y="5" width="182" height="86" rx="3"></rect>
+        <g id="gmGrid"></g>
+        <g id="gmBase"></g>
+        <g id="gmLive" class="gm-live">
+          <line id="gmLink" class="link" x1="0" y1="0" x2="0" y2="0"></line>
+          <line id="gmCx" x1="0" y1="0" x2="0" y2="0"></line>
+          <line id="gmCy" x1="0" y1="0" x2="0" y2="0"></line>
+          <circle id="gmDot" cx="0" cy="0" r="3.2"></circle>
+        </g>
+      </svg>
+      <div class="maptip" id="mapTip"></div>
+    </div>
+    <div class="col-head"><span>站位</span><span id="stnCount"></span></div>
+    <div id="stnList"></div>
+  </aside>
+  <section class="col" id="colMain"></section>
+  <aside class="col right" id="colOps"></aside>
+</main>
+
+<footer class="logbar">
+  <div class="head">
+    <span>事件与指令日志</span>
+    <span class="spacer"></span>
+    <button class="btn sm" data-action="log-clear" style="min-height:26px;padding:3px 9px;font-size:11px">清空</button>
+  </div>
+  <div class="loglist" id="logList"></div>
+</footer>
+
+<div class="modal-root" id="modalRoot"><div class="modal-mask" data-action="modal-cancel"></div><div class="modal" id="modalBox"></div></div>
+<div class="toasts" id="toastRoot"></div>
+<div class="chart-tip" id="chartTip"></div>
+
+<script>
+/* =========================================================================
+   0. 工具
+   ========================================================================= */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const pad2 = n => String(n).padStart(2, '0');
+function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return h >>> 0; }
+function lcg(seed) { let s = seed >>> 0; return () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; }; }
+function say(ms) { return new Promise(r => setTimeout(r, ms)); }
+const r1 = v => Math.round(v * 10) / 10;
+function hhmmss(iso) { return iso.slice(11, 19).replace(/:/g, ''); }
+function hms(iso) { return iso.slice(11, 19); }
+function mmdd(iso) { return iso.slice(5, 10).replace('-', '-'); }
+function relTime(iso) {
+  const t = new Date(iso).getTime(), now = Date.now();
+  const d = Math.max(0, now - t), h = d / 3600000;
+  if (h < 1) return Math.round(d / 60000) + ' 分钟前';
+  if (h < 24) return Math.round(h) + ' 小时前';
+  return Math.round(h / 24) + ' 天前';
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+/* =========================================================================
+   1. 模拟数据（形状严格对齐 patrol.stations.Station / analysis.db 的既有契约）
+   ========================================================================= */
+const TZ = '+08:00';
+/* 时间戳统一按 +08:00 墙上时间序列化（避免 ISO 取到 UTC 字段，差 8 小时） */
+function isoCST(ms) { return new Date(ms + 8 * 3600 * 1000).toISOString().slice(0, 19) + TZ; }
+function nowIso() { return isoCST(Date.now()); }
+
+const ANGLE_LABEL = { top0: '顶拍 0°', top45: '斜拍 45°' };
+
+// ---------- 单源常量（都取自 patrol.motion_profile / patrol.stations） ----------
+
+// 软限位包络 = 机械行程（现场实测），与 patrol.motion_profile 的
+// travel_min/travel_max 同源；Y 向右为正、Z 向上为正，两轴原点都在回零端。
+// 早期版本用「站位 min/max ± 50」是因为当时行程未知——现在不必拿站位当限位。
+const ENVELOPE = { y: [0, 4492], z: [-212, 0] };
+
+// 控制器单源（patrol.motion_profile 的 CONTROLLER_IP / CONTROLLER_PORT）
+const CONTROLLER = { ip: '192.168.1.239', port: 8088 };
+
+// 运动参数单源快照（patrol.motion_profile 的现场整定值，每轴一套）
+const MOTION = {
+  Y: { travel_speed: 50, travel_acc: 500, jog_speed: 10, jog_acc: 100, home_speed: 150, home_acc: 1500, home_dir: 2 },
+  Z: { travel_speed: 20, travel_acc: 200, jog_speed: 4, jog_acc: 40, home_speed: 50, home_acc: 500, home_dir: 1 },
+};
+// 回零落点 = 原点：Y 落在左端（负限位），Z 落在顶端（正限位）
+const ORIGIN = { y: 0, z: 0 };
+
+// 6 轮巡检（rounds 表刻度）
+const ROUNDS = [
+  '2026-08-13T09:12:41', '2026-08-20T09:14:02', '2026-08-27T09:11:37',
+  '2026-09-03T09:16:50', '2026-09-07T09:13:22', '2026-09-10T09:15:22',
+].map(t => t + TZ);
+
+// ---------- 现场布局：12 框（横）× 5 层（竖），每框 1 个站位 ----------
+// 与 patrol/stations.py 的 GRID_COLS / GRID_LAYERS / GRID_ANGLES 一一对应。
+// **框数随时会调**（用户：后面根据实际框数再调整），所以这里只认这两个常量，
+// 坐标一律从机械行程推导，绝不逐点手写：改一个数字，站位表/平面图/列表全跟着变。
+const GRID_COLS = 12;      // 横向框数（沿 Y 0…4492 mm）
+const GRID_LAYERS = 5;     // 竖向层数（沿 Z -212…0 mm，**第 1 层在最上**）
+const GRID_ANGLES = ['top45'];   // 一期每框 1 档；要恢复双档就写 ['top0','top45']
+
+const Y_PITCH = (ENVELOPE.y[1] - ENVELOPE.y[0]) / GRID_COLS;
+const Z_PITCH = (ENVELOPE.z[1] - ENVELOPE.z[0]) / GRID_LAYERS;
+// 框序号 → 框心 Y；层号 → 层心 Z（第 1 层贴近 Z 原点，即最上）
+const colY = c => ENVELOPE.y[0] + (c - 0.5) * Y_PITCH;
+const layerZ = L => ENVELOPE.z[1] - (L - 0.5) * Z_PITCH;
+
+// 站位按**蛇形遍历序**生成（与 build_grid 同规则）：层内走完一列再折返，
+// 换层只动 Z 的 42.4mm，省掉每层从右端折回左端的 ~4.1m 空程。
+// 坐标保留 0.1mm（示教精度，和输入框 0.5 步长同量级），避免浮点尾巴污染界面。
+const STATIONS = [];
+for (let layer = 1; layer <= GRID_LAYERS; layer++) {
+  const cols = layer % 2 === 1
+    ? Array.from({ length: GRID_COLS }, (_, k) => k + 1)
+    : Array.from({ length: GRID_COLS }, (_, k) => GRID_COLS - k);
+  for (const col of cols) {
+    for (const angle of GRID_ANGLES) {
+      STATIONS.push({
+        id: `S${layer}${pad2(col)}${GRID_ANGLES.length === 1 ? '' : '-' + angle}`,
+        box_id: `B${layer}${pad2(col)}`,
+        layer, col,
+        y: r1(colY(col)), z: r1(layerZ(layer)),
+        angle_profile: angle,
+        camera_ip: '192.168.1.' + (21 + (layer - 1) * GRID_COLS + col - 1),
+        exposure_note: 'manual',
+      });
+    }
+  }
+}
+const STN = Object.fromEntries(STATIONS.map(s => [s.id, s]));
+// 实际出现的角度档（图例与历史筛选只列这些；一期只有斜拍 45°）
+const ANGLES = [...new Set(STATIONS.map(s => s.angle_profile))];
+const GRID = { cols: GRID_COLS, layers: GRID_LAYERS, y_pitch: Y_PITCH, z_pitch: Z_PITCH };
+
+// 图像索引（ADR-0005 表形状）：一帧一行
+// 失败帧写成「站位@轮次」的清单——一眼能看出是哪一框哪一轮出的问题。
+const FAILURES = new Set(['S105@2', 'S507@4']);
+const IMAGES = [];
+ROUNDS.forEach((round_ts, ri) => {
+  STATIONS.forEach((st, si) => {
+    const t = new Date(round_ts).getTime() + si * 37000;
+    const iso = isoCST(t);
+    const failed = FAILURES.has(`${st.id}@${ri}`);
+    IMAGES.push({
+      ts: iso, box_id: st.box_id, station_id: st.id, angle_profile: st.angle_profile,
+      object_name: `${iso.slice(0, 10).replace(/-/g, '')}/${st.box_id}_${st.id}_${st.angle_profile}_${hhmmss(iso)}`,
+      round_ts, ok: !failed, error: failed ? 'capture timeout (2.1s)' : null, source: 'prod',
+    });
+  });
+});
+// 一次手动抓拍（round_ts = NULL，尚未同步 → source = local）
+IMAGES.push({
+  ts: '2026-09-10T14:32:07' + TZ, box_id: 'B101', station_id: 'S101', angle_profile: 'top45',
+  object_name: '20260910/B101_S101_top45_143207', round_ts: null, ok: true, error: null, source: 'local',
+});
+
+// measurements 表（每框每轮一行；生长趋势）
+// 偏置只跟网格位置有关（上层/左侧略大），不是物理结论，仅让曲线不重合成一根线。
+const MEASUREMENTS = {};
+STATIONS.forEach(st => {
+  const rnd = lcg(hashStr('m' + st.box_id));
+  const bias = (st.col - (GRID_COLS + 1) / 2) * 0.45
+    + (Math.ceil(GRID_LAYERS / 2) - st.layer) * 1.1;
+  MEASUREMENTS[st.box_id] = ROUNDS.map((ts, ri) => {
+    const mean_len = 36 + ri * 3.6 + bias + (rnd() - .5) * 1.6;
+    const mean_cap = 21 + ri * 2.25 + bias * 0.55 + (rnd() - .5) * 1.0;
+    return {
+      ts, box_id: st.box_id, n: 42 + Math.round(rnd() * 20),
+      mean_len_mm: r1(mean_len), mean_cap_mm: r1(mean_cap),
+      p10_len: r1(mean_len - 5 - rnd() * 2), p90_len: r1(mean_len + 5.5 + rnd() * 2),
+      quality: '',
+    };
+  });
+});
+
+/* =========================================================================
+   2. 模拟相机出图（canvas 生成，保证原型自带图像、离线可用）
+   ========================================================================= */
+const photoCache = new Map();
+function photo(o) {
+  const w = o.w || 800, h = o.h || 600, detail = o.detail !== false;
+  const key = `${o.box}|${o.station}|${o.angle}|${o.ts}|${w}|${o.ok === false}`;
+  if (photoCache.has(key)) return photoCache.get(key);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d');
+  const rnd = lcg(hashStr(key));
+  const top = o.angle === 'top0';
+
+  const grad = g.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, '#4a3f33'); grad.addColorStop(.55, '#33291f'); grad.addColorStop(1, '#241c15');
+  g.fillStyle = grad; g.fillRect(0, 0, w, h);
+
+  const dots = detail ? 900 : 160;
+  for (let i = 0; i < dots; i++) {
+    g.fillStyle = `rgba(${170 + rnd() * 60 | 0},${160 + rnd() * 60 | 0},${140 + rnd() * 60 | 0},${.03 + rnd() * .06})`;
+    g.beginPath(); g.arc(rnd() * w, rnd() * h, rnd() * (detail ? 2.4 : 1.2), 0, 6.283); g.fill();
+  }
+
+  const cols = top ? 5 : 4, rows = top ? 4 : 3;
+  for (let r = 0; r < rows; r++) for (let k = 0; k < cols; k++) {
+    const cx = w * (k + .5) / cols + (rnd() - .5) * w * .05;
+    const cy = h * (r + .5) / rows + (rnd() - .5) * h * .07;
+    const capR = h * (top ? .072 : .082) * (.82 + rnd() * .45);
+    if (!top) {
+      g.fillStyle = '#e6e0d1';
+      g.fillRect(cx - capR * .21, cy, capR * .42, capR * 1.3);
+      g.fillStyle = 'rgba(0,0,0,.16)';
+      g.fillRect(cx + capR * .07, cy, capR * .14, capR * 1.3);
+    }
+    const base = top ? [206, 196, 180] : [238, 231, 218];
+    const cg = g.createRadialGradient(cx - capR * .3, cy - capR * .35, capR * .08, cx, cy, capR * 1.15);
+    cg.addColorStop(0, `rgb(${base[0]},${base[1]},${base[2]})`);
+    cg.addColorStop(.68, `rgb(${base[0] - 48},${base[1] - 46},${base[2] - 42})`);
+    cg.addColorStop(1, `rgb(${base[0] - 100},${base[1] - 96},${base[2] - 90})`);
+    g.fillStyle = cg;
+    g.beginPath(); g.ellipse(cx, cy, capR, capR * (top ? 1 : .76), 0, 0, 6.283); g.fill();
+    g.lineWidth = Math.max(1, w / 900); g.strokeStyle = 'rgba(58,44,34,.34)'; g.stroke();
+  }
+
+  const bl = g.createRadialGradient(w * .5, h * .42, 8, w * .5, h * .42, w * .7);
+  bl.addColorStop(0, 'rgba(255,250,232,.15)'); bl.addColorStop(1, 'rgba(0,0,0,.3)');
+  g.fillStyle = bl; g.fillRect(0, 0, w, h);
+
+  if (detail) {
+    g.strokeStyle = 'rgba(255,255,255,.45)'; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(w / 2 - 13, h / 2); g.lineTo(w / 2 + 13, h / 2);
+    g.moveTo(w / 2, h / 2 - 13); g.lineTo(w / 2, h / 2 + 13); g.stroke();
+    const bar = w * .18, by = h - 26;
+    g.strokeStyle = 'rgba(255,255,255,.85)'; g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(w / 2 - bar / 2, by); g.lineTo(w / 2 + bar / 2, by);
+    g.moveTo(w / 2 - bar / 2, by - 5); g.lineTo(w / 2 - bar / 2, by + 5);
+    g.moveTo(w / 2 + bar / 2, by - 5); g.lineTo(w / 2 + bar / 2, by + 5); g.stroke();
+    g.fillStyle = 'rgba(255,255,255,.88)'; g.textAlign = 'center';
+    g.font = `${Math.round(w / 46)}px ${'ui-monospace,monospace'}`;
+    g.fillText('50 mm', w / 2, by - 11);
+    const bh = Math.round(h * .072);
+    g.fillStyle = 'rgba(0,0,0,.45)'; g.fillRect(0, 0, w, bh);
+    g.fillStyle = '#fff'; g.textAlign = 'left';
+    g.fillText(`${o.box} · ${o.station} · ${ANGLE_LABEL[o.angle]}`, 10, Math.round(bh * .68));
+    g.textAlign = 'right'; g.fillText(o.ts.slice(0, 19).replace('T', ' '), w - 10, Math.round(bh * .68));
+  }
+  const url = c.toDataURL('image/jpeg', detail ? .82 : .68);
+  photoCache.set(key, url);
+  return url;
+}
+function imgRecOf(rec) { return { box: rec.box_id, station: rec.station_id, angle: rec.angle_profile, ts: rec.ts, ok: rec.ok }; }
+
+/* =========================================================================
+   3. api 适配层（mock 实现；形状与 .scratch/console-ui/spec.md §5 一致）
+      接入真实后端时把 USE_MOCK 换成 false，并实现下面 5 个 fetch 即可。
+   ========================================================================= */
+const USE_MOCK = true;
+const api = {
+  async status() { return mock.status(); },
+  async stations() { return mock.stations(); },
+  async images(q) { return mock.images(q); },
+  async measurements(q) { return mock.measurements(q); },
+  async session_open() { return mock.session_open(); },
+  async session_close() { return mock.session_close(); },
+  async goto(y, z) { return mock.command('goto', { y, z }); },
+  async jog(axis, dist) { return mock.command('jog', { axis, dist }); },
+  async abs(axis, pos) { return mock.command('abs', { axis, pos }); },
+  async home() { return mock.command('home', {}); },
+  async lamp(on) { return mock.command('lamp', { on }); },
+  async capture(station_id) { return mock.command('capture', { station_id }); },
+  async stop() { return mock.command('stop', {}); },
+};
+
+const mock = {
+  state: 'SCHEDULED',            // SCHEDULED | YIELDING | MANUAL | FAULT
+  connected: true, run_mode: 'M1',
+  pos: { y: 380, z: -180 },
+  session: null,                 // {id, expires_in_s}
+  job: null,                     // {id, kind, state, progress, target}
+  patrol: { active: false, last_round_ts: ROUNDS[ROUNDS.length - 1], last_round_status: 'ok' },
+  yieldRetried: false,
+  events: [],
+  seq: 0,
+  log(level, text) {
+    this.events.unshift({ ts: nowIso(), level, text });
+    if (this.events.length > 60) this.events.pop();
+    if (S.ready) renderLog();
+  },
+  async status() {
+    return {
+      ts: nowIso(),
+      machine: {
+        state: this.state, connected: this.connected, ip: CONTROLLER.ip, port: CONTROLLER.port,
+        real_pos: [r1(this.pos.y), r1(this.pos.z)], real_speed: [0, 0], run_mode: this.run_mode,
+        inputs: { IN0: 0, IN1: 0 }, outputs: { OUT0: S.lamp ? 1 : 0 },
+      },
+      session: this.state === 'MANUAL' && this.session
+        ? { id: this.session.id, expires_in_s: this.session.expires_in_s, operator: '现场' } : null,
+      job: this.job,
+      patrol: this.patrol,
+      envelope: ENVELOPE,
+      events: this.events.slice(0, 50),
+    };
+  },
+  async stations() {
+    return STATIONS.map(s => {
+      const mine = IMAGES.filter(i => i.station_id === s.id && i.ok);
+      return {
+        ...s,
+        last_capture_ts: mine.length ? mine[mine.length - 1].ts : null,
+        image_count: mine.length,
+      };
+    });
+  },
+  async images(q) {
+    let rows = IMAGES.filter(i => i.station_id === q.station_id);
+    if (q.angle && q.angle !== 'all') rows = rows.filter(i => i.angle_profile === q.angle);
+    if (q.date_from) rows = rows.filter(i => i.ts.slice(0, 10) >= q.date_from);
+    if (q.date_to) rows = rows.filter(i => i.ts.slice(0, 10) <= q.date_to);
+    if (q.round_ts) rows = rows.filter(i => i.round_ts === q.round_ts);
+    return rows.slice().sort((a, b) => a.ts < b.ts ? 1 : -1);
+  },
+  async measurements(q) { return (MEASUREMENTS[q.box_id] || []).slice(); },
+  async session_open() {
+    await say(420);
+    if (this.state === 'MANUAL') return { ok: true, state: 'MANUAL' };
+    if (this.patrol.active) {
+      this.state = 'YIELDING';
+      render();
+      await say(1500);
+      // 确定性演示：本轮第一次让位请求会被"巡采图窗口"拒绝一次，重试即成功
+      if (!this.yieldRetried) {
+        this.yieldRetried = true;
+        this.state = 'SCHEDULED';
+        return { ok: false, code: 409, error: 'round_in_progress', retry_after_s: 4 };
+      }
+      this.yieldRetried = false;
+      this.patrol.last_round_status = 'yielded';
+      this.log('warn', `巡检已让位：本轮标记 yielded，退出实时模式后从下一站位续跑`);
+    }
+    this.seq++;
+    this.session = { id: 's-' + this.seq.toString(16).padStart(4, '0'), expires_in_s: 300 };
+    this.state = 'MANUAL'; this.run_mode = 'M0';
+    this.log('info', `进入实时模式：会话 ${this.session.id}，有效期 300s（与巡检互斥）`);
+    return { ok: true, state: 'MANUAL' };
+  },
+  async session_close() {
+    if (this.state !== 'MANUAL') return { ok: true };
+    await this.command('home', {});
+    this.session = null; this.state = 'SCHEDULED'; this.run_mode = 'M1';
+    this.log('info', '已回零并交还导轨：状态退回 SCHEDULED');
+    return { ok: true, state: 'SCHEDULED' };
+  },
+  _guard(args) {
+    if (this.state === 'FAULT') return { ok: false, code: 409, error: 'fault', detail: '已急停，需先复位' };
+    if (this.state !== 'MANUAL') return { ok: false, code: 403, error: 'no_session', detail: '请先进入实时模式' };
+    if (this.job && this.job.state === 'running') return { ok: false, code: 409, error: 'busy', detail: '上一动作未完成' };
+    return null;
+  },
+  async command(kind, args) {
+    if (kind !== 'stop') {
+      const bad = this._guard(args);
+      if (bad) return bad;
+    }
+    if (kind === 'stop') {
+      if (this.job) { this.job.state = 'cancelled'; this.job = null; }
+      if (this.state === 'MANUAL') { this.state = 'FAULT'; this.run_mode = 'M0'; }
+      this.log('err', '急停：Stop_Run 已下发，运动中止（需复位后重新回零）');
+      return { ok: true };
+    }
+    if (kind === 'goto') {
+      if (args.y < ENVELOPE.y[0] || args.y > ENVELOPE.y[1] || args.z < ENVELOPE.z[0] || args.z > ENVELOPE.z[1])
+        return { ok: false, code: 400, error: 'out_of_envelope', detail: `目标超出软限位 Y ${ENVELOPE.y.join('–')} / Z ${ENVELOPE.z.join('–')} mm` };
+      return this._startJob('goto', { y: args.y, z: args.z }, 2.6);
+    }
+    if (kind === 'jog') {
+      const a = args.axis.toLowerCase();
+      const target = { ...this.pos };
+      target[a] = target[a] + args.dist;
+      if (target[a] < ENVELOPE[a][0] || target[a] > ENVELOPE[a][1])
+        return { ok: false, code: 400, error: 'out_of_envelope', detail: `轴 ${args.axis} 点动后会越界（${r1(target[a])} mm 超出 ${ENVELOPE[a][0]}–${ENVELOPE[a][1]}）` };
+      const travel = Math.abs(args.dist) / MOTION[args.axis].jog_speed;
+      return this._startJob('jog', target, .5 + travel * .3);
+    }
+    if (kind === 'abs') {
+      const a = args.axis.toLowerCase();
+      const lo = ENVELOPE[a][0], hi = ENVELOPE[a][1];
+      if (args.pos < lo || args.pos > hi)
+        return { ok: false, code: 400, error: 'out_of_envelope', detail: `轴 ${args.axis} 目标超出 ${lo}–${hi} mm` };
+      const target = { ...this.pos }; target[a] = args.pos;
+      return this._startJob('abs', target, 1.6);
+    }
+    if (kind === 'home') return this._startJob('home', { ...ORIGIN }, 2.2);
+    if (kind === 'lamp') { S.lamp = !!args.on; this.log('info', `OUT0 补光灯 ${S.lamp ? '点亮' : '熄灭'}`); return { ok: true }; }
+    if (kind === 'capture') {
+      const st = STN[args.station_id];
+      return this._startJob('capture', { y: st.y, z: st.z }, 1.6, { station_id: args.station_id });
+    }
+    return { ok: false, code: 400, error: 'unknown' };
+  },
+  _startJob(kind, target, seconds, extra) {
+    this.seq++;
+    this.job = {
+      id: 'j-' + this.seq, kind, state: 'running', progress: 0,
+      target: target.y !== undefined ? [target.y, target.z] : null,
+      elapsed_ms: 0, error: null, extra: extra || null,
+      from: { ...this.pos }, duration: seconds * 1000, t0: Date.now(),
+    };
+    const label = { goto: '双轴直线插补', jog: '单轴点动', abs: '单轴绝对定位', home: '双轴回零', capture: '站位采图' }[kind];
+    this.log('info', `${label}：job ${this.job.id} 已下发 → 202 Accepted`);
+    return { ok: true, job: { id: this.job.id, kind, state: 'running' } };
+  },
+};
+
+/* =========================================================================
+   4. 视图状态
+   ========================================================================= */
+const S = {
+  ready: false, mode: 'realtime', state: 'SCHEDULED',
+  selected: null, target: null, lamp: false, zoom: 1, pan: { x: 0, y: 0 },
+  stations: [], images: [], measurements: [], viewIdx: 0,
+  hist: { angle: 'all', date_from: '', date_to: '', round: '', overlay: true },
+  jogStep: 1, lastCapture: null, chartGeom: null, tickAcc: 0,
+};
+
+/* =========================================================================
+   5. 渲染
+   ========================================================================= */
+function render() {
+  S.state = mock.state;                     // 状态单一来源：mock（真实实现里来自 /api/status）
+  renderTop();
+  renderStations();
+  renderMap();
+  if (S.mode === 'realtime') renderRealtime(); else renderHistory();
+  renderOps();
+  renderLog();
+}
+
+function renderTop() {
+  $$('#modeSeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.mode === S.mode)));
+  const map = {
+    SCHEDULED: ['scheduled', '待机 · 巡检可调度'],
+    YIELDING: ['yielding', '让位中'],
+    MANUAL: ['manual', '手动 · MANUAL'],
+    FAULT: ['fault', '已急停'],
+  };
+  const [cls, text] = map[S.state] || map.SCHEDULED;
+  const pill = $('#pill');
+  pill.className = 'pill ' + cls;
+  $('#pillText').textContent = text;
+  $('#linkbar').innerHTML =
+    `<span class="${mock.connected ? 'up' : 'down'}">FMC4030 ${mock.connected ? '已连接' : '断开'} ${CONTROLLER.ip}:${CONTROLLER.port}</span>` +
+    `<span class="${S.cameraOk ? 'up' : 'down'}">相机 ${S.cameraOk ? '就绪' : '不可用'} :7003</span>` +
+    `<span>${S.state === 'MANUAL' ? 'M0 手动' : 'M1 主机调度'}</span>`;
+}
+S.cameraOk = true;
+
+function renderStations() {
+  // 按**层**分组（60 个框一个一个列会得到 60 个单行分组，等于没分组）：
+  // 5 层 × 12 框正好对上货架的实际结构，和平面图的行列一一对应。
+  const byLayer = {};
+  S.stations.forEach(s => (byLayer[s.layer] = byLayer[s.layer] || []).push(s));
+  const bad = new Set(IMAGES.filter(i => !i.ok).map(i => i.station_id));
+  const multiAngle = ANGLES.length > 1;   // 一期单档：行内改显相机 IP（信息更值钱）
+  let html = '';
+  Object.keys(byLayer).map(Number).sort((a, b) => a - b).forEach(layer => {
+    const list = byLayer[layer].slice().sort((a, b) => a.col - b.col);
+    html += `<div class="boxgroup"><div class="boxgroup-head">
+      <span>第 ${layer} 层</span><span>${list.length} 框 · Z ${r1(list[0].z)} mm</span></div>`;
+    list.forEach(s => {
+      const sel = S.selected === s.id;
+      const failed = bad.has(s.id);
+      const meta = multiAngle
+        ? `<span class="chip ${s.angle_profile}">${ANGLE_LABEL[s.angle_profile]}</span>`
+        : `<span class="chip">${s.camera_ip}</span>`;
+      html += `<button class="stn ${failed ? 'warn' : ''}" data-action="station" data-id="${s.id}" aria-selected="${sel}">
+        <span class="id">${s.id}</span>
+        <span class="meta">${meta}</span>
+        <span class="badge" title="图像数 / 最近拍摄">${s.image_count}${failed ? ' !' : ''}</span>
+        <span class="last" style="grid-column:1/-1">Y ${r1(s.y)} · Z ${r1(s.z)} · ${s.last_capture_ts ? relTime(s.last_capture_ts) : '未拍'}</span>
+      </button>`;
+    });
+    html += '</div>';
+  });
+  $('#stnList').innerHTML = html;
+  $('#stnCount').textContent = `${S.stations.length} 个 · ${GRID.cols}×${GRID.layers}`;
+}
+
+/* ---------- 导轨平面图（两轴位置可视化） ----------
+   画的是货架网格本身：横轴 Y 归一化到 0–4492mm（右为正）分 12 列，
+   纵轴 Z 归一化到 -212–0mm（上为正）分 5 层，第 1 层在最上。
+   格心 = 站位坐标，所以「12×5」在图上就是「12 列 × 5 行」的格子。
+   注意：站位点属静态层（#gmBase），随 render() 重建；
+   滑块十字属动态层（#gmLive），只在 updateMapLive() 里改属性，
+   这样 200ms 的 tick 不会整块重建 DOM。                        */
+const GMAP = { l: 9, t: 5, w: 182, h: 86 };
+function gmPos(y, z) {
+  const cl = v => Math.max(0, Math.min(1, v));
+  const u = cl((y - ENVELOPE.y[0]) / (ENVELOPE.y[1] - ENVELOPE.y[0]));
+  const v = cl((z - ENVELOPE.z[0]) / (ENVELOPE.z[1] - ENVELOPE.z[0]));
+  return { px: GMAP.l + u * GMAP.w, py: GMAP.t + (1 - v) * GMAP.h, u, v };
+}
+
+function renderMap() {
+  const grid = $('#gmGrid'), base = $('#gmBase');
+  if (!grid || !base) return;
+  const cols = GRID.cols, layers = GRID.layers;
+
+  // --- 静态层 1：货架格 —— 层带 + 格线 + 外框 + 层号/框号 ---
+  let g = '';
+  for (let j = 0; j < layers; j++) {          // 隔层浅色带，5 层一眼可数
+    if (j % 2) continue;
+    g += `<rect class="gm-band" x="${GMAP.l}" y="${GMAP.t + GMAP.h * j / layers}"`
+      + ` width="${GMAP.w}" height="${GMAP.h / layers}"></rect>`;
+  }
+  for (let i = 1; i < cols; i++)              // 列边界
+    g += `<line class="gm-cellline" x1="${GMAP.l + GMAP.w * i / cols}" y1="${GMAP.t}"`
+      + ` x2="${GMAP.l + GMAP.w * i / cols}" y2="${GMAP.t + GMAP.h}"></line>`;
+  for (let j = 1; j < layers; j++)            // 层边界
+    g += `<line class="gm-cellline" x1="${GMAP.l}" y1="${GMAP.t + GMAP.h * j / layers}"`
+      + ` x2="${GMAP.l + GMAP.w}" y2="${GMAP.t + GMAP.h * j / layers}"></line>`;
+  g += `<rect class="gm-frame" x="${GMAP.l}" y="${GMAP.t}" width="${GMAP.w}" height="${GMAP.h}"`
+    + ` fill="none" rx="2"></rect>`;
+  for (let c = 1; c <= cols; c++)             // 底部框号 1…12
+    g += `<text class="gm-ax gm-ax-col" x="${GMAP.l + GMAP.w * (c - .5) / cols}"`
+      + ` y="${GMAP.t + GMAP.h + 9.5}" text-anchor="middle">${c}</text>`;
+  for (let L = 1; L <= layers; L++)           // 左侧层号 1…5（1 在最上）
+    g += `<text class="gm-ax gm-ax-row" x="${GMAP.l - 3}"`
+      + ` y="${GMAP.t + GMAP.h * (L - .5) / layers + 2}" text-anchor="end">${L}</text>`;
+  grid.innerHTML = g;
+
+  // --- 静态层 2：蛇形遍历路径（#gmBase 的底衬）---
+  // 按 STATIONS 的生成顺序连线，就是控制器实际要走的路：层内单向跑完、
+  // 换层只在同侧落一格，所以横向空程为 0，折返处是竖直短线。
+  let s = `<polyline class="gm-path" points="${
+    S.stations.map(st => { const p = gmPos(st.y, st.z); return `${p.px.toFixed(2)},${p.py.toFixed(2)}`; }).join(' ')
+  }"></polyline>`;
+
+  // --- 静态层 3：站位点 ---
+  const badSet = new Set(IMAGES.filter(i => !i.ok).map(i => i.station_id));
+  S.stations.forEach(st => {
+    const p = gmPos(st.y, st.z);
+    const sel = S.selected === st.id;
+    const bad = badSet.has(st.id);
+    const tip = `${st.id} · ${st.box_id} · 第 ${st.layer} 层第 ${st.col} 框`
+      + ` · ${ANGLE_LABEL[st.angle_profile]}`
+      + ` · Y ${r1(st.y)} / Z ${r1(st.z)} mm · ${st.image_count} 张`
+      + (bad ? ' · 有失败帧' : '');
+    // 标签锚点自适应，避免最左/最右的标签越出绘图区
+    const anchor = p.px < 30 ? 'start' : p.px > 170 ? 'end' : 'middle';
+    const lx = p.px < 30 ? p.px + 4.5 : p.px > 170 ? p.px - 4.5 : p.px;
+    s += `<g class="gm-stn ${st.angle_profile}${bad ? ' has-fail' : ''}" data-action="station" data-id="${st.id}" aria-selected="${sel}">
+      <title>${tip}</title>
+      ${sel ? `<circle class="halo" cx="${p.px}" cy="${p.py}" r="6.2"></circle>` : ''}
+      <circle cx="${p.px}" cy="${p.py}" r="6.5" fill="transparent"></circle>
+      <circle class="pt" cx="${p.px}" cy="${p.py}" r="${sel ? 4 : 3.2}"></circle>
+      <text class="lbl" x="${lx}" y="${p.py - 6}" text-anchor="${anchor}">${st.id}</text>
+    </g>`;
+  });
+  base.innerHTML = s;
+
+  // --- 图例：只列数据里真实存在的角度档（一期就一档，不摆空选项）---
+  const tipEl = $('#mapTip');
+  if (tipEl) {
+    tipEl.innerHTML = ANGLES.map(a =>
+      `<span><i class="${a === 'top0' ? 'd0' : 'd45'}"></i>${ANGLE_LABEL[a]}</span>`).join('')
+      + '<span><i class="dfail"></i>有失败帧</span>';
+  }
+
+  const rng = $('#mapRange');
+  if (rng) rng.textContent =
+    `Y ${ENVELOPE.y[0]}–${ENVELOPE.y[1]} (${cols} 框) · Z ${ENVELOPE.z[0]}–${ENVELOPE.z[1]} (${layers} 层)`;
+
+  updateMapLive();
+}
+
+function updateMapLive() {
+  const live = $('#gmLive');
+  if (!live) return;
+  if (S.mode !== 'realtime') { live.style.display = 'none'; return; }
+  live.style.display = '';
+
+  const p = gmPos(mock.pos.y, mock.pos.z);
+  const cx = $('#gmCx'), cy = $('#gmCy'), dot = $('#gmDot');
+  cx.setAttribute('x1', p.px - 5.5); cx.setAttribute('x2', p.px + 5.5);
+  cx.setAttribute('y1', p.py); cx.setAttribute('y2', p.py);
+  cy.setAttribute('x1', p.px); cy.setAttribute('x2', p.px);
+  cy.setAttribute('y1', p.py - 5.5); cy.setAttribute('y2', p.py + 5.5);
+  dot.setAttribute('cx', p.px); dot.setAttribute('cy', p.py);
+
+  // 当前位置 → 目标（选中站位）的余程连线
+  const link = $('#gmLink'), t = S.target;
+  if (link) {
+    if (t) {
+      const q = gmPos(t.y, t.z);
+      link.setAttribute('x1', p.px); link.setAttribute('y1', p.py);
+      link.setAttribute('x2', q.px); link.setAttribute('y2', q.py);
+      link.style.display = (Math.hypot(q.px - p.px, q.py - p.py) < 1.5) ? 'none' : '';
+    } else { link.style.display = 'none'; }
+  }
+}
+
+/* ---------- 实时模式中栏 ---------- */
+function renderRealtime() {
+  const st = S.selected ? STN[S.selected] : null;
+  const rec = S.lastCapture;
+  const dist = st ? Math.hypot(st.y - mock.pos.y, st.z - mock.pos.z) : 0;
+  $('#colMain').innerHTML = `
+  <div class="stage">
+    <div class="stage-head">
+      <span class="strong">最新静帧</span>
+      <span>·</span>
+      <span>${rec ? `${rec.box_id} · ${rec.station_id} · ${ANGLE_LABEL[rec.angle_profile]}` : '尚未抓拍'}</span>
+      <span class="src-${rec && rec.source === 'local' ? 'local' : 'prod'}">${rec ? (rec.source === 'local' ? '本地待同步' : 'prod') : ''}</span>
+      <span style="margin-left:auto">${rec ? rec.ts.slice(0, 19).replace('T', ' ') : ''}</span>
+    </div>
+    <div class="viewer ${S.zoom > 1 ? 'zoomed' : ''}" id="viewer" data-action="viewer-toggle">
+      ${rec
+        ? `<img id="viewerImg" src="${photo(imgRecOf(rec))}" alt="最新静帧"
+             style="transform:translate(${S.pan.x}px,${S.pan.y}px) scale(${S.zoom})">`
+        : `<div style="color:#8b8f98;font-size:12px">进入实时模式后移动到位并点击「抓拍」</div>`}
+      <div class="viewer-hud"><span class="rec" style="background:${S.state === 'MANUAL' ? '#4ea86b' : '#8b8f98'}"></span>${S.state === 'MANUAL' ? 'M0 手动 · 静帧' : '待机'}</div>
+      <div class="viewer-hint">抓拍单帧 1–5 s，非视频流</div>
+    </div>
+    <div class="readouts">
+      <div class="ro hi"><div class="k">当前位置 Y / Z</div><div class="v" id="posRead">${r1(mock.pos.y)} / ${r1(mock.pos.z)} <small>mm</small></div></div>
+      <div class="ro"><div class="k">目标站位</div><div class="v" id="tgtRead">${st ? `${st.id} → ${r1(st.y)} / ${r1(st.z)}` : '未选'} <small>mm</small></div></div>
+      <div class="ro"><div class="k">剩余距离</div><div class="v" id="distRead">${r1(dist)} <small>mm</small></div></div>
+      <div class="ro"><div class="k">当前动作</div><div class="v" id="jobRead">${S.state === 'FAULT' ? '已急停' : '空闲'}</div>
+        <div class="bar"><i id="jobBar"></i></div></div>
+    </div>
+    <div class="card" style="padding:11px">
+      <div class="kv"><span class="k">本次抓拍</span><span class="v mono" id="capInfo">${rec ? `${rec.ts.slice(11, 19)} · ${stnSpeed}` : '—'}</span></div>
+    </div>
+  </div>`;
+}
+const stnSpeed = '1.8 s';
+
+/* ---------- 历史模式中栏 ---------- */
+function renderHistory() {
+  const st = S.selected ? STN[S.selected] : null;
+  if (!st) {
+    $('#colMain').innerHTML = `<div class="empty">左侧选择一个站位，查看它的历史图像与生长曲线。</div>`;
+    return;
+  }
+  const rows = S.images;
+  const cur = rows[Math.min(S.viewIdx, Math.max(rows.length - 1, 0))];
+  const okCount = rows.filter(r => r.ok).length;
+  const days = {};
+  rows.forEach(r => { const d = r.ts.slice(0, 10); (days[d] = days[d] || []).push(r); });
+
+  const timeline = Object.keys(days).sort().map(d => `
+    <div class="tl-day">
+      <div class="d">${d.slice(5)} · ${days[d].length} 帧</div>
+      <div class="row">${days[d].map(r => `
+        <button class="tl-item ${r.ok ? '' : 'failed'}" data-action="pick" data-ts="${r.ts}" aria-selected="${cur && cur.ts === r.ts}">
+          <img src="${photo({ ...imgRecOf(r), w: 208, h: 156, detail: false })}" alt="">
+          ${r.ok ? '' : '<span class="failtag">失败</span>'}
+          <span class="cap"><span>${r.ts.slice(11, 19)}</span><span>${r.angle_profile === 'top0' ? '0°' : '45°'}</span></span>
+        </button>`).join('')}</div>
+    </div>`).join('');
+
+  $('#colMain').innerHTML = `
+  <div class="stage">
+    <div class="stage-head">
+      <span class="strong">${cur ? `${cur.station_id} · ${cur.box_id} · ${ANGLE_LABEL[cur.angle_profile]}` : st.id + ' · ' + st.box_id}</span>
+      <span class="src-${cur && cur.source === 'local' ? 'local' : 'prod'}">${cur ? (cur.source === 'local' ? '本地待同步' : 'prod') : ''}</span>
+      <span>· 共 ${rows.length} 帧，成功 ${okCount}</span>
+      <span style="margin-left:auto">${cur ? cur.ts.slice(0, 19).replace('T', ' ') : ''}</span>
+    </div>
+    ${cur ? `
+    <div class="viewer" id="viewer" data-action="viewer-toggle" data-pan="1">
+      <img id="viewerImg" src="${photo({ ...imgRecOf(cur), ok: true })}" alt="历史图像"
+           style="transform:translate(${S.pan.x}px,${S.pan.y}px) scale(${S.zoom})">
+      <div class="viewer-hud"><span>${cur.object_name}.jpg</span></div>
+      <div class="viewer-hint">点击/滚轮缩放 ${S.zoom}×　放大后拖拽平移</div>
+    </div>
+    <div class="card">
+      <div class="col-head" style="border-bottom:1px solid var(--line-2);border-radius:0">时间轴（倒序）<span>${Object.keys(days).length} 个采集日</span></div>
+      <div class="timeline">${timeline}</div>
+    </div>
+    <div class="card">
+      <div class="col-head" style="border-bottom:1px solid var(--line-2);border-radius:0">
+        <span>生长曲线 · ${st.box_id}（measurements）</span><span>${S.hist.overlay ? '叠加测量值' : ''}</span>
+      </div>
+      <div class="chartwrap">
+        <div class="legend">
+          <span><i style="background:#1f6feb"></i>菇体长 mean_len_mm</span>
+          <span><i style="background:#c2701a"></i>菌盖径 mean_cap_mm</span>
+        </div>
+        ${chartSVG()}
+      </div>
+    </div>` : `<div class="empty">该筛选条件下没有图像。</div>`}
+  </div>`;
+  setupChartHover();
+}
+
+function chartSVG() {
+  const rows = S.measurements;
+  const W = 720, H = 210, P = { l: 46, r: 58, t: 14, b: 26 };
+  if (rows.length < 2) return `<div class="empty">测量数据不足</div>`;
+  const series = [
+    { key: 'mean_len_mm', color: '#1f6feb', label: '菇长' },
+    { key: 'mean_cap_mm', color: '#c2701a', label: '盖径' },
+  ];
+  const vals = rows.flatMap(r => series.map(s => r[s.key]));
+  const lo = Math.min(...vals) - 4, hi = Math.max(...vals) + 4;
+  const px = i => P.l + i * (W - P.l - P.r) / (rows.length - 1);
+  const py = v => H - P.b - (v - lo) * (H - P.t - P.b) / (hi - lo);
+  const ticks = 4;
+  let g = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" style="overflow:visible">`;
+  for (let t = 0; t <= ticks; t++) {
+    const v = lo + (hi - lo) * t / ticks, y = py(v);
+    g += `<line x1="${P.l}" y1="${y}" x2="${W - P.r}" y2="${y}" stroke="#eceff4"/>
+          <text x="${P.l - 8}" y="${y + 4}" text-anchor="end" font-size="10" fill="#8b93a3" font-family="ui-monospace,monospace">${r1(v)}</text>`;
+  }
+  rows.forEach((r, i) => {
+    g += `<text x="${px(i)}" y="${H - P.b + 15}" text-anchor="middle" font-size="10" fill="#8b93a3" font-family="ui-monospace,monospace">${mmdd(r.ts)}</text>`;
+  });
+  series.forEach(s => {
+    const pts = rows.map((r, i) => `${px(i)},${py(r[s.key])}`).join(' ');
+    g += `<polyline points="${pts}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round"/>`;
+    rows.forEach((r, i) => {
+      g += `<circle cx="${px(i)}" cy="${py(r[s.key])}" r="3.2" fill="#fff" stroke="${s.color}" stroke-width="2"><title>${mmdd(r.ts)} ${s.label} ${r[s.key]} mm</title></circle>`;
+      if (S.hist.overlay && i === rows.length - 1)
+        g += `<text x="${px(i) + 6}" y="${py(r[s.key]) + 4}" font-size="10.5" fill="${s.color}" font-family="ui-monospace,monospace">${r[s.key]}</text>`;
+    });
+  });
+  g += `<rect id="chartHit" x="${P.l}" y="${P.t}" width="${W - P.l - P.r}" height="${H - P.t - P.b}" fill="transparent" data-ignore="1"/>`;
+  g += '</svg>';
+  S.chartGeom = { rows, px, py, series, P, W, H };
+  return g;
+}
+
+function setupChartHover() {
+  const tip = $('#chartTip');
+  const hit = $('#chartHit');
+  if (!hit) return;
+  const geom = S.chartGeom;
+  hit.addEventListener('mousemove', e => {
+    const svg = hit.ownerSVGElement, r = svg.getBoundingClientRect();
+    const x = (e.clientX - r.left) * geom.W / r.width;
+    let best = 0, bd = 1e9;
+    geom.rows.forEach((_, i) => { const d = Math.abs(geom.px(i) - x); if (d < bd) { bd = d; best = i; } });
+    const row = geom.rows[best];
+    tip.innerHTML = `${row.ts.slice(5, 10)} ${row.ts.slice(11, 16)}<br>` +
+      geom.series.map(s => `${s.label} ${row[s.key]} mm`).join('<br>') +
+      `<br><span style="color:#9aa1ac">n=${row.n} p10 ${row.p10_len} / p90 ${row.p90_len}</span>`;
+    tip.style.left = (r.left + geom.px(best) * r.width / geom.W) + 'px';
+    tip.style.top = (r.top + geom.P.t * r.height / geom.H) + 'px';
+    tip.style.opacity = 1;
+  });
+  hit.addEventListener('mouseleave', () => { tip.style.opacity = 0; });
+}
+
+/* ---------- 右栏 ---------- */
+function renderOps() {
+  const ops = $('#colOps');
+  if (S.mode === 'realtime') {
+    const st = S.selected ? STN[S.selected] : null;
+    const manual = S.state === 'MANUAL';
+    const dis = manual ? '' : 'disabled';   // 细粒度可用性由 refreshControls() 统一刷新
+    ops.innerHTML = `
+    <div class="ops">
+      <button class="estop" data-action="estop" ${S.state === 'SCHEDULED' ? 'disabled' : ''}>急 停</button>
+      ${S.state === 'FAULT' ? `<div class="banner danger"><div><b>已急停</b><br>运动已中止。请点「复位」后重新回零，再继续操作。</div></div>
+        <button class="btn warn" data-action="reset">复位（解除急停）</button>` : ''}
+      ${S.state === 'YIELDING' ? `<div class="banner warn"><div><b>正在请求让位…</b><br>等待巡检守护在站间空程停下（最长 30s，超时提示重试）。</div></div>` : ''}
+      ${manual ? `<div class="banner ok"><div><b>已持有导轨（${mock.session ? mock.session.id : '—'}）</b><br>会话剩余 <span class="mono" id="sessLeft">${sessLeftText()}</span>，命令自动续期；到期或断线自动退回待机。</div>
+        <button class="btn sm" data-action="exit" style="flex:0 0 auto">退出</button></div>` : ''}
+      ${!manual && S.state !== 'YIELDING' && S.state !== 'FAULT' ? `<div class="banner warn"><div><b>待机（SCHEDULED）</b><br>导轨由巡检守护占用。点顶栏「实时模式」申请让位后才能手动控制。</div></div>` : ''}
+
+      <div class="sect"><h4>目标定位</h4><div class="body">
+        <div class="row2">
+          <div class="field"><label>Y（mm）</label><input id="inY" type="number" step="0.5" value="${st ? st.y : r1(mock.pos.y)}"></div>
+          <div class="field"><label>Z（mm）</label><input id="inZ" type="number" step="0.5" value="${st ? st.z : r1(mock.pos.z)}"></div>
+        </div>
+        <div class="err" id="envErr"></div>
+        <div class="note">软限位 = 机械行程：Y ${ENVELOPE.y[0]}–${ENVELOPE.y[1]} · Z ${ENVELOPE.z[0]}–${ENVELOPE.z[1]} mm</div>
+        <div class="row2">
+          <button class="btn primary" data-action="goto" ${dis}>移动到该点</button>
+          <button class="btn" data-action="home" ${dis}>双轴回零</button>
+        </div>
+      </div></div>
+
+      <div class="sect"><h4>点动 · 步长 mm</h4><div class="body">
+        <div class="chips" data-group="jogstep">
+          ${[0.5, 1, 5, 10].map(v => `<button data-action="jogstep" data-v="${v}" aria-pressed="${S.jogStep === v}">${v}</button>`).join('')}
+        </div>
+        <div class="joggrid">
+          <span></span>
+          <button data-action="jog" data-axis="Z" data-dir="1" ${dis} title="Z+ 向上">${arrow('up')}</button>
+          <span></span>
+          <button data-action="jog" data-axis="Y" data-dir="-1" ${dis} title="Y- 向左">${arrow('left')}</button>
+          <div class="hub">${S.jogStep}<br>mm</div>
+          <button data-action="jog" data-axis="Y" data-dir="1" ${dis} title="Y+ 向右">${arrow('right')}</button>
+          <span></span>
+          <button data-action="jog" data-axis="Z" data-dir="-1" ${dis} title="Z- 向下">${arrow('down')}</button>
+          <span></span>
+        </div>
+        <div class="note">点动 ${MOTION.Y.jog_speed} / ${MOTION.Z.jog_speed} mm/s（Y / Z，motion_profile 单源，界面不可改）。回零后必须重新对刀。</div>
+      </div></div>
+
+      <div class="sect"><h4>单轴绝对定位</h4><div class="body">
+        <div class="row2">
+          <div class="field"><label>轴</label>
+            <div class="chips" data-group="axis">
+              <button data-action="axis" data-v="Y" aria-pressed="${S.axis === 'Y'}">Y</button>
+              <button data-action="axis" data-v="Z" aria-pressed="${S.axis !== 'Y'}">Z</button>
+            </div>
+          </div>
+          <div class="field"><label>目标（mm）</label><input id="inAbs" type="number" step="0.5" value="${r1(mock.pos[S.axis.toLowerCase()])}"></div>
+        </div>
+        <button class="btn" data-action="abs" ${dis}>定位</button>
+      </div></div>
+
+      <div class="sect"><h4>补光与快门</h4><div class="body">
+        <div class="toggle"><span>OUT0 补光灯</span>
+          <button class="switch" data-action="lamp" aria-pressed="${S.lamp}" ${dis}><i></i></button></div>
+        <div class="note">灯窗 = 曝光窗口：亮 → 稳定 150 ms → 抓帧 → 灭（M1 由采图返回决定关灯）。</div>
+        <button class="btn primary" data-action="capture" ${dis}>抓拍当前站位</button>
+        <div class="note" id="capHint">${S.selected ? `目标站位 ${S.selected}（会先移动到位）` : '先在左栏选一个站位'}</div>
+      </div></div>
+
+      <div class="sect"><h4>运动参数（只读）</h4><div class="body">
+        <div class="kv"><span class="k">Y 目标 / 回零</span><span class="v">${MOTION.Y.travel_speed} / ${MOTION.Y.home_speed} mm/s</span></div>
+        <div class="kv"><span class="k">Z 目标 / 回零</span><span class="v">${MOTION.Z.travel_speed} / ${MOTION.Z.home_speed} mm/s</span></div>
+        <div class="note">源自 motion_profile，M1/M2 单源（ADR-0002），页面不提供修改入口。</div>
+      </div></div>
+    </div>`;
+    bindEnvValidation();
+  } else {
+    const rounds = ROUNDS.slice().reverse();
+    ops.innerHTML = `
+    <div class="ops">
+      <div class="sect"><h4>筛选</h4><div class="body">
+        <div class="row2">
+          <div class="field"><label>起始日期</label><input type="date" id="df" value="${S.hist.date_from}"></div>
+          <div class="field"><label>结束日期</label><input type="date" id="dt" value="${S.hist.date_to}"></div>
+        </div>
+        <div class="field"><label>角度档</label>
+          <div class="chips" data-group="angle">
+            ${[['all', '全部'], ...ANGLES.map(a => [a, ANGLE_LABEL[a]])].map(([v, t]) =>
+              `<button data-action="angle" data-v="${v}" aria-pressed="${S.hist.angle === v}">${t}</button>`).join('')}
+          </div></div>
+        <div class="field"><label>轮次（rounds）</label>
+          <div class="chips" data-group="round">
+            <button data-action="round" data-v="" aria-pressed="${!S.hist.round}">全部</button>
+            ${rounds.map(r => `<button data-action="round" data-v="${r}" aria-pressed="${S.hist.round === r}">${mmdd(r)}</button>`).join('')}
+          </div></div>
+        <div class="toggle"><span>叠加测量数值</span>
+          <button class="switch" data-action="overlay" aria-pressed="${S.hist.overlay}"><i></i></button></div>
+      </div></div>
+
+      <div class="sect"><h4>本站位</h4><div class="body">
+        ${S.selected ? `<div class="kv"><span class="k">站位</span><span class="v">${S.selected} · ${STN[S.selected].box_id}</span></div>
+        <div class="kv"><span class="k">角度档</span><span class="v">${ANGLE_LABEL[STN[S.selected].angle_profile]}</span></div>
+        <div class="kv"><span class="k">坐标</span><span class="v">${r1(STN[S.selected].y)} / ${r1(STN[S.selected].z)}</span></div>
+        <div class="kv"><span class="k">本次筛选</span><span class="v">${S.images.length} 帧（成功 ${S.images.filter(i => i.ok).length}）</span></div>
+        <div class="kv"><span class="k">相机</span><span class="v">${STN[S.selected].camera_ip}</span></div>
+        <div class="note">曝光：手动锁定（标定时固定）</div>`
+        : `<div class="note">未选择站位。</div>`}
+      </div></div>
+
+      <div class="sect"><h4>视图</h4><div class="body">
+        <div class="chips">
+          <button data-action="fit">适应</button>
+          <button data-action="zoom" data-v="2">2×</button>
+          <button data-action="zoom" data-v="4">4×</button>
+        </div>
+        <div class="note">图像经 console 转发（ADR-0003/0006）；缩略图由 console 生成并缓存。来源标签区分「本地待同步」与「prod」。</div>
+      </div></div>
+    </div>`;
+  }
+}
+S.axis = 'Y';
+function sessLeftText() {
+  if (!mock.session) return '—';
+  const s = Math.max(0, mock.session.expires_in_s);
+  return Math.floor(s / 60) + ':' + pad2(s % 60);
+}
+function arrow(dir) {
+  const p = {
+    up: 'M12 5l7 8H5z', down: 'M12 19l-7-8h14z', left: 'M5 12l8-7v14z', right: 'M19 12l-8 7V5z',
+  }[dir];
+  return `<svg width="20" height="20" viewBox="0 0 24 24"><path d="${p}" fill="#3d4552"/></svg>`;
+}
+
+/* ---------- 日志 ---------- */
+function renderLog() {
+  const list = $('#logList');
+  const rows = mock.events.slice(0, 60);
+  list.innerHTML = rows.map(e => {
+    const cls = e.level === 'info' ? 'ok' : e.level;
+    const t = e.ts ? e.ts.slice(11, 19) : '--:--:--';
+    return `<div class="l ${cls}"><span class="t">${t}</span><span class="m">${esc(e.text)}</span></div>`;
+  }).join('') || `<div class="l"><span class="t">--:--:--</span><span class="m">（暂无事件）</span></div>`;
+}
+function logLocal(level, text) { mock.log(level, text); }
+
+/* =========================================================================
+   6. 动作
+   ========================================================================= */
+async function toast(text, level = '') {
+  const el = document.createElement('div');
+  el.className = 'toast ' + level;
+  el.textContent = text;
+  $('#toastRoot').appendChild(el);
+  await say(2600); el.style.opacity = 0; el.style.transition = 'opacity .3s';
+  setTimeout(() => el.remove(), 320);
+}
+function confirmDialog({ title, body, confirm = '确认', danger = false }) {
+  return new Promise(resolve => {
+    const root = $('#modalRoot');
+    $('#modalBox').innerHTML = `
+      <h3>${title}</h3><p>${body}</p>
+      <div class="acts">
+        <button class="btn" data-action="modal-cancel">取消</button>
+        <button class="btn ${danger ? 'estop' : 'primary'}" style="min-height:44px;font-size:13px" data-action="modal-ok">${confirm}</button>
+      </div>`;
+    root.classList.add('open');
+    root.dataset.resolve = '1';
+    const done = v => { root.classList.remove('open'); root.removeEventListener('click', h); resolve(v); };
+    const h = e => {
+      const b = e.target.closest('[data-action]');
+      if (!b) return;
+      if (b.dataset.action === 'modal-ok') done(true);
+      if (b.dataset.action === 'modal-cancel') done(false);
+    };
+    root.addEventListener('click', h);
+  });
+}
+function envBad() {
+  const y = $('#inY'), z = $('#inZ');
+  if (!y || !z) return false;
+  return Number(y.value) < ENVELOPE.y[0] || Number(y.value) > ENVELOPE.y[1]
+    || Number(z.value) < ENVELOPE.z[0] || Number(z.value) > ENVELOPE.z[1];
+}
+/* 统一刷新控制按钮的可用性：仅 MANUAL 且无作业在跑时可下发 */
+function refreshControls() {
+  const allowed = mock.state === 'MANUAL' && !mock.job;
+  $$('#colOps [data-action="goto"],#colOps [data-action="home"],#colOps [data-action="abs"],' +
+    '#colOps [data-action="jog"],#colOps [data-action="lamp"],#colOps [data-action="capture"]')
+    .forEach(b => { b.disabled = !allowed; });
+  const g = $('#colOps [data-action="goto"]');
+  if (g && envBad()) g.disabled = true;
+  const es = $('#colOps [data-action="estop"]');
+  if (es) es.disabled = mock.state === 'SCHEDULED';
+}
+function bindEnvValidation() {
+  const y = $('#inY'), z = $('#inZ');
+  if (!y || !z) return;
+  const check = () => {
+    const by = Number(y.value) < ENVELOPE.y[0] || Number(y.value) > ENVELOPE.y[1];
+    const bz = Number(z.value) < ENVELOPE.z[0] || Number(z.value) > ENVELOPE.z[1];
+    y.classList.toggle('bad', by); z.classList.toggle('bad', bz);
+    $('#envErr').textContent = (by || bz) ? '目标超出软限位，已在浏览器侧拦下（不下发控制器）' : '';
+    refreshControls();
+  };
+  y.addEventListener('input', check); z.addEventListener('input', check);
+  refreshControls();
+}
+
+document.addEventListener('click', async e => {
+  const b = e.target.closest('[data-action]');
+  if (!b || b.id === 'chartHit') return;
+  const a = b.dataset.action;
+
+  if (a === 'mode') { await switchMode(b.dataset.mode); return; }
+  if (a === 'station') { await selectStation(b.dataset.id); return; }
+  if (a === 'log-clear') { mock.events = []; renderLog(); return; }
+  if (a === 'modal-cancel' || a === 'modal-ok') return;
+
+  if (a === 'jogstep') { S.jogStep = Number(b.dataset.v); renderOps(); return; }
+  if (a === 'axis') { S.axis = b.dataset.v; renderOps(); return; }
+  if (a === 'angle') { S.hist.angle = b.dataset.v; renderOps(); await loadHistory(); return; }
+  if (a === 'round') { S.hist.round = b.dataset.v; renderOps(); await loadHistory(); return; }
+  if (a === 'overlay') { S.hist.overlay = !S.hist.overlay; renderOps(); renderHistory(); return; }
+  if (a === 'zoom') { S.zoom = Number(b.dataset.v); S.pan = { x: 0, y: 0 }; renderHistory(); return; }
+  if (a === 'fit') { S.zoom = 1; S.pan = { x: 0, y: 0 }; renderHistory(); return; }
+  if (a === 'pick') { S.viewIdx = S.images.findIndex(r => r.ts === b.dataset.ts); renderHistory(); return; }
+  if (a === 'viewer-toggle') {
+    if (S.suppressClick && S.suppressClick()) return;      // 刚才是拖拽平移，不当作缩放点击
+    S.zoom = S.zoom === 1 ? 2 : 1; S.pan = { x: 0, y: 0 };
+    (S.mode === 'realtime' ? renderRealtime : renderHistory)(); return;
+  }
+
+  if (a === 'estop') { await doStop(); return; }
+  if (a === 'exit') { await closeSession(); return; }
+  if (a === 'reset') { S.state = 'SCHEDULED'; mock.state = 'SCHEDULED'; mock.run_mode = 'M1'; logLocal('warn', '急停已复位：请重新进入实时模式并回零'); render(); return; }
+  if (a === 'home') {
+    if (!await confirmDialog({ title: '双轴回零', body: '回零会以 Y 150 / Z 50 mm/s 撞向限位（Y 反向到左端、Z 向上到顶端）并脱落 5 mm。请确认导轨行程内无人。', confirm: '开始回零' })) return;
+    await api.home(); return;
+  }
+  if (a === 'goto') {
+    const y = Number($('#inY').value), z = Number($('#inZ').value);
+    if (!await confirmDialog({ title: '移动到目标点', body: `目标 Y ${y} / Z ${z} mm，当前 Y ${r1(mock.pos.y)} / Z ${r1(mock.pos.z)}，直线距离 ${r1(Math.hypot(y - mock.pos.y, z - mock.pos.z))} mm。<br>合成速度按各轴上限折算（Y ${MOTION.Y.travel_speed} / Z ${MOTION.Z.travel_speed} mm/s），末段 5mm 降速接近。`, confirm: '下发运动' })) return;
+    const r = await api.goto(y, z); if (!r.ok) return apiFail(r); return;
+  }
+  if (a === 'abs') {
+    const r = await api.abs(S.axis, Number($('#inAbs').value)); if (!r.ok) return apiFail(r); return;
+  }
+  if (a === 'jog') {
+    const r = await api.jog(b.dataset.axis, Number(b.dataset.dir) * S.jogStep); if (!r.ok) return apiFail(r); return;
+  }
+  if (a === 'lamp') { await api.lamp(!S.lamp); renderOps(); renderTop(); return; }
+  if (a === 'capture') {
+    if (!S.selected) { toast('请先在左栏选择站位', 'warn'); return; }
+    const r = await api.capture(S.selected); if (!r.ok) return apiFail(r); return;
+  }
+});
+
+function apiFail(r) {
+  const msg = r.error === 'no_session' ? '请先进入实时模式（需向巡检守护申请让位）'
+    : r.error === 'out_of_envelope' ? r.detail
+      : r.error === 'busy' ? '上一动作尚未完成' : (r.detail || r.error);
+  logLocal('err', `命令被拒（${r.code} ${r.error}）：${msg}`);
+  toast(msg, 'err');
+}
+
+async function doStop() {
+  await api.stop();
+  render();
+  toast('急停已下发（Stop_Run）', 'err');
+}
+
+async function switchMode(mode) {
+  if (S.mode === mode) {
+    // 已在实时模式但未持有导轨（初始即为实时模式）：再点一次视为申请会话
+    if (mode === 'realtime' && mock.state === 'SCHEDULED') await openSession();
+    return;
+  }
+  if (mode === 'history') {
+    if (S.state === 'MANUAL') { toast('实时模式会话保持中，可随时切回', 'warn'); }
+    S.mode = 'history';
+    await loadHistory();
+    render(); return;
+  }
+  S.mode = 'realtime'; render();
+  if (S.state === 'MANUAL' || S.state === 'YIELDING') return;
+  await openSession();
+}
+
+async function openSession() {
+  if (mock.state === 'FAULT') {
+    logLocal('err', '处于急停状态：请先点「复位」，再重新进入实时模式');
+    toast('请先复位急停', 'err'); return;
+  }
+  let attempt = 0;
+  while (attempt++ < 8) {
+    const r = await api.session_open();
+    if (r.ok) { render(); toast('已进入实时模式：导轨已由你持有', 'ok'); return; }
+    if (r.error === 'round_in_progress') {
+      logLocal('warn', `让位被拒（409 round_in_progress）：巡检正处于采图窗口，${r.retry_after_s}s 后重试（第 ${attempt} 次）`);
+      toast(`巡检轮次采图中，${r.retry_after_s}s 后重试让位（${attempt}/8）`, 'warn');
+      render();
+      await say(r.retry_after_s * 1000);
+      continue;
+    }
+    apiFail(r); return;
+  }
+  logLocal('err', '让位等待超时（30s）：巡检仍在采图，请稍后再试');
+  toast('让位超时，请稍后再试', 'err');
+  S.state = 'SCHEDULED'; mock.state = 'SCHEDULED'; render();
+}
+
+async function closeSession() {
+  await api.session_close();
+  S.state = 'SCHEDULED'; S.zoom = 1; S.pan = { x: 0, y: 0 };
+  render(); toast('已回零并交还导轨，巡检可恢复', 'ok');
+}
+
+async function selectStation(id) {
+  S.selected = id; S.zoom = 1; S.pan = { x: 0, y: 0 };
+  S.target = { y: STN[id].y, z: STN[id].z };
+  if (S.mode === 'history') { await loadHistory(); }
+  else {
+    const st = STN[id];
+    const y = $('#inY'), z = $('#inZ');
+    if (y) { y.value = st.y; z.value = st.z; }
+    logLocal('info', `选中站位 ${id}（${st.box_id} · ${ANGLE_LABEL[st.angle_profile]} · Y ${st.y} / Z ${st.z}）`);
+  }
+  render();
+}
+
+async function loadHistory() {
+  if (!S.selected) { S.images = []; S.measurements = []; return; }
+  S.images = await api.images({
+    station_id: S.selected, angle: S.hist.angle,
+    date_from: S.hist.date_from, date_to: S.hist.date_to, round_ts: S.hist.round,
+  });
+  S.viewIdx = Math.min(S.viewIdx, Math.max(S.images.length - 1, 0));
+  S.measurements = await api.measurements({ box_id: STN[S.selected].box_id });
+}
+
+/* 200ms 心跳：会话倒计时 + 运动插值 + 作业收尾 */
+function tick() {
+  const dt = 200;
+  const m = mock;
+  if (m.state === 'MANUAL' && m.session) {
+    m.tickAcc = (m.tickAcc || 0) + dt / 1000;
+    if (m.tickAcc >= 1) {
+      m.tickAcc = 0;
+      m.session.expires_in_s -= 1;
+      const el = $('#sessLeft');
+      if (el) el.textContent = Math.floor(m.session.expires_in_s / 60) + ':' + pad2(m.session.expires_in_s % 60);
+      if (m.session.expires_in_s <= 0) {
+        logLocal('warn', '会话超时（300s 无操作）：自动退回 SCHEDULED');
+        S.state = 'SCHEDULED'; m.state = 'SCHEDULED'; m.session = null; m.run_mode = 'M1';
+        render(); toast('会话超时，已退回待机', 'warn');
+      }
+    }
+    // 任何轮询刷新都算续期（真实实现里由命令续期）
+  }
+  if (m.job && m.job.state === 'running') {
+    const j = m.job;
+    j.elapsed_ms += dt;
+    const p = Math.min(1, j.elapsed_ms / j.duration);
+    j.progress = p;
+    const e = 1 - Math.pow(1 - p, 2.2);   // ease-out
+    if (j.target) {
+      m.pos.y = j.from.y + (j.target[0] - j.from.y) * e;
+      m.pos.z = j.from.z + (j.target[1] - j.from.z) * e;
+    }
+    updateLive();
+    if (p >= 1) {
+      if (j.kind === 'capture') { finishCapture(j); }
+      else {
+        logLocal('info', `${j.kind} 完成：Y ${r1(m.pos.y)} / Z ${r1(m.pos.z)} mm（${(j.elapsed_ms / 1000).toFixed(1)}s）`);
+        m.job = null; updateLive(true);
+      }
+    }
+  }
+}
+
+function updateLive() {
+  const j = mock.job;
+  const pr = $('#posRead'), tb = $('#jobBar'), jr = $('#jobRead'), dr = $('#distRead');
+  if (pr) pr.innerHTML = `${r1(mock.pos.y)} / ${r1(mock.pos.z)} <small>mm</small>`;
+  if (tb) tb.style.width = j ? (j.progress * 100).toFixed(0) + '%' : '0%';
+  if (jr) jr.textContent = j ? ({ goto: '双轴插补中', jog: '点动中', abs: '定位中', home: '回零中', capture: '采图中' }[j.kind]) : (S.state === 'FAULT' ? '已急停' : '空闲');
+  if (dr && S.target) dr.innerHTML = `${r1(Math.hypot(S.target.y - mock.pos.y, S.target.z - mock.pos.z))} <small>mm</small>`;
+  const st = S.selected ? STN[S.selected] : null;
+  const tr = $('#tgtRead');
+  if (tr && st) tr.innerHTML = `${st.id} → ${r1(st.y)} / ${r1(st.z)} <small>mm</small>`;
+  updateMapLive();
+  refreshControls();
+}
+
+/* 采图完成：写索引 + 更新界面（ADR-0005） */
+function finishCapture(j) {
+  const sid = j.extra.station_id || S.selected;
+  const st = STN[sid];
+  const iso = nowIso();
+  const rec = {
+    ts: iso, box_id: st.box_id, station_id: sid, angle_profile: st.angle_profile,
+    object_name: `${iso.slice(0, 10).replace(/-/g, '')}/${st.box_id}_${sid}_${st.angle_profile}_${hhmmss(iso)}`,
+    round_ts: null, ok: true, error: null, source: 'local',
+  };
+  IMAGES.push(rec);
+  S.lastCapture = rec;
+  mock.job = null;
+  const s = S.stations.find(x => x.id === sid);
+  if (s) { s.last_capture_ts = iso; s.image_count += 1; }
+  logLocal('info', `采图成功 ${sid} → ${rec.object_name}.jpg（索引已落库，round_ts=NULL，待 outbox 同步）`);
+  mock.log('info', '灯窗 OUT0 已关闭（由采图返回决定）');
+  if (S.zoom !== 1) { S.zoom = 1; S.pan = { x: 0, y: 0 }; }
+  render();
+  toast(`已抓拍 ${sid}：${rec.ts.slice(11, 19)}`, 'ok');
+}
+
+/* =========================================================================
+   7. 初始化
+   ========================================================================= */
+(async function init() {
+  mock.log('info', 'console 启动：静态页面 + 控制/查询 API；浏览器只与本 origin 通信（ADR-0003）');
+  mock.log('info', '图像索引查询合并「patrol 本地 outbox」与「prod 已同步」两处来源（ADR-0006）');
+  S.stations = await api.stations();
+  // 深链：?mode=history&station=S105（便于分享与排障）
+  const qs = new URLSearchParams(location.search);
+  if (qs.get('mode') === 'history') S.mode = 'history';
+  S.selected = STN[qs.get('station')] ? qs.get('station') : 'S101';
+  S.target = { y: STN[S.selected].y, z: STN[S.selected].z };
+  mock.pos = { y: STN[S.selected].y, z: STN[S.selected].z };
+  await loadHistory();
+  render();
+  // 拖拽平移（放大后）；位移超过 3px 视为拖拽，抑制随后的 click 缩放
+  let drag = null, suppressClick = false;
+  document.addEventListener('pointerdown', e => {
+    const v = e.target.closest('#viewer');
+    if (!v || S.zoom <= 1) return;
+    drag = { x: e.clientX, y: e.clientY, px: S.pan.x, py: S.pan.y, moved: false };
+    v.classList.add('grabbing');
+  });
+  document.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    S.pan = { x: drag.px + dx, y: drag.py + dy };
+    const img = $('#viewerImg');
+    if (img) img.style.transform = `translate(${S.pan.x}px,${S.pan.y}px) scale(${S.zoom})`;
+  });
+  document.addEventListener('pointerup', () => {
+    if (drag && drag.moved) { suppressClick = true; setTimeout(() => (suppressClick = false), 0); }
+    drag = null; const v = $('#viewer'); if (v) v.classList.remove('grabbing');
+  });
+  document.addEventListener('wheel', e => {
+    const v = e.target.closest('#viewer');
+    if (!v) return;
+    e.preventDefault();
+    S.zoom = e.deltaY < 0 ? Math.min(4, S.zoom * 2) : Math.max(1, S.zoom / 2);
+    if (S.zoom === 1) S.pan = { x: 0, y: 0 };
+    (S.mode === 'realtime' ? renderRealtime : renderHistory)();
+  }, { passive: false });
+  $('#patrolToggle').addEventListener('change', e => {
+    mock.patrol.active = e.target.checked;
+    if (mock.patrol.active) {
+      mock.yieldRetried = false;
+      logLocal('warn', '巡检守护已启动：正在执行本轮（IN0/OUT0 握手就绪）');
+      if (S.state !== 'MANUAL') { S.state = 'SCHEDULED'; mock.state = 'SCHEDULED'; }
+    } else {
+      logLocal('info', '巡检守护已停止（M1 空闲待机）');
+    }
+    render();
+  });
+  S.suppressClick = () => suppressClick;
+  setInterval(tick, 200);
+  logLocal('info', `货架布局：横向 ${GRID.cols} 框 × 竖向 ${GRID.layers} 层 = ${S.stations.length} 个站位（每框 1 档，层内蛇形遍历，换层空程 0）`);
+  logLocal('info', `软限位 = 机械行程：Y ${ENVELOPE.y[0]}–${ENVELOPE.y[1]} · Z ${ENVELOPE.z[0]}–${ENVELOPE.z[1]} mm（原点 = Y 反向回零 / Z 向上回零的落点）`);
+  S.ready = true;
+  render();
+})();
+</script>
+</body>
+</html>

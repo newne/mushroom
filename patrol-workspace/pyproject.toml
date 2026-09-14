@@ -1,0 +1,37 @@
+[project]
+name = "mushroom-patrol-workspace"
+version = "0.1.0"
+description = "巡检工程（原 mushrooms 仓库）的聚合项目：patrol / deploy / measure / analysis"
+requires-python = ">=3.12"
+dependencies = ["patrol", "measure", "analysis", "deploy"]
+
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+# 为什么是两个项目而不是一个 workspace（ADR-0012 修订）：把我们的包并进根项目，
+# uv 会重算他们那份锁——实测一次 `uv lock` 动了 **84 个包**（fastapi 0.133→0.136、
+# transformers 5.2→5.9、redis 7.2→8.0…），而那是要进生产镜像的依赖集。
+# 拆成两个互不干扰的项目后，根目录的 `pyproject.toml` 与 `uv.lock` **一个字节都不变**，
+# 巡检这边的依赖也独立演进（两个镜像本来就该各带各的锁）。
+[tool.uv.workspace]
+members = ["../patrol", "../deploy", "../measure", "../analysis"]
+
+[tool.uv.sources]
+patrol = { workspace = true }
+measure = { workspace = true }
+analysis = { workspace = true }
+deploy = { workspace = true }
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# legacy 冻结归档、capture 为 vendored 原样组件、.scratch 为设计草稿区，均不参与 lint
+# （路径相对本目录，包体在上一级）
+extend-exclude = ["../legacy", "../capture", "../.scratch"]
+
+[tool.ruff.lint]
+# DTZ：全链路约定使用库房当地时间（naive datetime），不做时区混用
+ignore = ["DTZ"]
+
+[tool.pytest.ini_options]
+testpaths = ["../patrol/tests", "../deploy/tests", "../measure/tests", "../analysis/tests"]

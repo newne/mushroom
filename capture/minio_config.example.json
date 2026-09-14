@@ -1,0 +1,9 @@
+{
+  "MINIO_ROOT_USER": "admin",
+  "MINIO_ROOT_PASSWORD": "4sxuE7m5dxhoSsq3",
+  "AWS_ACCESS_KEY_ID": "admin",
+  "AWS_SECRET_ACCESS_KEY": "4sxuE7m5dxhoSsq3",
+  "MLFLOW_S3_ENDPOINT_URL": "http://192.168.1.250:9000",
+  "MLFLOW_DEFAULT_ARTIFACT_ROOT": "s3://mogu",
+  "MINIO_BUCKET_NAME": "mogu"
+}

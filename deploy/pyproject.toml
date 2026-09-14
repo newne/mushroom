@@ -1,0 +1,20 @@
+[project]
+name = "deploy"
+version = "0.1.0"
+description = "库房主机部署侧胶水：M1 装配入口 + 真实 HTTP 传输（patrol 包保持零网络调用）"
+requires-python = ">=3.11"
+dependencies = [
+    "patrol",
+    "httpx>=0.27",
+]
+
+[tool.uv.sources]
+patrol = { workspace = true }
+
+[project.scripts]
+patrol-m1 = "deploy.m1:main"
+deploy-fetch-room = "deploy.fetch_room:main"
+deploy-flush-outbox = "deploy.flush_outbox:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/deploy"]

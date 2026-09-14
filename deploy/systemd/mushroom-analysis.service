@@ -1,0 +1,21 @@
+[Unit]
+Description=蘑菇房 prod 接收 API（图像索引 / 测量 / 轮次入库）
+Documentation=file:/opt/mushroom-patrol/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/mushroom-analysis
+# ⇧ 决定 SQLite 落点：create_app 的默认 db_path="mushrooms.db" 是**相对路径**，
+#   所以库文件就是 /opt/mushroom-analysis/mushrooms.db。换位置就换 WorkingDirectory。
+Environment=PYTHONPATH=/opt/mushroom-analysis/src
+# 单 worker 是硬约束，不是性能选择：create_app 在工厂里建一个 SQLite 连接，
+# 多 worker 会各自持有一份连接与世界，写入互相看不见（见 analysis/api.py 顶部注释）。
+ExecStart=/opt/mushroom-analysis/.venv/bin/uvicorn analysis.api:create_app \
+    --factory --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,28 @@
+[Unit]
+Description=XCloud Screenshot Capture Service (Python)
+After=network.target
+
+[Service]
+Type=simple
+User=sysadmin
+Group=sysadmin
+
+# 建议把整个 Mushroom_CLI 发布到该目录，并把 lib/ 与配置文件放在 WorkingDirectory 下
+WorkingDirectory=/home/sysadmin/algorithm/xcloudsdk_py
+
+# 让 libXCloudSDK.so 的依赖库可被找到（按你的发布目录调整）
+Environment="LD_LIBRARY_PATH=/home/sysadmin/algorithm/xcloudsdk_py/lib/x86_64/Release"
+
+# 无头环境运行：提供虚拟显示
+ExecStart=/usr/bin/xvfb-run -a --server-args="-screen 0 1920x1080x24" /usr/bin/python3 -m xcloudsdk_py --http 27003 --lib ./lib/x86_64/Release/libXCloudSDK.so
+
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

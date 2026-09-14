@@ -157,3 +157,28 @@ build_info.json
 
 # MLflow docker data
 docker/mlflow_data/
+
+# ---------- 巡检工程带来的忽略规则（原 mushrooms 仓库；合并见 ADR-0012） ----------
+# 本地状态与工具目录
+.mimosa/
+.workbuddy/
+.scratch/_ref/
+# 本地 SQLite（analysis 的接收库、试跑产物）
+*.db
+# pytest 临时目录
+.ptmp-*
+# 现场部署的构建产物（离线 wheel 与源码包，可重新生成；脚本与实测取证保留）
+.scratch/prod-deploy/wheels/
+.scratch/prod-deploy/*.tgz
+.scratch/prod-deploy/_m1dist/
+.scratch/prod-deploy/__pycache__/
+# 打包暂存目录（每次 tar 前现生成；已误入库过 _analysis/_m1src）
+.scratch/prod-deploy/_*/
+# 一次性现场探针脚本（_ 前缀；结论已落 gap-list）
+.scratch/prod-deploy/_*.py
+# 现场帧的分析产物与单帧派生图（可重新抓取）
+.scratch/prod-deploy/look/
+.scratch/prod-deploy/captures/_*
+.scratch/prod-deploy/captures/realtime_*
+# 远程执行包装（含主机密钥/口令用法，属本机工具产物）
+.scratch/prod-deploy/_*_exec.ps1

@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+.DS_Store
+.idea/
+dist/
+dist.bak/
+
+# runtime files
+saved_datas/
+log/
+performance.log
+performance_report.txt
+
+# local configs (may contain secrets)
+XCloudSDKTest_config.ini
+minio_config.json
+
+# vendor runtime assets (usually proprietary)
+lib/
+Device/

@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+
+# runtime outputs
+saved_datas/
+log/
+
+# local SDK libs should be mounted at runtime
+lib/
+
+# configs may contain secrets; always mount at runtime
+XCloudSDKTest_config.ini
+minio_config.json
+
+# vendor runtime assets should be mounted at runtime
+Device/
+
+dist.bak/
