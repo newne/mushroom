@@ -30,7 +30,8 @@ uv lock                     # 只在巡检依赖变化时；不要碰根目录�
 | `../deploy/` | 部署胶水：真实 HTTP transport、`patrol-m1` 入口、systemd 单元、`deploy-fetch-room`、`deploy-flush-outbox` |
 | `../measure/` | 图像 → 测量（numpy；含亮区质心微调依据） |
 | `../analysis/` | prod 侧接收 API 与分析（FastAPI + SQLite） |
-| `../docs/adr/` | 架构决策（0001–0013） |
+| `../web/console/` | 巡检台**前端**（纯静态页 + 同源 nginx 配置，ADR-0015）。不属于本 uv 项目，不参与 `uv sync` |
+| `../docs/adr/` | 架构决策（0001–0015） |
 | `../CONTEXT.md` | 领域词汇表（术语以它为准） |
 | `../docs/patrol/` | 设计草稿与现场记录：`console-ui/`（巡检台规格与原型）、`prod-deploy/gap-list.md`（现场欠账清单） |
 

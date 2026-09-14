@@ -29,7 +29,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from patrol.room import RoomStateError, load_room_state
 from patrol.stations import GRID_ANGLES, grid_geometry, load_stations
 from patrol.store import JsonlStore
@@ -314,9 +314,6 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
     deps = deps if deps is not None else deps_from_env()
     console = Console(deps)
     app = FastAPI(title="mushroom-patrol-console")
-    # 静态页：默认取包内 static/；容器里由 PATROL_STATIC 指到 /app/static
-    # （显式拷进去，不依赖 wheel 打包是否带上非 .py 文件）
-    static_dir = Path(os.environ.get("PATROL_STATIC", str(Path(__file__).parent / "static")))
 
     @app.get("/healthz")
     def healthz() -> dict:
@@ -341,13 +338,6 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
     @app.get("/api/images")
     def api_images(station_id: str = "", limit: int = Query(200, ge=1, le=2000)) -> dict:
         return console.images(station_id=station_id or None, limit=limit)
-
-    @app.get("/", response_class=HTMLResponse)
-    def index() -> str:
-        page = static_dir / "index.html"
-        if not page.exists():
-            return "<h1>console 静态页缺失</h1>"
-        return page.read_text(encoding="utf-8")
 
     @app.post("/api/patrol/run", status_code=202)
     def api_patrol_run(reason: str = "", by: str = "scheduler") -> JSONResponse:

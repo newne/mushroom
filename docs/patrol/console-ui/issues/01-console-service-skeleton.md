@@ -33,5 +33,9 @@ Status: ready-for-agent
 
 ## 备注
 
+> **2026-09-14 修订（ADR-0015）**：本票的"托管静态页面"由前端容器承担，**不经过 Python**。
+> 后端只有 `/api/*` 与 `/healthz`；页面在 `web/console/`（nginx 发静态页 + 同源反代 `/api/`）。
+> 验收第 1 条相应改为"打开 `http://<服务器IP>:8002/` 可见页面、无 CORS、无第二个 origin"。
+
 建议把 `patrol-debug` 的指令映射（`patrol/debug.py` 的 `status/home/jog/abs/goto/lamp/stop`）
 抽成可复用方法，console 与 CLI 共用同一层，避免两套动词集漂移。

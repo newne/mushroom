@@ -17,6 +17,8 @@ Status: ready-for-human
   + `box_id` 生长曲线（`mean_len_mm`/`mean_cap_mm`）；筛选：日期、角度档、轮次。
 - 依赖 vendor 进仓库（`console/static/vendor/`），**不走 CDN**；图表可换 ECharts/Chart.js，
   原型里的手绘 SVG 可保留为无依赖兜底。
+  > **2026-09-14（ADR-0015）**：页面落在 `web/console/index.html`，故 vendor 目录相应为
+  > `web/console/vendor/`；取数走**同源** `/api/...`（上机由 nginx 反代，本机 `dev.py`）。
 - 深链保留：`?mode=history&station=S05`。
 
 ## 验收

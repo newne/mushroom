@@ -173,11 +173,11 @@ def test_grid_endpoint(tmp_path):
     assert g["z_min"] == -212.0 and g["z_max"] == 0.0
 
 
-def test_page_is_served(tmp_path):
+def test_backend_is_api_only(tmp_path):
+    """页面是独立产物（web/console/，由 nginx 服务），后端不再分发静态文件（ADR-0015）。"""
     with make_client(tmp_path) as c:
-        r = c.get("/")
-    assert r.status_code == 200
-    assert "蘑菇房巡检台" in r.text
+        assert c.get("/").status_code == 404
+        assert c.get("/index.html").status_code == 404
 
 
 def test_healthz(tmp_path):

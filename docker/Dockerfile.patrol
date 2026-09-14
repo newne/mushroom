@@ -32,7 +32,6 @@ COPY deploy/ /srv/deploy/
 COPY measure/ /srv/measure/
 COPY analysis/ /srv/analysis/
 COPY patrol-workspace/pyproject.toml patrol-workspace/uv.lock /srv/patrol-workspace/
-COPY deploy/src/deploy/static /app/static
 COPY docker/patrol-entrypoint.sh /usr/local/bin/patrol-entrypoint
 
 # --frozen：完全按锁装，容器里绝不重新解析依赖（生产镜像的依赖必须是可复现的）
@@ -48,7 +47,6 @@ ENV PATH=/srv/patrol-workspace/.venv/bin:$PATH \
     PATROL_STATIONS=/app/configs/stations.yaml \
     PATROL_OUTBOX=/app/data/outbox.jsonl \
     PATROL_LOG=/app/Logs/m1.log \
-    PATROL_STATIC=/app/static \
     PATROL_CAPTURE_HOST=172.17.0.1:7003 \
     PATROL_INGEST=http://172.17.0.1:8000/ingest
 
