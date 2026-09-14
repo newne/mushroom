@@ -44,7 +44,7 @@ from patrol.fmc import (
 from patrol.motion_profile import M1
 from patrol.stations import Station, image_object_name
 
-from deploy.manual import Command, ManualChannel
+from deploy.manual import Command, ManualChannel, estop_allows
 
 MANUAL_TIMEOUT_S = 60.0     # 手动定位/回零的到位确认预算（比巡检档宽松：人看着）
 JOG_WAIT_S = 30.0           # 点动的到位确认预算
@@ -148,9 +148,9 @@ class ManualExecutor:
             return ExecOutcome(False, expired)
 
         # 急停：**闩锁**。置位期间只放行"停下来"与"关灯"，别的一律拒绝。
-        if cmd.kind != "stop" and self.channel.raised():
-            if cmd.kind == "lamp" and cmd.args.get("on") is False:
-                return self._with_client(lambda fmc: self._lamp(fmc, cmd))
+        # 判断来自 `deploy.manual.estop_allows`——console 用它给出当场的话，这里用它把关；
+        # 两处各写一份，迟早漂移成"页面说能、执行方说不能"。
+        if self.channel.raised() and not estop_allows(cmd.kind, cmd.args):
             return ExecOutcome(
                 False,
                 "急停已置位：先复位急停再操作（复位是独立动作，刻意不随指令自动清掉）",

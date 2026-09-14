@@ -29,6 +29,21 @@ from pathlib import Path
 SESSION_TTL_S = 300          # 会话有效期（秒）：到期自动退回，避免"人走了还在授权"
 MOTION_KINDS = ("goto", "jog", "home")     # 会动机构的指令（受急停与会话双重约束）
 ALL_KINDS = (*MOTION_KINDS, "lamp", "capture", "stop")
+#: 急停是**闩锁**：置位期间只放行"停下来"与"关灯"，其余一律拒绝（ADR-0016）。
+#: `stop` 自己要能再发一次（可能第一次没送达）；关灯是为了让人能安全地靠近设备。
+ESTOP_ALLOWED = ("stop", "lamp_off")
+
+
+def estop_allows(kind: str, args: dict | None = None) -> bool:
+    """急停置位时这条指令还允许吗？
+
+    判断只有这一处：console 用它给出**当场**的话（页面要立刻知道为什么不能动），
+    执行方用它做**最终**把关（指令可能是别处写进来的）。两处各写一份，迟早会漂移成
+    "页面说能、执行方说不能"。
+    """
+    if kind == "stop":
+        return True
+    return kind == "lamp" and (args or {}).get("on") is False
 
 
 @dataclass

@@ -335,3 +335,41 @@ def test_closing_the_session_during_a_round_does_not_queue_home(tmp_path):
         r = c.delete("/api/session").json()
     assert r["home_command"] is None
     assert "巡检进行中" in r["detail"] and "未另排回零" in r["detail"]
+
+
+def test_closing_with_a_home_already_pending_does_not_claim_a_second_one(tmp_path):
+    """队列里已经压着一条回零时说"已有一条在排队"，**不谎称刚排的**，也不再排第二条。"""
+    with make_client(tmp_path) as c:
+        c.post("/api/session")
+        pending = c.post("/api/cmd", json={"kind": "home"}).json()["command"]
+        r = c.delete("/api/session").json()
+        state = c.get("/api/cmd").json()
+    assert "已有一条回零在排队" in r["detail"]
+    assert r["home_command"]["id"] == pending["id"]
+    assert state["inflight"]["id"] == pending["id"], "不该把原来那条挤掉或另排一条"
+
+
+# ---------- 急停闩锁：先于"上一条还没结束"报出来 ----------
+
+
+def test_estop_latch_outranks_the_busy_message(tmp_path):
+    """两条都在（急停按着 + 上一条没结束）时，必须先说急停——否则人会以为"再等等就能动"。"""
+    with make_client(tmp_path) as c:
+        c.post("/api/session")
+        assert c.post("/api/cmd", json={"kind": "home"}).status_code == 202
+        c.post("/api/stop")
+        r = c.post("/api/cmd", json={"kind": "goto", "args": {"y": 10.0, "z": 0.0}})
+    assert r.status_code == 409
+    assert "急停已置位" in r.json()["error"]
+    assert "还没结束" not in r.json()["error"]
+
+
+def test_lamp_off_is_allowed_under_estop(tmp_path):
+    """关灯在急停闩锁下也放行（人要安全地靠近设备），开灯与别的动作不放行。"""
+    with make_client(tmp_path) as c:
+        c.post("/api/session")
+        c.post("/api/stop")
+        off = c.post("/api/cmd", json={"kind": "lamp", "args": {"on": False}})
+        on = c.post("/api/cmd", json={"kind": "lamp", "args": {"on": True}})
+    assert off.status_code == 202
+    assert on.status_code == 409 and "急停" in on.json()["error"]

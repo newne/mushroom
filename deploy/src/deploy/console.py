@@ -35,7 +35,7 @@ from patrol.stations import GRID_ANGLES, grid_geometry, load_stations
 from patrol.store import JsonlStore
 from pydantic import BaseModel
 
-from deploy.manual import ALL_KINDS, SESSION_TTL_S, ManualChannel
+from deploy.manual import ALL_KINDS, SESSION_TTL_S, ManualChannel, estop_allows
 from deploy.patrol_trigger import TriggerStore
 
 #: 心跳超过这么久没更新 ⇒ 不认为"正在巡检"（一轮约 11 分钟，逐站心跳是秒级）
@@ -430,11 +430,17 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
         active = ch.active_session()
         patrol = patrol_state(deps.runs_dir)
         queued: dict | None = None
+        pending = ch.inflight()
         if active is None:
             detail = "没有有效会话，无需回零"
         elif patrol.get("active"):
             detail = (f"巡检进行中（{eta_text(patrol, now=deps.now())}）——"
                       "本轮结束时它自己会回原位，未另排回零")
+        elif pending is not None and pending.kind == "home":
+            # 已经有一条回零在排队（多半是上一次放开时排的）：**别谎称"刚排的"**，
+            # 但要让操作者知道"放开之后机器会回零"这件事仍然成立。
+            queued = asdict(pending)
+            detail = f"已有一条回零在排队（{pending.id}）：执行方领走后写回结果"
         else:
             cmd, why = ch.submit("home", by="operator", session=active.token)
             if cmd.kind == "home":
@@ -498,6 +504,14 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
                 status_code=409,
             )
         ch = channel()
+        # 急停闩锁要**先于**"上一条还没结束"报出来：操作者最需要知道的是"现在还按着急停"，
+        # 而"上一条没结束"会让人以为再等等就能动。判断与执行方共用 `estop_allows`。
+        if ch.raised() and not estop_allows(body.kind, body.args):
+            return JSONResponse(
+                {"error": "急停已置位：先复位急停再操作（复位是独立动作，不随指令自动清掉）",
+                 "estop": True},
+                status_code=409,
+            )
         active = ch.active_session()
         try:
             cmd, why = ch.submit(body.kind, args=body.args or {}, by=body.by or "operator",

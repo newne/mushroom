@@ -140,6 +140,19 @@ def test_estop_can_be_cleared_only_explicitly(tmp_path):
     assert c.raised() is False
 
 
+def test_estop_allows_only_stopping_and_turning_the_lamp_off():
+    """急停闩锁放行什么，只有这一处定义（console 与执行方共用）。"""
+    from deploy.manual import estop_allows
+
+    assert estop_allows("stop") is True                    # 再停一次永远可以
+    assert estop_allows("lamp", {"on": False}) is True     # 关灯：要能安全靠近设备
+    assert estop_allows("lamp", {"on": True}) is False
+    assert estop_allows("lamp", {}) is False               # 参数缺失 = 不当作关灯
+    for kind in ("goto", "jog", "home", "capture"):
+        assert estop_allows(kind) is False
+    assert estop_allows("lamp", None) is False
+
+
 def test_broken_command_file_reads_as_nothing_in_flight(tmp_path):
     """正在写一半的 JSON（或盘写坏了）不能把执行方卡死。"""
     c = chan(tmp_path)
