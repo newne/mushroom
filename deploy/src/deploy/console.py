@@ -508,8 +508,13 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
             return JSONResponse({"error": str(e)}, status_code=400)
         if cmd.kind != body.kind:
             return JSONResponse({"error": why, "busy_with": asdict(cmd)}, status_code=409)
+        # 每接受一条指令就续期（spec §5.2）：手动操作是"连着做几件事"，让会话在两次
+        # 动作之间过期，操作者会在最不方便的时候被踢出去。续期只延长授权，不动机构。
+        renewed = ch.renew_session() if active is not None else None
         console.note(f"指令 {cmd.id} {cmd.kind} {cmd.args or ''}", level="info")
-        return JSONResponse({"command": asdict(cmd), "detail": why}, status_code=202)
+        return JSONResponse({"command": asdict(cmd), "detail": why,
+                             "session": asdict(renewed) if renewed else None},
+                            status_code=202)
 
     @app.get("/api/events")
     def api_events() -> JSONResponse:

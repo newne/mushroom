@@ -19,10 +19,24 @@
 | --- | --- |
 | `GET /api/status`、`/api/room`、`/api/stations`、`/api/grid` | 实时状态 |
 | `GET /api/images?station_id=`、`/api/events` | 历史图像与日志 |
-| `POST/DELETE /api/session`、`GET/POST /api/cmd`、`POST/DELETE /api/stop` | 手动控制（受 ADR-0013 约束：巡检中拒绝） |
+| `POST/DELETE /api/session`、`GET/POST /api/cmd`、`POST/DELETE /api/stop` | 手动控制（受 ADR-0013/0016 约束：巡检中拒绝、急停是闩锁） |
 
 **前端不持有任何控制逻辑**：它不认识控制器、SDK、库房主机路径，只发 HTTP。控制面接口
 只有后端一处实现，页面永远不是第二条通往控制器的路（ADR-0011/0015）。
+
+## 页面里有什么（现状）
+
+| 位置 | 内容 |
+| --- | --- |
+| 顶栏 | 状态药丸（巡检中 / 手动 / 已急停 / 待机）+ 位置 + 当前站进度 |
+| 门禁带 | 库房 · 入库日期 · 第几天 · 今天能不能巡检（现场第一疑问） |
+| 左栏 | 导轨平面图（Y–Z，标出当前站位）+ 按层分组的站位列表 |
+| 中栏 | 上一轮 / 本轮状态 + 选中站位的历史图像（本地待同步 + prod 双源） |
+| 右栏 | **急停（常驻）** · 接管/放开 + 会话倒计时 · 定位（二次确认）/回零 · 点动（0.5/1/5/10）· 补光灯 · 抓拍 · 机器信息 · 事件日志 |
+
+手动面的行为边界（越界在浏览器侧拦、403/409 话术原样显示、`Esc` 只中断在飞的那条、
+放开会话 = 回零 + 撤权）见 `docs/patrol/console-ui/spec.md` §10.4/§10.5 与 ADR-0016。
+回归脚本：`docs/patrol/console-ui/verify-page.js`（jsdom，37 项断言）。
 
 ## 本机开发
 

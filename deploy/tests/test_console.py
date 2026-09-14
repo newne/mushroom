@@ -281,6 +281,15 @@ def test_manual_is_allowed_between_rounds(tmp_path):
     assert r.json()["command"]["kind"] == "goto"
 
 
+def test_accepted_command_renews_the_session(tmp_path):
+    """每条被接受的指令都续期（spec §5.2）：连着做几件事时不该在中途被踢出去。"""
+    with make_client(tmp_path) as c:
+        opened = c.post("/api/session").json()["session"]
+        r = c.post("/api/cmd", json={"kind": "lamp", "args": {"on": True}}).json()
+    assert r["session"]["token"] == opened["token"]
+    assert r["session"]["expires_at"] >= opened["expires_at"]
+
+
 def test_eta_is_extrapolated_from_progress_then_falls_back():
     """估算两条路：有进度按已完成站数外推；没进度按典型时长兜底。"""
     started = NOW.replace(hour=9, minute=49)      # 已经跑了 11 分钟

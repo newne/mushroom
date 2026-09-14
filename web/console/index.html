@@ -39,6 +39,33 @@
   .empty{color:var(--dim);font-size:13px;padding:8px 0}
   .bar{height:8px;background:#0e1319;border-radius:4px;overflow:hidden;margin-top:6px}
   .bar i{display:block;height:100%;background:var(--accent)}
+  /* ---- 操作区（手动控制）：急停常驻右栏顶部，不随滚动隐藏（ADR-0004/0016） ---- */
+  .estopcard{position:sticky;top:52px;z-index:4;background:#2a1416;border-color:#5a1f22}
+  .estopcard h2{color:#ffb3ae}
+  button{font:inherit;color:var(--fg);background:#232c38;border:1px solid var(--line);
+         border-radius:6px;padding:9px 10px;min-height:44px;cursor:pointer}
+  button:hover:not(:disabled){background:#2b3644}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.primary{background:#1f3350;border-color:var(--accent)}
+  button.danger{background:#7d1d20;border-color:#b62327;color:#fff;font-weight:700;font-size:16px}
+  button.danger:hover:not(:disabled){background:#96262a}
+  .row{display:flex;gap:6px;align-items:center;margin:6px 0}
+  .row>*{flex:1}
+  .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:6px 0}
+  .grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin:6px 0}
+  input,select{font:inherit;color:var(--fg);background:#0e1319;border:1px solid var(--line);
+               border-radius:6px;padding:9px 8px;min-height:44px;width:100%}
+  input.bad{border-color:var(--bad);color:#ffb3ae}
+  .lbl{color:var(--dim);font-size:12px;margin:8px 0 2px;clear:both}
+  #opmsg{font-size:13px;padding:8px 10px;border-radius:6px;margin-top:8px;display:none}
+  #opmsg.info{display:block;background:#12233a;color:#9dc7ff}
+  #opmsg.ok{display:block;background:#0d2a17;color:#7ee2a8}
+  #opmsg.bad{display:block;background:#2a1416;color:#ffb3ae}
+  #sessionline{font-size:13px;color:var(--dim)}
+  .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;
+       border:1px solid var(--line);color:var(--dim)}
+  .tag.on{color:var(--ok);border-color:var(--ok)}
+  .tag.bad{color:var(--bad);border-color:var(--bad)}
 </style>
 </head>
 <body>
@@ -76,6 +103,54 @@
   </section>
 
   <section>
+    <!-- 急停常驻（ADR-0004/0016）：不随滚动隐藏，永远可点，不需要会话 -->
+    <div class="card estopcard">
+      <h2>急停</h2>
+      <button id="estopbtn" class="danger" style="width:100%">急停（Esc）</button>
+      <div class="row" style="margin-top:8px">
+        <span id="estopstate" class="tag">未置位</span>
+        <button id="estopclear" disabled>复位急停</button>
+      </div>
+      <div class="empty" style="padding:4px 0 0">软件急停（约 1 秒内生效），不替代硬件急停回路</div>
+    </div>
+
+    <div class="card">
+      <h2>操作</h2>
+      <div class="row">
+        <button id="takebtn" class="primary">接管</button>
+        <button id="dropbtn" disabled>放开</button>
+      </div>
+      <div id="sessionline">未接管 · 手动移动需要先接管（会话 5 分钟，指令会续期）</div>
+      <div id="opnotice" class="empty" style="padding:6px 0"></div>
+
+      <div class="lbl">坐标（Y 0…4492 · Z −212…0）</div>
+      <div class="row">
+        <input id="gtY" type="number" step="0.5" inputmode="decimal" placeholder="Y">
+        <input id="gtZ" type="number" step="0.5" inputmode="decimal" placeholder="Z">
+      </div>
+      <div class="grid2">
+        <button id="gotobtn" class="primary">移动到该点</button>
+        <button id="homebtn">回零</button>
+      </div>
+
+      <div class="lbl">点动（步长 mm）</div>
+      <div class="row">
+        <select id="step">
+          <option value="0.5">0.5</option><option value="1">1</option>
+          <option value="5" selected>5</option><option value="10">10</option>
+        </select>
+        <button id="lampbtn">补光灯</button>
+        <button id="capbtn" disabled>抓拍</button>
+      </div>
+      <div class="grid4">
+        <button data-jog="Y-">Y −</button><button data-jog="Y+">Y +</button>
+        <button data-jog="Z+">Z +</button><button data-jog="Z-">Z −</button>
+      </div>
+
+      <div id="cmdline" class="empty" style="padding:6px 0 0">最近指令 —</div>
+      <div id="opmsg"></div>
+    </div>
+
     <div class="card">
       <h2>机器</h2>
       <div class="kv" id="machine">—</div>
@@ -90,11 +165,32 @@
 <script>
 const $ = s => document.querySelector(s);
 let stations = [], grid = null, selected = null, lastStatus = null;
+let cmd = {inflight:null, result:null, estop:false, session_active:false};
+let session = null;              // {token, expires_at}；本地只用来显示倒计时
+let clockSkewMs = 0;             // 服务器时间 − 浏览器时间：倒计时用服务器口径算
 
 async function jget(url){
   const r = await fetch(url);
   if(!r.ok) throw new Error(url + ' → HTTP ' + r.status);
   return r.json();
+}
+
+/* 控制类请求统一走这里：**不把 4xx 当异常**——403/409/400 是后端正常的业务回答
+   （没接管 / 巡检中 / 参数不合法），页面必须原样把话术显示出来，而不是一句"失败"。 */
+async function jsend(url, method, body){
+  const opt = {method, headers:{'Content-Type':'application/json'}};
+  if(body !== undefined) opt.body = JSON.stringify(body);
+  const r = await fetch(url, opt);
+  let data = {};
+  try{ data = await r.json(); }catch(e){ data = {error:'响应不是 JSON（HTTP ' + r.status + '）'}; }
+  return {status:r.status, ok:r.ok, data};
+}
+
+function opmsg(text, kind){
+  const el = $('#opmsg');
+  if(!text){ el.style.display = 'none'; el.textContent = ''; return; }
+  el.className = kind || 'info';
+  el.textContent = text;
 }
 
 function pill(text, cls){ const p = $('#pill'); p.textContent = text; p.className = 'pill ' + cls; }
@@ -174,6 +270,9 @@ async function selectStation(id){
 
 function renderStatus(s){
   lastStatus = s;
+  // 服务器时间 − 浏览器时间：会话倒计时与"还要多久"都按**服务器口径**算。现场上位机的
+  // 时钟与库房主机不一致是常态，不校准的话倒计时会骗人（提前说"过期"或过期了还在数）。
+  if(s.ts){ const t = Date.parse(s.ts); if(Number.isFinite(t)) clockSkewMs = t - Date.now(); }
   const p = s.patrol || {}, m = s.machine || {}, r = s.room || {};
   // 门禁带（现场第一疑问：机器今天该不该动）
   const g = $('#gate');
@@ -188,6 +287,12 @@ function renderStatus(s){
     const pct = p.station_total ? (100 * (p.station_index||0) / p.station_total) : 0;
     $('#progresswrap').style.display = ''; $('#progress').style.width = pct.toFixed(1) + '%';
     $('#roundinfo').textContent = `第 ${p.station_index||'?'}/${p.station_total||'?'} 站 · ${p.current_station||''}`;
+  } else if(cmd.estop){
+    pill('已急停', 'bad');
+    $('#progresswrap').style.display = 'none'; $('#roundinfo').textContent = '急停已置位（闩锁）';
+  } else if(cmd.session_active){
+    pill('手动', 'warn');
+    $('#progresswrap').style.display = 'none'; $('#roundinfo').textContent = '已接管：可手动操作';
   } else {
     $('#progresswrap').style.display = 'none'; $('#roundinfo').textContent = '';
     pill(p.status === 'ok' ? '待机（上轮正常）' : (p.known ? '待机' : '待机（无取证）'),
@@ -213,6 +318,7 @@ function renderStatus(s){
   const ev = (s.events||[]).slice().reverse();
   $('#log').className = ev.length ? '' : 'empty';
   $('#log').innerHTML = ev.length ? ev.map(e => `<div>${e.ts} ${e.text}</div>`).join('') : '—';
+  renderOps();          // 巡检状态变了，操作区要跟着解锁/上锁
 }
 
 async function tick(){
@@ -227,6 +333,190 @@ async function tick(){
       });
     }
   }catch(e){ pill('接口不通', 'bad'); }
+  try{
+    const c = await jget('/api/cmd');
+    cmd = c;
+    // 会话真值以后端为准：本地那份只是拿来显示倒计时的
+    if(!c.session_active) session = null;
+    renderOps();
+    // 有指令在飞就加密轮询：人连着点动时，"上一条结束了吗"必须尽快知道——
+    // 1 秒的空白期里按钮是灰的，操作者会以为点坏了，然后去按急停。
+    if(busy()) setTimeout(refreshCmd, 300);
+  }catch(e){ /* /api/cmd 不通不影响只读面 */ }
+}
+
+/* ---------------- 手动控制（ADR-0016：所有动作都经 /api/cmd 一条路） ---------------- */
+
+function busy(){ return !!(cmd.inflight && !cmd.result); }
+function inRound(){ return !!(lastStatus?.patrol?.active); }
+
+function renderOps(){
+  const est = !!cmd.estop;
+  $('#estopstate').className = 'tag ' + (est ? 'bad' : 'on');
+  $('#estopstate').textContent = est ? '已置位（闩锁）' : '未置位';
+  $('#estopclear').disabled = !est;
+
+  const active = !!cmd.session_active;
+  $('#takebtn').disabled = active;
+  $('#dropbtn').disabled = !active;
+  if(active && session){
+    const left = Math.max(0, Math.round((Date.parse(session.expires_at) - (Date.now() + clockSkewMs)) / 1000));
+    $('#sessionline').innerHTML = left > 0
+      ? `已接管 <b class="mono">${String(Math.floor(left/60)).padStart(2,'0')}:${String(left%60).padStart(2,'0')}</b> · 指令会续期`
+      : '会话已过期（下一条指令会被拒；重新接管即可）';
+  }else{
+    $('#sessionline').textContent = '未接管 · 手动移动需要先接管（会话 5 分钟，指令会续期）';
+  }
+
+  // 巡检中：机构归那一轮（ADR-0013）。这里只是**提前**说清楚，真正的拒绝在后端。
+  $('#opnotice').textContent = inRound()
+    ? '巡检进行中：机构由这一轮占用，' + etaText(lastStatus.patrol) + '（急停仍可用）'
+    : '';
+
+  const locked = est || !active || busy() || inRound();
+  $('#homebtn').disabled = locked;
+  $('#gotobtn').disabled = locked || !targetsOk();
+  $('#lampbtn').disabled = est;                       // 关灯在急停闩锁下也放行
+  document.querySelectorAll('[data-jog]').forEach(b => b.disabled = locked);
+  $('#capbtn').disabled = locked || !selected;        // 抓拍要有选中的站位（照片归到它名下）
+
+  const el = $('#cmdline');
+  if(busy()){
+    el.className = '';
+    el.innerHTML = `<span style="color:var(--accent)">执行中…</span> ${cmd.inflight.kind} ` +
+      `<span class="mono">${cmd.inflight.args ? JSON.stringify(cmd.inflight.args) : ''}</span>`;
+  }else if(cmd.result){
+    el.className = '';
+    el.innerHTML = (cmd.result.ok ? '<span style="color:var(--ok)">✔ 上一条</span> '
+                                  : '<span style="color:var(--bad)">✘ 上一条</span> ') +
+      `${cmd.result.detail} <span style="color:var(--dim)">(${cmd.result.ended_at})</span>`;
+  }else{
+    el.className = 'empty'; el.textContent = '最近指令 —';
+  }
+}
+
+function etaText(patrol){
+  if(!patrol || !patrol.started_at) return '预计几分钟后可用';
+  const t0 = Date.parse(patrol.started_at);
+  const idx = patrol.station_index, total = patrol.station_total;
+  const elapsed = (Date.now() + clockSkewMs - t0) / 1000;
+  let eta;
+  if(idx > 0 && total > 0 && elapsed > 0) eta = elapsed / idx * (total - idx);
+  else eta = Math.max(0, 11*60 - elapsed);
+  return '预计 ' + Math.max(1, Math.round(eta / 60)) + ' 分钟后可用';
+}
+
+/* 软限位在**浏览器侧**先拦一道（spec §5.2）：越界不下发，输入框当场标红。 */
+function envelope(){
+  if(!grid) return null;
+  return {y:[grid.y_min, grid.y_max], z:[grid.z_min, grid.z_max]};
+}
+function targetsOk(){
+  const env = envelope(); if(!env) return false;
+  const y = parseFloat($('#gtY').value), z = parseFloat($('#gtZ').value);
+  return Number.isFinite(y) && Number.isFinite(z) &&
+         y >= env.y[0] && y <= env.y[1] && z >= env.z[0] && z <= env.z[1];
+}
+function validateTargets(){
+  const env = envelope();
+  for(const [sel, rng] of [['#gtY', env?.y], ['#gtZ', env?.z]]){
+    const el = $(sel), v = parseFloat(el.value);
+    const bad = el.value !== '' && (!Number.isFinite(v) || (rng && (v < rng[0] || v > rng[1])));
+    el.className = bad ? 'bad' : '';
+  }
+  if(!busy()) $('#gotobtn').disabled = !!cmd.estop || !cmd.session_active || inRound() || !targetsOk();
+}
+
+async function sendCmd(kind, args){
+  const r = await jsend('/api/cmd', 'POST', {kind, args: args || {}});
+  const d = r.data || {};
+  if(r.status === 202){
+    opmsg(`已提交 ${kind}${d.detail ? '：' + d.detail : ''}`, 'ok');
+    if(d.session) session = d.session;
+  }else if(r.status === 403){
+    opmsg('需要先接管：' + (d.error || ''), 'bad');
+  }else if(r.status === 409){
+    // 巡检中 / 上一条还没结束：后端的话术直接显示，别翻译成"失败"
+    opmsg(d.error || '当前不可用', 'bad');
+  }else{
+    opmsg(d.error || ('提交失败（HTTP ' + r.status + '）'), 'bad');
+  }
+  await refreshCmd();
+  return r;
+}
+
+async function refreshCmd(){
+  try{ cmd = await jget('/api/cmd'); if(!cmd.session_active) session = null; renderOps(); }
+  catch(e){ /* 忽略：下一拍还会再取 */ }
+}
+
+async function takeSession(){
+  const r = await jsend('/api/session', 'POST');
+  if(r.status === 201){ session = r.data.session; opmsg('已接管：可以手动操作了', 'ok'); }
+  else opmsg(r.data?.error || '接管失败', 'bad');
+  await refreshCmd();
+}
+
+async function dropSession(){
+  const r = await jsend('/api/session', 'DELETE');
+  session = null;
+  opmsg(r.data?.detail || '已放开', r.data?.home_command ? 'ok' : 'info');
+  await refreshCmd();
+}
+
+async function estop(){
+  // 不排队、不需要会话、不看巡检状态——它必须永远能置上（ADR-0016）
+  const r = await jsend('/api/stop?reason=' + encodeURIComponent('页面按下'), 'POST');
+  opmsg(r.ok ? '急停已置位：先处理现场，再点「复位急停」' : '急停请求失败，请立即用硬件急停',
+        r.ok ? 'bad' : 'bad');
+  await refreshCmd();
+}
+
+async function clearEstop(){
+  const r = await jsend('/api/stop', 'DELETE');
+  opmsg(r.ok ? '急停已复位（下一条指令才会动机构）' : '复位失败', r.ok ? 'ok' : 'bad');
+  await refreshCmd();
+}
+
+function wireOps(){
+  $('#takebtn').onclick = takeSession;
+  $('#dropbtn').onclick = dropSession;
+  $('#estopbtn').onclick = estop;
+  $('#estopclear').onclick = clearEstop;
+  $('#gtY').oninput = validateTargets;
+  $('#gtZ').oninput = validateTargets;
+  $('#homebtn').onclick = async () => {
+    if(confirm('回零会把两轴开到硬限位重新建立坐标系。\n当前机构会真的移动，确认执行？'))
+      await sendCmd('home', {});
+  };
+  $('#gotobtn').onclick = async () => {
+    const y = parseFloat($('#gtY').value), z = parseFloat($('#gtZ').value);
+    const d = Math.hypot(y - (posNow()?.[0] ?? y), z - (posNow()?.[1] ?? z));
+    if(confirm(`移动到 Y=${y} Z=${z}（直线约 ${d.toFixed(0)} mm）？`)) await sendCmd('goto', {y, z});
+  };
+  document.querySelectorAll('[data-jog]').forEach(b => b.onclick = async () => {
+    const [axis, sign] = [b.dataset.jog[0], b.dataset.jog[1]];
+    const step = parseFloat($('#step').value) * (sign === '+' ? 1 : -1);
+    await sendCmd('jog', {axis, mm: step});
+  });
+  $('#lampbtn').onclick = async () => {
+    const on = !($('#lampbtn').dataset.on === '1');
+    await sendCmd('lamp', {on});
+    $('#lampbtn').dataset.on = on ? '1' : '0';
+    $('#lampbtn').textContent = on ? '补光灯（开）' : '补光灯';
+  };
+  $('#capbtn').onclick = async () => {
+    if(!selected){ opmsg('先在左栏选一个站位：照片要归到它名下', 'bad'); return; }
+    await sendCmd('capture', {station_id:selected});
+  };
+  // Esc = 中断**正在执行**的那一条。空闲时不响应：一次误按就把急停闩上、
+  // 之后的巡检轮次会全部失败，代价太大（指令本身 60 秒内有效，中断来得及）。
+  document.addEventListener('keydown', e => { if(e.key === 'Escape' && busy()) estop(); });
+}
+
+function posNow(){
+  const p = lastStatus?.machine?.real_pos;
+  return Array.isArray(p) ? p : null;
 }
 
 (async function init(){
@@ -235,6 +525,8 @@ async function tick(){
     if(!data.ok){ $('#list').innerHTML = `<div class="empty">${data.error}</div>`; return; }
     stations = data.stations; grid = data.grid; drawMap(); drawList();
   }catch(e){ $('#list').innerHTML = `<div class="empty">站位表读取失败：${e.message}</div>`; }
+  wireOps();
+  await refreshCmd();
   tick(); setInterval(tick, 1000);
 })();
 </script>
