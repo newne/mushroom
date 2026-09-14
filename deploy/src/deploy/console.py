@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -32,13 +33,23 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from patrol.room import RoomStateError, load_room_state
 from patrol.stations import GRID_ANGLES, grid_geometry, load_stations
 from patrol.store import JsonlStore
+from pydantic import BaseModel
 
+from deploy.manual import SESSION_TTL_S, ManualChannel
 from deploy.patrol_trigger import TriggerStore
 
 #: 心跳超过这么久没更新 ⇒ 不认为"正在巡检"（一轮约 11 分钟，逐站心跳是秒级）
 HEARTBEAT_STALE_S = 180.0
 #: 最近事件环形缓冲的条数（前端底栏日志）
 EVENT_BUFFER = 50
+
+
+class CmdBody(BaseModel):
+    """手动指令请求体。`kind` 走白名单校验，未知指令在执行层被拒（400）。"""
+
+    kind: str
+    args: dict | None = None        # 默认 None 而不是 {}：可变默认值是个陷阱
+    by: str = "operator"
 
 
 @dataclass
@@ -56,6 +67,8 @@ class ConsoleDeps:
     transport: object | None = None
     # 触发请求的落盘目录（跑一轮的入口；见 deploy/patrol_trigger.py）
     trigger_dir: str = "/app/data/trigger"
+    # 手动指令的落盘目录（console 只写，执行方 patrol-serve 领走执行）
+    cmd_dir: str = "/app/data/cmd"
     now: object = datetime.now
 
     def envelope(self) -> dict:
@@ -293,6 +306,7 @@ def deps_from_env() -> ConsoleDeps:
         capture_host=os.environ.get("PATROL_CAPTURE_HOST", "172.17.0.1:7003"),
         transport=HttpxTransport(allowed_hosts={host_port(analysis_url)}),
         trigger_dir=os.environ.get("PATROL_TRIGGER_DIR", "/app/data/trigger"),
+        cmd_dir=os.environ.get("PATROL_CMD_DIR", "/app/data/cmd"),
     )
 
 
@@ -363,6 +377,79 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
                 "pending": bool(req and req.pending),
                 "age_s": store.age_s(req),
                 "stale": store.is_stale(req)}
+
+    # ---------- 手动控制：会话 / 指令 / 急停（ADR-0013 的语义） ----------
+
+    def channel() -> ManualChannel:
+        return ManualChannel(deps.cmd_dir, now=deps.now)
+
+    @app.post("/api/session", status_code=201)
+    def api_session_open() -> dict:
+        """接管：开一个会话。巡检期间也能开，但**指令会被执行方按 ADR-0013 拒绝**——
+        轮内不动机构，轮间随时可用（约 94% 的时间）。"""
+        s = channel().open_session(uuid.uuid4().hex[:12])
+        console.note(f"操作者接管（会话 {s.token}，{SESSION_TTL_S}s）")
+        return {"session": asdict(s), "ttl_s": SESSION_TTL_S}
+
+    @app.delete("/api/session")
+    def api_session_close() -> dict:
+        """放开会话。**真正的"先回零再放开"由执行方完成**（它才碰得到控制器）：
+        这里只撤销授权，并把回零排成一条指令。"""
+        ch = channel()
+        ch.close_session()
+        console.note("操作者已放开会话")
+        return {"closed": True}
+
+    @app.post("/api/stop")
+    def api_stop(reason: str = "") -> dict:
+        """急停：独立标志文件，**不排队、不需要会话、不受任何规则限制**。
+
+        延迟上限约等于执行方的急停检查间隔（1 秒），不是实时回路——这一点写在
+        deploy/manual.py 的模块注释里，别当它是安全回路。
+        """
+        channel().raise_estop(by="operator", reason=reason)
+        console.note(f"急停已置位（{reason or '操作者按下'}）", level="warn")
+        return {"estop": True}
+
+    @app.delete("/api/stop")
+    def api_stop_clear() -> dict:
+        """复位急停。刻意做成独立动作：急停不该被"下一条指令"顺带清掉。"""
+        channel().clear_estop()
+        console.note("急停已复位")
+        return {"estop": False}
+
+    @app.get("/api/cmd")
+    def api_cmd_state() -> dict:
+        """当前指令与最近一次结果（页面按这个轮询）。"""
+        ch = channel()
+        inflight = ch.inflight()
+        result = ch.result()
+        return {"inflight": asdict(inflight) if inflight else None,
+                "result": asdict(result) if result else None,
+                "estop": ch.raised(),
+                "session_active": ch.active_session() is not None}
+
+    @app.post("/api/cmd", status_code=202)
+    def api_cmd(body: CmdBody) -> JSONResponse:
+        """提交一条手动指令（goto/jog/abs/home/lamp/capture）。
+
+        **异步**：这里只把指令写进共享目录就返回 202，执行方（持有控制器的那个进程）
+        领走后写回结果。之所以不是同步的：控制器是单会话设备，console 一旦自己去连，
+        就可能把正在跑的那一轮巡检踢掉。页面按 `GET /api/cmd` 轮询结果。
+        """
+        ch = channel()
+        active = ch.active_session()
+        try:
+            cmd, why = ch.submit(body.kind, args=body.args or {}, by=body.by or "operator",
+                                 session=active.token if active else "")
+        except PermissionError as e:
+            return JSONResponse({"error": str(e), "need_session": True}, status_code=403)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        if cmd.kind != body.kind:
+            return JSONResponse({"error": why, "busy_with": asdict(cmd)}, status_code=409)
+        console.note(f"指令 {cmd.id} {cmd.kind} {cmd.args or ''}", level="info")
+        return JSONResponse({"command": asdict(cmd), "detail": why}, status_code=202)
 
     @app.get("/api/events")
     def api_events() -> JSONResponse:

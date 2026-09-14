@@ -31,7 +31,8 @@ def client(tmp_path, *, now=T0) -> TestClient:
     deps = ConsoleDeps(room_path=str(room), stations_path=str(stations),
                        outbox_path=str(tmp_path / "outbox.jsonl"),
                        runs_dir=str(tmp_path / "runs"),
-                       trigger_dir=str(tmp_path / "trigger"), now=lambda: now)
+                       trigger_dir=str(tmp_path / "trigger"),
+                       cmd_dir=str(tmp_path / "cmd"), now=lambda: now)
     return TestClient(create_app(deps))
 
 

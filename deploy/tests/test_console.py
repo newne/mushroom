@@ -50,6 +50,7 @@ def make_client(tmp_path, *, entry="2026-09-04", transport=None) -> TestClient:
     deps = ConsoleDeps(room_path=str(room), stations_path=str(stations),
                        outbox_path=str(tmp_path / "outbox.jsonl"),
                        runs_dir=str(tmp_path / "runs"),
+                       trigger_dir=str(tmp_path / "trigger"), cmd_dir=str(tmp_path / "cmd"),
                        transport=transport, now=lambda: NOW)
     return TestClient(create_app(deps))
 
