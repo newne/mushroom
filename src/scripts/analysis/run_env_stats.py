@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime
 
 # 使用BASE_DIR统一管理路径
-from global_const.global_const import ensure_src_path
+from global_const.paths import ensure_src_path
 ensure_src_path()
 
 # 导入必要的模块

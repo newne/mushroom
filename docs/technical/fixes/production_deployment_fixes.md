@@ -161,7 +161,7 @@ def _create_client(self, http_client: Optional[PoolManager] = None) -> Minio:
 
 ### 6. 数据库模型修复
 
-**文件**：`src/clip/mushroom_image_encoder.py`
+**文件**：`src/vision/mushroom_image_encoder.py`
 
 ```python
 # 修复前：使用已删除的growth_stage字段

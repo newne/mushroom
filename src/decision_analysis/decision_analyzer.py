@@ -10,7 +10,6 @@ import json
 import time
 from datetime import datetime
 from pathlib import Path
-from statistics import mean, pstdev
 from typing import Dict, Optional
 
 from dynaconf import Dynaconf
@@ -29,6 +28,18 @@ from decision_analysis.data_models import (
 )
 from decision_analysis.llm_client import LLMClient
 from decision_analysis.output_handler import OutputHandler
+from decision_analysis.scoring.device_alignment import (
+    calculate_stage_alignment_confidence,
+    infer_device_type,
+    normalize_device_config,
+    priority_weight,
+    score_against_reference,
+    to_float,
+)
+from decision_analysis.scoring.device_mapping import map_parameter_to_point_alias
+from decision_analysis.scoring.image_consistency import (
+    calculate_image_consistency_fallback,
+)
 from decision_analysis.template_renderer import TemplateRenderer
 
 
@@ -1464,155 +1475,28 @@ class DecisionAnalyzer:
         Calculate confidence based on how well dynamic recommendations align
         with growth-stage needs inferred from similar historical cases.
         """
-        if not similar_cases or not device_recommendations:
-            return 0.0, {"reason": "insufficient_reference_data"}
-
-        if not getattr(device_recommendations, "devices", None):
-            return 0.0, {"reason": "no_device_recommendations"}
-
-        ref_values: Dict[str, Dict[str, list[float]]] = {}
-        for case in similar_cases:
-            for device_type, raw_config in [
-                ("air_cooler", case.air_cooler_params),
-                ("fresh_air_fan", case.fresh_air_params),
-                ("humidifier", case.humidifier_params),
-                ("grow_light", case.grow_light_params),
-            ]:
-                config = self._normalize_device_config(raw_config)
-                if not config:
-                    continue
-                for point_alias, value in config.items():
-                    num_value = self._to_float(value)
-                    if num_value is None:
-                        continue
-                    ref_values.setdefault(device_type, {}).setdefault(
-                        point_alias, []
-                    ).append(num_value)
-
-        if not ref_values:
-            return 0.0, {"reason": "no_reference_values"}
-
-        total_weight = 0.0
-        total_score = 0.0
-        matched_params = 0
-        evaluated_params = 0
-
-        for device_key, device_rec in device_recommendations.devices.items():
-            device_type = self._infer_device_type(device_key)
-            if not device_type or device_type not in ref_values:
-                continue
-
-            for point_alias, param in device_rec.parameters.items():
-                if not hasattr(param, "recommended_value"):
-                    continue
-                evaluated_params += 1
-                rec_value = self._to_float(param.recommended_value)
-                if rec_value is None:
-                    continue
-
-                values = ref_values.get(device_type, {}).get(point_alias, [])
-                if not values:
-                    continue
-
-                threshold = (
-                    self.setpoint_thresholds.get(device_type, {}).get(point_alias)
-                    if isinstance(self.setpoint_thresholds, dict)
-                    else None
-                )
-                score = self._score_against_reference(rec_value, values, threshold)
-                weight = self._priority_weight(getattr(param, "priority", "low"))
-                total_score += score * weight
-                total_weight += weight
-                matched_params += 1
-
-        if total_weight == 0.0:
-            return 0.0, {
-                "reason": "no_comparable_parameters",
-                "evaluated_params": evaluated_params,
-                "matched_params": matched_params,
-                "reference_cases": len(similar_cases),
-            }
-
-        confidence = total_score / total_weight
-        return round(max(0.0, min(confidence, 1.0)), 4), {
-            "evaluated_params": evaluated_params,
-            "matched_params": matched_params,
-            "reference_cases": len(similar_cases),
-        }
+        return calculate_stage_alignment_confidence(
+            device_recommendations,
+            similar_cases,
+            self.setpoint_thresholds,
+        )
 
     def _normalize_device_config(self, raw_config) -> Dict:
-        if raw_config is None:
-            return {}
-        if isinstance(raw_config, dict):
-            return raw_config
-        if isinstance(raw_config, str):
-            try:
-                parsed = json.loads(raw_config)
-                return parsed if isinstance(parsed, dict) else {}
-            except Exception:
-                return {}
-        return {}
+        return normalize_device_config(raw_config)
 
     def _to_float(self, value) -> float | None:
-        try:
-            if value is None:
-                return None
-            if isinstance(value, bool):
-                return float(int(value))
-            return float(value)
-        except Exception:
-            return None
+        return to_float(value)
 
     def _infer_device_type(self, device_key: str) -> str | None:
-        if not isinstance(device_key, str):
-            return None
-        for device_type in [
-            "air_cooler",
-            "fresh_air_fan",
-            "humidifier",
-            "grow_light",
-        ]:
-            if device_key == device_type or device_key.startswith(f"{device_type}_"):
-                return device_type
-        return None
+        return infer_device_type(device_key)
 
     def _priority_weight(self, priority: str) -> float:
-        mapping = {
-            "low": 1.0,
-            "medium": 1.5,
-            "high": 2.0,
-            "critical": 3.0,
-        }
-        return mapping.get(str(priority).lower(), 1.0)
+        return priority_weight(priority)
 
     def _score_against_reference(
         self, value: float, values: list[float], threshold: float | None
     ) -> float:
-        if not values:
-            return 0.0
-
-        try:
-            unique_vals = {int(v) if float(v).is_integer() else v for v in values}
-            is_enum = (
-                all(float(v).is_integer() for v in values) and len(unique_vals) <= 5
-            )
-            if is_enum:
-                from collections import Counter
-
-                mode_val = Counter(int(v) for v in values).most_common(1)[0][0]
-                return 1.0 if int(round(value)) == mode_val else 0.0
-
-            avg = mean(values)
-            std = pstdev(values) if len(values) > 1 else 0.0
-            base_tol = float(threshold) if threshold not in (None, 0) else 0.0
-            rel_tol = abs(avg) * 0.05
-            tol = max(std * 2.0, base_tol, rel_tol, 1.0)
-            if tol <= 0:
-                return 0.0
-            score = 1.0 - abs(value - avg) / tol
-            return max(0.0, min(score, 1.0))
-        except Exception:
-            return 0.0
+        return score_against_reference(value, values, threshold)
 
     def _map_parameter_to_point_alias(
         self, device_type: str, parameter_name: str
@@ -1627,62 +1511,12 @@ class DecisionAnalyzer:
         Returns:
             Point alias from device configuration or None if not found
         """
-        # Mapping from enhanced decision parameter names to configuration point aliases
-        parameter_mappings = {
-            "air_cooler": {
-                "tem_set": "temp_set",
-                "tem_diff_set": "temp_diffset",
-                "cyc_on_off": "cyc_on_off",
-                "cyc_on_time": "cyc_on_time",
-                "cyc_off_time": "cyc_off_time",
-                "ar_on_off": "air_on_off",
-                "hum_on_off": "hum_on_off",
-                "on_off": "on_off",
-            },
-            "fresh_air_fan": {
-                "model": "mode",
-                "control": "control",
-                "co2_on": "co2_on",
-                "co2_off": "co2_off",
-                "on": "on",
-                "off": "off",
-            },
-            "humidifier": {"model": "mode", "on": "on", "off": "off"},
-            "grow_light": {
-                "model": "model",
-                "on_mset": "on_mset",
-                "off_mset": "off_mset",
-                "on_off_1": "on_off1",
-                "on_off_2": "on_off2",
-                "on_off_3": "on_off3",
-                "on_off_4": "on_off4",
-                "choose_1": "choose1",
-                "choose_2": "choose2",
-                "choose_3": "choose3",
-                "choose_4": "choose4",
-            },
-        }
-
-        device_mapping = parameter_mappings.get(device_type, {})
-        point_alias = device_mapping.get(parameter_name)
-
-        if point_alias:
-            # Verify that this point alias is supported in the configuration
-            supported_points = self.device_config_adapter.get_supported_points(
-                device_type
-            )
-            if point_alias in supported_points:
-                return point_alias
-            else:
-                logger.debug(
-                    f"[DecisionAnalyzer] Point alias '{point_alias}' not supported for device type '{device_type}'"
-                )
-                return None
-        else:
-            logger.debug(
-                f"[DecisionAnalyzer] No mapping found for parameter '{parameter_name}' in device type '{device_type}'"
-            )
-            return None
+        supported_points = self.device_config_adapter.get_supported_points(device_type)
+        return map_parameter_to_point_alias(
+            device_type,
+            parameter_name,
+            supported_points,
+        )
 
     def _calculate_image_consistency(self, embedding_df) -> float:
         """
@@ -2045,38 +1879,4 @@ class DecisionAnalyzer:
         Returns:
             Consistency score between 0.0 and 1.0
         """
-        try:
-            if len(embedding_df) < 2:
-                return 1.0  # Single image is perfectly consistent
-
-            import numpy as np
-            from sklearn.metrics.pairwise import cosine_similarity
-
-            embeddings = []
-            for _, row in embedding_df.iterrows():
-                embedding = row.get("embedding")
-                if embedding is not None:
-                    if not isinstance(embedding, np.ndarray):
-                        embedding = np.array(embedding)
-                    embeddings.append(embedding)
-
-            if len(embeddings) < 2:
-                return 1.0
-
-            # Calculate pairwise cosine similarities
-            similarities = []
-            for i in range(len(embeddings)):
-                for j in range(i + 1, len(embeddings)):
-                    sim = cosine_similarity([embeddings[i]], [embeddings[j]])[0][0]
-                    similarities.append(sim)
-
-            # Return average similarity as consistency score
-            # Ensure the result is between 0.0 and 1.0
-            avg_similarity = float(np.mean(similarities))
-            return max(0.0, min(1.0, avg_similarity))
-
-        except Exception as e:
-            logger.warning(
-                f"[DecisionAnalyzer] Failed to calculate image consistency (fallback): {e}"
-            )
-            return 0.5  # Default moderate consistency
+        return calculate_image_consistency_fallback(embedding_df)

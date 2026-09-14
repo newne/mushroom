@@ -9,7 +9,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-from datetime import datetime
 
 # Bootstrap sys.path to ensure we can import global_const from src
 current_file = Path(__file__).resolve()
@@ -18,13 +17,29 @@ if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
 # 使用BASE_DIR统一管理路径
-from global_const.global_const import ensure_src_path, BASE_DIR
+from global_const.paths import BASE_DIR, ensure_src_path
 ensure_src_path()
 os.chdir(str(BASE_DIR))
 
-from vision.mushroom_image_processor import create_mushroom_processor
-from utils.minio_service import create_minio_service
 from loguru import logger
+
+
+def _create_processor():
+    from vision.mushroom_image_processor import create_mushroom_processor
+
+    return create_mushroom_processor()
+
+
+def _create_minio_service():
+    from utils.minio_service import create_minio_service
+
+    return create_minio_service()
+
+
+def _create_encoder(load_clip: bool = True):
+    from vision.mushroom_image_encoder import create_mushroom_encoder
+
+    return create_mushroom_encoder(load_clip=load_clip)
 
 
 def setup_logging(verbose: bool = False):
@@ -36,7 +51,7 @@ def setup_logging(verbose: bool = False):
 
 def cmd_list_images(args):
     """列出图像文件"""
-    processor = create_mushroom_processor()
+    processor = _create_processor()
     
     images = processor.get_mushroom_images(
         mushroom_id=args.mushroom_id,
@@ -61,7 +76,7 @@ def cmd_list_images(args):
 
 def cmd_process_images(args):
     """处理图像文件"""
-    processor = create_mushroom_processor()
+    processor = _create_processor()
     
     if args.single_file:
         # 处理单个文件
@@ -97,7 +112,7 @@ def cmd_process_images(args):
 
 def cmd_stats(args):
     """显示统计信息"""
-    processor = create_mushroom_processor()
+    processor = _create_processor()
     
     # 获取处理统计
     stats = processor.get_processing_statistics()
@@ -117,7 +132,7 @@ def cmd_stats(args):
             print(f"    库号 {mushroom_id}: {count} 张图片")
     
     # MinIO统计
-    minio_service = create_minio_service()
+    minio_service = _create_minio_service()
     minio_stats = minio_service.get_image_statistics()
     
     if minio_stats:
@@ -134,7 +149,7 @@ def cmd_stats(args):
 
 def cmd_search(args):
     """搜索相似图像"""
-    processor = create_mushroom_processor()
+    processor = _create_processor()
     
     logger.info(f"搜索与 {args.query_image} 相似的图像...")
     
@@ -160,11 +175,9 @@ def cmd_search(args):
 
 def cmd_encode_images(args):
     """编码图像并获取环境参数"""
-    from vision.mushroom_image_encoder import create_mushroom_encoder
-    
     logger.info("开始图像编码和环境参数获取...")
-    
-    encoder = create_mushroom_encoder()
+
+    encoder = _create_encoder()
     
     # 批量处理图像
     stats = encoder.batch_process_images(
@@ -195,11 +208,9 @@ def cmd_encode_images(args):
 
 def cmd_encode_single(args):
     """编码单个图像"""
-    from vision.mushroom_image_encoder import create_mushroom_encoder
-    
     logger.info(f"编码单个图像: {args.image_path}")
-    
-    encoder = create_mushroom_encoder()
+
+    encoder = _create_encoder()
     
     # 解析图像路径
     image_info = encoder.processor.parser.parse_path(args.image_path)
@@ -230,7 +241,7 @@ def cmd_encode_single(args):
 
 def cmd_validate(args):
     """验证路径格式"""
-    processor = create_mushroom_processor()
+    processor = _create_processor()
     
     if args.path:
         # 验证单个路径
@@ -251,7 +262,7 @@ def cmd_validate(args):
         # 验证所有图像路径
         logger.info("验证所有图像路径格式...")
         
-        minio_service = create_minio_service()
+        minio_service = _create_minio_service()
         all_images = minio_service.client.list_images(prefix="mogu/")
         
         valid_count = 0
@@ -277,9 +288,9 @@ def cmd_validate(args):
 def cmd_health_check(args):
     """健康检查"""
     logger.info("执行系统健康检查...")
-    
+
     # MinIO健康检查
-    minio_service = create_minio_service()
+    minio_service = _create_minio_service()
     minio_health = minio_service.health_check()
     
     print("MinIO服务状态:")
@@ -295,7 +306,7 @@ def cmd_health_check(args):
     
     # 数据库连接检查
     try:
-        processor = create_mushroom_processor()
+        processor = _create_processor()
         db_stats = processor.get_processing_statistics()
         
         print("数据库状态:")
@@ -308,18 +319,18 @@ def cmd_health_check(args):
         print(f"  错误信息: {e}")
 
 
-def main():
-    """主函数"""
+def build_parser() -> argparse.ArgumentParser:
+    """构建命令行解析器。"""
     parser = argparse.ArgumentParser(description="蘑菇图像处理命令行工具")
     parser.add_argument("-v", "--verbose", action="store_true", help="详细输出")
-    
+
     subparsers = parser.add_subparsers(dest="command", help="可用命令")
-    
+
     # list 命令
     list_parser = subparsers.add_parser("list", help="列出图像文件")
     list_parser.add_argument("-m", "--mushroom-id", help="蘑菇库号过滤")
     list_parser.add_argument("-d", "--date", help="日期过滤 (YYYYMMDD)")
-    
+
     # process 命令
     process_parser = subparsers.add_parser("process", help="处理图像文件")
     process_parser.add_argument("-m", "--mushroom-id", help="蘑菇库号过滤")
@@ -327,70 +338,79 @@ def main():
     process_parser.add_argument("-f", "--single-file", help="处理单个文件")
     process_parser.add_argument("--description", help="图像描述")
     process_parser.add_argument("-b", "--batch-size", type=int, default=10, help="批处理大小")
-    
+
     # stats 命令
-    stats_parser = subparsers.add_parser("stats", help="显示统计信息")
-    
+    subparsers.add_parser("stats", help="显示统计信息")
+
     # encode 命令
     encode_parser = subparsers.add_parser("encode", help="编码图像并获取环境参数")
     encode_parser.add_argument("-m", "--mushroom-id", help="蘑菇库号过滤")
     encode_parser.add_argument("-d", "--date", help="日期过滤 (YYYYMMDD)")
     encode_parser.add_argument("-b", "--batch-size", type=int, default=10, help="批处理大小")
-    
+
     # encode-single 命令
     encode_single_parser = subparsers.add_parser("encode-single", help="编码单个图像")
     encode_single_parser.add_argument("image_path", help="图像路径")
-    
+
     # search 命令
     search_parser = subparsers.add_parser("search", help="搜索相似图像")
     search_parser.add_argument("query_image", help="查询图像路径")
     search_parser.add_argument("-k", "--top-k", type=int, default=5, help="返回前K个结果")
-    
+
     # validate 命令
     validate_parser = subparsers.add_parser("validate", help="验证路径格式")
     validate_parser.add_argument("-p", "--path", help="验证单个路径")
-    
+
     # health 命令
-    health_parser = subparsers.add_parser("health", help="健康检查")
-    
+    subparsers.add_parser("health", help="健康检查")
+
+    return parser
+
+
+COMMAND_HANDLERS = {
+    "list": cmd_list_images,
+    "process": cmd_process_images,
+    "stats": cmd_stats,
+    "encode": cmd_encode_images,
+    "encode-single": cmd_encode_single,
+    "search": cmd_search,
+    "validate": cmd_validate,
+    "health": cmd_health_check,
+}
+
+
+def main() -> int:
+    """主函数"""
+    parser = build_parser()
     args = parser.parse_args()
-    
+
     if not args.command:
         parser.print_help()
-        return
-    
+        return 0
+
     # 设置日志
     setup_logging(args.verbose)
-    
+
     # 执行命令
     try:
-        if args.command == "list":
-            cmd_list_images(args)
-        elif args.command == "process":
-            cmd_process_images(args)
-        elif args.command == "stats":
-            cmd_stats(args)
-        elif args.command == "encode":
-            cmd_encode_images(args)
-        elif args.command == "encode-single":
-            cmd_encode_single(args)
-        elif args.command == "search":
-            cmd_search(args)
-        elif args.command == "validate":
-            cmd_validate(args)
-        elif args.command == "health":
-            cmd_health_check(args)
-        else:
+        handler = COMMAND_HANDLERS.get(args.command)
+        if handler is None:
             logger.error(f"未知命令: {args.command}")
-            
+            return 1
+
+        handler(args)
+        return 0
     except KeyboardInterrupt:
         logger.info("操作被用户中断")
+        return 130
     except Exception as e:
         logger.error(f"命令执行失败: {e}")
         if args.verbose:
             import traceback
+
             traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

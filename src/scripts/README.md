@@ -5,46 +5,68 @@
 ## 目录结构
 
 ### 1. Analysis (`analysis/`)
+
 用于数据分析和可视化的脚本。
+
 - `run_decision_analysis.py`: 运行决策分析的 CLI 工具。
 - `run_env_stats.py`: 运行环境统计分析。
 - `run_visualization.py`: 生成环境数据可视化报告。
 
 ### 2. Processing (`processing/`)
+
 用于数据处理和计算的脚本。
+
 - `compute_historical_env_stats.py`: 计算历史环境统计数据。
 - `process_recent_images.py`: 处理最近采集的图像（CLI 工具）。
 - `extract_monitoring_point_configs.py`: 提取监控点配置。
 - `visualize_latest_batch.py`: 可视化最新批次数据。
 
 ### 3. Monitoring (`monitoring/`)
+
 用于监控系统状态和设定点的脚本。
+
 - `batch_setpoint_monitoring.py`: 批量设定点监控。
 - `monitor_setpoint_changes.py`: 监控设定点变更。
 - `comprehensive_setpoint_analysis.py`: 综合设定点分析。
 
 ### 4. Config (`config/`)
+
 用于配置管理的脚本。
+
 - `import_static_config.py`: 导入静态配置。
 - `clear_and_reimport_static_config.py`: 清除并重新导入静态配置。
 
 ### 5. Data (`data/`)
+
 用于数据查询和存储的脚本。
+
 - `query_decision_analysis_results.py`: 查询决策分析结果。
 - `query_iot_results.py`: 查询 IoT 数据结果。
 - `store_decision_analysis_result.py`: 存储决策分析结果。
 - `store_iot_analysis_results.py`: 存储 IoT 分析结果。
 
 ### 6. Maintenance (`maintenance/`)
+
 用于系统维护和检查的脚本。
+
 - `cache_manager.py`: 缓存管理。
 - `check_env_stats.py`: 检查环境统计数据。
 - `check_embedding_data.py`: 检查向量数据。
 - `check_december_data.py`: 数据检查工具。
+- `workspace_artifact_archiver.py`: 归档运行产物（日志、output 结果、本地 mlflow.db），用于保持工作区整洁。
+
+## 业务分类建议
+
+- `analysis/`: 偏离线分析与报表产出。
+- `processing/`: 在线/离线核心处理流程。
+- `monitoring/`: 可观测性与运行状态巡检。
+- `maintenance/`: 清理、修复、回填、归档等运维动作。
+- `data/` 与 `data_collection/`: 数据查询、落库和采集链路。
 
 ## 主入口
 
 ### `mushroom_cli.py`
+
 这是一个集成的命令行工具，用于执行常见的图像处理任务。
 
 **使用示例:**
@@ -64,6 +86,9 @@ python src/scripts/mushroom_cli.py search path/to/image.jpg
 
 # 健康检查
 python src/scripts/mushroom_cli.py health
+
+# 归档运行产物
+python src/scripts/maintenance/workspace_artifact_archiver.py --tag 20260421
 ```
 
 ## 注意事项

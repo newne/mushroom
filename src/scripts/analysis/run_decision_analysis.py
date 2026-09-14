@@ -31,7 +31,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 # 使用BASE_DIR统一管理路径
-from global_const.global_const import ensure_src_path
+from global_const.paths import ensure_src_path
+from scripts.common.datetime_parser import parse_datetime_or_now
 ensure_src_path()
 
 from loguru import logger
@@ -126,24 +127,7 @@ def parse_datetime(datetime_str: Optional[str]) -> datetime:
     Raises:
         ValueError: 日期时间格式无效
     """
-    if datetime_str is None:
-        return datetime.now()
-    
-    try:
-        return datetime.strptime(datetime_str, "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        # Try alternative format without seconds
-        try:
-            return datetime.strptime(datetime_str, "%Y-%m-%d %H:%M")
-        except ValueError:
-            # Try date only format
-            try:
-                return datetime.strptime(datetime_str, "%Y-%m-%d")
-            except ValueError:
-                raise ValueError(
-                    f"Invalid datetime format: {datetime_str}. "
-                    f"Expected formats: 'YYYY-MM-DD HH:MM:SS', 'YYYY-MM-DD HH:MM', or 'YYYY-MM-DD'"
-                )
+    return parse_datetime_or_now(datetime_str)
 
 
 def format_console_output(result) -> str:

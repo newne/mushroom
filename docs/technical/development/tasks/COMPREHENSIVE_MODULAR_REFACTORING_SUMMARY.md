@@ -2,7 +2,7 @@
 
 ## 概述
 
-基于 `src/scheduling/optimized_scheduler.py` 中的定时任务配置，完成了整个项目架构的全面模块化重构，将所有功能模块按照明确的分类标准重新组织到 `src` 目录下的相应子目录中。
+基于 `src/scheduling/core/scheduler.py` 与 `src/scheduling/tasks/` 的定时任务配置，完成了整个项目架构的全面模块化重构，将所有功能模块按照明确的分类标准重新组织到 `src` 目录下的相应子目录中。
 
 ## 重构目标与原则
 
@@ -14,7 +14,7 @@
 5. **系统功能完整性**：确保所有定时任务仍能正常执行
 
 ### 分类标准
-1. **图像处理相关模块** → `src/clip/`
+1. **图像处理相关模块** → `src/vision/`
 2. **决策分析相关模块** → `src/decision_analysis/`
 3. **通用工具模块** → `src/utils/`
 4. **全局常量和配置模块** → `src/global_const/`
@@ -23,11 +23,11 @@
 
 ## 重构详情
 
-### 1. 图像处理模块 (`src/clip/`)
+### 1. 图像处理模块 (`src/vision/`)
 
 **新增目录结构：**
 ```
-src/clip/
+src/vision/
 ├── __init__.py                    # 模块接口定义
 ├── README.md                      # 模块文档（已存在）
 ├── clip_inference.py              # CLIP模型推理核心（已存在）
@@ -40,9 +40,9 @@ src/clip/
 ```
 
 **迁移的模块：**
-- `src/utils/mushroom_image_encoder.py` → `src/clip/mushroom_image_encoder.py`
-- `src/utils/mushroom_image_processor.py` → `src/clip/mushroom_image_processor.py`
-- `src/utils/recent_image_processor.py` → `src/clip/recent_image_processor.py`
+- `src/utils/mushroom_image_encoder.py` → `src/vision/mushroom_image_encoder.py`
+- `src/utils/mushroom_image_processor.py` → `src/vision/mushroom_image_processor.py`
+- `src/utils/recent_image_processor.py` → `src/vision/recent_image_processor.py`
 
 **功能覆盖：**
 - CLIP模型推理和图像向量化
@@ -66,7 +66,7 @@ src/decision_analysis/
 ├── llm_client.py                  # LLM客户端
 ├── output_handler.py              # 输出处理器
 ├── device_config_adapter.py       # 设备配置适配器
-├── inference_persistence.py       # 结果持久化
+├── executor.py                    # 决策执行协调
 └── data_models.py                 # 数据模型定义
 ```
 
@@ -88,7 +88,7 @@ src/utils/
 ├── data_preprocessing.py          # 数据预处理
 ├── env_data_processor.py          # 环境数据处理（新增create函数）
 ├── dataframe_utils.py             # DataFrame工具
-├── model_inference_storage.py     # 模型推理存储
+├── （该能力已迁移至 `src/storage/` 模块）
 ├── realtime_data_populator.py     # 实时数据填充
 ├── setpoint_config.py             # 设定点配置
 ├── setpoint_change_monitor.py     # 设定点变更监控
@@ -99,7 +99,7 @@ src/utils/
 ```
 
 **移除的模块：**
-- 图像处理相关模块已迁移到 `src/clip/`
+- 图像处理相关模块已迁移到 `src/vision/`
 
 ### 4. 全局常量和配置模块 (`src/global_const/`)
 
@@ -128,7 +128,8 @@ src/configs/
 src/scheduling/
 ├── __init__.py                    # 新增：模块接口
 ├── README.md                      # 调度系统文档（已存在）
-└── optimized_scheduler.py         # 优化版调度器（已存在）
+├── __main__.py                    # 包级命令行入口
+└── core/scheduler.py              # 优化版调度器核心实现
 ```
 
 **状态：** ✅ 已正确组织，新增 `__init__.py` 接口文件
@@ -170,9 +171,9 @@ from utils.mushroom_image_processor import create_mushroom_processor
 from utils.recent_image_processor import create_recent_image_processor
 
 # 新导入
-from src.clip.mushroom_image_encoder import create_mushroom_encoder
-from src.clip.mushroom_image_processor import create_mushroom_processor
-from src.clip.recent_image_processor import create_recent_image_processor
+from src.vision.mushroom_image_encoder import create_mushroom_encoder
+from src.vision.mushroom_image_processor import create_mushroom_processor
+from src.vision.recent_image_processor import create_recent_image_processor
 ```
 
 **调度器模块导入：**
@@ -195,12 +196,12 @@ from src.tasks import (
 ### 更新的文件列表
 
 **源代码文件：**
-- `src/clip/mushroom_image_encoder.py` - 更新内部导入
-- `src/clip/mushroom_image_processor.py` - 更新内部导入
-- `src/clip/recent_image_processor.py` - 更新内部导入
-- `src/clip/clip_inference_scheduler.py` - 更新导入路径
-- `src/clip/get_env_status.py` - 更新导入路径
-- `src/clip/clip_app.py` - 更新导入路径
+- `src/vision/mushroom_image_encoder.py` - 更新内部导入
+- `src/vision/mushroom_image_processor.py` - 更新内部导入
+- `src/vision/recent_image_processor.py` - 更新内部导入
+- `src/vision/clip_inference_scheduler.py` - 更新导入路径
+- `src/vision/get_env_status.py` - 更新导入路径
+- `src/vision/clip_app.py` - 更新导入路径
 - `src/utils/minio_client.py` - 更新图像处理器导入
 - `src/tasks/clip/clip_tasks.py` - 更新图像编码器导入
 
@@ -218,10 +219,10 @@ from src.tasks import (
 - `tests/integration/verify_system_integration.py`
 
 **文档文件：**
-- `docs/03_使用指南.md`
-- `docs/05_蘑菇系统功能说明.md`
-- `docs/guides/05_蘑菇图像处理指南.md`
-- `docs/development/optimizations/OPT_05_表结构优化总结.md`
+- `docs/business/03_使用指南.md`
+- `docs/business/05_蘑菇系统功能说明.md`
+- `docs/technical/guides/05_蘑菇图像处理指南.md`
+- `docs/technical/development/optimizations/OPT_05_表结构优化总结.md`
 
 ## 新增功能
 
@@ -249,7 +250,7 @@ def create_env_data_processor() -> EnvDataProcessor:
 
 ### 模块接口文件
 
-**`src/clip/__init__.py`：**
+**`src/vision/__init__.py`：**
 ```python
 # 导入核心组件
 from .clip_inference import *
@@ -265,24 +266,24 @@ from .recent_image_processor import *
 
 **`src/scheduling/__init__.py`：**
 ```python
-from .optimized_scheduler import OptimizedScheduler
+from .core.scheduler import OptimizedScheduler, run_scheduler
 
-__all__ = ['OptimizedScheduler']
+__all__ = ['OptimizedScheduler', 'run_scheduler']
 ```
 
 ## 验证结果
 
 ### 语法检查
 ```bash
-✅ python -m py_compile src/clip/__init__.py
-✅ python -m py_compile src/clip/mushroom_image_encoder.py
-✅ python -m py_compile src/clip/mushroom_image_processor.py
-✅ python -m py_compile src/clip/recent_image_processor.py
-✅ python -m py_compile src/clip/clip_inference_scheduler.py
-✅ python -m py_compile src/clip/get_env_status.py
-✅ python -m py_compile src/clip/clip_app.py
+✅ python -m py_compile src/vision/__init__.py
+✅ python -m py_compile src/vision/mushroom_image_encoder.py
+✅ python -m py_compile src/vision/mushroom_image_processor.py
+✅ python -m py_compile src/vision/recent_image_processor.py
+✅ python -m py_compile src/vision/clip_inference_scheduler.py
+✅ python -m py_compile src/vision/get_env_status.py
+✅ python -m py_compile src/vision/clip_app.py
 ✅ python -m py_compile src/scheduling/__init__.py
-✅ python -m py_compile src/scheduling/optimized_scheduler.py
+✅ python -m py_compile src/scheduling/core/scheduler.py
 ```
 
 ### 导入测试
@@ -372,7 +373,7 @@ __all__ = ['OptimizedScheduler']
 
 本次全面模块化重构成功实现了以下目标：
 
-1. **✅ 完成了图像处理模块的统一整合**：将分散在 `utils/` 中的图像处理功能统一迁移到 `src/clip/` 目录
+1. **✅ 完成了图像处理模块的统一整合**：将分散在 `utils/` 中的图像处理功能统一迁移到 `src/vision/` 目录
 2. **✅ 建立了清晰的模块边界**：每个目录都有明确的功能定位和职责范围
 3. **✅ 优化了依赖关系**：使用绝对导入路径，避免循环依赖问题
 4. **✅ 保持了完全的向后兼容性**：所有现有功能正常工作，定时任务正常执行

@@ -28,13 +28,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+SRC_DIR = Path(__file__).resolve().parents[1]
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
 # 使用BASE_DIR统一管理路径
-from global_const.global_const import ensure_src_path
+from global_const.paths import ensure_src_path
 
 ensure_src_path()
 
 from loguru import logger
 
+from scripts.common.datetime_parser import parse_datetime_or_now
 from scripts.analysis.run_enhanced_decision_analysis import (
     execute_enhanced_decision_analysis,
 )
@@ -50,18 +55,10 @@ loguru_setting(production=False)
 
 def parse_datetime(datetime_str: Optional[str]) -> datetime:
     """解析日期时间字符串"""
-    if datetime_str is None:
-        return datetime.now()
-
-    formats = ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"]
-
-    for fmt in formats:
-        try:
-            return datetime.strptime(datetime_str, fmt)
-        except ValueError:
-            continue
-
-    raise ValueError(f"无效的日期时间格式: {datetime_str}")
+    return parse_datetime_or_now(
+        datetime_str,
+        error_message=f"无效的日期时间格式: {datetime_str}",
+    )
 
 
 def run_enhanced_decision_analysis(

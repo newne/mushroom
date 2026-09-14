@@ -170,7 +170,7 @@ def verify_scheduler_compatibility():
     
     try:
         # 导入调度器模块（不启动）
-        from scheduling.optimized_scheduler import OptimizedScheduler
+        from scheduling import OptimizedScheduler
         
         logger.info("✅ 调度器模块导入成功")
         

@@ -31,7 +31,7 @@ from datetime import datetime
 from typing import Dict, List, Any, Optional
 
 # 使用BASE_DIR统一管理路径
-from global_const.global_const import ensure_src_path
+from global_const.paths import ensure_src_path
 ensure_src_path()
 
 from global_const.global_const import static_settings

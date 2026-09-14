@@ -29,13 +29,13 @@
 - ✅ 优化了索引注释格式
 
 ### 2. 环境数据解析
-**文件**: `src/clip/get_env_status.py`
+**文件**: `src/vision/get_env_status.py`
 - ✅ 删除了 growth_stage 的计算逻辑
 - ✅ 删除了 file_name 字段的生成
 - ✅ 更新了记录生成逻辑，移除相关字段
 
 ### 3. 图像编码器
-**文件**: `src/utils/mushroom_image_encoder.py`
+**文件**: `src/vision/mushroom_image_encoder.py`
 - ✅ 已实现 `calculate_image_quality_score()` 方法
 - ✅ 在 `process_single_image()` 中计算图像质量评分
 - ✅ 在 `_save_to_database()` 中保存 image_quality_score
@@ -49,12 +49,12 @@
 ## 未修改的文件（无需修改）
 
 ### 1. MushroomImageInfo 数据类
-**文件**: `src/utils/mushroom_image_processor.py`
+**文件**: `src/vision/mushroom_image_processor.py`
 - `file_name` 字段保留：用于日志记录和临时处理
 - 不是数据库字段，仅用于内存中的数据传递
 
 ### 2. 日志记录
-**文件**: `src/utils/recent_image_processor.py`
+**文件**: `src/vision/recent_image_processor.py`
 - 使用 `image_info.file_name` 进行日志输出
 - 不涉及数据库操作，无需修改
 
@@ -64,7 +64,7 @@
 - 与数据库表结构无关
 
 ### 4. 旧测试文件
-**文件**: `src/clip/clip_app.py`
+**文件**: `src/vision/clip_app.py`
 - 这是一个独立的测试文件，使用自己的表结构
 - 不影响主系统，可以忽略或单独更新
 
@@ -83,7 +83,7 @@ python scripts/migrate_mushroom_embedding_table.py
 ### 步骤 3: 重启调度器
 ```bash
 # 如果调度器正在运行，重启以应用新的表结构
-python scheduler.py
+PYTHONPATH=/mnt/d/code/mushroom/src uv run python -m scheduling
 ```
 
 ## 数据完整性保证

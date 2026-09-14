@@ -57,8 +57,8 @@ port="5000"
 
 
 [development.llama]
-llama_host = "10.77.77.49"
-llama_port = "7001"
+llama_host = "10.77.77.37"
+llama_port = "7002"
 model = "llama-mushroom-medium"
 llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成
@@ -74,8 +74,8 @@ mushroom_descripe_prompt = "" # Loaded from MLflow Prompt Registry: growth_stage
 
 
 [development.llama_vl]
-llama_host = "10.77.77.49"
-llama_port = "7001"
+llama_host = "10.77.77.37"
+llama_port = "7002"
 model = "llama-mushroom-medium"
 llama_completions = "http://{0}:{1}/v1/chat/completions"
 enabled = true  # 是否启用LLaMA描述生成

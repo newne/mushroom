@@ -4,11 +4,8 @@
 集成LLaMA模型获取蘑菇生长情况描述
 """
 
-import base64
 import importlib
-import io
 import json
-import re
 import sys
 import time
 import traceback
@@ -78,6 +75,31 @@ MushroomImageInfo = mushroom_image_processor_module.MushroomImageInfo
 create_mushroom_processor = mushroom_image_processor_module.create_mushroom_processor
 
 _import_last = _record_import_step("local_modules", _import_last)
+
+from vision.encoder_llm.prompt_builder import (
+    apply_prompt_length_guard,
+    build_compact_v15_prompt,
+    build_minimal_fallback_prompt,
+)
+from vision.encoder_llm.llama_gateway import (
+    build_llama_completions_url,
+    build_llama_headers,
+    get_llama_extra_body,
+    get_llama_generation_options,
+    parse_llama_json_content,
+)
+from vision.encoder_image.compression import (
+    LlamaImageCompressionConfig,
+    binary_search_quality,
+    compute_ssim,
+    encode_image_for_llama_with_meta,
+    encode_jpeg_bytes,
+    resize_image_for_llama,
+)
+from vision.encoder_storage.text_quality_repository import (
+    insert_text_quality_record,
+    save_text_quality_only,
+)
 
 
 def _encoder_log(event: str, message: str, level: str = "INFO", **context: Any) -> None:
@@ -305,32 +327,20 @@ class MushroomImageEncoder:
         llama_quality_score: float | None,
     ) -> bool:
         """仅保存文本描述与质量评分"""
-        session = self.Session()
         try:
             room_id = self._map_room_id(image_info.mushroom_id)
             in_date = time_info["collection_date"].date()
-            existing_embedding = (
-                session.query(MushroomImageEmbedding)
-                .filter_by(image_path=image_info.file_path)
-                .first()
+            return save_text_quality_only(
+                session_factory=self.Session,
+                image_path=image_info.file_path,
+                room_id=room_id,
+                in_date=in_date,
+                collection_datetime=time_info["collection_datetime"],
+                growth_stage_description=growth_stage_description,
+                chinese_description=chinese_description,
+                llama_quality_score=llama_quality_score,
             )
-            embedding_id = existing_embedding.id if existing_embedding else None
-
-            self._insert_text_quality_record(
-                session,
-                image_info.file_path,
-                embedding_id,
-                room_id,
-                in_date,
-                time_info["collection_datetime"],
-                growth_stage_description if growth_stage_description else None,
-                chinese_description,
-                llama_quality_score,
-            )
-            session.commit()
-            return True
         except Exception as e:
-            session.rollback()
             _encoder_log(
                 "VISION_TEXT_QUALITY_SAVE_FAILED",
                 "保存文本与质量记录失败",
@@ -342,8 +352,6 @@ class MushroomImageEncoder:
                 error_message=str(e),
             )
             return False
-        finally:
-            session.close()
 
     def _init_clip_model(self):
         """初始化CLIP模型"""
@@ -503,88 +511,32 @@ class MushroomImageEncoder:
 
     def _get_llama_generation_options(self) -> dict[str, Any]:
         """从 llama_vl 配置读取采样参数。"""
-        options: dict[str, Any] = {
-            "temperature": getattr(self.llama_config, "temperature", 0.7),
-            "max_tokens": getattr(self.llama_config, "max_tokens", 1024),
-            "top_p": getattr(self.llama_config, "top_p", 0.9),
-        }
-
-        for key in (
-            "top_k",
-            "min_p",
-            "presence_penalty",
-            "repetition_penalty",
-        ):
-            value = getattr(self.llama_config, key, None)
-            if value is not None:
-                options[key] = value
-
-        return options
+        return get_llama_generation_options(self.llama_config)
 
     def _get_llama_extra_body(self, model_name: str) -> dict[str, Any] | None:
         """为 Qwen3 系列关闭 think/reasoning 输出。"""
-        model_lower = str(model_name).lower()
-        if model_lower == "llama-mushroom-medium" or "qwen3" in model_lower:
-            return {
-                "enable_thinking": False,
-                "chat_template_kwargs": {"enable_thinking": False},
-            }
-        return None
+        return get_llama_extra_body(model_name)
 
     def _apply_prompt_length_guard(self, prompt_text: str) -> str:
         """提示词长度守卫：过长时切换紧凑版提示词。"""
-        normalized = str(prompt_text) if prompt_text is not None else ""
-        if len(normalized) > 2600:
+        def _log_compacted(original_length: int) -> None:
             _encoder_log(
                 "VISION_LLAMA_PROMPT_COMPACTED",
                 "提示词过长，切换到紧凑版提示词",
                 level="WARNING",
                 status="partial",
-                total_items=len(normalized),
+                total_items=original_length,
             )
-            return self._build_compact_v15_prompt()
-        return normalized
+
+        return apply_prompt_length_guard(prompt_text, on_compacted=_log_compacted)
 
     def _build_compact_v15_prompt(self) -> str:
         """构建紧凑版v15提示词，保留核心约束和关键示例。"""
-        return (
-            "You are a visual morphologist for Lyophyllum decastes in industrial bag cultivation. "
-            "Return exactly one JSON object with growth_stage_description, chinese_description, image_quality_score.\n"
-            "Use exact stage terms: Substrate Stage, Primordia Stage, Fruiting Stage, Post-harvest Stage.\n"
-            "Stage rules: "
-            "Substrate Stage=bags/substrate visible, smooth/flat, no visible primordia or fruiting bodies; "
-            "Primordia Stage=pinhead/coral primordia visible, no mature fruiting bodies; "
-            "Fruiting Stage=mature caps/stipes present; "
-            "Post-harvest Stage=bags visible, disturbed substrate, cut traces/residual bases, no intact mushrooms.\n"
-            "Visible traits only, no causes/speculation, no subjective words, no verbs.\n"
-            "Describe only deer antler mushroom growth status; never use biological-activity wording.\n"
-            "When primordia/fruiting visible, use noun-chain traits if clearly visible: "
-            "Cap(thin/thick, small/large, hemispherical/flattened, smooth/rough), "
-            "Stipe(short/long, slender/clavate, uniform/irregular), "
-            "Cluster(sparse/moderate/dense, radial/bushy), "
-            "Development(normal development/delayed development/over-mature), "
-            "Morphology Integrity(intact morphology/minor deformity/severe deformity), "
-            "Texture Uniformity(uniform grayscale/mottled grayscale), "
-            "Grayscale Tone(dark/medium/light).\n"
-            "growth_stage_description format: "
-            "[Stage], [Cap], [Stipe], [Cluster], [Development Status], [Morphology Integrity], [Texture Uniformity], [Grayscale Tone]. "
-            "Omit categories with no visible evidence. Post-harvest may skip cap/stipe.\n"
-            "chinese_description must be a professional mycological translation.\n"
-            "image_quality_score (0-100) based on focus/illumination/noise and obscuration; do not penalize natural absence of mushrooms.\n"
-            "Few-shot examples:\n"
-            '{"growth_stage_description": "Fruiting Stage, thick caps, long stipes, dense radial cluster, normal development, intact morphology, uniform grayscale, medium grayscale", "chinese_description": "子实体阶段，厚菌盖，长菌柄，密集放射状菌簇，发育正常，形态完整，灰度均匀，中等灰度", "image_quality_score": 92}\n'
-            '{"growth_stage_description": "Primordia Stage, coral primordia, dense cluster, normal development, intact morphology, uniform grayscale, medium grayscale", "chinese_description": "原基阶段，珊瑚状原基，密集菌簇，发育正常，形态完整，灰度均匀，中等灰度", "image_quality_score": 88}\n'
-            '{"growth_stage_description": "Post-harvest Stage, disturbed substrate, cut traces visible, low contrast grayscale", "chinese_description": "已采收阶段，基质扰动，可见切痕，低对比度灰度", "image_quality_score": 45}'
-        )
+        return build_compact_v15_prompt()
 
     def _build_minimal_fallback_prompt(self) -> str:
         """构建最小兼容提示词，用于接口400时降级重试。"""
-        return (
-            "Analyze this mushroom image and return EXACTLY one JSON object with keys "
-            "growth_stage_description, chinese_description, image_quality_score. "
-            "Use growth stages only from: Substrate Stage, Primordia Stage, Fruiting Stage, Post-harvest Stage. "
-            "Describe only visible traits and keep concise professional terms."
-        )
+        return build_minimal_fallback_prompt()
 
     def _call_llama_api(
         self,
@@ -714,36 +666,8 @@ class MushroomImageEncoder:
             if extra_body:
                 payload["extra_body"] = extra_body
 
-            headers = {"Content-Type": "application/json"}
-
-            # 根据模型类型智能选择API密钥
-            # 判断逻辑：如果模型名称中包含 'vl', 'vision', 'qvq' 等关键词，视为多模态模型
-            is_multimodal = any(kw in model.lower() for kw in ["vl", "vision", "qvq"])
-
-            api_key = None
-            if is_multimodal:
-                # 多模态模型：优先使用 vl key，回退到 basic key
-                api_key = getattr(self.llama_config, "api_key_vl", None) or getattr(
-                    self.llama_config, "api_key", None
-                )
-            else:
-                # 纯文本/通用模型：优先使用 basic key，回退到 vl key (以防配置错配)
-                api_key = getattr(self.llama_config, "api_key", None) or getattr(
-                    self.llama_config, "api_key_vl", None
-                )
-
-            if api_key:
-                headers["X-API-Key"] = api_key
-
-            # 构建URL
-            host = getattr(self.llama_config, "llama_host", "localhost")
-            port = getattr(self.llama_config, "llama_port", "7001")
-            base_url_template = getattr(
-                self.llama_config,
-                "llama_completions",
-                "http://{0}:{1}/v1/chat/completions",
-            )
-            base_url = base_url_template.format(host, port)
+            headers = build_llama_headers(self.llama_config, model)
+            base_url = build_llama_completions_url(self.llama_config)
 
             # 从配置获取超时时间，默认600秒
             timeout = getattr(self.llama_config, "timeout", 600)
@@ -996,13 +920,7 @@ class MushroomImageEncoder:
                     elif "```" in content:
                         content = content.split("```")[1].split("```")[0].strip()
 
-                    try:
-                        llama_result = json.loads(content)
-                    except json.JSONDecodeError:
-                        match = re.search(r"\{[\s\S]*\}", content)
-                        if not match:
-                            raise
-                        llama_result = json.loads(match.group(0))
+                    llama_result = parse_llama_json_content(content)
 
                     # 验证必需字段
                     if (
@@ -1226,50 +1144,31 @@ class MushroomImageEncoder:
             缩放后的PIL图像对象
         """
         try:
-            # 获取配置的目标分辨率（宽高双上限），默认为 960x960
             target_width = int(getattr(self.llama_config, "image_width", 960))
             target_height = int(getattr(self.llama_config, "image_height", 960))
+            resized = resize_image_for_llama(image, target_width, target_height)
 
-            # 下限保护，避免异常配置
-            target_width = max(64, target_width)
-            target_height = max(64, target_height)
-
-            original_width, original_height = image.size
-
-            # 使用“框内缩放”策略：同时约束宽和高，避免长边过大导致视觉token暴涨
-            scale_ratio = min(
-                target_width / original_width,
-                target_height / original_height,
-                1.0,
-            )
-
-            new_width = max(1, int(original_width * scale_ratio))
-            new_height = max(1, int(original_height * scale_ratio))
-
-            if new_width == original_width and new_height == original_height:
+            if not resized.changed:
                 _encoder_log(
                     "VISION_LLAMA_IMAGE_RESIZE_SKIPPED",
                     "图像已在目标尺寸范围内，保留原始分辨率",
                     level="DEBUG",
-                    original_width=original_width,
-                    original_height=original_height,
+                    original_width=resized.original_size[0],
+                    original_height=resized.original_size[1],
                 )
                 return image
 
-            resized_image = image.resize(
-                (new_width, new_height), Image.Resampling.LANCZOS
-            )
             _encoder_log(
                 "VISION_LLAMA_IMAGE_RESIZED",
                 "已为 LLaMA 缩放图像尺寸",
                 level="DEBUG",
-                original_width=original_width,
-                original_height=original_height,
-                resized_width=new_width,
-                resized_height=new_height,
+                original_width=resized.original_size[0],
+                original_height=resized.original_size[1],
+                resized_width=resized.resized_size[0],
+                resized_height=resized.resized_size[1],
             )
 
-            return resized_image
+            return resized.image
 
         except Exception as e:
             _encoder_log(
@@ -1286,44 +1185,11 @@ class MushroomImageEncoder:
         self, source_image: PILImageType, target_image: PILImageType
     ) -> float:
         """计算两张图像的全局SSIM（灰度）。"""
-        src_gray = np.asarray(source_image.convert("L"), dtype=np.float64)
-        tgt_gray = np.asarray(target_image.convert("L"), dtype=np.float64)
-
-        if src_gray.shape != tgt_gray.shape:
-            tgt_gray = np.asarray(
-                target_image.convert("L").resize(
-                    (src_gray.shape[1], src_gray.shape[0]),
-                    Image.Resampling.BILINEAR,
-                ),
-                dtype=np.float64,
-            )
-
-        c1 = (0.01 * 255) ** 2
-        c2 = (0.03 * 255) ** 2
-
-        mu_src = src_gray.mean()
-        mu_tgt = tgt_gray.mean()
-        var_src = src_gray.var()
-        var_tgt = tgt_gray.var()
-        cov = ((src_gray - mu_src) * (tgt_gray - mu_tgt)).mean()
-
-        numerator = (2 * mu_src * mu_tgt + c1) * (2 * cov + c2)
-        denominator = (mu_src**2 + mu_tgt**2 + c1) * (var_src + var_tgt + c2)
-
-        if denominator <= 0:
-            return 0.0
-        return float(max(0.0, min(1.0, numerator / denominator)))
+        return compute_ssim(source_image, target_image)
 
     def _encode_jpeg_bytes(self, image: PILImageType, quality: int) -> bytes:
         """将图像按指定质量编码为JPEG字节流。"""
-        buffer = io.BytesIO()
-        image.save(
-            buffer,
-            format="JPEG",
-            quality=quality,
-            optimize=True,
-        )
-        return buffer.getvalue()
+        return encode_jpeg_bytes(image, quality)
 
     def _binary_search_quality(
         self,
@@ -1335,138 +1201,57 @@ class MushroomImageEncoder:
         quality_search_steps: int,
     ) -> tuple[bytes, int, float]:
         """在体积和SSIM约束下二分搜索最优JPEG质量。"""
-        low = min_jpeg_quality
-        high = max_jpeg_quality
-
-        best_bytes = self._encode_jpeg_bytes(source_image, min_jpeg_quality)
-        best_quality = min_jpeg_quality
-        best_ssim = 0.0
-
-        for _ in range(quality_search_steps):
-            if low > high:
-                break
-
-            mid = (low + high) // 2
-            encoded = self._encode_jpeg_bytes(source_image, mid)
-
-            decoded = Image.open(io.BytesIO(encoded)).convert("RGB")
-            current_ssim = self._compute_ssim(source_image, decoded)
-            size_ok = len(encoded) <= max_image_bytes
-            ssim_ok = current_ssim >= ssim_threshold
-
-            if size_ok and ssim_ok:
-                if mid >= best_quality:
-                    best_bytes = encoded
-                    best_quality = mid
-                    best_ssim = current_ssim
-                low = mid + 1
-            else:
-                high = mid - 1
-
-        # 如果没有命中SSIM门限，至少返回满足体积约束的最高质量版本
-        if best_ssim <= 0.0:
-            fallback_quality = min_jpeg_quality
-            for q in range(max_jpeg_quality, min_jpeg_quality - 1, -5):
-                encoded = self._encode_jpeg_bytes(source_image, q)
-                if len(encoded) <= max_image_bytes:
-                    decoded = Image.open(io.BytesIO(encoded)).convert("RGB")
-                    best_ssim = self._compute_ssim(source_image, decoded)
-                    best_bytes = encoded
-                    fallback_quality = q
-                    break
-            best_quality = fallback_quality
-
-        return best_bytes, best_quality, best_ssim
+        return binary_search_quality(
+            source_image=source_image,
+            max_image_bytes=max_image_bytes,
+            min_jpeg_quality=min_jpeg_quality,
+            max_jpeg_quality=max_jpeg_quality,
+            ssim_threshold=ssim_threshold,
+            quality_search_steps=quality_search_steps,
+        )
 
     def _encode_image_for_llama_with_meta(
         self,
         image: PILImageType,
     ) -> tuple[str, bytes, PILImageType]:
         """将图像编码为适合LLaMA-VL的base64，含体积/质量双约束。"""
+        config = LlamaImageCompressionConfig(
+            target_width=int(getattr(self.llama_config, "image_width", 960)),
+            target_height=int(getattr(self.llama_config, "image_height", 960)),
+            jpeg_quality=int(getattr(self.llama_config, "jpeg_quality", 80)),
+            min_jpeg_quality=int(getattr(self.llama_config, "min_jpeg_quality", 50)),
+            max_image_bytes=int(
+                getattr(self.llama_config, "max_image_bytes", 350 * 1024)
+            ),
+            downscale_step_percent=int(
+                getattr(self.llama_config, "downscale_step_percent", 15)
+            ),
+            ssim_threshold=float(getattr(self.llama_config, "ssim_threshold", 0.95)),
+            quality_search_steps=int(
+                getattr(self.llama_config, "quality_search_steps", 7)
+            ),
+            max_downscale_attempts=int(
+                getattr(self.llama_config, "max_downscale_attempts", 4)
+            ),
+        )
         resized_image = self._resize_image_for_llama(image)
+        encoded = encode_image_for_llama_with_meta(resized_image, config)
 
-        if resized_image.mode != "RGB":
-            resized_image = resized_image.convert("RGB")
-
-        jpeg_quality = int(getattr(self.llama_config, "jpeg_quality", 80))
-        min_jpeg_quality = int(getattr(self.llama_config, "min_jpeg_quality", 50))
-        max_image_bytes = int(getattr(self.llama_config, "max_image_bytes", 350 * 1024))
-        downscale_step_percent = int(
-            getattr(self.llama_config, "downscale_step_percent", 15)
-        )
-        ssim_threshold = float(getattr(self.llama_config, "ssim_threshold", 0.95))
-        quality_search_steps = int(
-            getattr(self.llama_config, "quality_search_steps", 7)
-        )
-        max_downscale_attempts = int(
-            getattr(self.llama_config, "max_downscale_attempts", 4)
-        )
-
-        jpeg_quality = max(20, min(95, jpeg_quality))
-        min_jpeg_quality = max(20, min(jpeg_quality, min_jpeg_quality))
-        max_image_bytes = max(64 * 1024, max_image_bytes)
-        downscale_step_percent = max(5, min(40, downscale_step_percent))
-        ssim_threshold = max(0.7, min(0.999, ssim_threshold))
-        quality_search_steps = max(3, min(10, quality_search_steps))
-        max_downscale_attempts = max(1, min(8, max_downscale_attempts))
-
-        current_image = resized_image
-
-        for attempt in range(1, max_downscale_attempts + 1):
-            image_bytes, selected_quality, current_ssim = self._binary_search_quality(
-                source_image=current_image,
-                max_image_bytes=max_image_bytes,
-                min_jpeg_quality=min_jpeg_quality,
-                max_jpeg_quality=jpeg_quality,
-                ssim_threshold=ssim_threshold,
-                quality_search_steps=quality_search_steps,
+        if encoded.compression_applied:
+            _encoder_log(
+                "VISION_LLAMA_ADAPTIVE_COMPRESSION_APPLIED",
+                "图像已完成自适应压缩",
+                level="WARNING",
+                attempt=encoded.attempt,
+                image_size=str(encoded.encoded_size),
+                jpeg_quality=encoded.selected_quality,
+                image_bytes=len(encoded.image_bytes),
+                ssim=round(encoded.ssim, 4),
+                target_ssim=round(encoded.target_ssim, 4),
+                status="success",
             )
 
-            if len(image_bytes) <= max_image_bytes:
-                if attempt > 1 or current_ssim < ssim_threshold:
-                    _encoder_log(
-                        "VISION_LLAMA_ADAPTIVE_COMPRESSION_APPLIED",
-                        "图像已完成自适应压缩",
-                        level="WARNING",
-                        attempt=attempt,
-                        image_size=str(current_image.size),
-                        jpeg_quality=selected_quality,
-                        image_bytes=len(image_bytes),
-                        ssim=round(current_ssim, 4),
-                        target_ssim=round(ssim_threshold, 4),
-                        status="success",
-                    )
-                return (
-                    base64.b64encode(image_bytes).decode("utf-8"),
-                    image_bytes,
-                    resized_image,
-                )
-
-            width, height = current_image.size
-            scale = (100 - downscale_step_percent) / 100
-            next_width = max(64, int(width * scale))
-            next_height = max(64, int(height * scale))
-
-            # 防止无法继续缩放导致死循环
-            if (next_width, next_height) == (width, height):
-                return (
-                    base64.b64encode(image_bytes).decode("utf-8"),
-                    image_bytes,
-                    resized_image,
-                )
-
-            current_image = current_image.resize(
-                (next_width, next_height), Image.Resampling.LANCZOS
-            )
-            jpeg_quality = max(min_jpeg_quality, jpeg_quality - 5)
-
-        # 兜底返回最后一次编码结果
-        final_bytes = self._encode_jpeg_bytes(current_image, min_jpeg_quality)
-        return (
-            base64.b64encode(final_bytes).decode("utf-8"),
-            final_bytes,
-            resized_image,
-        )
+        return encoded.image_data, encoded.image_bytes, encoded.resized_image
 
     def _encode_image_for_llama(self, image: PILImageType) -> str:
         """兼容接口：仅返回base64编码字符串。"""
@@ -2853,17 +2638,16 @@ class MushroomImageEncoder:
         chinese_description: str | None,
         image_quality_score: float | None,
     ) -> None:
-        session.add(
-            ImageTextQuality(
-                mushroom_embedding_id=embedding_id,
-                image_path=image_path,
-                room_id=room_id,
-                in_date=in_date,
-                collection_datetime=collection_datetime,
-                llama_description=llama_description,
-                chinese_description=chinese_description,
-                image_quality_score=image_quality_score,
-            )
+        insert_text_quality_record(
+            session,
+            image_path,
+            embedding_id,
+            room_id,
+            in_date,
+            collection_datetime,
+            llama_description,
+            chinese_description,
+            image_quality_score,
         )
 
     def _save_to_database(

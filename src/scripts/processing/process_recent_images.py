@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from loguru import logger
 
 # 路径管理
-from global_const.global_const import ensure_src_path
+from global_const.paths import ensure_src_path
 from global_const.const_config import MUSHROOM_ROOM_IDS
 
 ensure_src_path()

@@ -16,18 +16,17 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy_utils import create_database, database_exists
 
 from global_const.global_const import pgsql_engine
+from storage.models.base import Base
 
 # 向量维度配置，建议放到 settings 中
 EMBEDDING_DIM = 512
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import JSON, Text, text
-
-Base = declarative_base()
 
 
 class MushroomImageEmbedding(Base):
@@ -2386,6 +2385,47 @@ def query_decision_analysis_dynamic_results(
             f"[Dynamic Results Query] Failed to query dynamic point results: {e}"
         )
         raise
+
+
+def store_decision_analysis_results(
+    json_data: dict, room_id: str, analysis_time: datetime, batch_id: str = None
+) -> dict:
+    from storage.repositories.decision_analysis_repository import (
+        store_decision_analysis_results as _store_decision_analysis_results,
+    )
+
+    return _store_decision_analysis_results(
+        json_data=json_data,
+        room_id=room_id,
+        analysis_time=analysis_time,
+        batch_id=batch_id,
+    )
+
+
+def query_decision_analysis_dynamic_results(
+    room_id: str = None,
+    batch_id: str = None,
+    device_alias: str = None,
+    point_alias: str = None,
+    change_only: bool = False,
+    start_time: datetime = None,
+    end_time: datetime = None,
+    limit: int = 1000,
+) -> list:
+    from storage.repositories.decision_analysis_repository import (
+        query_decision_analysis_dynamic_results as _query_decision_analysis_dynamic_results,
+    )
+
+    return _query_decision_analysis_dynamic_results(
+        room_id=room_id,
+        batch_id=batch_id,
+        device_alias=device_alias,
+        point_alias=point_alias,
+        change_only=change_only,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+    )
 
 
 def _parse_kb_generated_at(generated_at: str | None) -> datetime:

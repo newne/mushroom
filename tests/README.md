@@ -31,7 +31,6 @@ pytest tests/unit/test_clip_matcher.py::test_find_similar_cases
 
 **测试文件：**
 - `test_validate_env_params_integration.py` - 环境参数验证集成测试
-- `test_json_format_integration.py` - JSON 格式集成测试
 - `verify_system_integration.py` - 系统集成验证
 
 **运行集成测试：**
@@ -55,14 +54,19 @@ python tests/performance/test_query_performance.py
 测试完整的功能流程和业务逻辑。
 
 **测试文件：**
+- `test_db_connection.py` - 数据库连接测试
 - `test_extract_device_changes.py` - 设备变更提取测试
 - `test_extract_embedding_data.py` - 嵌入数据提取测试
 - `test_extract_env_daily_stats.py` - 环境统计提取测试
 - `test_find_similar_cases.py` - 相似案例查找测试
+- `test_get_all_device_configs_optimization.py` - 设备配置读取优化测试
 - `test_get_data_prompt.py` - 数据提示获取测试
 - `test_validate_env_params.py` - 环境参数验证测试
 - `test_llama_json_format.py` - LLaMA JSON 格式测试
-- `test_llama_json_with_real_images.py` - LLaMA 真实图像测试
+- `test_model_path.py` - 模型路径测试
+- `test_prompt_api.py` - Prompt API 测试
+- `test_setpoint_refactor.py` - 设定点重构测试
+- `test_table_structure_optimization.py` - 表结构优化测试
 
 **运行功能测试：**
 ```bash
@@ -182,3 +186,4 @@ pytest -m slow tests/
 3. **测试应该独立且可重复**
 4. **测试应该快速执行**
 5. **测试应该有清晰的断言和错误消息**
+6. **打印式一次性验证脚本优先清理或迁移为 pytest 断言风格测试**

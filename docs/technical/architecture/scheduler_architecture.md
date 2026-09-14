@@ -18,8 +18,11 @@
 
 ```
 src/scheduling/
-├── optimized_scheduler.py    # 调度器主模块（重构版）
-└── __init__.py
+├── __main__.py               # 包级命令行入口
+├── __init__.py               # 公共 API 导出
+├── core/
+│   └── scheduler.py          # 调度器核心实现
+└── tasks/                    # 任务注册模块
 ```
 
 **主要功能：**
@@ -175,8 +178,7 @@ DECISION_ANALYSIS_SCHEDULE_TIMES = [(10, 0), (12, 0), (14, 0)]
 ### 启动调度器
 
 ```bash
-cd src
-python -m scheduling.optimized_scheduler
+PYTHONPATH=/mnt/d/code/mushroom/src uv run python -m scheduling
 ```
 
 ### 环境要求
@@ -194,7 +196,7 @@ python -m scheduling.optimized_scheduler
 
 ### 健康检查
 
-调度器提供以下监控接口：
+调度器提供以下监控能力：
 
 - 任务执行状态
 - 数据库连接状态
@@ -214,11 +216,11 @@ python -m scheduling.optimized_scheduler
 
 ### 添加新任务
 
-1. 在 `src/tasks/` 目录创建新的任务子目录
+1. 在 `src/tasks/` 或 `src/scheduling/tasks/` 的合适位置创建任务实现/注册逻辑
 2. 创建任务模块文件和 `__init__.py` 接口文件
 3. 实现 `safe_task_name()` 接口函数
 4. 在 `src/tasks/__init__.py` 中导入并导出接口
-5. 在调度器中注册任务
+5. 在 `src/scheduling/tasks/` 中完成注册
 
 **示例：添加新的报告任务**
 

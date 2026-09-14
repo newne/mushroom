@@ -13,7 +13,8 @@ src_dir = Path(__file__).resolve().parents[2]
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-from global_const.global_const import ensure_src_path, pgsql_engine
+from global_const.global_const import pgsql_engine
+from global_const.paths import ensure_src_path
 from utils.loguru_setting import logger
 from vision.mushroom_image_processor import MushroomImagePathParser
 
