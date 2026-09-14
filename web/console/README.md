@@ -41,13 +41,19 @@ python web/console/dev.py --host 0.0.0.0                   # 给平板/手机看
 
 ## 上机（容器）
 
-由 `docker/mushroom_solution.yml` 的 `mushroom_console_web`（nginx:alpine）服务，与后端
-`mushroom_console` 同 compose 项目：
+前端由我们自建的镜像 `mushroom_console_web` 服务（`docker/Dockerfile.console-web`：
+nginx + 打进去的 `nginx.conf`），与后端 `mushroom_console` 同 compose 项目：
 
 ```bash
-# 在仓库里：把前端产物拷到巡检的部署目录（与 configs/data/Logs 同级）
+# 1) 构建并推送（在 WSL 里，构建上下文是仓库根）
+REG=registry.cn-beijing.aliyuncs.com/ncgnewne
+docker build -f docker/Dockerfile.console-web -t $REG/mushroom_console_web:0.1.0 .
+docker push $REG/mushroom_console_web:0.1.0
+
+# 2) 把前端产物拷到巡检的部署目录（与 configs/data/Logs 同级）
 scp -r web/console sysadmin@<服务器>:/home/sysadmin/algorithm/mushroom_patrol/web
-# 在服务器上
+
+# 3) 在服务器上起两个容器
 cd /home/sysadmin/algorithm/mushroom_service
 docker compose --profile patrol up -d mushroom_console mushroom_console_web
 ```
@@ -55,5 +61,9 @@ docker compose --profile patrol up -d mushroom_console mushroom_console_web
 上位机访问 `http://<服务器IP>:8002/`。**对外只暴露这一个端口**：后端 8001 只给前端容器
 与算法侧调度器用（`/api/patrol/run`），不需要开放到现场局域网。
 
+> **改页面 vs 改配置**：页面是挂进去的 ⇒ 改 `index.html` 只要重拷一次（`docker cp`
+> 或 scp 都行，不必重建镜像）；`nginx.conf` 打在镜像里 ⇒ 改它要重建并推送镜像。
+> 这条分界是刻意的（配置即代码、页面是数据），别把两边都做成挂载。
+>
 > 排障：页面空白 vs 接口 500 现在是**两件事**——`curl -s localhost:8002/` 看页面、
 > `curl -s localhost:8002/healthz` 看后端；后者通、前者空说明产物没拷过去。
