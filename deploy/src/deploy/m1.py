@@ -19,6 +19,7 @@ patrol 包里 M1 的**逻辑**早已齐备：``round.PatrolRound``（一轮的�
 from __future__ import annotations
 
 import argparse
+import os
 import signal
 import sys
 import time
@@ -53,6 +54,9 @@ DEFAULT_ROOM_PATH = "/opt/mushroom-patrol/room.yaml"   # 入库日期 ⇒ 巡检
 DEFAULT_OUTBOX_PATH = "/opt/mushroom-patrol/outbox.jsonl"
 DEFAULT_LOG_PATH = "/opt/mushroom-patrol/m1.log"   # 人读日志（journal 记结构化取证）
 CAPTURE_HOST = "127.0.0.1:7003"  # 同机采图服务（spec §2 架构图，端口固定）
+# 容器里 127.0.0.1 不是宿主：采图服务发布在宿主上，得走网桥网关地址（现场惯例 172.17.0.1）。
+# 环境变量与 --capture-host 都能改，默认值保持"裸机直跑"的那一个。
+DEFAULT_CAPTURE_HOST = os.environ.get("PATROL_CAPTURE_HOST", CAPTURE_HOST)
 DEFAULT_AT_MINUTE = 5            # 每小时的第几分钟启动（避开老系统 :01–:02 批量采图）
 
 
@@ -160,7 +164,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--log", default=DEFAULT_LOG_PATH,
                     help="人读日志落盘路径（同时仍打到 stdout）；留空则只打 stdout")
     ap.add_argument("--camera-ip", default=CAMERA_IP, help="全场相机 IP（生成站位表时写入）")
-    ap.add_argument("--ingest", default=PROD_INGEST_URL, help="prod 接收端点")
+    ap.add_argument("--ingest", default=os.environ.get("PATROL_INGEST", PROD_INGEST_URL),
+                    help="prod 接收端点")
+    ap.add_argument("--capture-host", default=DEFAULT_CAPTURE_HOST,
+                    help="采图服务的 host:port（容器里要用宿主网桥地址，如 172.17.0.1:7003）")
     ap.add_argument("--no-sync", action="store_true",
                     help="禁用向 prod 同步（outbox 只累积，待端点确定后补传）")
 
@@ -288,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     # 信封），不是"服务挂了"。放它按链路故障抛错会把业务失败误判成基础设施故障，
     # 也会丢掉重试所需的 error_code/message。交给 CaptureClient._interpret 分类。
     capture_transport: Transport = HttpxTransport(
-        allowed_hosts={CAPTURE_HOST}, accept_json_errors=("success",)
+        allowed_hosts={args.capture_host}, accept_json_errors=("success",)
     )
     capture = CaptureClient(transport=capture_transport)
 

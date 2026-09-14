@@ -1,0 +1,28 @@
+# 构建上下文瘦身：两个镜像都不需要这些东西，而 models/ 有 1.5GB、patrol-workspace/.venv 有 140MB。
+#
+# ⚠️ 不要排除 dist/ —— 算法工程的 Dockerfile 要 `COPY dist/src/ ./`（那是它的混淆产物）。
+# 排除它会让他们的构建直接失败。
+
+.git
+**/.git
+.venv
+**/.venv
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+.idea
+.vscode
+.validation
+.trae
+.scratch
+models
+data
+notebooks
+legacy
+progress.mk
+*.tar
+*.tgz
+*.log
+**/*.db

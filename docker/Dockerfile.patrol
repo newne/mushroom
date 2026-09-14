@@ -1,0 +1,57 @@
+# 巡检镜像：导轨控制 + 采图调度 + prod 接收 API（ADR-0012 §4：不背 torch/opencv/mlflow）
+#
+# 构建（在 WSL 里；构建上下文是**仓库根**）：
+#   cd /mnt/d/code/mushroom
+#   docker build -f docker/Dockerfile.patrol -t mushroom_patrol:dev .
+#
+# 为什么基础镜像可以是 bookworm：厂商库 libFMC4030_2009_1.so 只依赖 libstdc++ 与 libc
+# （2026-09-14 用 `readelf -d` 核实），不像 XCloudSDK 还要 libssl1.1，所以不必像
+# capture 那样死守 bullseye。
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    TZ=Asia/Shanghai
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      libstdc++6 \
+      curl \
+      ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# uv 版本与开发机一致，保证 --frozen 用的是同一套锁语义
+RUN pip install --no-cache-dir uv==0.12.10
+
+# 容器里的目录结构与仓库一致：巡检项目是个独立 uv 项目，成员是上一级的 ../patrol 等，
+# 照搬结构就不用为镜像另造一套路径（见 patrol-workspace/README.md）。
+WORKDIR /srv
+COPY patrol/ /srv/patrol/
+COPY deploy/ /srv/deploy/
+COPY measure/ /srv/measure/
+COPY analysis/ /srv/analysis/
+COPY patrol-workspace/pyproject.toml patrol-workspace/uv.lock /srv/patrol-workspace/
+COPY docker/patrol-entrypoint.sh /usr/local/bin/patrol-entrypoint
+
+# --frozen：完全按锁装，容器里绝不重新解析依赖（生产镜像的依赖必须是可复现的）
+# --no-dev：不要 pytest/ruff
+# --no-editable：把四个包真正装进 venv 的 site-packages，镜像自包含
+RUN cd /srv/patrol-workspace \
+ && uv sync --frozen --no-dev --no-editable \
+ && chmod +x /usr/local/bin/patrol-entrypoint
+
+ENV PATH=/srv/patrol-workspace/.venv/bin:$PATH \
+    FMC4030_LIB_PATH=/opt/fmc-lib/libFMC4030_2009_1.so \
+    PATROL_ROOM=/app/configs/room.yaml \
+    PATROL_STATIONS=/app/configs/stations.yaml \
+    PATROL_OUTBOX=/app/data/outbox.jsonl \
+    PATROL_LOG=/app/Logs/m1.log \
+    PATROL_CAPTURE_HOST=172.17.0.1:7003 \
+    PATROL_INGEST=http://172.17.0.1:8000/ingest
+
+LABEL org.opencontainers.image.title="mushroom_patrol" \
+      org.opencontainers.image.description="蘑菇房巡检：导轨控制 + 采图调度 + 接收 API"
+
+ENTRYPOINT ["/usr/local/bin/patrol-entrypoint"]
+CMD ["patrol"]

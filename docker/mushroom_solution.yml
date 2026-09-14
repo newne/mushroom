@@ -170,6 +170,47 @@ services:
     mem_limit: 256m
     cpus: 1.0
 
+  # ---------- 巡检服务（导轨控制 + 采图调度 + prod 接收 API，ADR-0012） ----------
+  #
+  # 为什么带 profiles：这个服务用的镜像是**另外构建**的（docker/Dockerfile.patrol），
+  # 不一定在 registry 里。带上 profile 之后，日常的 `docker compose up -d` 不会去拉它，
+  # 因此巡检镜像还没准备好时，**算法侧的部署完全不受影响**；要起它得显式指定：
+  #
+  #     docker compose --profile patrol up -d mushroom_patrol
+  #
+  # 配置与数据放在**同级目录** ../mushroom_patrol/（与 mushroom_service/ 平级，Q18 的决定）
+  mushroom_patrol:
+    <<: *base
+    profiles: ["patrol"]
+    image: "${PATROL_IMAGE:-registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0}"
+    container_name: mushroom_patrol
+    # 一轮约 11 分钟、每 3 小时由算法侧的调度器触发一次（ADR-0012 §6）。
+    # 这里给的是"被触发时怎么跑"，不是自己的时刻表——自己排时刻表会让两边各有一套节奏。
+    command: ["patrol", "--once"]
+    environment:
+      - PROD_INGEST=${PROD_INGEST:-http://172.17.0.1:8000/ingest}
+      # 采图服务发布在宿主上：容器里 127.0.0.1 不是宿主，必须走网桥网关
+      - PATROL_CAPTURE_HOST=${PATROL_CAPTURE_HOST:-172.17.0.1:7003}
+      - FMC4030_LIB_PATH=/opt/fmc-lib/libFMC4030_2009_1.so
+    volumes:
+      - ../mushroom_patrol/configs:/app/configs:ro
+      - ../mushroom_patrol/data:/app/data:rw
+      - ../mushroom_patrol/Logs:/app/Logs:rw
+      # 厂商 SDK 动态库（与 capture 一样：运行时挂载，不打进镜像）
+      - ../mushroom_patrol/lib:/opt/fmc-lib:ro
+    healthcheck:
+      # 巡检没有 HTTP 端口，用"进程还活着 + 日志可写"当健康判据
+      test: ["CMD-SHELL", "test -w /app/Logs || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # 导轨控制是单会话：绝不允许两个实例同时连着控制器
+    deploy:
+      replicas: 1
+    mem_limit: 1g
+    cpus: 2.0
+
 # 数据卷（根级别，关键修复！）
 volumes:
   postgre_data_v18:
