@@ -182,3 +182,20 @@ docker/mlflow_data/
 .scratch/prod-deploy/captures/realtime_*
 # 远程执行包装（含主机密钥/口令用法，属本机工具产物）
 .scratch/prod-deploy/_*_exec.ps1
+
+# ---------- 巡检工程的测试必须入库 ----------
+# 上面 `test_*.py` / `*_test.py` 是给算法侧的临时脚本设的，但它会连带忽略巡检的整套测试：
+# 合并时实测 39 个测试文件只进去了 1 个（其余静默消失）。下面把四个包的测试目录显式收回。
+# 刻意只收回 test_*.py，不用 `!dir/**` —— 那会把 __pycache__ 之类也一起收回来。
+!patrol/tests/test_*.py
+!deploy/tests/test_*.py
+!measure/tests/test_*.py
+!analysis/tests/test_*.py
+
+# `ENV/` 是为算法侧的环境配置目录设的，但它（在大小写不敏感的路径上）连带忽略了
+# analysis 的 env 子包 —— 合并时整个 analysis/src/analysis/env/ 没进去。
+# 注意：目录被排除后无法再单独 re-include 里面的文件，必须把**目录本身**收回来。
+!analysis/src/analysis/env/
+
+# 冻结归档里的版本钉子（合并时被通用规则吞掉，一处收尾）
+!legacy/mushroom-cls/.python-version
