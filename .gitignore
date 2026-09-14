@@ -199,3 +199,5 @@ docker/mlflow_data/
 
 # 冻结归档里的版本钉子（合并时被通用规则吞掉，一处收尾）
 !legacy/mushroom-cls/.python-version
+# 容器验证用的临时配置目录（探针产物）
+.scratch/prod-deploy/pc-cfg/
