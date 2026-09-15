@@ -17,6 +17,11 @@
 #
 # ⚠️ 教训：当初只核对了"它依赖哪些库"（readelf -d 显示只有 libstdc++/libc），**没核对
 # 需要的符号版本**。`--dry-run` 预检现在会真的 load 一次这个库，把这类问题挡在部署前。
+#
+# ## ffmpeg
+#
+# 只有 `preview` 角色用得到（RTSP → MJPEG，ADR-0017）。宿主上没有 ffmpeg，转码放在容器里，
+# 顺便让相机口令只存在于容器配置中。镜像因此大 ~80 MB —— 相比再引入一个转码服务，这更划算。
 FROM python:3.12-slim-trixie
 
 ENV PYTHONUNBUFFERED=1 \
@@ -29,6 +34,7 @@ RUN apt-get update \
       libstdc++6 \
       curl \
       ca-certificates \
+      ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 # uv 版本与开发机一致，保证 --frozen 用的是同一套锁语义
@@ -58,7 +64,10 @@ ENV PATH=/srv/patrol-workspace/.venv/bin:$PATH \
     PATROL_OUTBOX=/app/data/outbox.jsonl \
     PATROL_LOG=/app/Logs/m1.log \
     PATROL_CAPTURE_HOST=172.17.0.1:7003 \
-    PATROL_INGEST=http://172.17.0.1:8000/ingest
+    PATROL_INGEST=http://172.17.0.1:8000/ingest \
+    PREVIEW_PORT=8003 \
+    PREVIEW_SCALE=640 \
+    PREVIEW_FPS=5
 
 LABEL org.opencontainers.image.title="mushroom_patrol" \
       org.opencontainers.image.description="蘑菇房巡检：导轨控制 + 采图调度 + 接收 API"

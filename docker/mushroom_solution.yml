@@ -227,6 +227,9 @@ services:
       - PATROL_CAPTURE_HOST=${PATROL_CAPTURE_HOST:-172.17.0.1:7003}
       # 算法侧的调度器打的地址（register_patrol_jobs.py 读同名环境变量）
       - PATROL_RUN_URL=${PATROL_RUN_URL:-http://mushroom_console:8001/api/patrol/run}
+      # 实时预览的上游（同 compose 网络里的服务名）。console 只是**反代**它：
+      # 预览挂了状态接口照常 200（页面显示"暂时看不到画面"），不拖垮整页。
+      - PATROL_PREVIEW=${PATROL_PREVIEW:-http://mushroom_preview:8003}
     volumes:
       # 只读挂配置与数据：console 不改任何东西
       - ../mushroom_patrol/configs:/app/configs:ro
@@ -275,6 +278,39 @@ services:
       retries: 3
     mem_limit: 64m
     cpus: 0.5
+
+  # 实时预览（ADR-0017）：RTSP 拉流 → ffmpeg 转 MJPEG → `<img>` 直接播。
+  #
+  # 为什么要单独一个容器、而不是塞进 mushroom_patrol：ffmpeg 崩了只影响预览（它会自己
+  # 退避重启），控制器那边一点都不受牵连；也不必给控制面镜像加热解码这种无关的东西。
+  # **没有宿主端口**：页面写 `<img src="/api/preview">`，由 mushroom_console 反代过来
+  # （相机地址与口令因此不出现在任何浏览器可见的地方）。
+  #
+  # 与抓图/老系统并存：这台 DVR 实测允许 ≥3 路并发 RTSP；但巡检进行中 console 会拒绝
+  # 预览（409 + 预计可用时间）——那一轮要用相机抓 60 张，不去赌并发。
+  mushroom_preview:
+    <<: *base
+    profiles: ["patrol"]
+    image: "${PATROL_IMAGE:-registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0}"
+    container_name: mushroom_preview
+    command: ["preview"]
+    environment:
+      - PREVIEW_PORT=${PREVIEW_PORT:-8003}
+      - PREVIEW_SCALE=${PREVIEW_SCALE:-640}
+      - PREVIEW_FPS=${PREVIEW_FPS:-5}
+    volumes:
+      # 只要站位表：相机 IP 与凭据**只有一个来源**，与抓拍共用同一份（ADR-0017 §5）
+      - ../mushroom_patrol/configs:/app/configs:ro
+    healthcheck:
+      # /healthz 在"还没有帧"时返回 503：健康判据是**画面是新的**，不是进程活着。
+      # 所以 start_period 要够长（ffmpeg 连相机 + 首帧一般几秒内出来）。
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8003/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    mem_limit: 512m
+    cpus: 1.5
 
 # 数据卷（根级别，关键修复！）
 volumes:

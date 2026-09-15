@@ -2,6 +2,9 @@
 # 巡检镜像的入口：一个镜像多个角色（ADR-0012 §4）。默认 `patrol`。
 #
 #   patrol       常驻/单轮巡检（deploy.m1）
+#   patrol-serve 触发请求的执行方（持有控制器的那一个进程）
+#   console      巡检台页面 + 只读接口 + 实时接管
+#   preview      相机实时预览（RTSP → MJPEG，ADR-0017）
 #   fetch-room   从生产库读入库日期写 room.yaml
 #   flush-outbox 补传累积的 outbox
 #   api          prod 接收 API（analysis.api，单 worker 硬约束）
@@ -51,6 +54,16 @@ case "${role}" in
     # 巡检台页面 + 只读接口。单 worker：状态是进程内事件缓冲，多 worker 会各说各话。
     exec uvicorn deploy.console:create_app --factory \
       --host 0.0.0.0 --port "${CONSOLE_PORT:-8001}"
+    ;;
+  preview)
+    # 实时预览：**一个 ffmpeg 只服务所有观看者**（广播），不是每个浏览器拉一路 RTSP。
+    # 与巡检/抓拍互不冲突：相机实测支持 3 路并发 RTSP（见 ADR-0017 §实测）。
+    exec python3 -m deploy.preview \
+      --stations "${PATROL_STATIONS:-/app/configs/stations.yaml}" \
+      --port "${PREVIEW_PORT:-8003}" \
+      --scale "${PREVIEW_SCALE:-640}" \
+      --fps "${PREVIEW_FPS:-5}" \
+      "$@"
     ;;
   shell)
     exec bash
