@@ -88,9 +88,11 @@ scp docker/mushroom_solution.yml $SSH:$BASE/mushroom_service/mushroom_solution.y
 
 ```bash
 cd $BASE/mushroom_service
-docker compose --profile patrol pull mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
-docker compose --profile patrol up -d mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
-docker compose --profile patrol ps
+# ⚠️ 必须带 -f mushroom_solution.yml：这个项目的 compose 文件名不是默认的 compose.yaml，
+#    不带 -f 的话 docker compose 会回一句 `no configuration file provided`（2026-09-15 实测）。
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol up -d mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol ps
 ```
 
 四个容器各自是什么：
@@ -131,11 +133,11 @@ ls -l $BASE/mushroom_patrol/data/trigger/run.json
 docker logs --tail 20 mushroom_patrol
 
 # 4.5 实时预览（ADR-0017）：容器健康 + 上游真的有帧 + 反代通了
-docker compose --profile patrol ps mushroom_preview         # Up (healthy)
+docker compose -f mushroom_solution.yml --profile patrol ps mushroom_preview         # Up (healthy)
 curl -s localhost:8003/healthz 2>/dev/null || \
-  docker compose exec mushroom_preview curl -fsS localhost:8003/healthz; echo
+  docker compose -f mushroom_solution.yml exec mushroom_preview curl -fsS localhost:8003/healthz; echo
 # 期望 {"ok":true,"frames":N,"age_s":<1.0,...}；frames 一直在涨 = ffmpeg 在出帧
-docker compose exec mushroom_console curl -fsS localhost:8001/api/preview/status; echo
+docker compose -f mushroom_solution.yml exec mushroom_console curl -fsS localhost:8001/api/preview/status; echo
 curl -s -o /tmp/f.jpg -w '%{http_code} %{content_type} %{size_download}\n' \
   localhost:8002/api/preview/frame.jpg     # 期望 200 image/jpeg 几十 KB
 # 浏览器：接管 → 操作卡下面那张「实时画面」自己亮起来；放开 → 自己关掉
@@ -159,9 +161,9 @@ curl -s -o /tmp/f.jpg -w '%{http_code} %{content_type} %{size_download}\n' \
 
 ```bash
 cd $BASE/mushroom_service
-docker compose --profile patrol stop mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol stop mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
 # 需要彻底撤掉时
-docker compose --profile patrol down
+docker compose -f mushroom_solution.yml --profile patrol down
 ```
 
 容器停掉后控制器就空出来了；要让宿主上的 systemd 版本重新接管：
@@ -239,13 +241,35 @@ scp docker/mushroom_solution.yml $SSH:$BASE/mushroom_service/mushroom_solution.y
 scp -r web/console/* $SSH:$BASE/mushroom_patrol/web/
 
 # 3) 起预览容器（其余三个不动）
-docker compose --profile patrol pull mushroom_patrol mushroom_preview
-docker compose --profile patrol up -d mushroom_preview
-docker compose --profile patrol up -d --no-deps mushroom_console     # 只换 console 的镜像
-docker compose --profile patrol restart mushroom_console_web         # 只重读 nginx 配置
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_patrol mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol up -d mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol up -d --no-deps mushroom_console     # 只换 console 的镜像
+docker compose -f mushroom_solution.yml --profile patrol restart mushroom_console_web         # 只重读 nginx 配置
 ```
 
 **这一节要盯的两个数**：`mushroom_preview` 的 `/healthz` 里 `frames` 要一直在涨（不涨就是
 ffmpeg 没连上相机，日志里会有打码后的 RTSP 地址与 ffmpeg 的 stderr）；console 的
 `/api/preview/status` 在巡检进行中必须是 `available:false`（这是设计，不是故障）。
+
+**实测记录（2026-09-15 13:36，真相机 192.168.1.238）**：
+
+| 检查 | 结果 |
+| --- | --- |
+| `mushroom_preview` | `Up (healthy)`；`/healthz` → `{"ok":true,"frames":1911,…，"restarts":0}`，约 **5 fps** |
+| 反代（`:8002` → console → preview） | `/api/preview/frame.jpg` → `200 image/jpeg` 640×360（15.5 KB） |
+| 流 | `curl --max-time 3 :8002/api/preview` → `multipart/x-mixed-replace`，3 秒 **16 帧**、245 KB |
+| 断开后 | 上游 `viewers` 回到 0（浏览器关掉 `<img>` 时上游连接确实断了，没白留队列） |
+| 其余容器 | `mushroom_patrol` / `mushroom_console` / `mushroom_console_web` 全部 `Up (healthy)`，页面 200 |
+
+两个上机才暴露、已修的小问题：
+
+1. **compose 必须带 `-f mushroom_solution.yml`**——这个项目的文件名不是默认的 `compose.yaml`，
+   照着手册里"cd 过去再 `docker compose --profile patrol up`"的写法会得到
+   `no configuration file provided: not found`（本轮手册已逐条改成带 `-f`）。
+2. **`启动转码` 那行日志只打了命令末尾 6 个参数**，现场看到的是 `7 -f image2pipe -c:v mjpeg -`，
+   像是"打码把命令吃掉了"。改成打**整条命令**（口令仍然打码）——现场排障要的正是
+   "实际用的 scale/fps/transport"。
+
+`.env` 里新增了四行（`PATROL_PREVIEW` / `PREVIEW_PORT` / `PREVIEW_SCALE` / `PREVIEW_FPS`），
+compose 与 `.env` 都留了 `*.bak-20260915b` 备份。
 
