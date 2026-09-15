@@ -58,6 +58,7 @@ const state = {
   reject_cmd: null,                           // 覆盖 POST /api/cmd 的状态码（测拒绝显示）
   growth_error: false,                        // 让 /api/growth 回"prod 查不到"
   preview_down: false,                        // 让 /api/preview/status 回"预览服务连不上"
+  preview_frame_age: 0.4,                     // 上游"最新一帧多久之前"（>3 秒 = 卡住）
   images_error: false,
   // 真执行方会在几百毫秒内领走并写回结果；默认照做，否则页面会一直停在"执行中"，
   // 后面的用例就全被上锁挡住了（那是假后端的锅，不是页面的）。
@@ -117,8 +118,10 @@ function route(method, url, body) {
     if (state.preview_down) {
       return json(200, { available: false, upstream: null, error: '预览服务连不上：preview 没起' });
     }
+    // 键名与 deploy/preview.py 的 Broadcaster.status() 一致：last_frame_age_s
     return json(200, { available: true, error: null,
-                       upstream: { ok: true, frames: 42, age_s: 0.4, viewers: 1 } });
+                       upstream: { ok: true, frames: 42, viewers: 1,
+                                   last_frame_age_s: state.preview_frame_age } });
   }
   if (path === '/api/cmd' && method === 'GET') {
     return json(200, { inflight: state.cmd, result: state.result, estop: state.estop,
@@ -390,6 +393,9 @@ const lastCmd = () => {
   check('页面里没有相机地址/口令，只有 /api/preview（浏览器只连 console）',
     !/192\.168\.|rtsp:|camera_pwd/.test(html), '命中片段：' +
     (html.match(/192\.168\.|rtsp:|camera_pwd/gi) || []).join(',') || '（无）');
+  check('实时画面卡在**中栏**（点动按钮在右栏，两者要同屏）',
+    !!$('#rtmain #pvimg') && !$('#rtcol #pvimg'),
+    $('#rtmain #pvimg') ? '中栏 ✓' : '不在中栏');
 
   state.preview_down = false;
   await click('#takebtn');
@@ -397,15 +403,35 @@ const lastCmd = () => {
   check('接管后自动打开画面（<img src="/api/preview">）',
     ($('#pvimg').getAttribute('src') || '').startsWith('/api/preview'),
     $('#pvimg').getAttribute('src') || '(无)');
+  // ⚠️ 这一条是上机踩过的坑：CSS 里 `.pvwrap img{display:none}` 是默认隐藏，
+  //    开流时写 `display:''` 只是清掉内联样式，规则照样生效——画面拿到了却只有一个黑框。
+  check('播放中 <img> 真的可见（display:block，不是被 CSS 藏住）',
+    $('#pvimg').style.display === 'block', 'display=' + ($('#pvimg').style.display || '(空)'));
+  check('播放中提示文字让位', $('#pvhint').style.display === 'none',
+    'hint display=' + ($('#pvhint').style.display || '(空)'));
   check('画面状态标为播放中', T('#pvstate').includes('播放中'), T('#pvstate'));
   check('画面信息来自 console 的 /api/preview/status（不是直连相机）',
     !!lastCall('/api/preview/status') && !state.calls.some(c => /192\.168|:554/.test(c.url)),
     JSON.stringify([...new Set(state.calls.map(c => c.url.split('?')[0]))].slice(-6)));
 
+  // 流"卡住"（连接还在、没有新帧）浏览器不会报错：页面必须靠上游的帧龄自己发现并重连
+  const stalledSrc = $('#pvimg').getAttribute('src');
+  state.preview_frame_age = 9;
+  await sleep(2600);
+  check('画面卡住时自动重连（换一个 src）',
+    $('#pvimg').getAttribute('src') !== stalledSrc && T('#pvstate').includes('重连'),
+    T('#pvstate') + ' / ' + $('#pvimg').getAttribute('src'));
+  state.preview_frame_age = 0.4;
+  await sleep(2600);
+  check('恢复后重新播放', T('#pvstate').includes('播放中'), T('#pvstate'));
+
   await click('#dropbtn');
   await sleep(400);
   check('放开接管后画面自动关闭',
     !$('#pvimg').getAttribute('src'), $('#pvimg').getAttribute('src') || '(已清空)');
+  check('关掉后 <img> 隐藏、提示文字回来',
+    $('#pvimg').style.display === 'none' && $('#pvhint').style.display !== 'none',
+    'img display=' + ($('#pvimg').style.display || '(空)'));
 
   // 轮内：接管也拿不到画面，且要说清"本轮结束后自动恢复"
   state.patrol_active = true;

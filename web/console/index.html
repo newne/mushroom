@@ -92,14 +92,15 @@
   #curve svg{width:100%;height:170px;display:block}
   .legend{font-size:12px;color:var(--dim);display:flex;gap:14px;margin-top:4px}
   .legend i{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:4px}
-  /* ---- 实时画面（MJPEG）----
+  /* ---- 实时画面（MJPEG，中栏第一张）----
      固定 16:9 的框：流没起来时也要占住位置，否则卡片高度会跳，下面的按钮跟着上下移动
      ——点动的时候按钮乱跑是很烦的事。object-fit:contain 保证画面不被拉变形。 */
   .pvwrap{position:relative;aspect-ratio:16/9;background:#05070a;border:1px solid var(--line);
           border-radius:6px;overflow:hidden;display:flex;align-items:center;justify-content:center}
   .pvwrap img{width:100%;height:100%;object-fit:contain;display:none}
   .pvwrap .empty{position:absolute;left:8px;right:8px;text-align:center;padding:0}
-  #pvnote{font-size:12px;flex:1}
+  #pvnote{font-size:12px;margin-left:8px}
+  #pverr{font-size:12px;flex:1}
 </style>
 </head>
 <body>
@@ -129,6 +130,21 @@
   </section>
 
   <section id="rtmain">
+    <!-- 实时画面（ADR-0017）：放在**中栏第一张**——接管之后它就是屏幕上最该看见的东西，
+         而点动按钮在右栏，两者同屏才谈得上"边挪边看"。
+         历史上它先在右栏待过一版：中栏上半屏空着、画面挤在 320px 的侧栏里，现场一眼就否了。 -->
+    <div class="card">
+      <h2>实时画面 <span id="pvstate" class="tag">未打开</span>
+        <span id="pvnote" style="color:var(--dim);font-weight:400"></span></h2>
+      <div class="pvwrap">
+        <img id="pvimg" alt="实时画面">
+        <div class="empty" id="pvhint">接管后自动打开（相机实时画面，约 1 秒延迟）</div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="pvbtn">看画面</button>
+        <span id="pverr" class="empty" style="padding:0"></span>
+      </div>
+    </div>
     <div class="card">
       <h2>上一轮 / 本轮</h2>
       <div class="kv" id="round">—</div>
@@ -210,20 +226,6 @@
 
       <div id="cmdline" class="empty" style="padding:6px 0 0">最近指令 —</div>
       <div id="opmsg"></div>
-    </div>
-
-    <!-- 实时画面（ADR-0017）：接管后自动打开，放开/切到历史模式就关掉。
-         为什么放在操作卡下面而不是右栏顶部：它是**手动操作的眼睛**，点动时要能同时看见。 -->
-    <div class="card">
-      <h2>实时画面 <span id="pvstate" class="tag">未打开</span></h2>
-      <div class="pvwrap">
-        <img id="pvimg" alt="实时画面">
-        <div class="empty" id="pvhint">接管后自动打开（相机实时画面，约 1 秒延迟）</div>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <button id="pvbtn">看画面</button>
-        <span id="pvnote" class="empty" style="padding:0"></span>
-      </div>
     </div>
 
     <div class="card">
@@ -647,9 +649,13 @@ function posNow(){
    - 巡检开始时自动关闭、本轮结束后自动恢复（轮内相机归那 60 张图）。
    服务端还有一道兜底：轮次一开始，它会自己把已经开着的流断掉（不指望页面自觉）。 */
 
-const pv = {wanted:false, open:false, timer:null};
+const pv = {wanted:false, open:false, timer:null, startedAt:0};
 
-function pvSet(state, cls, note){
+/* ⚠️ 这里必须写 `display:'block'` 而不是 `display:''`：
+   CSS 里 `.pvwrap img{display:none}` 是**默认隐藏**，`''` 只是清掉内联样式，
+   于是规则重新生效——画面拿到了、`src` 也对了，屏幕上却只有一个黑框。
+   2026-09-15 上机就是这么"没有视频流"的（当时的回归只断言了 `src`，没断言可见性）。 */
+function pvSetState(state, cls, note){
   const t = $('#pvstate');
   t.textContent = state;
   t.className = 'tag' + (cls ? ' ' + cls : '');
@@ -658,13 +664,14 @@ function pvSet(state, cls, note){
 
 function pvStartStream(){
   const img = $('#pvimg');
-  img.style.display = '';
+  img.style.display = 'block';
   $('#pvhint').style.display = 'none';
   // 每次换 URL：浏览器对同一个 <img> 的 MJPEG 只在 src **变化**时才重新建立连接
   img.src = '/api/preview?t=' + Date.now();
-  img.onerror = () => { pv.open = false; pvSet('重连中', 'bad', '画面断了，正在重试…'); };
+  img.onerror = () => { pv.open = false; pvSetState('重连中', 'bad', '画面断了，正在重试…'); };
   pv.open = true;
-  pvSet('播放中', 'on', '');
+  pv.startedAt = Date.now();
+  pvSetState('播放中', 'on', '');
 }
 
 function pvStopStream(keepWanted){
@@ -684,7 +691,7 @@ async function pvTick(){
   if(inRound()){
     if(pv.open) pvStopStream(true);
     $('#pvhint').textContent = '巡检进行中：相机这一路归本轮，' + etaText(lastStatus?.patrol);
-    pvSet('巡检中', 'bad', '本轮结束后自动恢复');
+    pvSetState('巡检中', 'bad', '本轮结束后自动恢复');
     return;
   }
   let st;
@@ -692,22 +699,30 @@ async function pvTick(){
   catch(e){ st = {available:false, error:'接口不通：' + e.message}; }
   if(!pv.wanted) return;
   if(st.available){
-    if(!pv.open) pvStartStream();
     const up = st.upstream || {};
-    pvSet('播放中', 'on', up.age_s != null
-      ? `${up.frames || 0} 帧 · 最新一帧 ${Number(up.age_s).toFixed(1)} 秒前`
+    const age = up.last_frame_age_s;
+    // 卡住的流浏览器**不会**报错（连接还开着，只是没有新帧）：靠上游的"最新一帧多久之前"
+    // 自己发现，然后换一个 URL 重连。不这么做的话，现场看到的就是一张永远不动的图。
+    if(pv.open && typeof age === 'number' && age > 3 && Date.now() - pv.startedAt > 4000){
+      pvStopStream(true);
+      pvSetState('重连中', 'bad', `画面 ${age.toFixed(0)} 秒没有更新，正在重连…`);
+      return;
+    }
+    if(!pv.open) pvStartStream();
+    pvSetState('播放中', 'on', typeof age === 'number'
+      ? `${up.frames || 0} 帧 · 最新一帧 ${age.toFixed(1)} 秒前`
       : '');
   }else{
     if(pv.open) pvStopStream(true);
     $('#pvhint').textContent = st.error || '暂时看不到画面';
-    pvSet(st.reason === 'patrolling' ? '巡检中' : '不可用', 'bad',
-          st.reason === 'patrolling' ? '本轮结束后自动恢复' : '每 2 秒重试');
+    pvSetState(st.reason === 'patrolling' ? '巡检中' : '不可用', 'bad',
+               st.reason === 'patrolling' ? '本轮结束后自动恢复' : '每 2 秒重试');
   }
 }
 
 function openPreview(why){
   pv.wanted = true;
-  if(!pv.open) pvSet('连接中…', '', '');
+  if(!pv.open) pvSetState('连接中…', '', '');
   if(!pv.timer) pv.timer = setInterval(pvTick, 2000);
   pvTick();
   if(why) opmsg(why, 'info');
@@ -717,7 +732,7 @@ function closePreview(why){
   if(!pv.wanted && !pv.open) return;
   pvStopStream(false);
   $('#pvhint').textContent = why || '已停止（接管时会自动打开）';
-  pvSet('未打开', '', '');
+  pvSetState('未打开', '', '');
 }
 
 function wirePreview(){

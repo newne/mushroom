@@ -60,7 +60,7 @@
 | --- | --- |
 | `deploy/preview.py` | 容器角色：帧切分 / 广播（队列 3，慢客户端丢帧）/ ffmpeg 监督（1·2·5·10 s 退避）/ `create_app`（`/healthz`、`/stream.mjpg`、`/frame.jpg`）/ `main()`（`--rtsp/--stations/--port/--scale/--fps`） |
 | `deploy/console.py` | `GET /api/preview`（MJPEG 反代）、`/api/preview/status`（能不能看 + 上游健康，**永不 500**）、`/api/preview/frame.jpg`（单帧） |
-| `web/console/index.html` | 操作卡下方的「实时画面」卡：接管开 / 放开关 / 轮内关、本轮结束自动恢复、不可用时每 2 秒重试并原样显示后端话术 |
+| `web/console/index.html` | 中栏第一张「实时画面」卡：接管开 / 放开关 / 轮内关、本轮结束自动恢复、不可用时每 2 秒重试并原样显示后端话术、帧龄 >3 秒自动重连 |
 | `docker/` | `Dockerfile.patrol` 装 ffmpeg；`patrol-entrypoint.sh` 的 `preview` 角色；compose 的 `mushroom_preview`（健康判据用容器内 `/healthz`——503 = 还没有帧）；`web/console/nginx.conf` 对 `/api/` 关掉 `proxy_buffering`（否则 MJPEG 会被攒成"延迟十几秒"） |
 
 两处**实现时**才明确的决定：
