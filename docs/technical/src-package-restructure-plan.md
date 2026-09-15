@@ -78,16 +78,46 @@ src/
 | 构建 | `build.sh`（混淆 + 镜像）与现场 `docker compose pull/up` | ⚠️ 会推镜像；发版动作 |
 | 巡检侧 | `uv run --frozen pytest`（607 项）在**根目录改动后仍全过** | ✅ |
 
-## 5. 需要你拍板的三件事
+## 5. 已拍板（2026-09-15）
 
-1. **包名**：`mushroom`（短、清楚）／ `mushroom_solution`（与 `pyproject.toml` 的 project 名一致）／
-   其它。名字一旦定下就是 339 行导入的目标，改起来比现在贵。
-2. **`scripts/` 与 `web_app/`、`data_collection/` 要不要进包**：它们是"跑一次的脚本"还是"库的一部分"？
-   建议：**进包**（`mushroom.scripts`），否则它们仍得靠 `sys.path` 或 `python -m` 的特殊处理。
-3. **`vision/mushroom_image_encoder.py:32` 的 `import_module(module_name)`**：变量从哪来需要你确认
-   （配置里的模块名？）——动态名字不进 codemod，必须人工处理，否则会在运行期才炸。
+| 问题 | 决定 |
+| --- | --- |
+| 包名 | **`mushroom_solution`**（与 `pyproject.toml` 的 project 名一致） |
+| `scripts/`、`web_app/`、`data_collection/` | **一起进包**（`mushroom_solution.scripts` 等）——否则它们仍得靠 `sys.path` 或 `python -m` 的特殊处理，重构不彻底 |
+| 清障（9 个既有失败） | **已做**：见 `tests/unit/test_clip_matcher.py` 与下一节的发现 |
 
-## 6. 与其它两条线的关系
+于是目标结构定为：
+
+```
+src/
+├── mushroom_solution/
+│   ├── __init__.py
+│   ├── vision/  decision_analysis/  scheduling/  storage/  utils/  ...
+│   ├── scripts/  web_app/  data_collection/        ← 三个非包目录也搬进来
+│   └── ...
+├── main.py            ← 入口脚本（薄：读配置 → from mushroom_solution... import）
+└── configs/           ← 留在原地（dynaconf 按路径找），打包时显式带出去
+```
+
+### 清障时发现的两处实现分歧（顺带记录，**未擅自改行为**）
+
+`decision_analysis/clip_matcher.py` 里同一个概念有三份规则，其中两份是死代码或与测试不一致：
+
+1. `find_similar_cases` 曾经**内联**了一份"80/50"的置信档阈值，而 `_calculate_confidence_level`
+   （带 `Requirements: 4.6` 注释）是"60/20"——同一个 70 分会被一处叫 high、另一处叫 medium。
+   **已统一**为调用那个纯函数（测试里钉住两者必须一致）。
+2. `_apply_multi_image_boost`（图数 + 质量 + 一致性）是**死代码**，真正跑的
+   `find_similar_cases_multi_image` 用的是另一份"只按图数"的内联公式，且里面有**第三套**
+   置信档阈值（85/50）。这一处**没动**——哪份是想要的语义需要你确认，之后再合并成一处。
+   顺带一提：现有公式里单图也有 1.1 的"一致性"加成，即基线不是 1.0。
+
+## 6. 仍未定的一件事
+
+**`vision/mushroom_image_encoder.py:32` 的 `import_module(module_name)`**：那个变量从哪来？
+（配置里的模块名？）——动态名字进不了 codemod，必须人工处理，否则会在运行期才炸。
+这是重构开始前唯一还需要你回答的问题。
+
+## 7. 与其它两条线的关系
 
 - 第 ② 步（依赖锁）已完成且**零版本变化**，重构可以放心在这个基线上做。
 - 巡检侧（`patrol/`、`deploy/`、`measure/`、`analysis/`）**完全不受影响**：它们是独立的 uv 项目，

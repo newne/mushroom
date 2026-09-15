@@ -135,13 +135,11 @@ class CLIPMatcher:
                     # Convert similarity score to percentage
                     similarity_score = float(row.get("combined_similarity", 0.0)) * 100
 
-                    # Determine confidence level based on similarity
-                    if similarity_score >= 80:
-                        confidence_level = "high"
-                    elif similarity_score >= 50:
-                        confidence_level = "medium"
-                    else:
-                        confidence_level = "low"
+                    # 置信档**只有一处规则**：`_calculate_confidence_level`（>60 高 / >=20 中 / 其余低，
+                    # 对应 Requirements 4.6）。这里曾经内联过一份"80/50"的阈值，与那处的 60/20
+                    # 不一致——同一个分数会给出两个不同的档，是 2026-09-15 清理既有失败用例时
+                    # 发现的（见 tests/unit/test_clip_matcher.py）。
+                    confidence_level = self._calculate_confidence_level(similarity_score)
 
                     similar_case = SimilarCase(
                         similarity_score=similarity_score,
