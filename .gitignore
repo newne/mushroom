@@ -201,3 +201,18 @@ docs/patrol/prod-deploy/_*_exec.ps1
 !legacy/mushroom-cls/.python-version
 # 容器验证用的临时配置目录（探针产物）
 docs/patrol/prod-deploy/pc-cfg/
+
+# ---------- 算法工程的源码与测试也必须入库（2026-09-15 补） ----------
+# 两条**算法侧**的老规则在同一个仓库里越界了，静默吞掉真实源码与测试：
+#
+# 1) 上面第 62 行的 `models/` 本意是"模型权重目录"（仓库根那份 1.5GB 的 CLIP/LLaMA 权重），
+#    但它同时匹配了 `src/storage/models/` ——那是重构后的**源码包**。后果：整个包从来没进过
+#    版本库，别人的克隆里 `import storage.models` 必然失败，而本机因为文件都在磁盘上，
+#    一直看不出来。
+# 2) 上面第 139 行的 `test_*.py` 本意是"临时测试脚本"，吞掉了 `tests/` 下 13 个真测试文件
+#    （`git ls-files tests/unit` 当时只有 5 个）。巡检侧四个包之前已同样收回，算法侧这次补上。
+#
+# 只收回 `*.py`，不用 `!dir/**` —— 那会把 __pycache__/*.pyc 也一起收回来。
+!src/storage/models/
+!src/storage/models/**/*.py
+!tests/**/test_*.py
