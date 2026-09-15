@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from deploy.preview import (
@@ -94,6 +95,27 @@ def test_password_is_redacted_in_logs():
         "rtsp://admin:***@192.168.1.238:554/Streaming/Channels/101"
     assert "secret" not in redact("rtsp://admin:secret@10.0.0.1/x")
     assert redact("rtsp://192.168.1.238/x") == "rtsp://192.168.1.238/x"
+    # 夹在句子里的也要打码：ffmpeg 的报错就是"地址 + 冒号 + 原因"这个形状
+    assert "secret" not in redact("rtsp://admin:secret@h:554/x: Server returned 401")
+    assert "secret" not in redact("打开 rtsp://admin:secret@h/x 失败")
+
+
+@pytest.mark.anyio
+async def test_ffmpeg_stderr_is_redacted_before_it_reaches_the_page():
+    """`last_error` 会经 `/api/preview/status` **进浏览器**：ffmpeg 的 stderr 必须先打码。
+
+    （上机时 `last_error` 是原样透出的；ffmpeg 恰好没在 stderr 里写地址，纯属运气。）
+    """
+    line = b"rtsp://admin:secret@192.168.1.238:554/x: Server returned 401 Unauthorized\n"
+    proc = SimpleNamespace(stderr=_Reader([line]))
+    logs: list[str] = []
+    sup = PreviewSupervisor(["ffmpeg"], Broadcaster(), log=logs.append)
+
+    await sup._drain_stderr(proc)          # type: ignore[arg-type]
+
+    assert sup.last_error and "secret" not in sup.last_error
+    assert "***" in sup.last_error
+    assert all("secret" not in m for m in logs)
 
 
 # ---------- ffmpeg 命令 ----------
@@ -172,6 +194,10 @@ async def test_supervisor_publishes_frames_then_restarts_with_backoff(monkeypatc
     assert sup.last_error and "connection refused" in sup.last_error
     assert all("pw" not in line or "***" in line for line in logs if "rtsp" in line), \
         "日志里不能出现相机口令"
+    # 打码之后要能看到**完整**命令：现场排障时"实际用的参数"就在这一行里。
+    # （上机第一版只打了末尾 6 个参数，日志成了"7 -f image2pipe …"，等于什么都没说。）
+    started = next(m for m in logs if m.startswith("启动转码"))
+    assert started == "启动转码：ffmpeg -i rtsp://admin:***@h/x", "整条命令都要在，口令要打码"
 
 
 # ---------- HTTP 面 ----------

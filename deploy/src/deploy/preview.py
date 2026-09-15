@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re
 import signal
 import time
 from collections.abc import AsyncIterator, Callable, Iterable
@@ -43,15 +44,18 @@ QUEUE_MAX = 3
 
 
 def redact(url: str) -> str:
-    """把 ``rtsp://user:pwd@host`` 里的口令打码——日志里绝不出现相机口令。"""
-    if "@" not in url or "://" not in url:
-        return url
-    scheme, rest = url.split("://", 1)
-    creds, _, host = rest.rpartition("@")
-    if ":" in creds:
-        user = creds.split(":", 1)[0]
-        return f"{scheme}://{user}:***@{host}"
-    return f"{scheme}://***@{host}"
+    """把文本里 ``scheme://user:pwd@host`` 的口令打码——日志与页面里绝不出现相机口令。
+
+    作用对象是**任意文本**，不只是一条干净的 URL：ffmpeg 出错时会把输入地址原样写进
+    stderr（例如 `rtsp://admin:pw@…: Server returned 401`），而 `last_error` 会经
+    `/api/preview/status` **进到浏览器**。2026-09-15 上机时这里只处理"整串就是一个 URL"
+    的情形，夹在句子里的口令会漏出去。
+    """
+    return _CREDS_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}:***@", url)
+
+
+#: `scheme://user:pwd@`（口令里可能有别的字符，但不含 `/`、空白与 `@`）
+_CREDS_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/\s:@]+):([^/\s@]*)@")
 
 
 def build_ffmpeg_cmd(rtsp_url: str, *, ffmpeg: str = "ffmpeg", scale: int = DEFAULT_SCALE_WIDTH,
@@ -189,7 +193,10 @@ class PreviewSupervisor:
     async def run_forever(self) -> None:
         attempt = 0
         while not self._stop.is_set():
-            self.log(f"启动转码：{redact(' '.join(self.cmd[-6:]))}")
+            # 打码后打**完整**命令：现场排障时"实际用的 scale/fps/transport"就在这一行里。
+            # （2026-09-15 上机第一版只打了末尾 6 个参数，日志成了"7 -f image2pipe …"，
+            # 看着像打码把命令吃掉了，实际上什么信息都没有。）
+            self.log(f"启动转码：{redact(' '.join(self.cmd))}")
             try:
                 self.proc = await asyncio.create_subprocess_exec(
                     *self.cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -231,6 +238,9 @@ class PreviewSupervisor:
                 return
             text = line.decode("utf-8", "replace").strip()
             if text:
+                # ffmpeg 会把输入地址（含口令）原样写进 stderr，而 last_error 会经
+                # /api/preview/status 进浏览器：这一行必须打码（ADR-0017 §5）。
+                text = redact(text)
                 self.last_error = text[:300]
                 self.log(f"ffmpeg: {text[:300]}")
 
