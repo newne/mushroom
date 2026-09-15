@@ -30,7 +30,7 @@ from patrol.capture_client import CaptureClient
 from patrol.daemon import PatrolDaemon
 from patrol.fmc import Fmc4030, FmcError
 from patrol.fmc.loader import load_library
-from patrol.framing import clamp_trim
+from patrol.framing import clamp_trim, default_sign_z
 from patrol.links import RetryingTransport, Transport
 from patrol.motion_profile import CONTROLLER_IP, CONTROLLER_PORT, DEVICE_ID, M1
 from patrol.room import RoomStateError, load_room_state
@@ -236,8 +236,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="纵向/Z 的换算；省略则与 --mm-per-px 相同")
     ap.add_argument("--framing-sign-y", type=float, default=1.0, choices=(1.0, -1.0),
                     help="图像 x 正方向对应的 Y 方向（相机反装时取 -1）")
-    ap.add_argument("--framing-sign-z", type=float, default=-1.0, choices=(1.0, -1.0),
-                    help="图像 y 正方向对应的 Z 方向（默认：目标偏画面下 ⇒ 相机往下挪）")
+    ap.add_argument("--framing-sign-z", type=float, default=default_sign_z(),
+                    choices=(1.0, -1.0),
+                    help="图像 y 正方向对应的 Z 方向（默认按机器约定派生：本机 Z 向下为正 ⇒ +1）")
 
     ap.add_argument("--ip", default=CONTROLLER_IP, help="控制器 IP")
     ap.add_argument("--port", type=int, default=CONTROLLER_PORT, help="控制器端口")

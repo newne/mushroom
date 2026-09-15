@@ -10,16 +10,16 @@ from patrol.stations import Station
 def make_stations():
     return [
         Station(id="S01", box_id="B01", y=100.0, z=0.0),
-        Station(id="S02", box_id="B02", y=100.0, z=-120.0),
+        Station(id="S02", box_id="B02", y=100.0, z=120.0),
     ]
 
 
-def test_prologue_homes_y_negative_and_z_positive():
+def test_prologue_homes_both_axes_to_the_motor_end():
     """回零段用「设置回零运动参数」（含方向）而不是「设置单轴运动参数」。"""
     lines = generate(make_stations())
     assert lines[0] == "设置回零运动参数 | 1 | 90 | 900 | 2"    # Y：反向（负限位）
     assert lines[1] == "启动单轴回零运动 | 1 | 5"
-    assert lines[2] == "设置回零运动参数 | 2 | 20 | 200 | 1"    # Z：向上（正限位）
+    assert lines[2] == "设置回零运动参数 | 2 | 20 | 200 | 2"    # Z：向上（负限位 = 靠近电机端）
     assert lines[3] == "启动单轴回零运动 | 2 | 5"
     assert lines[4] == "等待回零完成 | 1 | 2 | 1"
     assert lines[5] == "延时等待 | 2000"
@@ -39,11 +39,11 @@ def test_station_block_and_approach_chain():
     assert "启动两轴直线插补 | 6 | 95 | 0" in lines
     assert "设置直线插补参数 | 30 | 300 | 300" in lines
     assert "启动两轴直线插补 | 6 | 100 | 0" in lines
-    # 站位2：从 (100,0) 出发向 (100,-120)，接近点 (100,-115)；纯 Z → 用 Z 的档位
+    # 站位2：从 (100,0) 出发向 (100,120)，接近点 (100,115)；纯 Z → 用 Z 的档位
     assert "设置直线插补参数 | 20 | 200 | 200" in lines
-    assert "启动两轴直线插补 | 6 | 100 | -115" in lines
+    assert "启动两轴直线插补 | 6 | 100 | 115" in lines
     assert "设置直线插补参数 | 4 | 40 | 40" in lines
-    assert "启动两轴直线插补 | 6 | 100 | -120" in lines
+    assert "启动两轴直线插补 | 6 | 100 | 120" in lines
     # 每站 11 行 + 前置 6 + 收尾 3
     assert len(lines) == 6 + 11 * 2 + 3
 

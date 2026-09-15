@@ -200,7 +200,7 @@ def test_grid_endpoint(tmp_path):
     with make_client(tmp_path) as c:
         g = c.get("/api/grid").json()
     assert g["y_min"] == 0.0 and g["y_max"] == 4492.0
-    assert g["z_min"] == -212.0 and g["z_max"] == 0.0
+    assert g["z_min"] == 0.0 and g["z_max"] == 212.0
 
 
 def test_backend_is_api_only(tmp_path):

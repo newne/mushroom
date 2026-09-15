@@ -23,12 +23,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // ---------- 假后端：说话方式与 deploy/console.py 一致 ----------
 const NOW = '2026-09-14T10:00:00';
 const STATIONS = [
-  { id: 'S101', box_id: 'B101', y: 187.1, z: -21.2, layer: 1, col: 1, angle_profile: 'top45',
-    camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 187.1, target_z: -21.2 },
-  { id: 'S102', box_id: 'B102', y: 561.5, z: -21.2, layer: 1, col: 2, angle_profile: 'top45',
-    camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 561.5, target_z: -21.2 },
+  { id: 'S101', box_id: 'B101', y: 187.1, z: 21.2, layer: 1, col: 1, angle_profile: 'top45',
+    camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 187.1, target_z: 21.2 },
+  { id: 'S102', box_id: 'B102', y: 561.5, z: 21.2, layer: 1, col: 2, angle_profile: 'top45',
+    camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 561.5, target_z: 21.2 },
 ];
-const GRID = { cols: 12, layers: 5, y_min: 0.0, y_max: 4492.0, z_min: -212.0, z_max: 0.0 };
+const GRID = { cols: 12, layers: 5, y_min: 0.0, y_max: 4492.0, z_min: 0.0, z_max: 212.0 };
 
 // 历史模式用：两天的帧 + 一帧失败 + 一条本地待同步；两条生长点（都要有数值才画得出线）
 const IMAGES = [
@@ -202,6 +202,19 @@ const lastCmd = () => {
     Array.from(document.querySelectorAll('[data-jog]')).every(b => b.disabled));
   check('未接管时给出接管提示', T('#sessionline').includes('未接管'), T('#sessionline'));
 
+  // 1a. 坐标框架（ADR-0018）：Z 的原点在**顶端**、向下为正。
+  //     平面图必须把第 1 层画在最上面——旧代码按 z_max 起算，把第 1 层画到了最下面，
+  //     而"层画反了"与"机器去错层"是同一个错的两个面。
+  check('平面图标明 Z 向下', html.includes('Z 向下'), 'h2=' + T('section h2'));
+  check('坐标范围文案来自 /api/grid 且说明 Z 向下',
+    T('#envlbl').includes('Z 0…212') && T('#envlbl').includes('向下'), T('#envlbl'));
+  const dots = Array.from(document.querySelectorAll('#map circle'));
+  const yOf = id => Number(dots.find(c => c.dataset.id === id)?.getAttribute('cy'));
+  check('第 1 层的点画在图的上半部（Z 原点在顶端）', yOf('S101') < 75, 'cy=' + yOf('S101'));
+  check('点动按钮标出物理方向（Z + 是向下）',
+    T('[data-jog="Z+"]').includes('下') && T('[data-jog="Z-"]').includes('上'),
+    T('[data-jog="Z+"]') + ' / ' + T('[data-jog="Z-"]'));
+
   // 1b. 历史模式：**还没选站位**时该给提示而不是空白表格
   await click('#modeSeg [data-mode="history"]');
   check('历史模式：操作区让位给筛选', $('#rtcol').style.display === 'none' && $('#hcol').style.display === '');
@@ -236,13 +249,13 @@ const lastCmd = () => {
 
   // 4. 定位：二次确认 + 载荷
   state.calls.length = 0;
-  $('#gtY').value = '1200'; $('#gtZ').value = '-100';
+  $('#gtY').value = '1200'; $('#gtZ').value = '100';
   $('#gtY').dispatchEvent(new window.Event('input'));
   window.__ok = true; window.__confirmed.length = 0;
   await click('#gotobtn');
   check('定位前有二次确认', window.__confirmed.length === 1);
   check('定位载荷 = {y:1200, z:-100}',
-    JSON.stringify(lastCmd()) === '{"kind":"goto","args":{"y":1200,"z":-100}}', JSON.stringify(lastCmd()));
+    JSON.stringify(lastCmd()) === '{"kind":"goto","args":{"y":1200,"z":100}}', JSON.stringify(lastCmd()));
 
   state.calls.length = 0;
   window.__ok = false;                       // 用户在确认框里点了取消
@@ -314,7 +327,7 @@ const lastCmd = () => {
   document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await sleep(80);
   check('空闲时按 Esc 不发急停', !state.calls.some(c => c.url.startsWith('/api/stop')));
-  state.cmd = { id: 'c-2', kind: 'goto', args: { y: 1200, z: -100 }, started_at: NOW };
+  state.cmd = { id: 'c-2', kind: 'goto', args: { y: 1200, z: 100 }, started_at: NOW };
   state.result = null;
   await sleep(1200);                          // 等一拍 /api/cmd 轮询把"在飞"读进来
   check('运动中显示"执行中"', T('#cmdline').includes('执行中'), T('#cmdline'));

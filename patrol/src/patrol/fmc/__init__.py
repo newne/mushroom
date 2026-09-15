@@ -1,6 +1,6 @@
 """FMC4030 运动控制封装（票 01/07）。
 
-本机两轴为 Y（轴 1，水平 0…4492 mm）与 Z（轴 2，竖直 -212…0 mm）——见
+本机两轴为 Y（轴 1，水平 0…4492 mm）与 Z（轴 2，竖直 0…212 mm，向下为正）——见
 ``patrol.motion_profile`` 的现场实测参数与 ``docs/adr/0007-per-axis-motion-profile.md``。
 
 控制器**自带**一层软限位，出厂默认 ±200mm，必须按行程整定（``check_soft_limits``）；

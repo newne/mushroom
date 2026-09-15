@@ -83,7 +83,7 @@ def test_goto_raises_on_silent_shortfall():
     """
     fmc = short_stopping(ratio=1435.173 / 4442.0)
     with pytest.raises(TravelShortfallError) as ei:
-        fmc.goto(4442.0, -21.2)
+        fmc.goto(4442.0, 21.2)
     err = ei.value
     assert err.axis_name == "Y"
     assert err.actual < err.target, "必须是『没走到』而不是『走过了』"
@@ -95,7 +95,7 @@ def test_shortfall_message_names_target_and_actual():
     """现场要能一眼看出差多少——消息里必须有目标、实际、差值与容差。"""
     fmc = short_stopping(ratio=0.32)
     with pytest.raises(TravelShortfallError) as ei:
-        fmc.goto(1000.0, -21.2)
+        fmc.goto(1000.0, 21.2)
     msg = str(ei.value)
     assert "指令" in msg and "控制器计数器报" in msg and "容差" in msg
     assert "无位置反馈" in msg, "消息里必须写明这是计数口径，不是实测位置"
@@ -105,7 +105,7 @@ def test_goto_shortfall_reports_which_axis():
     """Z 出问题时要点名 Z——否则现场不知道该查哪根轴。"""
     fmc = short_stopping(ratio=0.0)
     with pytest.raises(TravelShortfallError) as ei:
-        fmc.goto(0.0, -190.8)
+        fmc.goto(0.0, 190.8)
     assert ei.value.axis_name in {"Y", "Z"}
 
 
@@ -134,14 +134,14 @@ def landing_off(short_mm: float) -> Fmc4030:
 def test_goto_is_fine_within_tolerance():
     """容差之内不报：实测落点噪声 0.000–0.019 mm，不能把它当故障。"""
     fmc = landing_off(ARRIVAL_TOL_MM * 0.5)
-    fmc.goto(100.0, -21.2)          # 不抛
+    fmc.goto(100.0, 21.2)          # 不抛
     assert abs(fmc.current_yz()[0] - 100.0) <= ARRIVAL_TOL_MM
 
 
 def test_goto_just_outside_tolerance_raises():
     fmc = landing_off(ARRIVAL_TOL_MM * 4)
     with pytest.raises(TravelShortfallError):
-        fmc.goto(100.0, -21.2)
+        fmc.goto(100.0, 21.2)
 
 
 def test_move_axis_also_verifies_arrival():
@@ -158,7 +158,7 @@ def test_goto_2axis_also_verifies_arrival():
     """M0 单段直达路径（现场调试台用的就是它）。"""
     fmc = short_stopping(ratio=0.25)
     with pytest.raises(TravelShortfallError):
-        fmc.goto_2axis(2000.0, -21.2)
+        fmc.goto_2axis(2000.0, 21.2)
 
 
 # ---------- 不改正常行为 ----------
@@ -166,11 +166,11 @@ def test_goto_2axis_also_verifies_arrival():
 
 def test_healthy_motion_still_passes():
     fmc = make()
-    fmc.goto(1200.0, -21.2)
-    assert fmc.current_yz() == pytest.approx((1200.0, -21.2))
+    fmc.goto(1200.0, 21.2)
+    assert fmc.current_yz() == pytest.approx((1200.0, 21.2))
     fmc.move_axis(1, 500.0)
-    fmc.goto_2axis(300.0, -21.2)
-    assert fmc.current_yz() == pytest.approx((300.0, -21.2))
+    fmc.goto_2axis(300.0, 21.2)
+    assert fmc.current_yz() == pytest.approx((300.0, 21.2))
 
 
 def test_shortfall_is_an_fmc_error_for_callers_that_catch_broadly():
@@ -217,7 +217,7 @@ def test_round_skips_the_station_and_keeps_going(tmp_path):
             )
 
     fmc = Fmc4030.connect(lib=FirstOneShort())
-    stations = [Station(id=f"S10{i}", box_id=f"B10{i}", y=100.0 * i, z=-21.2,
+    stations = [Station(id=f"S10{i}", box_id=f"B10{i}", y=100.0 * i, z=21.2,
                         camera_ip="192.168.1.238") for i in range(1, 4)]
     report = PatrolRound(fmc, OkCapture(), stations, return_home=False).run()
 

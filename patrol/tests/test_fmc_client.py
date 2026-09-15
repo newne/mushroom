@@ -59,13 +59,13 @@ def test_goto_two_phase_motion():
 def test_goto_composite_speed_is_limited_by_the_short_axis():
     """长轴主导的行程不被短轴拖慢，但任一根轴都不越限。
 
-    起点 (0, 0) → 目标 (4000, -200)（``approach_offset=0`` ⇒ 没有接近段，整段按巡检档）：
+    起点 (0, 0) → 目标 (4000, 200)（``approach_offset=0`` ⇒ 没有接近段，整段按巡检档）：
     Y 占 0.9988、Z 占 0.05，合成量由 Y 的上限折算，Y 的实际分量恰好 = 其上限、
     Z 的分量远低于其上限。
     """
     client, lib = make_client()
     lib.pos = (0.0, 0.0, 0.0)
-    client.goto(4000.0, -200.0, approach_offset=0.0)
+    client.goto(4000.0, 200.0, approach_offset=0.0)
     (call,) = lib.calls_of("line2")
     _, _, _, _, speed, acc, _ = call
     dist = (4000**2 + 200**2) ** 0.5
@@ -81,7 +81,7 @@ def test_goto_rejects_out_of_travel_before_touching_controller():
     with pytest.raises(TravelLimitError):
         client.goto(4493.0, 0.0)      # Y 超上限
     with pytest.raises(TravelLimitError):
-        client.goto(100.0, 1.0)       # Z 必须是负数（向上为正，0 为顶端）
+        client.goto(100.0, -1.0)      # Z 不能为负（原点在顶端、向下为正，ADR-0018）
     assert lib.calls_of("line2") == []
 
 
@@ -217,18 +217,18 @@ def test_move_axis_absolute_single_axis():
 def test_move_axis_checks_travel_on_the_target_axis_only():
     client, lib = make_client()
     with pytest.raises(TravelLimitError):
-        client.move_axis(2, 10.0)  # Z 上限是 0
+        client.move_axis(2, -10.0)  # Z 下限是 0（原点在顶端）
     assert lib.calls_of("jog") == []
 
 
 def test_goto_2axis_single_segment_full_params():
     client, lib = make_client()
     lib.pos = (0.0, 0.0, 0.0)
-    client.goto_2axis(100.0, -120.0, speed=80.0, acc=300.0, dec=400.0)
+    client.goto_2axis(100.0, 120.0, speed=80.0, acc=300.0, dec=400.0)
     lines = lib.calls_of("line2")
     assert len(lines) == 1
     # M0 直线插补单段直达，速度/加/减速全部由调用方显式给出（原样下发）
-    assert lines[0] == (1, 0x06, 100.0, -120.0, 80.0, 300.0, 400.0)
+    assert lines[0] == (1, 0x06, 100.0, 120.0, 80.0, 300.0, 400.0)
 
 
 def test_home_all_uses_per_axis_profile():
@@ -238,7 +238,7 @@ def test_home_all_uses_per_axis_profile():
     homes = lib.calls_of("home")
     assert [h[1] for h in homes] == [1, 2]
     assert homes[0][2:] == (90.0, 900.0, 5.0, 2)     # Y：速度 90、加减速 900、脱落 5、负限位
-    assert homes[1][2:] == (20.0, 200.0, 5.0, 1)     # Z：速度 20、加减速 200、脱落 5、正限位
+    assert homes[1][2:] == (20.0, 200.0, 5.0, 2)     # Z：速度 20、加减速 200、脱落 5、负限位（往上）
 
 
 def test_home_axis_override_and_unwired_reject():
@@ -322,7 +322,7 @@ def test_device_para_round_trip_from_the_controller():
     assert para.ip == "192.168.1.239"
     assert para.port == 8088
     assert para.raw_limits(1) == (212, 4600)        # 原始字段
-    assert para.effective_limits(1) == (-212, 4600)  # 生效区间
+    assert para.effective_limits(1) == (-212, 4600)  # 生效区间（负值按幅值存，见 device_para）
     assert lib.calls_of("get_device_para") == [(1,)]
 
 

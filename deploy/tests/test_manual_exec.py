@@ -140,15 +140,15 @@ def test_home_runs_and_reports_position(tmp_path):
 def test_goto_reaches_target(tmp_path):
     channel, fmc, executor, _rows, _logs = make(tmp_path)
     channel.open_session("t")
-    _cmd, res = run(channel, executor, "goto", {"y": 1200.0, "z": -100.0})
+    _cmd, res = run(channel, executor, "goto", {"y": 1200.0, "z": 100.0})
     assert res.ok is True
-    assert fmc.called("goto") == [("goto", 1200.0, -100.0)]
+    assert fmc.called("goto") == [("goto", 1200.0, 100.0)]
 
 
 def test_jog_relative_and_axis_by_name(tmp_path):
     channel, fmc, executor, _rows, _logs = make(tmp_path)
     channel.open_session("t")
-    fmc.pos = (300.0, -20.0)
+    fmc.pos = (300.0, 20.0)
     _cmd, res = run(channel, executor, "jog", {"axis": "Y", "mm": 50.0})
     assert res.ok is True
     assert fmc.called("jog") == [("jog", 1, 50.0)]
@@ -280,7 +280,7 @@ def test_estop_during_motion_aborts_and_stops(tmp_path):
 def test_wait_stop_timeout_is_reported(tmp_path):
     channel, _fmc, executor, _rows, _logs = make(tmp_path, fmc=FakeFmc(never_stops=True))
     channel.open_session("t")
-    _cmd, res = run(channel, executor, "jog", {"axis": "Z", "mm": -5.0})
+    _cmd, res = run(channel, executor, "jog", {"axis": "Z", "mm": 5.0})
     assert res.ok is False
     assert "未在" in res.detail and "停稳" in res.detail
 

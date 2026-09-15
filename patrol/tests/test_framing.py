@@ -17,8 +17,8 @@ from patrol.framing import (
     fine_tune,
 )
 
-LIMITS = (0.0, 4492.0, -212.0, 0.0)
-NOMINAL = (187.17, -21.2)
+LIMITS = (0.0, 4492.0, 0.0, 212.0)
+NOMINAL = (187.17, 21.2)
 
 
 def recipe(**kw) -> FramingRecipe:
@@ -84,21 +84,33 @@ def test_already_centered_takes_one_shot_and_does_not_move():
 def test_converges_in_one_tap_and_reports_trim():
     rig = Rig([(40.0, -20.0), (0.0, 0.0)])
     out = run(rig, recipe(tol_px=10.0))
-    # 40px × 0.5mm/px = +20mm（夹到 max_step 15）；-20px × 0.5 × (-1) = +10mm
+    # 40px × 0.5mm/px = +20mm（夹到 max_step 15）；-20px × 0.5 × (+1) = -10mm
     assert out.converged is True
     assert out.taps == 1
-    assert rig.moves == [(NOMINAL[0] + 15.0, NOMINAL[1] + 10.0)]
+    assert rig.moves == [(NOMINAL[0] + 15.0, NOMINAL[1] - 10.0)]
     assert out.chosen_pos == rig.moves[0]
-    assert out.trim == (15.0, 10.0)
+    assert out.trim == (15.0, -10.0)
     assert out.chosen == {"object_name": "probe1", "pos": rig.moves[0]}, "交出去的是好位置那张"
 
 
 def test_z_sign_default_moves_camera_down_when_target_is_low():
-    """目标偏画面下方 ⇒ 相机往下（Z 负）走，把目标拉回中间。"""
+    """目标偏画面下方 ⇒ 相机往下走，把目标拉回中间。
+
+    本机 Z 的原点在顶端、坐标**往下增长**（ADR-0018），所以"往下"是 Z 的 **+** 方向：
+    默认 `sign_z` 必须从机器约定派生（+1），而不是照抄"向上为正"年代写的 -1。
+    """
     rig = Rig([(0.0, 20.0), (0.0, 0.0)])
     run(rig, recipe(tol_px=10.0))
-    assert rig.moves[0][1] < NOMINAL[1], "Z 正方向是上；目标偏下要往下挪"
-    assert rig.moves[0][1] == pytest.approx(NOMINAL[1] - 10.0)
+    assert rig.moves[0][1] > NOMINAL[1], "Z 增大 = 向下；目标偏下要往 + 方向挪"
+    assert rig.moves[0][1] == pytest.approx(NOMINAL[1] + 10.0)
+
+
+def test_default_sign_z_follows_the_machine_convention():
+    """把"符号"与"Z 往哪边增长"绑在一起：改坐标框架时不会再漏改这一处。"""
+    from patrol.framing import FramingRecipe, default_sign_z
+
+    assert default_sign_z() == 1.0
+    assert FramingRecipe(mm_per_px_y=1.0, mm_per_px_z=1.0).sign_z == 1.0
 
 
 def test_sign_flip_reverses_the_step():
@@ -154,7 +166,7 @@ def test_divergence_reverts_to_the_best_seen_not_the_first():
 def test_already_at_travel_limit_reports_it_instead_of_pretending():
     """已经贴在限位上：一步都挪不动，理由必须说"限位"，不能含糊成"改善不足"。"""
     rig = Rig([(100.0, 0.0)])
-    out = run(rig, nominal=(4492.0, -21.2), r=recipe(max_taps=3))
+    out = run(rig, nominal=(4492.0, 21.2), r=recipe(max_taps=3))
     assert out.converged is False
     assert "限位" in out.reason
     assert rig.moves == []
@@ -163,9 +175,9 @@ def test_already_at_travel_limit_reports_it_instead_of_pretending():
 def test_never_commands_outside_travel_limits():
     """贴着边界时单步会被截短——截短可以，"发一个越界目标"不可以。"""
     rig = Rig([(100.0, 0.0), (100.0, 0.0)])
-    run(rig, nominal=(4490.0, -21.2), r=recipe(max_taps=3))
+    run(rig, nominal=(4490.0, 21.2), r=recipe(max_taps=3))
     assert rig.moves, "还有 2mm 余量时应该真的挪过去"
-    assert all(0.0 <= y <= 4492.0 and -212.0 <= z <= 0.0 for y, z in rig.moves)
+    assert all(0.0 <= y <= 4492.0 and 0.0 <= z <= 212.0 for y, z in rig.moves)
 
 
 def test_respects_max_total_mm():
@@ -220,7 +232,7 @@ def test_outcome_row_is_serialisable_for_the_index():
     rig = Rig([(40.0, -20.0), (0.0, 0.0)])
     row = run(rig).to_row()
     assert row["converged"] is True
-    assert row["trim"] == [15.0, 10.0]
+    assert row["trim"] == [15.0, -10.0]
     assert [h["tap"] for h in row["history"]] == [0, 1]
     assert row["history"][0]["dx_px"] == 40.0
-    assert row["history"][0]["step_mm"] == [15.0, 10.0]
+    assert row["history"][0]["step_mm"] == [15.0, -10.0]

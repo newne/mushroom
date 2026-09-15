@@ -119,7 +119,7 @@
 <main>
   <section>
     <div class="card">
-      <h2>导轨平面图（Y 向右 · Z 向上）</h2>
+      <h2>导轨平面图（Y 向右 · Z 向下）</h2>
       <svg id="map" viewBox="0 0 320 150" preserveAspectRatio="xMidYMid meet"></svg>
       <div class="empty" id="maphint">点位与巡检当前站位</div>
     </div>
@@ -200,7 +200,7 @@
       <div id="sessionline">未接管 · 手动移动需要先接管（会话 5 分钟，指令会续期）</div>
       <div id="opnotice" class="empty" style="padding:6px 0"></div>
 
-      <div class="lbl">坐标（Y 0…4492 · Z −212…0）</div>
+      <div class="lbl" id="envlbl">坐标（读取中…）</div>
       <div class="row">
         <input id="gtY" type="number" step="0.5" inputmode="decimal" placeholder="Y">
         <input id="gtZ" type="number" step="0.5" inputmode="decimal" placeholder="Z">
@@ -220,8 +220,8 @@
         <button id="capbtn" disabled>抓拍</button>
       </div>
       <div class="grid4">
-        <button data-jog="Y-">Y −</button><button data-jog="Y+">Y +</button>
-        <button data-jog="Z+">Z +</button><button data-jog="Z-">Z −</button>
+        <button data-jog="Y-">Y −（左）</button><button data-jog="Y+">Y +（右）</button>
+        <button data-jog="Z+">Z +（下）</button><button data-jog="Z-">Z −（上）</button>
       </div>
 
       <div id="cmdline" class="empty" style="padding:6px 0 0">最近指令 —</div>
@@ -302,11 +302,14 @@ function drawMap(){
   const {cols, layers, y_min, y_max, z_min, z_max} = grid;
   const W = 320, H = 150, pad = 14;
   const X = y => pad + (y - y_min) / (y_max - y_min) * (W - 2*pad);
-  const Y = z => pad + (z - z_min) / (z_max - z_min) * (H - 2*pad);   // Z 向上：z 越小越靠下
+  // Z 向下为正（原点在顶端，ADR-0018）：z 越大越靠下。层从**原点那一侧**排下去，
+  // 所以第 1 层（最上）用 z_min 起算——按 z_max 起算会把第 1 层画到最下面（旧代码就是）。
+  const Y = z => pad + (z - z_min) / (z_max - z_min) * (H - 2*pad);
+  const zPitch = (z_max - z_min) / layers;
   let s = '';
   // 层带
   for(let L = 1; L <= layers; L++){
-    const y0 = Y(z_max - (L-1)*(z_max-z_min)/layers), y1 = Y(z_max - L*(z_max-z_min)/layers);
+    const y0 = Y(z_min + (L-1)*zPitch), y1 = Y(z_min + L*zPitch);
     if(L % 2 === 1) s += `<rect x="${pad}" y="${y0}" width="${W-2*pad}" height="${y1-y0}" fill="#1e2632"/>`;
   }
   // 网格线
@@ -527,6 +530,16 @@ function etaText(patrol){
 function envelope(){
   if(!grid) return null;
   return {y:[grid.y_min, grid.y_max], z:[grid.z_min, grid.z_max]};
+}
+
+/* 坐标范围文案从 grid 来，不写死：2026-09-15 把 Z 的框架从 −212…0 翻成 0…212（ADR-0018），
+   写死的那一行当时就变成了错的说明——而错的坐标说明比没有说明更危险。 */
+function renderEnvelopeLabel(){
+  const el = $('#envlbl'); const env = envelope();
+  if(!el) return;
+  el.textContent = env
+    ? `坐标（Y ${env.y[0]}…${env.y[1]} · Z ${env.z[0]}…${env.z[1]}，Z 向下为正）`
+    : '坐标（读取中…）';
 }
 function targetsOk(){
   const env = envelope(); if(!env) return false;
@@ -957,7 +970,8 @@ function wireHistory(){
   try{
     const data = await jget('/api/stations');
     if(!data.ok){ $('#list').innerHTML = `<div class="empty">${data.error}</div>`; return; }
-    stations = data.stations; grid = data.grid; drawMap(); drawList();
+    stations = data.stations; grid = data.grid;
+    drawMap(); drawList(); renderEnvelopeLabel();
   }catch(e){ $('#list').innerHTML = `<div class="empty">站位表读取失败：${e.message}</div>`; }
   wireOps();
   wireHistory();

@@ -15,6 +15,7 @@ build-backend = "hatchling.build"
 [project.scripts]
 patrol-debug = "patrol.debug:main"
 patrol-teach = "patrol.teach:main"
+patrol-migrate = "patrol.migrate:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/patrol"]

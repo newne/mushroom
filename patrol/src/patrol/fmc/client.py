@@ -4,14 +4,14 @@
 
     from patrol.fmc import Fmc4030
     fmc = Fmc4030.connect()          # 默认 motion_profile.CONTROLLER_IP / PORT
-    fmc.home_all(); fmc.wait_stop()  # Y(轴1) 负限位回零、Z(轴2) 正限位回零
-    fmc.goto(1200.0, -120.0)         # 目标 (y, z) mm
+    fmc.home_all(); fmc.wait_stop()  # 两轴都找负限位（Y 往左、Z 往上，见 ADR-0018）
+    fmc.goto(1200.0, 120.0)          # 目标 (y, z) mm
     fmc.lamp(True)
     fmc.close()
 
 本机两轴为 **Y（轴 1）与 Z（轴 2）**，插补走组合号 0x06（X+Y=0x03、X+Z=0x05、
-Y+Z=0x06，见《FMC4030二次开发库详解》Line_2Axis）。坐标原点即「Y 反向（负限位）
-回零 / Z 向上（正限位）回零」后的落点。
+Y+Z=0x06，见《FMC4030二次开发库详解》Line_2Axis）。坐标原点即「两轴都向**负限位**
+（= 靠近电机的那一端）回零」后的落点：Y 在左端、Z 在顶端。
 
 行程、速度、加减速、回零方向、控制器 IP 全部取自运动参数单源
 ``patrol.motion_profile``（ADR-0002 / ADR-0007），本文件不持有任何物理常量。

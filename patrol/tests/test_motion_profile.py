@@ -17,7 +17,6 @@ from patrol.motion_profile import (
     CONTROLLER_IP,
     CONTROLLER_PORT,
     HOME_DIR_NEGATIVE,
-    HOME_DIR_POSITIVE,
     M1,
     M2,
 )
@@ -51,14 +50,29 @@ def test_y_travel_is_horizontal_and_origin_at_the_left_end():
 
 
 def test_z_travel_is_vertical_and_origin_at_the_top():
-    """向上为正：正限位回零落在行程上限，上限即原点 0，向下走到 -212。"""
-    assert (M1.z.travel_min, M1.z.travel_max) == (-212.0, 0.0)
-    assert M1.z.home_dir == HOME_DIR_POSITIVE     # 向上回零
+    """**向下为正**（ADR-0018）：原点在顶端（靠近电机端 = 负限位），坐标往下增长。
+
+    这条曾经写成 `-212…0 / 向上为正 / 正限位回零`——方向整好反了：`homeDir=1`（正限位）
+    在 Z 上指向**远离电机端**，回零会往下跑到远端开关、把底部当成 0。
+    """
+    assert (M1.z.travel_min, M1.z.travel_max) == (0.0, 212.0)
+    assert M1.z.home_dir == HOME_DIR_NEGATIVE     # 往上（负限位 = 靠近电机端）回零
     assert M1.z.home_position == 0.0
 
 
+def test_both_axes_home_to_the_motor_end():
+    """两轴同构：原点都在**靠近电机**的一端，回零都找负限位（说明书 §三.2）。
+
+    Y 的电机在左端、Z 的电机在顶端，所以 Y 往左回零、Z 往上回零——**都是负限位**。
+    这条不变量是 ADR-0018 的全部内容：搞错它的代价是撞限位。
+    """
+    assert M1.y.home_dir == M1.z.home_dir == HOME_DIR_NEGATIVE
+    assert M1.y.positive_towards == "right"       # 离开左端电机
+    assert M1.z.positive_towards == "down"        # 离开顶端电机
+
+
 def test_origin_is_the_homing_position_on_both_axes():
-    """「Y 反向回零、Z 向上回零的位置为原点」——两轴都不例外。"""
+    """「两轴回零后的落点为原点」——两轴都不例外。"""
     for spec in M1.axes:
         assert spec.home_position == 0.0
         assert spec.contains(0.0)
@@ -67,12 +81,12 @@ def test_origin_is_the_homing_position_on_both_axes():
 def test_direction_semantics_follow_from_the_origin():
     """行程单侧展开 → 符号即方向。"""
     assert M1.y.contains(4492.0) and not M1.y.contains(-1.0)   # Y 只能向正（右）
-    assert M1.z.contains(-212.0) and not M1.z.contains(1.0)    # Z 只能向负（下）
+    assert M1.z.contains(212.0) and not M1.z.contains(-1.0)    # Z 只能向正（下）
 
 
 @pytest.mark.parametrize(
     ("spec_name", "inside", "outside"),
-    [("y", 3000.0, 5000.0), ("z", -100.0, -300.0)],
+    [("y", 3000.0, 5000.0), ("z", 100.0, -300.0)],
 )
 def test_contains_rejects_anything_beyond_travel(spec_name, inside, outside):
     spec = getattr(M1, spec_name)
@@ -203,7 +217,7 @@ def test_composite_does_not_drag_the_long_axis_down():
 
 
 def test_composite_never_lets_any_axis_exceed_its_rating():
-    for delta in ((1.0, -1.0), (100.0, -1.0), (1.0, -100.0), (4492.0, -212.0)):
+    for delta in ((1.0, -1.0), (100.0, -1.0), (1.0, -100.0), (4492.0, 212.0)):
         v, a = composite_limits(delta, M1.travel_limits)
         dist = (delta[0] ** 2 + delta[1] ** 2) ** 0.5
         assert v * abs(delta[0]) / dist <= M1.y.travel_speed + 1e-9

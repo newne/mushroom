@@ -33,18 +33,30 @@ def test_station_ids_read_as_layer_and_col():
 
 
 def test_layer_one_is_at_the_top_and_layer_five_at_the_bottom():
-    """Z 原点在顶端、Z 向下为负：第 1 层必须最靠近 0。"""
-    assert layer_z(1) == pytest.approx(-42.4 / 2)
-    assert layer_z(GRID_LAYERS) == pytest.approx(-212 + 42.4 / 2)
-    assert layer_z(1) > layer_z(2) > layer_z(GRID_LAYERS)
+    """Z 原点在顶端、Z **向下为正**（ADR-0018）：第 1 层最靠近 0，层号越大 z 越大。"""
+    assert layer_z(1) == pytest.approx(42.4 / 2)
+    assert layer_z(GRID_LAYERS) == pytest.approx(212 - 42.4 / 2)
+    assert layer_z(1) < layer_z(2) < layer_z(GRID_LAYERS)
 
 
 def test_layers_evenly_split_the_whole_z_travel():
     zs = [layer_z(i) for i in range(1, GRID_LAYERS + 1)]
-    gaps = [zs[i] - zs[i + 1] for i in range(len(zs) - 1)]
+    gaps = [zs[i + 1] - zs[i] for i in range(len(zs) - 1)]
     assert all(g == pytest.approx(212 / GRID_LAYERS) for g in gaps)
     # 首末层各留半个层距的余量，既不贴顶也不贴底
-    assert M1.z.travel_min < zs[-1] and zs[0] < M1.z.travel_max
+    assert M1.z.travel_min < zs[0] and zs[-1] < M1.z.travel_max
+
+
+def test_layer_z_refuses_to_leave_the_travel_range():
+    """层是从**原点那一侧**排下去的：若有人把原点配到行程的另一端（正限位回零），
+    这里要当场喊出来，而不是算出一串越界坐标——ADR-0018 的镜像错就是这么来的。"""
+    from dataclasses import replace
+
+    from patrol.motion_profile import HOME_DIR_POSITIVE
+
+    flipped = replace(M1, z=replace(M1.z, home_dir=HOME_DIR_POSITIVE))   # 原点跑到 212
+    with pytest.raises(ValueError, match="靠近电机"):
+        layer_z(1, flipped)
 
 
 def test_cols_evenly_split_the_whole_y_travel():
@@ -91,7 +103,7 @@ def test_grid_geometry_matches_the_builder():
     assert geom["y_pitch"] == pytest.approx(4492 / GRID_COLS)
     assert geom["z_pitch"] == pytest.approx(212 / GRID_LAYERS)
     assert (geom["y_min"], geom["y_max"]) == (0.0, 4492.0)
-    assert (geom["z_min"], geom["z_max"]) == (-212.0, 0.0)
+    assert (geom["z_min"], geom["z_max"]) == (0.0, 212.0)
 
 
 def test_angles_dimension_can_be_reopened_without_touching_coordinates():

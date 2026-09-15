@@ -115,10 +115,10 @@ def test_console_rejects_out_of_travel():
     con, lib = make_console()
     before = len(lib.calls)
     with pytest.raises(TravelLimitError, match="超出行程"):
-        con.execute(parse_command("goto 300 50"))   # Z 上限是 0
+        con.execute(parse_command("goto 300 -50"))  # Z 下限是 0（原点在顶端）
     assert len(lib.calls) == before                  # 一条指令都没发出去
     with pytest.raises(TravelLimitError):
-        con.execute(parse_command("abs Z 10"))
+        con.execute(parse_command("abs Z -10"))
     assert lib.calls_of("jog") == []
 
 
@@ -129,7 +129,7 @@ def test_console_run_survives_out_of_travel():
     client.open()
     lib.calls.clear()
     out = io.StringIO()
-    con = DebugConsole(client, stdin=io.StringIO("goto 300 50\nquit\n"), stdout=out)
+    con = DebugConsole(client, stdin=io.StringIO("goto 300 -50\nquit\n"), stdout=out)
     con.run()
     assert "超出行程" in out.getvalue()
     assert "未知错误码" not in out.getvalue()   # 域错误不该套 SDK 错误码模板

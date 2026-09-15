@@ -1,7 +1,8 @@
 """站位表：库房每个拍照位的坐标与成像配置（spec §4.4 数据契约）。
 
 坐标是**虚拟坐标系**的 (y, z) mm，与导轨实轴的对应关系见 ``patrol.motion_profile``：
-Y 为水平长行程（0…4492，向右为正），Z 为竖直短行程（-212…0，向上为正）。
+Y 为水平长行程（0…4492，向右为正），Z 为竖直短行程（0…212，**向下为正**）。
+两轴的原点都在**靠近电机**的那一端（Y 左端、Z 顶端），坐标从原点单侧增长（ADR-0018）。
 
 现场布局（2026-09-12 确认）：**横向 12 框 × 竖向 5 层 = 60 个站位，每框 1 个站位**。
 两轴的机械行程刚好整除这个网格，因此站位坐标由 ``build_grid`` 从行程**推导**而不是
@@ -23,7 +24,7 @@ from patrol.motion_profile import M1, MotionProfile
 # ---------- 现场布局 ----------
 
 GRID_COLS = 12          # 横向框数（沿 Y 长行程 0…4492mm）
-GRID_LAYERS = 5         # 竖向层数（沿 Z 短行程 -212…0mm，**第 1 层在最上**）
+GRID_LAYERS = 5         # 竖向层数（沿 Z 短行程 0…212mm，**第 1 层在最上**＝靠近 Z 原点）
 # 全场**唯一**相机：老系统与 M1 共用同一台（spec §2；现场 2026-09-12 确认 238 无密码）。
 # 收敛成全局常量而不是每站位一个字段——"每框一个 IP"是改造前的假想，实际只有一台。
 CAMERA_IP = "192.168.1.238"
@@ -70,15 +71,24 @@ class Station:
 
 
 def layer_z(layer: int, profile: MotionProfile = M1) -> float:
-    """层号 → 该层中心的 Z 坐标（第 1 层在最上，即最靠近 Z 原点）。
+    """层号 → 该层中心的 Z 坐标（第 1 层在最上，即最靠近 Z 原点 = 顶端）。
 
-    5 层均分 Z 的竖直行程：层距 = 212 / 5 = 42.4mm，层心落在各段中点，
-    于是第 1 层 z = -21.2、第 5 层 z = -190.8，两端各留半个层距的余量。
+    5 层均分 Z 的竖直行程：层距 = 212 / 5 = 42.4mm，层心落在各段中点，于是第 1 层
+    z = 21.2、第 5 层 z = 190.8，两端各留半个层距的余量。
+
+    ⚠️ 从**原点那一侧**起算（ADR-0018）：Z 的原点在顶端、坐标往下增长，所以层号越大
+    z 越大。写成 `travel_max - …` 就会整体镜像（第 1 层跑到最下面）。
     """
     if not 1 <= layer <= GRID_LAYERS:
         raise ValueError(f"层号越界 {layer}（1…{GRID_LAYERS}）")
     pitch = profile.z.travel_span / GRID_LAYERS
-    return profile.z.travel_max - (layer - 0.5) * pitch
+    z = profile.z.home_position + (layer - 0.5) * pitch
+    if not profile.z.contains(z):
+        raise ValueError(
+            f"第 {layer} 层的 z={z} 不在行程 {profile.z.travel_min}…{profile.z.travel_max} 内："
+            "两轴的原点都应当落在**靠近电机**的那一端（ADR-0018）"
+        )
+    return z
 
 
 def col_y(col: int, profile: MotionProfile = M1) -> float:
@@ -190,6 +200,46 @@ def image_object_name(station: Station, ts: datetime) -> str:
     """图片对象名（MinIO/本地共用，截图服务自动补 .jpg）。"""
     return (f"{ts.strftime('%Y%m%d')}/{station.box_id}_{station.id}"
             f"_{station.angle_profile}_{ts.strftime('%H%M%S')}")
+
+
+# ---------- Z 框架镜像的一次性迁移（ADR-0018） ----------
+
+#: 旧 Z 框架的下限（ADR-0018 之前写成 `-212…0`：顶端为 0、**向上**为正）。
+#: 新框架跨度不变（212），只是把"向下"从负号改成正号。
+OLD_Z_MIN = -212.0
+
+
+def mirror_z_in_file(path: str, *, out: str | None = None,
+                     log: Callable[[str], None] = print) -> int:
+    """把一份站位表的 Z 坐标从**旧框架**搬到新框架（ADR-0018），返回改动的站位数。
+
+    换算只有一步：**去掉负号**（`z_new = -z_old`，`trim_z` 同）。
+
+    为什么不是"加 212"：两张表描述的物理位置是**同一批**——旧表里 `-21.2` 是"顶端往下
+    21.2 mm"（旧模型把向下记成负），新表里同一个点是 `+21.2`。加 212 会把第 1 层送到
+    第 5 层的位置（测试 `test_migrated_table_matches_the_new_grid` 钉住这一点）。
+
+    防重复执行：旧框架的 z 必然 ≤ 0，所以只要表里出现 `z > 0` 就认定"已经是新框架"并
+    抛错，而不是再翻一次符号（翻两次等于没迁，但会让人以为迁过了）。
+    """
+    stations = load_stations(path)
+    if not stations:
+        raise ValueError(f"{path} 里没有站位，不迁移")
+    if abs(OLD_Z_MIN) != M1.z.travel_span:
+        raise ValueError(f"Z 行程跨度变了（{M1.z.travel_span} ≠ {abs(OLD_Z_MIN)}）："
+                         "这条迁移是给 ADR-0018 那一次用的，跨度变了要重新推导")
+    ahead = [s.id for s in stations if s.z > 0]
+    if ahead:
+        raise ValueError(f"{path} 看起来已经是新框架（有 z>0：{ahead[:3]}…），拒绝重复迁移")
+    below = [s.id for s in stations if s.z < OLD_Z_MIN - 1e-6]
+    if below:
+        raise ValueError(f"{path} 里有超出旧行程的 z（{below[:3]}…），这份表不对劲，先人工看")
+
+    shifted = [replace(s, z=-s.z, trim_z=-s.trim_z) for s in stations]
+    save_stations(shifted, out or path)
+    log(f"Z 框架迁移：{path} → {out or path}，{len(shifted)} 个站位（z 与 trim_z 取反）；"
+        "物理位置不变")
+    return len(shifted)
 
 
 # ---------- 标定字段 ----------

@@ -2,12 +2,12 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `adr/` | 架构决策记录（0001–0017）。跨两个子系统的决策也放这里 |
+| `adr/` | 架构决策记录（0001–0018）。跨两个子系统的决策也放这里 |
 | `agents/` | 给协作代理看的流程约定：issue 追踪、triage 标签、领域文档规范 |
 | `patrol/` | **巡检工程**的文档与现场记录 |
 | `patrol/console-ui/` | 巡检台规格（`spec.md`）、单页原型（`prototype.html`）、jsdom 回归（`verify.js`）、五张实施票 |
 | `patrol/fmc4030-camera-scan/` | 一期扫描功能的规格与计划（`spec.md` / `plan.md` / 八张票） |
-| `patrol/prod-deploy/` | 现场上机记录：`gap-list.md`（欠账清单）、`container-cutover.md`（容器上机切换手册）、Y 轴排查清单、采图服务修复、各次实测脚本与产物 |
+| `patrol/prod-deploy/` | 现场上机记录：`gap-list.md`（欠账清单）、`container-cutover.md`（容器上机切换手册）、`z-frame-cutover.md`（Z 坐标框架迁移清单）、Y 轴排查清单、采图服务修复、各次实测脚本与产物 |
 | `technical/` `algorithms/` `business/` | **算法工程**的文档（既有，未改动） |
 
 ## 代码在哪

@@ -40,6 +40,23 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from patrol.motion_profile import M1, MotionProfile
+
+
+def default_sign_z(profile: MotionProfile = M1) -> float:
+    """图像 y 正方向（向下）对应 Z 的哪个方向——由机器约定**派生**，不写死。
+
+    相机朝 Y 正方向看、图像 x 向右、图像 y 向下，所以：
+
+    * 目标偏画面下方 ⇒ 相机得往**下**挪；
+    * "往下"是 Z 的 + 方向还是 − 方向，取决于 Z 的坐标系怎么摆——本机 Z 的原点在顶端、
+      坐标往下增长（`positive_towards="down"`，ADR-0018），所以是 **+1**。
+
+    这个符号是**最容易配错**的一项：配错的表现是"越挪越偏"。它现在从
+    `AxisProfile.positive_towards` 推出来，改坐标框架时不会再漏改这里。
+    """
+    return 1.0 if profile.z.positive_towards == "down" else -1.0
+
 # 目标在画面里的偏移（像素）→ mm 的换算与边界。
 DEFAULT_TOL_PX = 24.0          # 画面 1/20 左右；再小就是在追检测噪声
 DEFAULT_MAX_STEP_MM = 15.0     # 单步上限：够跨过装配误差，又不至于跨框
@@ -78,8 +95,9 @@ class FramingRecipe:
     "相机朝 Y 正方向看、图像 x 向右、y 向下"，即
 
     * 目标偏右 ⇒ 相机往 **Y 正**方向挪（把目标拉回中间）⇒ ``sign_y = +1``；
-    * 目标偏下 ⇒ 相机往 **Z 负**方向挪（Z 向上为正）⇒ ``sign_z = -1``。
+    * 目标偏下 ⇒ 相机往 **Z 正**方向挪（本机 Z 的原点在顶端、坐标向下增长）⇒ ``sign_z = +1``。
 
+    ``sign_z`` 的默认值由 `default_sign_z()` 从机器约定推出来（ADR-0018 之后是 +1）。
     这两个符号是**最容易配错**的一项，配错的表现是"越挪越偏"——`fine_tune` 的
     不进步回退会把它挡住，但现场仍应先用单站验证一次方向再放开。
     """
@@ -87,7 +105,7 @@ class FramingRecipe:
     mm_per_px_y: float
     mm_per_px_z: float
     sign_y: float = 1.0
-    sign_z: float = -1.0
+    sign_z: float = field(default_factory=default_sign_z)
     tol_px: float = DEFAULT_TOL_PX
     max_step_mm: float = DEFAULT_MAX_STEP_MM
     max_total_mm: float = DEFAULT_MAX_TOTAL_MM
