@@ -66,11 +66,41 @@
        border:1px solid var(--line);color:var(--dim)}
   .tag.on{color:var(--ok);border-color:var(--ok)}
   .tag.bad{color:var(--bad);border-color:var(--bad)}
+  /* ---- 模式切换（实时 / 历史）---- */
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{border:0;border-radius:0;min-height:36px;padding:6px 14px;background:transparent;
+              color:var(--dim)}
+  .seg button.on{background:#1f3350;color:#fff}
+  /* ---- 时间轴（历史模式）---- */
+  .tlhead{padding:6px 0 2px;color:var(--dim);font-size:12px;border-bottom:1px solid var(--line);
+          margin-top:6px}
+  .tl{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin:8px 0}
+  .tl .im{cursor:pointer}
+  .tl .im.sel{outline:2px solid var(--accent)}
+  .tl .im.gone{opacity:.55}
+  /* ---- 大图查看器 ---- */
+  .viewer{position:relative;overflow:hidden;background:#05070a;border:1px solid var(--line);
+          border-radius:6px;height:340px;display:flex;align-items:center;justify-content:center;
+          cursor:grab}
+  .viewer.dragging{cursor:grabbing}
+  .viewer img{max-width:100%;max-height:100%;transition:transform .08s linear;
+              transform-origin:center center;user-select:none;-webkit-user-drag:none}
+  .viewer .hint{position:absolute;left:8px;bottom:6px;font-size:12px;color:var(--dim)}
+  table.meas{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px}
+  table.meas th,table.meas td{border-bottom:1px solid #202834;padding:4px 6px;text-align:left}
+  table.meas th{color:var(--dim);font-weight:500}
+  #curve svg{width:100%;height:170px;display:block}
+  .legend{font-size:12px;color:var(--dim);display:flex;gap:14px;margin-top:4px}
+  .legend i{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:4px}
 </style>
 </head>
 <body>
 <header>
   <h1>蘑菇房巡检台</h1>
+  <span id="modeSeg" class="seg">
+    <button data-mode="realtime" class="on">实时</button>
+    <button data-mode="history">历史</button>
+  </span>
   <span id="pill" class="pill idle">连接中…</span>
   <span id="posn" class="mono" style="color:var(--dim)">位置 —</span>
   <span id="roundinfo" style="color:var(--dim)"></span>
@@ -90,7 +120,7 @@
     </div>
   </section>
 
-  <section>
+  <section id="rtmain">
     <div class="card">
       <h2>上一轮 / 本轮</h2>
       <div class="kv" id="round">—</div>
@@ -102,7 +132,30 @@
     </div>
   </section>
 
-  <section>
+  <section id="hmain" style="display:none">
+    <div class="card">
+      <h2>时间轴 <span id="tltitle" style="color:var(--dim);font-weight:400"></span></h2>
+      <div id="timeline" class="empty">点左侧任一站位，看它的历史帧</div>
+    </div>
+    <div class="card">
+      <h2>大图 <span id="zoomlabel" style="color:var(--dim);font-weight:400"></span></h2>
+      <div class="viewer" id="viewer">
+        <img id="bigimg" alt="" style="display:none">
+        <span class="hint" id="viewhint">滚轮或按钮缩放，放大后可拖拽平移</span>
+      </div>
+      <div class="grid4">
+        <button data-zoom="1">1×</button><button data-zoom="2">2×</button>
+        <button data-zoom="4">4×</button><button id="fitbtn">适应</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>生长曲线 <span id="curvetitle" style="color:var(--dim);font-weight:400"></span></h2>
+      <div id="curve" class="empty">选一个站位，看它所在框的生长</div>
+      <div id="growthnote" class="empty"></div>
+    </div>
+  </section>
+
+  <section id="rtcol">
     <!-- 急停常驻（ADR-0004/0016）：不随滚动隐藏，永远可点，不需要会话 -->
     <div class="card estopcard">
       <h2>急停</h2>
@@ -158,6 +211,31 @@
     <div class="card">
       <h2>事件</h2>
       <div id="log" class="empty">—</div>
+    </div>
+  </section>
+
+  <section id="hcol" style="display:none">
+    <div class="card">
+      <h2>筛选</h2>
+      <div class="lbl">日期范围</div>
+      <div class="row">
+        <input id="fromDate" type="date"><input id="toDate" type="date">
+      </div>
+      <div class="lbl">角度档</div>
+      <div class="row"><select id="angleSel"><option value="">全部</option></select></div>
+      <div class="grid2">
+        <button id="clearfilter">清空筛选</button>
+        <button id="reloadbtn">重新读取</button>
+      </div>
+      <div id="filterinfo" class="empty" style="padding:6px 0 0"></div>
+    </div>
+    <div class="card">
+      <h2>机器</h2>
+      <div class="kv" id="machine2">—</div>
+    </div>
+    <div class="card">
+      <h2>事件</h2>
+      <div id="log2" class="empty">—</div>
     </div>
   </section>
 </main>
@@ -254,18 +332,23 @@ async function selectStation(id){
   $('#imgs').innerHTML = '<div class="empty">读取中…</div>';
   try{
     const data = await jget('/api/images?station_id=' + encodeURIComponent(id));
-    if(!data.rows.length){ $('#imgs').innerHTML = '<div class="empty">这个站位还没有图像索引</div>'; return; }
-    $('#imgs').innerHTML = data.rows.map(r => {
-      const url = r.cloud_url || '';
-      const ok = r.ok !== false && r.ok !== 0;
-      return `<div class="im ${ok?'':'fail'} ${r.source==='local'?'local':''}">
-        ${url ? `<a href="${url}" target="_blank"><img loading="lazy" src="${url}"></a>` : '<div style="height:110px"></div>'}
-        <div class="m"><b>${(r.ts||'').replace('T',' ')}</b><br>${r.object_name || (ok?'':'<span style="color:#f85149">采图失败</span>')}
-        <br>${r.source==='local'?'本地':'prod'}</div></div>`;
-    }).join('');
+    hist.rows = data.rows || [];
+    hist.loadedFor = id;
+    if(!data.rows.length){ $('#imgs').innerHTML = '<div class="empty">这个站位还没有图像索引</div>'; }
+    else{
+      $('#imgs').innerHTML = data.rows.map(r => {
+        const url = r.cloud_url || '';
+        const ok = r.ok !== false && r.ok !== 0;
+        return `<div class="im ${ok?'':'fail'} ${r.source==='local'?'local':''}">
+          ${url ? `<a href="${url}" target="_blank"><img loading="lazy" src="${url}"></a>` : '<div style="height:110px"></div>'}
+          <div class="m"><b>${(r.ts||'').replace('T',' ')}</b><br>${r.object_name || (ok?'':'<span style="color:#f85149">采图失败</span>')}
+          <br>${r.source==='local'?'本地':'prod'}</div></div>`;
+      }).join('');
+    }
     if(data.prod_error) $('#imgs').insertAdjacentHTML('afterbegin',
       `<div class="empty">⚠ prod 查询失败（只显示了本地待同步的）：${data.prod_error}</div>`);
   }catch(e){ $('#imgs').innerHTML = `<div class="empty">读取失败：${e.message}</div>`; }
+  if(mode === 'history'){ syncAngleOptions(); renderHistory(); await loadGrowth(); }
 }
 
 function renderStatus(s){
@@ -316,8 +399,18 @@ function renderStatus(s){
     ['位置来源', m.pos_source], ['相机服务', m.host],
   ].map(([k,v]) => `<b>${k}</b><span>${v ?? '—'}</span>`).join('');
   const ev = (s.events||[]).slice().reverse();
-  $('#log').className = ev.length ? '' : 'empty';
-  $('#log').innerHTML = ev.length ? ev.map(e => `<div>${e.ts} ${e.text}</div>`).join('') : '—';
+  const evHtml = ev.length ? ev.map(e => `<div>${e.ts} ${e.text}</div>`).join('') : '—';
+  const mHtml = [
+    ['页面状态', m.state], ['控制器连接', m.connected ? '已连' : '未连（巡检进行中时刻意不连）'],
+    ['位置来源', m.pos_source], ['相机服务', m.host],
+  ].map(([k,v]) => `<b>${k}</b><span>${v ?? '—'}</span>`).join('');
+  for(const [logSel, machSel] of [['#log', '#machine'], ['#log2', '#machine2']]){
+    const lg = $(logSel), mc = $(machSel);
+    if(!lg || !mc) continue;
+    lg.className = ev.length ? '' : 'empty';
+    lg.innerHTML = evHtml;
+    mc.innerHTML = mHtml;
+  }
   renderOps();          // 巡检状态变了，操作区要跟着解锁/上锁
 }
 
@@ -519,6 +612,217 @@ function posNow(){
   return Array.isArray(p) ? p : null;
 }
 
+/* ---------------- 历史模式：时间轴 / 大图 / 生长曲线 ---------------- */
+
+let mode = 'realtime';
+const hist = { rows: [], growth: null, picked: null, zoom: 1, px: 0, py: 0 };
+
+function setMode(m){
+  mode = m;
+  document.querySelectorAll('#modeSeg button').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
+  $('#rtmain').style.display = m === 'realtime' ? '' : 'none';
+  $('#rtcol').style.display = m === 'realtime' ? '' : 'none';
+  $('#hmain').style.display = m === 'history' ? '' : 'none';
+  $('#hcol').style.display = m === 'history' ? '' : 'none';
+  if(m === 'history') renderHistory();
+}
+
+function rowDate(r){ return String(r.ts || '').slice(0, 10); }
+function rowOk(r){ return r.ok !== false && r.ok !== 0; }
+
+function filtered(){
+  const from = $('#fromDate').value, to = $('#toDate').value, ang = $('#angleSel').value;
+  return hist.rows.filter(r => {
+    const d = rowDate(r);
+    if(from && d && d < from) return false;
+    if(to && d && d > to) return false;
+    if(ang && r.angle_profile !== ang) return false;
+    return true;
+  });
+}
+
+function renderHistory(){
+  if(mode !== 'history') return;
+  const rows = filtered();
+  const st = selected ? stations.find(s => s.id === selected) : null;
+  $('#tltitle').textContent = selected ? '· ' + selected + (st ? '（' + st.box_id + '）' : '') : '';
+  $('#curvetitle').textContent = st ? '· ' + st.box_id : '';
+  $('#filterinfo').textContent = hist.rows.length
+    ? `共 ${hist.rows.length} 帧，筛出 ${rows.length} 帧`
+    : '';
+
+  const tl = $('#timeline');
+  if(!selected){ tl.className = 'empty'; tl.textContent = '点左侧任一站位，看它的历史帧'; }
+  else if(!rows.length){
+    tl.className = 'empty';
+    tl.textContent = hist.rows.length ? '当前筛选下没有帧（放宽日期/角度试试）'
+                                      : '这个站位还没有图像索引';
+  }else{
+    tl.className = '';
+    const byDate = {};
+    for(const r of rows) (byDate[rowDate(r)] ||= []).push(r);
+    tl.innerHTML = Object.keys(byDate).sort().reverse().map(d => `
+      <div class="tlhead">${d} · ${byDate[d].length} 帧</div>
+      <div class="tl">${byDate[d].map(r => {
+        const url = r.cloud_url || '';
+        const id = r.object_name || r.ts;
+        const on = hist.picked === id;
+        return `<div class="im ${rowOk(r)?'':'fail'} ${r.source==='local'?'local':''} ${on?'sel':''} ${url?'':'gone'}"
+                     data-pick="${encodeURIComponent(id)}" data-url="${url}">
+          ${url ? `<img loading="lazy" src="${url}">` : '<div style="height:96px"></div>'}
+          <div class="m"><b>${String(r.ts||'').slice(11,19) || '—'}</b><br>
+            ${r.angle_profile || '—'} · ${r.source === 'local' ? '本地' : 'prod'}
+            ${rowOk(r) ? '' : '<br><span style="color:#f85149">采图失败</span>'}</div>
+        </div>`;
+      }).join('')}</div>`).join('');
+    tl.querySelectorAll('[data-pick]').forEach(el => el.onclick = () => {
+      history_pick(decodeURIComponent(el.dataset.pick), el.dataset.url);
+    });
+  }
+  drawCurve();
+}
+
+function history_pick(id, url){
+  hist.picked = id;
+  const img = $('#bigimg');
+  if(url){ img.src = url; img.style.display = ''; $('#viewhint').textContent = id; }
+  else { img.style.display = 'none'; $('#viewhint').textContent = '这一帧没有可用的图（失败帧或对象已不在）'; }
+  hist.zoom = 1; hist.px = hist.py = 0;
+  applyZoom();
+  renderHistory();
+}
+
+function applyZoom(){
+  const img = $('#bigimg');
+  img.style.transform = `translate(${hist.px}px, ${hist.py}px) scale(${hist.zoom})`;
+  $('#zoomlabel').textContent = `· ${hist.zoom}×`;
+}
+
+function drawCurve(){
+  const box = $('#curve'), note = $('#growthnote');
+  const g = hist.growth;
+  if(!selected || !g){ box.className = 'empty'; box.textContent = '选一个站位，看它所在框的生长'; note.textContent = ''; return; }
+  if(!g.ok){
+    // prod 查不到 **与** 还没有测量值，必须分得开：前者要排障，后者只需等待
+    box.className = 'empty'; box.textContent = '查不到生长数据';
+    note.textContent = '⚠ ' + (g.error || '未知原因');
+    return;
+  }
+  const pts = (g.points || []).filter(p => p && p.ts);
+  if(!pts.length){
+    box.className = 'empty';
+    box.textContent = '还没有测量值（measure_fn 未接）——接上之后这里会出现曲线';
+    note.textContent = '生长判断的逻辑与判词都已就绪，缺的是"每帧测出长度"那一步';
+    return;
+  }
+  const W = 640, H = 170, padL = 46, padR = 12, padT = 12, padB = 24;
+  const vals = [];
+  for(const p of pts){
+    for(const k of ['mean_len_mm', 'mean_cap_mm']) if(typeof p[k] === 'number') vals.push(p[k]);
+  }
+  const lo = vals.length ? Math.min(...vals) : 0, hi = vals.length ? Math.max(...vals) : 1;
+  const span = (hi - lo) || 1;
+  const X = i => padL + (pts.length === 1 ? (W - padL - padR) / 2
+                                          : i * (W - padL - padR) / (pts.length - 1));
+  const Y = v => padT + (1 - (v - lo) / span) * (H - padT - padB);
+  const line = key => {
+    const seg = pts.map((p, i) => typeof p[key] === 'number' ? `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(p[key]).toFixed(1)}` : '').filter(Boolean).join(' ');
+    return seg;
+  };
+  box.className = '';
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}">
+    <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${H-padB}" stroke="#2a3340"/>
+    <line x1="${padL}" y1="${H-padB}" x2="${W-padR}" y2="${H-padB}" stroke="#2a3340"/>
+    <text x="2" y="${Y(hi)+4}" fill="#8b98a5" font-size="10">${hi.toFixed(1)}</text>
+    <text x="2" y="${Y(lo)+4}" fill="#8b98a5" font-size="10">${lo.toFixed(1)}</text>
+    <text x="${padL}" y="${H-6}" fill="#8b98a5" font-size="10">${String(pts[0].ts).slice(0,16)}</text>
+    <text x="${W-padR}" y="${H-6}" text-anchor="end" fill="#8b98a5" font-size="10">${String(pts[pts.length-1].ts).slice(0,16)}</text>
+    <path d="${line('mean_len_mm')}" fill="none" stroke="#58a6ff" stroke-width="2"/>
+    <path d="${line('mean_cap_mm')}" fill="none" stroke="#7ee2a8" stroke-width="2"/>
+    ${pts.map((p, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(p.mean_len_mm ?? lo).toFixed(1)}" r="3" fill="#58a6ff"><title>${p.ts} · 判词 ${p.verdict || '—'}</title></circle>`).join('')}
+  </svg>
+  <div class="legend"><span><i style="background:#58a6ff"></i>平均长度 mm</span>
+    <span><i style="background:#7ee2a8"></i>平均伞盖 mm</span>
+    <span>最新判词：${(g.latest && g.latest.verdict_text) || (g.latest && g.latest.verdict) || '—'}</span></div>`;
+  const recent = pts.slice(-8).reverse();
+  note.innerHTML = `<table class="meas"><tr><th>时间</th><th>长度 mm</th><th>伞盖 mm</th><th>判词</th></tr>
+    ${recent.map(p => `<tr><td>${String(p.ts).replace('T',' ')}</td>
+      <td>${p.mean_len_mm ?? '—'}</td><td>${p.mean_cap_mm ?? '—'}</td>
+      <td>${p.verdict_text || p.verdict || '—'}</td></tr>`).join('')}</table>`;
+}
+
+async function loadHistory(force){
+  if(!selected) return;
+  if(!force && hist.rows.length && hist.loadedFor === selected) return;
+  hist.loadedFor = selected;
+  $('#timeline').className = 'empty';
+  $('#timeline').textContent = '读取中…';
+  try{
+    const data = await jget('/api/images?station_id=' + encodeURIComponent(selected));
+    hist.rows = data.rows || [];
+    if(data.prod_error) $('#filterinfo').textContent = '⚠ prod 查询失败（只显示本地待同步的）：' + data.prod_error;
+  }catch(e){
+    hist.rows = [];
+    $('#timeline').className = 'empty';
+    $('#timeline').textContent = '读取失败：' + e.message;
+  }
+  syncAngleOptions();
+  hist.growth = null;
+  renderHistory();
+  await loadGrowth();
+}
+
+function syncAngleOptions(){
+  // 角度档选项只列**数据里真实存在**的档，不摆注定筛出空结果的选项（spec §5.1）
+  const angles = [...new Set(hist.rows.map(r => r.angle_profile).filter(Boolean))].sort();
+  const sel = $('#angleSel'), keep = sel.value;
+  sel.innerHTML = '<option value="">全部</option>' + angles.map(a => `<option value="${a}">${a}</option>`).join('');
+  if(angles.includes(keep)) sel.value = keep;
+}
+
+async function loadGrowth(){
+  const st = selected ? stations.find(s => s.id === selected) : null;
+  if(!st){ hist.growth = null; drawCurve(); return; }
+  try{
+    hist.growth = await jget('/api/growth?box_id=' + encodeURIComponent(st.box_id));
+  }catch(e){
+    hist.growth = {ok: false, error: '生长接口不可达：' + e.message, points: []};
+  }
+  drawCurve();
+}
+
+function wireHistory(){
+  document.querySelectorAll('#modeSeg button').forEach(b => b.onclick = () => setMode(b.dataset.mode));
+  $('#fromDate').onchange = renderHistory;
+  $('#toDate').onchange = renderHistory;
+  $('#angleSel').onchange = renderHistory;
+  $('#clearfilter').onclick = () => { $('#fromDate').value = ''; $('#toDate').value = ''; $('#angleSel').value = ''; renderHistory(); };
+  $('#reloadbtn').onclick = () => loadHistory(true);
+  document.querySelectorAll('[data-zoom]').forEach(b => b.onclick = () => {
+    hist.zoom = Number(b.dataset.zoom); hist.px = hist.py = 0; applyZoom();
+  });
+  $('#fitbtn').onclick = () => { hist.zoom = 1; hist.px = hist.py = 0; applyZoom(); };
+  const viewer = $('#viewer');
+  viewer.addEventListener('wheel', e => {
+    if(!$('#bigimg').src) return;
+    e.preventDefault();
+    hist.zoom = Math.min(8, Math.max(1, hist.zoom * (e.deltaY < 0 ? 1.25 : 0.8)));
+    if(hist.zoom === 1){ hist.px = hist.py = 0; }
+    applyZoom();
+  }, {passive:false});
+  let drag = null;
+  viewer.addEventListener('mousedown', e => {
+    if(hist.zoom <= 1) return;
+    drag = {x:e.clientX - hist.px, y:e.clientY - hist.py};
+    viewer.classList.add('dragging');
+  });
+  window.addEventListener('mousemove', e => {
+    if(!drag) return;
+    hist.px = e.clientX - drag.x; hist.py = e.clientY - drag.y; applyZoom();
+  });
+  window.addEventListener('mouseup', () => { drag = null; viewer.classList.remove('dragging'); });
+}
+
 (async function init(){
   try{
     const data = await jget('/api/stations');
@@ -526,6 +830,7 @@ function posNow(){
     stations = data.stations; grid = data.grid; drawMap(); drawList();
   }catch(e){ $('#list').innerHTML = `<div class="empty">站位表读取失败：${e.message}</div>`; }
   wireOps();
+  wireHistory();
   await refreshCmd();
   tick(); setInterval(tick, 1000);
 })();

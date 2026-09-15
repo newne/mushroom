@@ -73,6 +73,26 @@ def test_room_gate_open_when_inside_window(tmp_path):
     assert "第 10 天" in r["text"]
 
 
+def test_room_day_follows_the_injected_clock_not_the_wall_clock(tmp_path):
+    """天数只取决于"今天"，而"今天"必须来自注入的时钟。
+
+    这条是 2026-09-15 跨零点时真实炸出来的：`/api/room` 原先用 `datetime.now()`，
+    测试里注入的 NOW（2026-09-14）被绕过，于是"第 10 天"在午夜之后变成"第 11 天"，
+    整套测试会在某个特定时刻开始失败——最难查的那种失败。
+    """
+    write_room(tmp_path / "room.yaml", "2026-09-04")
+    later = NOW.replace(day=20)          # 同一个库房，"今天"往后推 6 天
+    deps = ConsoleDeps(room_path=str(tmp_path / "room.yaml"),
+                       stations_path=str(tmp_path / "none.yaml"),
+                       outbox_path=str(tmp_path / "outbox.jsonl"),
+                       runs_dir=str(tmp_path / "runs"),
+                       trigger_dir=str(tmp_path / "trigger"), cmd_dir=str(tmp_path / "cmd"),
+                       now=lambda: later)
+    with TestClient(create_app(deps)) as c:
+        assert c.get("/api/room").json()["day"] == 16
+        assert c.get("/api/status").json()["room"]["day"] == 16
+
+
 def test_room_gate_closed_when_expired(tmp_path):
     with make_client(tmp_path, entry="2026-03-16") as c:      # 第 182 天
         r = c.get("/api/room").json()
@@ -231,6 +251,45 @@ def test_images_filter_by_station(tmp_path):
     with make_client(tmp_path) as c:
         got = c.get("/api/images?station_id=S102").json()
     assert [r["station_id"] for r in got["rows"]] == ["S102"]
+
+
+# ---------- 生长曲线：代理 prod，查不到就如实说 ----------
+
+
+def test_growth_is_proxied_to_prod(tmp_path):
+    seen = {}
+
+    def transport(url, *, params=None, body=None):
+        seen["url"] = url
+        return {"box_id": "B101", "points": [{"ts": "2026-09-14", "verdict": "growing"}],
+                "latest": {"ts": "2026-09-14", "verdict": "growing"}}
+
+    with make_client(tmp_path, transport=transport) as c:
+        got = c.get("/api/growth?box_id=B101").json()
+    assert got["ok"] is True and len(got["points"]) == 1
+    assert "box_id=B101" in seen["url"] and "/growth?" in seen["url"]
+
+
+def test_growth_needs_a_box(tmp_path):
+    with make_client(tmp_path) as c:
+        got = c.get("/api/growth").json()
+    assert got["ok"] is False and "box_id" in got["error"]
+
+
+def test_growth_reports_prod_failure_instead_of_an_empty_curve(tmp_path):
+    """「还没有测量值」与「问不到 prod」必须分得开——页面据此决定是等待还是排障。"""
+    def bad_transport(url, *, params=None, body=None):
+        raise ConnectionError("prod 不通")
+
+    with make_client(tmp_path, transport=bad_transport) as c:
+        got = c.get("/api/growth?box_id=B101").json()
+    assert got["ok"] is False and "prod 不通" in got["error"] and got["points"] == []
+
+
+def test_growth_without_transport_says_so(tmp_path):
+    with make_client(tmp_path) as c:      # make_client 不给 transport
+        got = c.get("/api/growth?box_id=B101").json()
+    assert got["ok"] is False and "未接入 prod" in got["error"]
 
 
 # ---------- 手动面：巡检进行中的拒绝（ADR-0013） ----------

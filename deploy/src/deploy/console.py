@@ -27,6 +27,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
@@ -264,7 +265,8 @@ class Console:
 
     def status(self) -> dict:
         patrol = patrol_state(self.deps.runs_dir)
-        room = room_state(self.deps.room_path)
+        # now 走**注入的时钟**：门禁的天数会随时钟变，测试与被测代码必须看同一个"今天"
+        room = room_state(self.deps.room_path, now=self.deps.now())
         st = stations_state(self.deps.stations_path)
         current = patrol.get("current_station")
         pos, source = None, "none"
@@ -359,7 +361,9 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
 
     @app.get("/api/room")
     def api_room() -> dict:
-        return room_state(deps.room_path)
+        # 同样走注入时钟：这条接口的答案（第几天、今天动不动）**只**取决于"今天"，
+        # 用真实时钟会让它在跨零点时悄悄变一个数（测试里就是这么炸的）。
+        return room_state(deps.room_path, now=deps.now())
 
     @app.get("/api/stations")
     def api_stations() -> dict:
@@ -372,6 +376,29 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
     @app.get("/api/images")
     def api_images(station_id: str = "", limit: int = Query(200, ge=1, le=2000)) -> dict:
         return console.images(station_id=station_id or None, limit=limit)
+
+    @app.get("/api/growth")
+    def api_growth(box_id: str = "", limit: int = Query(50, ge=1, le=500)) -> dict:
+        """某框的逐点生长对比——**代理 prod 的 `/growth`**，页面不直连 prod。
+
+        为什么要代理：页面在菇房内网里很可能到不了 prod（ADR-0003），而且直连就得把
+        prod 的地址与凭据放进浏览器可见的配置里。
+
+        prod 查不到时**如实报错**（`ok:false` + `error`），不返回一条空曲线顶替：
+        "还没有测量值"与"问不到 prod"在现场是两件完全不同的事，页面必须分得开。
+        """
+        if not box_id.strip():
+            return {"ok": False, "error": "需要 box_id（生长是按框比的）", "points": []}
+        if deps.transport is None:
+            return {"ok": False, "error": "未接入 prod 分析服务（transport 未配置）", "points": []}
+        q = urlencode({"box_id": box_id.strip(), "limit": limit})
+        try:
+            got = deps.transport(f"{deps.analysis_url}/growth?{q}")
+        except Exception as e:  # noqa: BLE001 - prod 不通不该让页面整页报错
+            return {"ok": False, "error": f"prod 查询失败：{e}", "points": [], "box_id": box_id}
+        points = got.get("points", []) if isinstance(got, dict) else []
+        latest = got.get("latest") if isinstance(got, dict) else None
+        return {"ok": True, "box_id": box_id, "points": points, "latest": latest}
 
     @app.post("/api/patrol/run", status_code=202)
     def api_patrol_run(reason: str = "", by: str = "scheduler") -> JSONResponse:

@@ -30,6 +30,24 @@ const STATIONS = [
 ];
 const GRID = { cols: 12, layers: 5, y_min: 0.0, y_max: 4492.0, z_min: -212.0, z_max: 0.0 };
 
+// 历史模式用：两天的帧 + 一帧失败 + 一条本地待同步；两条生长点（都要有数值才画得出线）
+const IMAGES = [
+  { ts: '2026-09-14T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
+    ok: true, object_name: '20260914/B102_S102_top45_093000', cloud_url: 'http://minio/a.jpg',
+    source: 'prod' },
+  { ts: '2026-09-14T06:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
+    ok: false, object_name: null, cloud_url: '', source: 'prod' },
+  { ts: '2026-09-13T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top0',
+    ok: true, object_name: '20260913/B102_S102_top0_093000', cloud_url: 'http://minio/b.jpg',
+    source: 'local' },
+];
+const GROWTH = [
+  { ts: '2026-09-13T09:30:00', mean_len_mm: 28.4, mean_cap_mm: 12.1, verdict: 'no_prev',
+    verdict_text: '没有上一个时间点，先作为基线' },
+  { ts: '2026-09-14T09:30:00', mean_len_mm: 31.2, mean_cap_mm: 13.6, verdict: 'growing',
+    verdict_text: '比上一个时间点长 2.8 mm（+9.9%），在长' },
+];
+
 const state = {
   calls: [],                                  // {method, url, body}
   estop: false,
@@ -38,6 +56,8 @@ const state = {
   result: null,
   patrol_active: false,
   reject_cmd: null,                           // 覆盖 POST /api/cmd 的状态码（测拒绝显示）
+  growth_error: false,                        // 让 /api/growth 回"prod 查不到"
+  images_error: false,
   // 真执行方会在几百毫秒内领走并写回结果；默认照做，否则页面会一直停在"执行中"，
   // 后面的用例就全被上锁挡住了（那是假后端的锅，不是页面的）。
   auto_complete_ms: 150,
@@ -77,7 +97,15 @@ function route(method, url, body) {
       events: [{ ts: NOW, level: 'info', text: '页面已连接' }],
     });
   }
-  if (path === '/api/images') return json(200, { ok: true, rows: [], n_local: 0, n_prod: 0 });
+  if (path === '/api/images') {
+    if (state.images_error) return json(500, { error: 'boom' });
+    return json(200, { ok: true, rows: IMAGES, n_local: 1, n_prod: IMAGES.length - 1 });
+  }
+  if (path === '/api/growth') {
+    if (state.growth_error) return json(200, { ok: false, error: 'prod 查询失败：不通', points: [] });
+    return json(200, { ok: true, box_id: 'B102', points: GROWTH,
+                       latest: GROWTH[GROWTH.length - 1] });
+  }
   if (path === '/api/cmd' && method === 'GET') {
     return json(200, { inflight: state.cmd, result: state.result, estop: state.estop,
                        session_active: !!state.session });
@@ -156,6 +184,16 @@ const lastCmd = () => {
     ['#gotobtn', '#homebtn', '#capbtn'].every(s => $(s).disabled) &&
     Array.from(document.querySelectorAll('[data-jog]')).every(b => b.disabled));
   check('未接管时给出接管提示', T('#sessionline').includes('未接管'), T('#sessionline'));
+
+  // 1b. 历史模式：**还没选站位**时该给提示而不是空白表格
+  await click('#modeSeg [data-mode="history"]');
+  check('历史模式：操作区让位给筛选', $('#rtcol').style.display === 'none' && $('#hcol').style.display === '');
+  check('历史模式：中栏换成时间轴/大图/曲线',
+    $('#hmain').style.display === '' && $('#rtmain').style.display === 'none');
+  check('未选站位时时间轴给的是提示', T('#timeline').includes('点左侧'), T('#timeline'));
+  check('未选站位时不画曲线', T('#curve').includes('选一个站位'), T('#curve'));
+  await click('#modeSeg [data-mode="realtime"]');
+  check('切回实时模式：操作区回来', $('#rtcol').style.display === '' && $('#rtmain').style.display === '');
 
   // 2. 接管 → 解锁
   await click('#takebtn');
@@ -281,6 +319,57 @@ const lastCmd = () => {
   check('放开会话发出 DELETE /api/session',
     state.calls.some(c => c.url.split('?')[0] === '/api/session' && c.method === 'DELETE'));
   check('放开时说明"已排回零"', T('#opmsg').includes('回零'), T('#opmsg'));
+
+  // 12. 历史模式：时间轴 / 大图 / 生长曲线 / 筛选 / 与 prod 不通的区别
+  await click('#modeSeg [data-mode="history"]');
+  await click('.stn[data-id="S102"]');
+  await sleep(400);
+  check('时间轴按日期分组（2 天 → 2 个日期头）',
+    document.querySelectorAll('.tlhead').length === 2, document.querySelectorAll('.tlhead').length + ' 个');
+  check('时间轴帧数 = 3', document.querySelectorAll('.tl .im').length === 3,
+    document.querySelectorAll('.tl .im').length + ' 帧');
+  check('失败帧被标出来', T('#timeline').includes('采图失败'));
+  check('本地待同步那一帧有标记', !!document.querySelector('.tl .im.local'));
+  check('角度档只列数据里有的（全部 + top0 + top45）',
+    document.querySelectorAll('#angleSel option').length === 3,
+    document.querySelectorAll('#angleSel option').length + ' 项');
+
+  await click('.tl .im[data-pick]');
+  check('点缩略图 → 大图有 src', !!$('#bigimg').getAttribute('src'), $('#bigimg').getAttribute('src') || '');
+  check('大图默认 1×', T('#zoomlabel').includes('1×'), T('#zoomlabel'));
+  await click('[data-zoom="4"]');
+  check('4× 缩放生效（transform 里带 scale(4)）',
+    ($('#bigimg').style.transform || '').includes('scale(4)'), $('#bigimg').style.transform);
+  await click('#fitbtn');
+  check('适应复位回 1×', ($('#bigimg').style.transform || '').includes('scale(1)'),
+    $('#bigimg').style.transform);
+
+  check('生长曲线画出来了（两条线 + 点）',
+    !!$('#curve svg') && document.querySelectorAll('#curve svg path').length === 2,
+    document.querySelectorAll('#curve svg path').length + ' 条');
+  check('曲线下方列出最近的测量值', T('#growthnote').includes('31.2') && T('#growthnote').includes('在长'),
+    T('#growthnote').slice(0, 60));
+  check('曲线标题带框号', T('#curvetitle').includes('B102'), T('#curvetitle'));
+
+  // 筛选：日期只留 09-14 → 2 帧；角度只留 top0 → 1 帧
+  $('#fromDate').value = '2026-09-14'; $('#fromDate').dispatchEvent(new window.Event('change'));
+  await sleep(150);
+  check('日期筛选生效（09-14 → 2 帧）', document.querySelectorAll('.tl .im').length === 2,
+    document.querySelectorAll('.tl .im').length + ' 帧');
+  $('#angleSel').value = 'top0'; $('#angleSel').dispatchEvent(new window.Event('change'));
+  await sleep(150);
+  check('筛选后可筛出 0 帧并说明原因', T('#timeline').includes('放宽日期'), T('#timeline').slice(0, 60));
+  await click('#clearfilter');
+  check('清空筛选后回到 3 帧', document.querySelectorAll('.tl .im').length === 3,
+    document.querySelectorAll('.tl .im').length + ' 帧');
+
+  // prod 查不到 vs 还没有测量值：两件事，必须分开说
+  state.growth_error = true;
+  await click('#reloadbtn');
+  await sleep(300);
+  check('prod 查不到时如实报错（不是画一条空曲线）',
+    T('#curve').includes('查不到') && T('#growthnote').includes('prod'), T('#growthnote'));
+  state.growth_error = false;
 
   console.log(out.join('\n'));
   console.log('\n运行期错误：' + (errors.length ? '\n  ' + errors.join('\n  ') : '无'));
