@@ -39,6 +39,31 @@ wsl -e bash /mnt/d/code/mushroom/docs/patrol/prod-deploy/verify_console_containe
 
 ## 2. 现场目录（库房主机）
 
+### 2.0 先把变量写进 `.env`（与 compose 文件同目录）
+
+compose 里的每个变量都有默认值，但**现场应当显式写下来**——默认值是给本地/演练用的。
+在 `/home/sysadmin/algorithm/mushroom_service/.env`（与 `mushroom_solution.yml` 同目录；
+模板见仓库 `docker/.env` 的同一段）写：
+
+```ini
+PATROL_IMAGE=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0
+CONSOLE_WEB_IMAGE=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_console_web:0.1.0
+CONSOLE_WEB_PORT=8002          # 上位机访问的就是这个（对外只开这一个）
+CONSOLE_PORT=8001              # 后端：给前端容器与调度器用
+PATROL_CAPTURE_HOST=172.17.0.1:7003
+PROD_INGEST=http://172.17.0.1:8000/ingest
+PATROL_ANALYSIS=http://172.17.0.1:8000
+PATROL_RUN_URL=http://mushroom_console:8001/api/patrol/run
+```
+
+> 这一版**没有**用项目名/环境后缀做变量名（`COMPOSE_PROJECT_NAME` 仍是 `mushroom_service`），
+> 所以 `.env` 里的键与上面这份一一对应，照抄即可。
+>
+> `docker/.env` 在本机是**未跟踪**文件（根 `.gitignore` 有 `.env`），SSH 口令 `PROD_PW`
+> 也可以放在那里给 `docs/patrol/prod-deploy/{rexec,rpush}.sh` 用——**别拷进仓库**。
+
+### 2.1 目录与文件
+
 ```bash
 SSH=sysadmin@10.77.77.39          # 库房主机
 BASE=/home/sysadmin/algorithm
