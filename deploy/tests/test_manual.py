@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 
 import pytest
@@ -98,9 +99,34 @@ def test_result_is_paired_with_the_command(tmp_path):
     c = chan(tmp_path)
     c.open_session("t")
     cmd, _ = c.submit("capture", args={"station_id": "S101"})
-    c.complete(cmd, ok=False, detail="相机不可用")
+    c.complete(cmd, ok=False, detail="相机不可用", data={"reason": "camera"})
     got = c.result()
     assert got.id == cmd.id and got.ok is False and "相机" in got.detail
+    assert got.kind == "capture"
+    assert got.args == {"station_id": "S101"}
+    assert got.data == {"reason": "camera"}
+
+
+def test_legacy_result_without_structured_fields_is_readable(tmp_path):
+    c = chan(tmp_path)
+    c.result_path.parent.mkdir(parents=True, exist_ok=True)
+    c.result_path.write_text(
+        json.dumps(
+            {
+                "id": "legacy-1",
+                "ok": True,
+                "detail": "旧结果",
+                "ended_at": "2026-09-14T10:00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    got = c.result()
+
+    assert got is not None
+    assert got.id == "legacy-1" and got.ok is True
+    assert got.kind == "" and got.args == {} and got.data == {}
 
 
 def test_unknown_kind_is_rejected(tmp_path):

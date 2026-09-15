@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>蘑菇房巡检台</title>
 <style>
   :root{--bg:#12161c;--panel:#1a2029;--line:#2a3340;--fg:#e6edf3;--dim:#8b98a5;
@@ -101,20 +102,102 @@
   .pvwrap .empty{position:absolute;left:8px;right:8px;text-align:center;padding:0}
   #pvnote{font-size:12px;margin-left:8px}
   #pverr{font-size:12px;flex:1}
+
+  /* ---- 浅色固定工作台：顶栏、门禁和日志常驻，各栏自己滚动 ---- */
+  :root{--bg:#edf1f5;--panel:#fff;--line:#d8e0e8;--fg:#16212b;--dim:#6b7785;
+        --ok:#18794e;--warn:#a35d00;--bad:#c73535;--accent:#1f6feb;
+        --soft:#f7f9fb;--accent-soft:#e8f0fe;--ok-soft:#e8f5ee;--bad-soft:#fcecec;
+        --shadow:0 1px 2px rgba(24,38,52,.06),0 4px 14px rgba(24,38,52,.04)}
+  html,body{height:100%;overflow:hidden}
+  body{display:flex;flex-direction:column;background:var(--bg);color:var(--fg);
+       font-family:"Aptos","Segoe UI","Microsoft YaHei",sans-serif;font-size:13px}
+  header{height:52px;flex:0 0 52px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line);
+         box-shadow:0 1px 5px rgba(24,38,52,.04)}
+  h1{font-size:16px;letter-spacing:.01em}
+  .pill{font-weight:600;background:var(--soft)}
+  #gate{height:36px;flex:0 0 36px;display:flex;align-items:center;padding:0 16px;font-size:12px;border-bottom:1px solid var(--line)}
+  #gate.allow{background:var(--ok-soft);color:#12613d} #gate.deny{background:var(--bad-soft);color:#8e2424}
+  main{height:calc(100vh - 88px);flex:1;min-height:0;display:grid;
+       grid-template-columns:minmax(280px,320px) minmax(0,1fr) minmax(320px,360px);
+       gap:0;padding:0;align-items:stretch;background:var(--bg)}
+  main>section{min-width:0;min-height:0;overflow-y:auto;padding:14px;background:var(--bg)}
+  main>section:first-child{display:flex;flex-direction:column;overflow:hidden;padding:14px 12px;background:var(--panel);border-right:1px solid var(--line)}
+  #rtmain,#hmain{scrollbar-gutter:stable}
+  #rtcol,#hcol{background:var(--soft);border-left:1px solid var(--line)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:12px;box-shadow:var(--shadow)}
+  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)}
+  main>section:first-child>.card:first-child{flex:0 0 auto}
+  main>section:first-child>.card:nth-child(2){min-height:0;overflow:hidden;display:flex;flex-direction:column}
+  #list{min-height:0;overflow-y:auto;padding-right:2px}
+  #map{height:190px;background:#fbfcfd;border:1px solid var(--line);border-radius:6px}
+  .stn{color:var(--fg);background:transparent;border-color:transparent;text-align:left;min-height:40px}
+  .stn:hover{background:var(--soft)} .stn.sel{background:var(--accent-soft);border-color:#bcd4ff}
+  .layer{font-weight:600;letter-spacing:.04em;color:var(--dim);padding-top:10px}
+  button{color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:6px;box-shadow:0 1px 1px rgba(24,38,52,.03)}
+  button:hover:not(:disabled){background:var(--soft);border-color:#b9c8d8}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.primary:hover:not(:disabled){background:#185fc7}
+  button.danger{background:#c73535;border-color:#b52e2e;color:#fff;box-shadow:0 2px 0 #9e2727}
+  button.danger:hover:not(:disabled){background:#ad2e2e}
+  button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #bcd4ff;outline-offset:1px}
+  input,select{color:var(--fg);background:var(--panel);border-color:var(--line)}
+  .estopcard{top:0;background:var(--bad-soft);border-color:#efc2c2;box-shadow:var(--shadow)}
+  .estopcard h2{color:#8e2424}
+  #rtmain>.card:first-child{border-top:3px solid var(--accent)}
+  .pvwrap{border-color:#c6d1dc;background:#16212b;box-shadow:inset 0 0 0 1px rgba(255,255,255,.04)}
+  .readouts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px}
+  .readout{min-width:0;padding:8px 9px;background:var(--soft);border:1px solid var(--line);border-radius:6px}
+  .readout .k{display:block;color:var(--dim);font-size:11px}
+  .readout .v{display:block;margin-top:2px;font:600 13px ui-monospace,Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .readout .v.unknown{color:var(--dim);font-weight:400}
+  .jogpad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:6px 0}
+  .jogpad button{min-height:48px;font-size:16px}
+  .jogpad button[disabled][aria-hidden="true"]{opacity:1;background:var(--soft);color:var(--dim);cursor:default}
+  .seg{background:var(--soft);border-color:var(--line);padding:2px}
+  .seg button{color:var(--dim);min-height:34px}
+  .seg button.on{background:var(--panel);color:var(--fg);font-weight:600;box-shadow:var(--shadow)}
+  #hmain{display:grid;grid-template-rows:minmax(300px,1.25fr) minmax(150px,.55fr) minmax(150px,.7fr);gap:12px;overflow-y:auto}
+  #hmain>.card{min-height:0;overflow:auto;margin:0}
+  #hmain>.card:nth-child(2){grid-row:1}
+  #hmain>.card:nth-child(1){grid-row:2}
+  #hmain>.card:nth-child(3){grid-row:3}
+  .viewer{height:100%;min-height:260px;border-color:#c6d1dc;background:#16212b}
+  .tl{display:flex;gap:10px;overflow-x:auto;padding:8px 0}
+  .tl .im{flex:0 0 128px}
+  .tlhead{margin-top:8px;border-bottom-color:var(--line);font-weight:600}
+  #log,#log2{font-family:ui-monospace,Consolas,monospace}
+  #opmsg.info{background:var(--accent-soft);color:#14538f}
+  #opmsg.ok{background:var(--ok-soft);color:#12613d}
+  #opmsg.bad{background:var(--bad-soft);color:#8e2424}
+  .empty{color:var(--dim)}
+  .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  @media (max-width:1500px){
+    main{grid-template-columns:280px minmax(0,1fr) 320px}
+    main>section{padding:10px}
+    .readouts{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .readout .v{font-size:12px}
+  }
+  @media (max-height:820px){
+    #map{height:150px}
+    .card{padding:10px 12px;margin-bottom:9px}
+    .pvwrap{aspect-ratio:16/8.5}
+    .readout{padding:6px 8px}
+  }
+  @media (prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
 </style>
 </head>
 <body>
 <header>
   <h1>蘑菇房巡检台</h1>
-  <span id="modeSeg" class="seg">
-    <button data-mode="realtime" class="on">实时</button>
-    <button data-mode="history">历史</button>
+  <span id="modeSeg" class="seg" role="group" aria-label="页面模式">
+    <button type="button" data-mode="realtime" class="on" aria-pressed="true">实时</button>
+    <button type="button" data-mode="history" aria-pressed="false">历史</button>
   </span>
-  <span id="pill" class="pill idle">连接中…</span>
+  <span id="pill" class="pill idle" role="status" aria-live="polite">连接中…</span>
   <span id="posn" class="mono" style="color:var(--dim)">位置 —</span>
   <span id="roundinfo" style="color:var(--dim)"></span>
 </header>
-<div id="gate">门禁状态读取中…</div>
+<div id="gate" role="status" aria-live="polite">门禁状态读取中…</div>
 
 <main>
   <section>
@@ -143,6 +226,12 @@
       <div class="row" style="margin-top:8px">
         <button id="pvbtn">看画面</button>
         <span id="pverr" class="empty" style="padding:0"></span>
+      </div>
+      <div class="readouts" aria-live="polite">
+        <div class="readout"><span class="k">当前位置</span><span id="actualpos" class="v unknown">未知</span></div>
+        <div class="readout"><span class="k">目标站位</span><span id="targetpos" class="v unknown">未选择</span></div>
+        <div class="readout"><span class="k">直线距离</span><span id="distance" class="v unknown">不可计算</span></div>
+        <div class="readout"><span class="k">当前动作</span><span id="cmdstage" class="v unknown">空闲</span></div>
       </div>
     </div>
     <div class="card">
@@ -219,13 +308,17 @@
         <button id="lampbtn">补光灯</button>
         <button id="capbtn" disabled>抓拍</button>
       </div>
-      <div class="grid4">
-        <button data-jog="Y-">Y −（左）</button><button data-jog="Y+">Y +（右）</button>
-        <button data-jog="Z+">Z +（下）</button><button data-jog="Z-">Z −（上）</button>
+      <div class="jogpad" aria-label="空间方向点动">
+        <button data-jog="Z-" aria-label="Z 负方向，上">↑<span class="sr-only"> Z −（上）</span></button>
+        <button type="button" disabled aria-hidden="true">·</button>
+        <button data-jog="Z+" aria-label="Z 正方向，下">↓<span class="sr-only"> Z +（下）</span></button>
+        <button data-jog="Y-" aria-label="Y 负方向，左">←<span class="sr-only"> Y −（左）</span></button>
+        <button type="button" disabled aria-hidden="true">Y/Z</button>
+        <button data-jog="Y+" aria-label="Y 正方向，右">→<span class="sr-only"> Y +（右）</span></button>
       </div>
 
-      <div id="cmdline" class="empty" style="padding:6px 0 0">最近指令 —</div>
-      <div id="opmsg"></div>
+      <div id="cmdline" class="empty" role="status" aria-live="polite" style="padding:6px 0 0">最近指令 —</div>
+      <div id="opmsg" role="alert" aria-live="assertive"></div>
     </div>
 
     <div class="card">
@@ -270,22 +363,69 @@ let stations = [], grid = null, selected = null, lastStatus = null;
 let cmd = {inflight:null, result:null, estop:false, session_active:false};
 let session = null;              // {token, expires_at}；本地只用来显示倒计时
 let clockSkewMs = 0;             // 服务器时间 − 浏览器时间：倒计时用服务器口径算
+let lastCommandedPosition = null;
+let lampConfirmed = null;
+let observedResultId = '';
+let stationRequestSeq = 0;
+let historyRequestSeq = 0;
+let growthRequestSeq = 0;
+let cmdRequestInFlight = false;
+let cmdRefreshTimer = null;
+let statusRequestInFlight = false;
+const REQUEST_TIMEOUT_MS = 8000;
+
+function esc(value){
+  return String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function safeImageUrl(value){
+  if(typeof value !== 'string' || !value.trim()) return '';
+  try{
+    const url = new URL(value, window.location.href);
+    if(url.protocol !== 'http:' && url.protocol !== 'https:') return '';
+    return url.href;
+  }catch(e){ return ''; }
+}
+
+function request(url, opt){
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const fetchOpt = {...(opt || {})};
+  if(controller) fetchOpt.signal = controller.signal;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      if(controller) controller.abort();
+      const error = new Error('请求超时：' + url);
+      error.code = 'TIMEOUT';
+      reject(error);
+    }, REQUEST_TIMEOUT_MS);
+  });
+  return Promise.race([fetch(url, fetchOpt), timeout]).finally(() => clearTimeout(timer));
+}
 
 async function jget(url){
-  const r = await fetch(url);
+  const r = await request(url);
   if(!r.ok) throw new Error(url + ' → HTTP ' + r.status);
   return r.json();
+}
+
+function requestErrorText(error){
+  return error && error.code === 'TIMEOUT' ? '请求超时，请检查 console 服务' : '接口不可达：' + error.message;
 }
 
 /* 控制类请求统一走这里：**不把 4xx 当异常**——403/409/400 是后端正常的业务回答
    （没接管 / 巡检中 / 参数不合法），页面必须原样把话术显示出来，而不是一句"失败"。 */
 async function jsend(url, method, body){
-  const opt = {method, headers:{'Content-Type':'application/json'}};
-  if(body !== undefined) opt.body = JSON.stringify(body);
-  const r = await fetch(url, opt);
-  let data = {};
-  try{ data = await r.json(); }catch(e){ data = {error:'响应不是 JSON（HTTP ' + r.status + '）'}; }
-  return {status:r.status, ok:r.ok, data};
+  try{
+    const opt = {method, headers:{'Content-Type':'application/json'}};
+    if(body !== undefined) opt.body = JSON.stringify(body);
+    const r = await request(url, opt);
+    let data = {};
+    try{ data = await r.json(); }catch(e){ data = {error:'响应不是 JSON（HTTP ' + r.status + '）'}; }
+    return {status:r.status, ok:r.ok, data};
+  }catch(e){
+    return {status:0, ok:false, data:{error:requestErrorText(e)}, error:e};
+  }
 }
 
 function opmsg(text, kind){
@@ -297,43 +437,149 @@ function opmsg(text, kind){
 
 function pill(text, cls){ const p = $('#pill'); p.textContent = text; p.className = 'pill ' + cls; }
 
+function validPosition(value){
+  return Array.isArray(value) && value.length >= 2 &&
+    Number.isFinite(Number(value[0])) && Number.isFinite(Number(value[1]));
+}
+
+function stationTarget(st){
+  if(!st) return null;
+  const y = Number(st.target_y ?? st.y), z = Number(st.target_z ?? st.z);
+  return Number.isFinite(y) && Number.isFinite(z) ? [y, z] : null;
+}
+
+function positionState(){
+  const m = lastStatus?.machine || {};
+  if(validPosition(m.real_pos) && (m.pos_source === 'controller' || m.pos_source === 'observed')){
+    return {value:[Number(m.real_pos[0]), Number(m.real_pos[1])], source:'controller'};
+  }
+  if(validPosition(m.real_pos) && m.pos_source === 'station'){
+    return {value:[Number(m.real_pos[0]), Number(m.real_pos[1])], source:'patrol'};
+  }
+  const patrol = lastStatus?.patrol || {};
+  const patrolStation = stations.find(st => st.id === patrol.current_station);
+  const patrolTarget = stationTarget(patrolStation);
+  if(patrol.active && patrolTarget) return {value:patrolTarget, source:'patrol'};
+  if(validPosition(lastCommandedPosition)){
+    return {value:[Number(lastCommandedPosition[0]), Number(lastCommandedPosition[1])], source:'last-command'};
+  }
+  return {value:null, source:'unknown'};
+}
+
+function observeCommandResult(result){
+  if(!result || !result.id || result.id === observedResultId) return;
+  observedResultId = result.id;
+  const data = result.data || {};
+  if(result.ok && validPosition(data.position_yz)){
+    lastCommandedPosition = [Number(data.position_yz[0]), Number(data.position_yz[1])];
+  }
+  if(result.ok && result.kind === 'lamp' && typeof data.lamp_on === 'boolean'){
+    lampConfirmed = data.lamp_on;
+  }
+  if(result.ok && result.kind === 'capture' && data.lamp_on === false){
+    lampConfirmed = false;
+  }
+}
+
+function positionText(state){
+  if(!state.value) return '位置未知';
+  const source = state.source === 'controller' ? '控制器实读'
+    : state.source === 'patrol' ? '巡检站位推定' : '最后成功目标';
+  return `Y=${state.value[0].toFixed(1)} Z=${state.value[1].toFixed(1)} · ${source}`;
+}
+
+function renderPositionReadouts(){
+  const state = positionState();
+  const actual = $('#actualpos');
+  if(actual){
+    actual.textContent = positionText(state);
+    actual.className = 'v' + (state.value ? '' : ' unknown');
+  }
+  const target = stationTarget(stations.find(st => st.id === selected));
+  const targetEl = $('#targetpos');
+  if(targetEl){
+    targetEl.textContent = target ? `${selected} · Y=${target[0].toFixed(1)} Z=${target[1].toFixed(1)}` : '未选择';
+    targetEl.className = 'v' + (target ? '' : ' unknown');
+  }
+  const distance = $('#distance');
+  if(distance){
+    distance.textContent = state.value && target
+      ? `约 ${Math.hypot(target[0] - state.value[0], target[1] - state.value[1]).toFixed(0)} mm`
+      : '不可计算';
+    distance.className = 'v' + (state.value && target ? '' : ' unknown');
+  }
+  const stage = $('#cmdstage');
+  if(stage){
+    stage.textContent = busy() ? '执行中' : (cmd.result ? (cmd.result.ok ? '已完成' : '失败') : '空闲');
+    stage.className = 'v' + (busy() || cmd.result ? '' : ' unknown');
+  }
+}
+
 function drawMap(){
   const svg = $('#map'); if(!grid){ return; }
   const {cols, layers, y_min, y_max, z_min, z_max} = grid;
   const W = 320, H = 150, pad = 14;
-  const X = y => pad + (y - y_min) / (y_max - y_min) * (W - 2*pad);
+  const X = y => pad + (y - y_min) / Math.max(1, y_max - y_min) * (W - 2*pad);
   // Z 向下为正（原点在顶端，ADR-0018）：z 越大越靠下。层从**原点那一侧**排下去，
   // 所以第 1 层（最上）用 z_min 起算——按 z_max 起算会把第 1 层画到最下面（旧代码就是）。
-  const Y = z => pad + (z - z_min) / (z_max - z_min) * (H - 2*pad);
+  const Y = z => pad + (z - z_min) / Math.max(1, z_max - z_min) * (H - 2*pad);
   const zPitch = (z_max - z_min) / layers;
   let s = '';
   // 层带
   for(let L = 1; L <= layers; L++){
     const y0 = Y(z_min + (L-1)*zPitch), y1 = Y(z_min + L*zPitch);
-    if(L % 2 === 1) s += `<rect x="${pad}" y="${y0}" width="${W-2*pad}" height="${y1-y0}" fill="#1e2632"/>`;
+    if(L % 2 === 1) s += `<rect class="map-band" x="${pad}" y="${y0}" width="${W-2*pad}" height="${y1-y0}"/>`;
   }
   // 网格线
   for(let c = 0; c <= cols; c++){
     const x = pad + c*(W-2*pad)/cols;
-    s += `<line x1="${x}" y1="${pad}" x2="${x}" y2="${H-pad}" stroke="#2a3340"/>`;
+    s += `<line class="map-grid" x1="${x}" y1="${pad}" x2="${x}" y2="${H-pad}"/>`;
   }
   for(let L = 0; L <= layers; L++){
     const y = pad + L*(H-2*pad)/layers;
-    s += `<line x1="${pad}" y1="${y}" x2="${W-pad}" y2="${y}" stroke="#2a3340"/>`;
+    s += `<line class="map-grid" x1="${pad}" y1="${y}" x2="${W-pad}" y2="${y}"/>`;
   }
+  const ordered = [...stations].sort((a, b) => a.layer - b.layer ||
+    (a.layer % 2 ? a.col - b.col : b.col - a.col));
+  const coords = st => {
+    const target = stationTarget(st);
+    return target ? [X(target[0]), Y(target[1])] : null;
+  };
+  const path = ordered.map((st, i) => {
+    const point = coords(st);
+    return point ? `${i ? 'L' : 'M'}${point[0].toFixed(1)},${point[1].toFixed(1)}` : '';
+  }).filter(Boolean).join(' ');
+  if(path) s += `<path class="map-path" d="${path}"/>`;
   // 站位点
   const cur = lastStatus?.patrol?.current_station;
   for(const st of stations){
     const sel = st.id === selected, isCur = st.id === cur;
-    s += `<circle cx="${X(st.target_y)}" cy="${Y(st.target_z)}" r="${sel||isCur?6:3.2}"
-            fill="${isCur ? '#58a6ff' : (sel ? '#7ee2a8' : '#4a5766')}"
-            stroke="${sel?'#7ee2a8':'none'}" data-id="${st.id}"><title>${st.id} · ${st.box_id} ·
-            第${st.layer}层第${st.col}框 · Y=${st.target_y.toFixed(1)} Z=${st.target_z.toFixed(1)}</title></circle>`;
+    const point = coords(st); if(!point) continue;
+    s += `<circle class="map-station ${sel?'selected':''} ${isCur?'current':''}"
+            cx="${point[0].toFixed(1)}" cy="${point[1].toFixed(1)}" r="${sel||isCur?6:3.2}"
+            fill="${isCur ? '#1f6feb' : (sel ? '#18794e' : '#697887')}"
+            stroke="${sel?'#18794e':'none'}" data-id="${esc(st.id)}"><title>${esc(st.id)} · ${esc(st.box_id)} ·
+            第${esc(st.layer)}层第${esc(st.col)}框 · Y=${point[0].toFixed(1)} Z=${point[1].toFixed(1)}</title></circle>`;
   }
-  s += `<text x="${pad}" y="${H-2}" fill="#8b98a5" font-size="9">Y ${y_min} → ${y_max} mm</text>`;
-  s += `<text x="${W-86}" y="${H-2}" fill="#8b98a5" font-size="9">Z ${z_min} → ${z_max} mm</text>`;
+  const target = stationTarget(stations.find(st => st.id === selected));
+  const current = positionState().value;
+  if(target){
+    const point = [X(target[0]), Y(target[1])];
+    s += `<rect class="map-target" x="${(point[0]-5).toFixed(1)}" y="${(point[1]-5).toFixed(1)}" width="10" height="10"/>`;
+    if(current){
+      s += `<line class="map-link" x1="${X(current[0]).toFixed(1)}" y1="${Y(current[1]).toFixed(1)}"
+              x2="${point[0].toFixed(1)}" y2="${point[1].toFixed(1)}"/>`;
+    }
+  }
+  if(current){
+    s += `<g class="map-live"><line x1="${X(current[0])-5}" y1="${Y(current[1])}"
+      x2="${X(current[0])+5}" y2="${Y(current[1])}"/><line x1="${X(current[0])}" y1="${Y(current[1])-5}"
+      x2="${X(current[0])}" y2="${Y(current[1])+5}"/><circle cx="${X(current[0])}" cy="${Y(current[1])}" r="3.5"/></g>`;
+  }
+  s += `<text class="map-label" x="${pad}" y="${H-2}">Y ${esc(y_min)} → ${esc(y_max)} mm</text>`;
+  s += `<text class="map-label" x="${W-86}" y="${H-2}">Z ${esc(z_min)} → ${esc(z_max)} mm</text>`;
   svg.innerHTML = s;
-  svg.querySelectorAll('circle').forEach(c => c.onclick = () => selectStation(c.dataset.id));
+  svg.querySelectorAll('.map-station').forEach(c => c.onclick = () => selectStation(c.dataset.id));
 }
 
 function drawList(){
@@ -343,38 +589,64 @@ function drawList(){
   $('#list').className = '';
   $('#list').innerHTML = Object.keys(byLayer).sort().map(L => {
     const rows = byLayer[L].sort((a,b)=>a.col-b.col).map(st => `
-      <div class="stn ${st.id===selected?'sel':''}" data-id="${st.id}">
-        <span>${st.id===cur?`<span class="cur">▶ </span>`:''}${st.id}</span>
-        <span class="mono" style="color:var(--dim)">${st.target_y.toFixed(0)}, ${st.target_z.toFixed(1)}
+      <button type="button" class="stn ${st.id===selected?'sel':''}" data-id="${esc(st.id)}"
+        aria-selected="${st.id===selected}" aria-label="${esc(st.id)}，第 ${esc(st.layer)} 层第 ${esc(st.col)} 框">
+        <span>${st.id===cur?'<span class="cur">▶ </span>':''}${esc(st.id)}</span>
+        <span class="mono" style="color:var(--dim)">${Number(st.target_y ?? st.y).toFixed(0)}, ${Number(st.target_z ?? st.z).toFixed(1)}
         ${(st.trim_y||st.trim_z)?'⇥':''}</span>
-      </div>`).join('');
-    return `<div class="layer">第 ${L} 层</div>${rows}`;
+      </button>`).join('');
+    return `<div class="layer" role="heading" aria-level="3">第 ${esc(L)} 层</div>${rows}`;
   }).join('');
   $('#list').querySelectorAll('.stn').forEach(el => el.onclick = () => selectStation(el.dataset.id));
 }
 
 async function selectStation(id){
+  const requestId = ++stationRequestSeq;
+  historyRequestSeq++;
+  growthRequestSeq++;
   selected = id; drawList(); drawMap();
-  $('#imgtitle').textContent = '· ' + id;
+  hist.rows = [];
+  hist.loadedFor = null;
+  hist.growth = null;
+  hist.picked = null;
+  const station = stations.find(st => st.id === id);
+  const target = stationTarget(station);
+  if(target){ $('#gtY').value = target[0]; $('#gtZ').value = target[1]; }
+  renderPositionReadouts();
+  validateTargets();
+  $('#imgtitle').textContent = station ? '· ' + station.id : '';
   $('#imgs').innerHTML = '<div class="empty">读取中…</div>';
   try{
     const data = await jget('/api/images?station_id=' + encodeURIComponent(id));
+    if(requestId !== stationRequestSeq || selected !== id) return;
     hist.rows = data.rows || [];
     hist.loadedFor = id;
     if(!data.rows.length){ $('#imgs').innerHTML = '<div class="empty">这个站位还没有图像索引</div>'; }
     else{
       $('#imgs').innerHTML = data.rows.map(r => {
-        const url = r.cloud_url || '';
+        const url = safeImageUrl(r.cloud_url || '');
         const ok = r.ok !== false && r.ok !== 0;
         return `<div class="im ${ok?'':'fail'} ${r.source==='local'?'local':''}">
-          ${url ? `<a href="${url}" target="_blank"><img loading="lazy" src="${url}"></a>` : '<div style="height:110px"></div>'}
-          <div class="m"><b>${(r.ts||'').replace('T',' ')}</b><br>${r.object_name || (ok?'':'<span style="color:#f85149">采图失败</span>')}
+          ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(url)}" alt="${esc(r.station_id || id)} ${esc(r.ts || '')}"></a>` : '<div style="height:110px"></div>'}
+          <div class="m"><b>${esc(String(r.ts||'').replace('T',' '))}</b><br>${esc(r.object_name || '') || (ok?'':'采图失败')}
           <br>${r.source==='local'?'本地':'prod'}</div></div>`;
       }).join('');
     }
-    if(data.prod_error) $('#imgs').insertAdjacentHTML('afterbegin',
-      `<div class="empty">⚠ prod 查询失败（只显示了本地待同步的）：${data.prod_error}</div>`);
-  }catch(e){ $('#imgs').innerHTML = `<div class="empty">读取失败：${e.message}</div>`; }
+    if(data.prod_error){
+      const note = document.createElement('div');
+      note.className = 'empty';
+      note.textContent = '⚠ prod 查询失败（只显示了本地待同步的）：' + data.prod_error;
+      $('#imgs').prepend(note);
+    }
+  }catch(e){
+    if(requestId !== stationRequestSeq || selected !== id) return;
+    $('#imgs').textContent = '';
+    const error = document.createElement('div');
+    error.className = 'empty';
+    error.textContent = '读取失败：' + e.message;
+    $('#imgs').append(error);
+  }
+  if(requestId !== stationRequestSeq || selected !== id) return;
   if(mode === 'history'){ syncAngleOptions(); renderHistory(); await loadGrowth(); }
 }
 
@@ -408,10 +680,9 @@ function renderStatus(s){
     pill(p.status === 'ok' ? '待机（上轮正常）' : (p.known ? '待机' : '待机（无取证）'),
          p.status === 'ok' ? 'ok' : (p.known ? 'idle' : 'warn'));
   }
-  $('#posn').textContent = m.real_pos
-    ? `位置 Y=${m.real_pos[0].toFixed(1)} Z=${m.real_pos[1].toFixed(1)}` +
-      (m.pos_source === 'station' ? '（站位目标值）' : '')
-    : '位置 —';
+  const pos = positionState();
+  $('#posn').textContent = positionText(pos);
+  renderPositionReadouts();
   const rows = [
     ['状态', p.reason || '—'],
     ['本轮开始', p.started_at || '—'],
@@ -420,17 +691,17 @@ function renderStatus(s){
     ['失败站', p.n_failures ?? '—'],
     ['取证文件', p.file || '—'],
   ];
-  $('#round').innerHTML = rows.map(([k,v]) => `<b>${k}</b><span>${v}</span>`).join('');
+  $('#round').innerHTML = rows.map(([k,v]) => `<b>${esc(k)}</b><span>${esc(v)}</span>`).join('');
   $('#machine').innerHTML = [
     ['页面状态', m.state], ['控制器连接', m.connected ? '已连' : '未连（巡检进行中时刻意不连）'],
     ['位置来源', m.pos_source], ['相机服务', m.host],
-  ].map(([k,v]) => `<b>${k}</b><span>${v ?? '—'}</span>`).join('');
+  ].map(([k,v]) => `<b>${esc(k)}</b><span>${esc(v ?? '—')}</span>`).join('');
   const ev = (s.events||[]).slice().reverse();
-  const evHtml = ev.length ? ev.map(e => `<div>${e.ts} ${e.text}</div>`).join('') : '—';
+  const evHtml = ev.length ? ev.map(e => `<div>${esc(e.ts)} ${esc(e.text)}</div>`).join('') : '—';
   const mHtml = [
     ['页面状态', m.state], ['控制器连接', m.connected ? '已连' : '未连（巡检进行中时刻意不连）'],
     ['位置来源', m.pos_source], ['相机服务', m.host],
-  ].map(([k,v]) => `<b>${k}</b><span>${v ?? '—'}</span>`).join('');
+  ].map(([k,v]) => `<b>${esc(k)}</b><span>${esc(v ?? '—')}</span>`).join('');
   for(const [logSel, machSel] of [['#log', '#machine'], ['#log2', '#machine2']]){
     const lg = $(logSel), mc = $(machSel);
     if(!lg || !mc) continue;
@@ -442,6 +713,8 @@ function renderStatus(s){
 }
 
 async function tick(){
+  if(statusRequestInFlight) return;
+  statusRequestInFlight = true;
   try{
     const s = await jget('/api/status');
     renderStatus(s); drawMap();
@@ -453,15 +726,12 @@ async function tick(){
       });
     }
   }catch(e){ pill('接口不通', 'bad'); }
+  finally{ statusRequestInFlight = false; }
   try{
-    const c = await jget('/api/cmd');
-    cmd = c;
-    // 会话真值以后端为准：本地那份只是拿来显示倒计时的
-    if(!c.session_active) session = null;
-    renderOps();
+    await refreshCmd();
     // 有指令在飞就加密轮询：人连着点动时，"上一条结束了吗"必须尽快知道——
     // 1 秒的空白期里按钮是灰的，操作者会以为点坏了，然后去按急停。
-    if(busy()) setTimeout(refreshCmd, 300);
+    if(busy()) scheduleCmdRefresh();
   }catch(e){ /* /api/cmd 不通不影响只读面 */ }
 }
 
@@ -471,6 +741,7 @@ function busy(){ return !!(cmd.inflight && !cmd.result); }
 function inRound(){ return !!(lastStatus?.patrol?.active); }
 
 function renderOps(){
+  observeCommandResult(cmd.result);
   const est = !!cmd.estop;
   $('#estopstate').className = 'tag ' + (est ? 'bad' : 'on');
   $('#estopstate').textContent = est ? '已置位（闩锁）' : '未置位';
@@ -481,8 +752,8 @@ function renderOps(){
   $('#dropbtn').disabled = !active;
   if(active && session){
     const left = Math.max(0, Math.round((Date.parse(session.expires_at) - (Date.now() + clockSkewMs)) / 1000));
-    $('#sessionline').innerHTML = left > 0
-      ? `已接管 <b class="mono">${String(Math.floor(left/60)).padStart(2,'0')}:${String(left%60).padStart(2,'0')}</b> · 指令会续期`
+    $('#sessionline').textContent = left > 0
+      ? `已接管 ${String(Math.floor(left/60)).padStart(2,'0')}:${String(left%60).padStart(2,'0')} · 指令会续期`
       : '会话已过期（下一条指令会被拒；重新接管即可）';
   }else{
     $('#sessionline').textContent = '未接管 · 手动移动需要先接管（会话 5 分钟，指令会续期）';
@@ -496,23 +767,31 @@ function renderOps(){
   const locked = est || !active || busy() || inRound();
   $('#homebtn').disabled = locked;
   $('#gotobtn').disabled = locked || !targetsOk();
-  $('#lampbtn').disabled = est;                       // 关灯在急停闩锁下也放行
+  $('#lampbtn').disabled = est && lampConfirmed !== true;
   document.querySelectorAll('[data-jog]').forEach(b => b.disabled = locked);
   $('#capbtn').disabled = locked || !selected;        // 抓拍要有选中的站位（照片归到它名下）
+
+  const lamp = $('#lampbtn');
+  if(lamp){
+    lamp.textContent = lampConfirmed === true ? '补光灯（已开）'
+      : lampConfirmed === false ? '补光灯（已关）' : '补光灯（状态未知）';
+    lamp.setAttribute('aria-pressed', lampConfirmed === true ? 'true' : 'false');
+    lamp.title = lampConfirmed === null ? '尚未收到控制器确认' : '控制器已确认当前状态';
+  }
 
   const el = $('#cmdline');
   if(busy()){
     el.className = '';
-    el.innerHTML = `<span style="color:var(--accent)">执行中…</span> ${cmd.inflight.kind} ` +
-      `<span class="mono">${cmd.inflight.args ? JSON.stringify(cmd.inflight.args) : ''}</span>`;
+    el.textContent = `执行中… ${cmd.inflight.kind} ` +
+      (cmd.inflight.args ? JSON.stringify(cmd.inflight.args) : '');
   }else if(cmd.result){
     el.className = '';
-    el.innerHTML = (cmd.result.ok ? '<span style="color:var(--ok)">✔ 上一条</span> '
-                                  : '<span style="color:var(--bad)">✘ 上一条</span> ') +
-      `${cmd.result.detail} <span style="color:var(--dim)">(${cmd.result.ended_at})</span>`;
+    el.textContent = (cmd.result.ok ? '✔ 上一条 ' : '✘ 上一条 ') +
+      `${cmd.result.detail || '无详细说明'} (${cmd.result.ended_at || '时间未知'})`;
   }else{
     el.className = 'empty'; el.textContent = '最近指令 —';
   }
+  renderPositionReadouts();
 }
 
 function etaText(patrol){
@@ -576,8 +855,33 @@ async function sendCmd(kind, args){
 }
 
 async function refreshCmd(){
-  try{ cmd = await jget('/api/cmd'); if(!cmd.session_active) session = null; renderOps(); }
-  catch(e){ /* 忽略：下一拍还会再取 */ }
+  if(cmdRequestInFlight) return false;
+  cmdRequestInFlight = true;
+  try{
+    applyCommandState(await jget('/api/cmd'));
+    if(busy()) scheduleCmdRefresh();
+    return true;
+  }catch(e){
+    opmsg('控制状态读取失败：' + requestErrorText(e), 'bad');
+    return false;
+  }finally{
+    cmdRequestInFlight = false;
+  }
+}
+
+function applyCommandState(value){
+  cmd = value;
+  // 会话真值以后端为准：本地那份只是拿来显示倒计时的
+  if(!cmd.session_active) session = null;
+  renderOps();
+}
+
+function scheduleCmdRefresh(){
+  if(cmdRefreshTimer || !busy()) return;
+  cmdRefreshTimer = setTimeout(() => {
+    cmdRefreshTimer = null;
+    refreshCmd();
+  }, 300);
 }
 
 async function takeSession(){
@@ -625,8 +929,11 @@ function wireOps(){
   };
   $('#gotobtn').onclick = async () => {
     const y = parseFloat($('#gtY').value), z = parseFloat($('#gtZ').value);
-    const d = Math.hypot(y - (posNow()?.[0] ?? y), z - (posNow()?.[1] ?? z));
-    if(confirm(`移动到 Y=${y} Z=${z}（直线约 ${d.toFixed(0)} mm）？`)) await sendCmd('goto', {y, z});
+    const current = positionState().value;
+    const detail = current
+      ? `直线约 ${Math.hypot(y - current[0], z - current[1]).toFixed(0)} mm`
+      : '当前位置未知，无法计算距离';
+    if(confirm(`移动到 Y=${y} Z=${z}（${detail}）？`)) await sendCmd('goto', {y, z});
   };
   document.querySelectorAll('[data-jog]').forEach(b => b.onclick = async () => {
     const [axis, sign] = [b.dataset.jog[0], b.dataset.jog[1]];
@@ -634,10 +941,8 @@ function wireOps(){
     await sendCmd('jog', {axis, mm: step});
   });
   $('#lampbtn').onclick = async () => {
-    const on = !($('#lampbtn').dataset.on === '1');
+    const on = lampConfirmed !== true;
     await sendCmd('lamp', {on});
-    $('#lampbtn').dataset.on = on ? '1' : '0';
-    $('#lampbtn').textContent = on ? '补光灯（开）' : '补光灯';
   };
   $('#capbtn').onclick = async () => {
     if(!selected){ opmsg('先在左栏选一个站位：照片要归到它名下', 'bad'); return; }
@@ -767,7 +1072,12 @@ function setMode(m){
   $('#hcol').style.display = m === 'history' ? '' : 'none';
   // 历史模式下右栏整列是隐藏的：画面留着也看不见，纯属白占相机一路
   if(m === 'history') closePreview('切到历史模式时已关闭');
-  if(m === 'history') renderHistory();
+  if(m === 'history'){
+    renderHistory();
+    if(selected) loadHistory(false);
+  }else if(cmd.session_active){
+    openPreview('已回到实时模式');
+  }
 }
 
 function rowDate(r){ return String(r.ts || '').slice(0, 10); }
@@ -805,16 +1115,16 @@ function renderHistory(){
     const byDate = {};
     for(const r of rows) (byDate[rowDate(r)] ||= []).push(r);
     tl.innerHTML = Object.keys(byDate).sort().reverse().map(d => `
-      <div class="tlhead">${d} · ${byDate[d].length} 帧</div>
+      <div class="tlhead">${esc(d)} · ${byDate[d].length} 帧</div>
       <div class="tl">${byDate[d].map(r => {
-        const url = r.cloud_url || '';
-        const id = r.object_name || r.ts;
+        const url = safeImageUrl(r.cloud_url || '');
+        const id = String(r.object_name ?? r.ts ?? '');
         const on = hist.picked === id;
         return `<div class="im ${rowOk(r)?'':'fail'} ${r.source==='local'?'local':''} ${on?'sel':''} ${url?'':'gone'}"
-                     data-pick="${encodeURIComponent(id)}" data-url="${url}">
-          ${url ? `<img loading="lazy" src="${url}">` : '<div style="height:96px"></div>'}
-          <div class="m"><b>${String(r.ts||'').slice(11,19) || '—'}</b><br>
-            ${r.angle_profile || '—'} · ${r.source === 'local' ? '本地' : 'prod'}
+                     data-pick="${esc(encodeURIComponent(id))}" data-url="${esc(url)}">
+          ${url ? `<img loading="lazy" src="${esc(url)}" alt="${esc(id)}">` : '<div style="height:96px"></div>'}
+          <div class="m"><b>${esc(String(r.ts||'').slice(11,19) || '—')}</b><br>
+            ${esc(r.angle_profile || '—')} · ${r.source === 'local' ? '本地' : 'prod'}
             ${rowOk(r) ? '' : '<br><span style="color:#f85149">采图失败</span>'}</div>
         </div>`;
       }).join('')}</div>`).join('');
@@ -878,37 +1188,47 @@ function drawCurve(){
     <line x1="${padL}" y1="${H-padB}" x2="${W-padR}" y2="${H-padB}" stroke="#2a3340"/>
     <text x="2" y="${Y(hi)+4}" fill="#8b98a5" font-size="10">${hi.toFixed(1)}</text>
     <text x="2" y="${Y(lo)+4}" fill="#8b98a5" font-size="10">${lo.toFixed(1)}</text>
-    <text x="${padL}" y="${H-6}" fill="#8b98a5" font-size="10">${String(pts[0].ts).slice(0,16)}</text>
-    <text x="${W-padR}" y="${H-6}" text-anchor="end" fill="#8b98a5" font-size="10">${String(pts[pts.length-1].ts).slice(0,16)}</text>
+    <text x="${padL}" y="${H-6}" fill="#8b98a5" font-size="10">${esc(String(pts[0].ts).slice(0,16))}</text>
+    <text x="${W-padR}" y="${H-6}" text-anchor="end" fill="#8b98a5" font-size="10">${esc(String(pts[pts.length-1].ts).slice(0,16))}</text>
     <path d="${line('mean_len_mm')}" fill="none" stroke="#58a6ff" stroke-width="2"/>
     <path d="${line('mean_cap_mm')}" fill="none" stroke="#7ee2a8" stroke-width="2"/>
-    ${pts.map((p, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(p.mean_len_mm ?? lo).toFixed(1)}" r="3" fill="#58a6ff"><title>${p.ts} · 判词 ${p.verdict || '—'}</title></circle>`).join('')}
+    ${pts.map((p, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(typeof p.mean_len_mm === 'number' ? p.mean_len_mm : lo).toFixed(1)}" r="3" fill="#58a6ff"><title>${esc(p.ts)} · 判词 ${esc(p.verdict || '—')}</title></circle>`).join('')}
   </svg>
   <div class="legend"><span><i style="background:#58a6ff"></i>平均长度 mm</span>
     <span><i style="background:#7ee2a8"></i>平均伞盖 mm</span>
-    <span>最新判词：${(g.latest && g.latest.verdict_text) || (g.latest && g.latest.verdict) || '—'}</span></div>`;
+    <span>最新判词：${esc((g.latest && g.latest.verdict_text) || (g.latest && g.latest.verdict) || '—')}</span></div>`;
   const recent = pts.slice(-8).reverse();
   note.innerHTML = `<table class="meas"><tr><th>时间</th><th>长度 mm</th><th>伞盖 mm</th><th>判词</th></tr>
-    ${recent.map(p => `<tr><td>${String(p.ts).replace('T',' ')}</td>
-      <td>${p.mean_len_mm ?? '—'}</td><td>${p.mean_cap_mm ?? '—'}</td>
-      <td>${p.verdict_text || p.verdict || '—'}</td></tr>`).join('')}</table>`;
+    ${recent.map(p => `<tr><td>${esc(String(p.ts).replace('T',' '))}</td>
+      <td>${esc(p.mean_len_mm ?? '—')}</td><td>${esc(p.mean_cap_mm ?? '—')}</td>
+      <td>${esc(p.verdict_text || p.verdict || '—')}</td></tr>`).join('')}</table>`;
 }
 
 async function loadHistory(force){
-  if(!selected) return;
-  if(!force && hist.rows.length && hist.loadedFor === selected) return;
-  hist.loadedFor = selected;
+  const stationId = selected;
+  if(!stationId) return;
+  const requestId = ++historyRequestSeq;
+  if(!force && hist.loadedFor === stationId){
+    if(!hist.growth) await loadGrowth();
+    renderHistory();
+    return;
+  }
+  hist.loadedFor = null;
   $('#timeline').className = 'empty';
   $('#timeline').textContent = '读取中…';
   try{
-    const data = await jget('/api/images?station_id=' + encodeURIComponent(selected));
+    const data = await jget('/api/images?station_id=' + encodeURIComponent(stationId));
+    if(requestId !== historyRequestSeq || selected !== stationId) return;
     hist.rows = data.rows || [];
+    hist.loadedFor = stationId;
     if(data.prod_error) $('#filterinfo').textContent = '⚠ prod 查询失败（只显示本地待同步的）：' + data.prod_error;
   }catch(e){
+    if(requestId !== historyRequestSeq || selected !== stationId) return;
     hist.rows = [];
     $('#timeline').className = 'empty';
     $('#timeline').textContent = '读取失败：' + e.message;
   }
+  if(requestId !== historyRequestSeq || selected !== stationId) return;
   syncAngleOptions();
   hist.growth = null;
   renderHistory();
@@ -919,18 +1239,23 @@ function syncAngleOptions(){
   // 角度档选项只列**数据里真实存在**的档，不摆注定筛出空结果的选项（spec §5.1）
   const angles = [...new Set(hist.rows.map(r => r.angle_profile).filter(Boolean))].sort();
   const sel = $('#angleSel'), keep = sel.value;
-  sel.innerHTML = '<option value="">全部</option>' + angles.map(a => `<option value="${a}">${a}</option>`).join('');
+  sel.innerHTML = '<option value="">全部</option>' + angles.map(a => `<option value="${esc(a)}">${esc(a)}</option>`).join('');
   if(angles.includes(keep)) sel.value = keep;
 }
 
 async function loadGrowth(){
-  const st = selected ? stations.find(s => s.id === selected) : null;
+  const stationId = selected;
+  const requestId = ++growthRequestSeq;
+  const st = stationId ? stations.find(s => s.id === stationId) : null;
   if(!st){ hist.growth = null; drawCurve(); return; }
+  let growth;
   try{
-    hist.growth = await jget('/api/growth?box_id=' + encodeURIComponent(st.box_id));
+    growth = await jget('/api/growth?box_id=' + encodeURIComponent(st.box_id));
   }catch(e){
-    hist.growth = {ok: false, error: '生长接口不可达：' + e.message, points: []};
+    growth = {ok: false, error: '生长接口不可达：' + e.message, points: []};
   }
+  if(requestId !== growthRequestSeq || selected !== stationId) return;
+  hist.growth = growth;
   drawCurve();
 }
 
@@ -969,10 +1294,21 @@ function wireHistory(){
 (async function init(){
   try{
     const data = await jget('/api/stations');
-    if(!data.ok){ $('#list').innerHTML = `<div class="empty">${data.error}</div>`; return; }
-    stations = data.stations; grid = data.grid;
-    drawMap(); drawList(); renderEnvelopeLabel();
-  }catch(e){ $('#list').innerHTML = `<div class="empty">站位表读取失败：${e.message}</div>`; }
+    if(!data.ok){
+      $('#list').textContent = '';
+      const error = document.createElement('div');
+      error.className = 'empty'; error.textContent = data.error || '站位表不可用';
+      $('#list').append(error);
+    }else{
+      stations = data.stations; grid = data.grid;
+      drawMap(); drawList(); renderEnvelopeLabel();
+    }
+  }catch(e){
+    $('#list').textContent = '';
+    const error = document.createElement('div');
+    error.className = 'empty'; error.textContent = '站位表读取失败：' + e.message;
+    $('#list').append(error);
+  }
   wireOps();
   wireHistory();
   wirePreview();

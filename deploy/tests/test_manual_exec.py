@@ -134,6 +134,7 @@ def test_home_runs_and_reports_position(tmp_path):
     _cmd, res = run(channel, executor, "home")
     assert res.ok is True
     assert "回零完成" in res.detail and "Y=0.00 Z=0.00" in res.detail
+    assert res.data == {"position_yz": [0.0, 0.0]}
     assert fmc.called("home") and fmc.called("close")
 
 
@@ -142,6 +143,7 @@ def test_goto_reaches_target(tmp_path):
     channel.open_session("t")
     _cmd, res = run(channel, executor, "goto", {"y": 1200.0, "z": 100.0})
     assert res.ok is True
+    assert res.data == {"position_yz": [1200.0, 100.0]}
     assert fmc.called("goto") == [("goto", 1200.0, 100.0)]
 
 
@@ -153,12 +155,13 @@ def test_jog_relative_and_axis_by_name(tmp_path):
     assert res.ok is True
     assert fmc.called("jog") == [("jog", 1, 50.0)]
     assert "Y=350.00" in res.detail
+    assert res.data == {"position_yz": [350.0, 20.0]}
 
 
 def test_lamp_on_off(tmp_path):
     channel, fmc, executor, _rows, _logs = make(tmp_path)
-    assert run(channel, executor, "lamp", {"on": True})[1].ok
-    assert run(channel, executor, "lamp", {"on": False})[1].ok
+    assert run(channel, executor, "lamp", {"on": True})[1].data == {"lamp_on": True}
+    assert run(channel, executor, "lamp", {"on": False})[1].data == {"lamp_on": False}
     assert fmc.called("lamp") == [("lamp", True), ("lamp", False)]
 
 
@@ -168,6 +171,7 @@ def test_stop_is_available_without_session_and_reports_shortfall(tmp_path):
     _cmd, res = run(channel, executor, "stop")
     assert res.ok is False
     assert "未确认成功" in res.detail and "stop_axis(2)" in res.detail
+    assert res.data == {}
 
 
 # ---------- 拒绝的那些 ----------
@@ -295,7 +299,11 @@ def test_capture_writes_index_with_actual_position(tmp_path):
     _cmd, res = run(channel, executor, "capture", {"station_id": "s105"})
     assert res.ok is True
     assert capture.shots and capture.shots[0]["filename"].endswith("B105_S105_top45_100000")
-    assert fmc.called("lamp") == [("lamp", True), ("lamp", False)]   # 拍完必须灭灯
+    assert fmc.called("lamp") == [("lamp", True), ("lamp", False)]  # 拍完必须灭灯
+    assert res.data["station_id"] == "S105"
+    assert res.data["object_name"] == capture.shots[0]["filename"]
+    assert res.data["position_yz"] == [505.0, -50.0]
+    assert res.data["lamp_on"] is False
     (row,) = rows
     assert row["kind"] == "image_index" and row["manual"] is True
     assert row["station_id"] == "S105" and row["box_id"] == "B105"

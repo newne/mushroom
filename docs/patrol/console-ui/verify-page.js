@@ -60,6 +60,11 @@ const state = {
   preview_down: false,                        // 让 /api/preview/status 回"预览服务连不上"
   preview_frame_age: 0.4,                     // 上游"最新一帧多久之前"（>3 秒 = 卡住）
   images_error: false,
+  image_delay: {},
+  command_network_error: false,
+  machine_position: [200.0, -20.0],
+  machine_pos_source: 'controller',
+  lamp_on: false,
   // 真执行方会在几百毫秒内领走并写回结果；默认照做，否则页面会一直停在"执行中"，
   // 后面的用例就全被上锁挡住了（那是假后端的锅，不是页面的）。
   auto_complete_ms: 150,
@@ -70,7 +75,12 @@ function completeSoon() {
   const cmd = state.cmd;
   setTimeout(() => {
     if (state.cmd !== cmd) return;
-    state.result = { id: cmd.id, ok: true, detail: '已执行（假后端）', ended_at: NOW };
+    const data = {};
+    if (cmd.kind === 'goto') data.position_yz = [cmd.args.y, cmd.args.z];
+    if (cmd.kind === 'home') data.position_yz = [0, 0];
+    if (cmd.kind === 'lamp') { state.lamp_on = !!cmd.args.on; data.lamp_on = state.lamp_on; }
+    state.result = { id: cmd.id, kind: cmd.kind, args: cmd.args, data,
+      ok: true, detail: '已执行（假后端）', ended_at: NOW };
     state.cmd = null;
   }, state.auto_complete_ms);
 }
@@ -87,7 +97,7 @@ function route(method, url, body) {
     return json(200, {
       ts: NOW,
       machine: { state: state.patrol_active ? 'PATROLLING' : 'IDLE', connected: true,
-                 real_pos: [200.0, -20.0], pos_source: 'controller', probe_suppressed: false,
+                 real_pos: state.machine_position, pos_source: state.machine_pos_source, probe_suppressed: false,
                  host: '172.17.0.1:7003' },
       patrol: state.patrol_active
         ? { active: true, known: true, started_at: '2026-09-14T09:58:00', station_index: 12,
@@ -101,7 +111,11 @@ function route(method, url, body) {
   }
   if (path === '/api/images') {
     if (state.images_error) return json(500, { error: 'boom' });
-    return json(200, { ok: true, rows: IMAGES, n_local: 1, n_prod: IMAGES.length - 1 });
+    const stationId = new URL('http://console.local' + url).searchParams.get('station_id');
+    const rows = IMAGES.map(r => ({ ...r, station_id: stationId || r.station_id }));
+    const response = json(200, { ok: true, rows, n_local: 1, n_prod: IMAGES.length - 1 });
+    const delay = state.image_delay[stationId] || 0;
+    return delay ? new Promise(resolve => setTimeout(() => resolve(response), delay)) : response;
   }
   if (path === '/api/growth') {
     if (state.growth_error) return json(200, { ok: false, error: 'prod 查询失败：不通', points: [] });
@@ -124,6 +138,7 @@ function route(method, url, body) {
                                    last_frame_age_s: state.preview_frame_age } });
   }
   if (path === '/api/cmd' && method === 'GET') {
+    if (state.command_network_error) throw new Error('offline');
     return json(200, { inflight: state.cmd, result: state.result, estop: state.estop,
                        session_active: !!state.session });
   }
@@ -139,6 +154,7 @@ function route(method, url, body) {
   if (path === '/api/stop' && method === 'POST') { state.estop = true; return json(200, { estop: true }); }
   if (path === '/api/stop' && method === 'DELETE') { state.estop = false; return json(200, { estop: false }); }
   if (path === '/api/cmd' && method === 'POST') {
+    if (state.command_network_error) throw new Error('offline');
     if (state.reject_cmd) return json(state.reject_cmd, { error: state.reject_cmd === 409
       ? '巡检进行中：机构由这一轮占用，预计 7 分钟后可用' : '没有有效会话：手动移动需要先接管' });
     state.cmd = { id: 'c-' + (state.calls.length), kind: body.kind, args: body.args || {}, by: body.by,
@@ -158,8 +174,9 @@ const dom = new JSDOM(html, {
   beforeParse(window) {
     window.fetch = async (url, opt = {}) => route(opt.method || 'GET', String(url),
       opt.body ? JSON.parse(opt.body) : undefined);
-    window.confirm = () => { window.__confirmed.push(true); return window.__ok; };
+    window.confirm = message => { window.__confirmed.push(true); window.__confirmMessages.push(String(message)); return window.__ok; };
     window.__confirmed = [];
+    window.__confirmMessages = [];
     window.__ok = true;
     window.onerror = (m, s, l, c) => { errors.push(`onerror: ${m} @${l}:${c}`); };
     window.addEventListener('unhandledrejection',
@@ -247,15 +264,35 @@ const lastCmd = () => {
   check('步长切到 0.5 生效', JSON.stringify(lastCmd()) === '{"kind":"jog","args":{"axis":"Y","mm":-0.5}}',
     JSON.stringify(lastCmd()));
 
+  // 灯状态只接受执行方的结构化确认；提交失败不能把按钮改成另一个事实。
+  await click('#lampbtn');
+  check('结构化结果确认补光灯已开', T('#lampbtn').includes('已开'), T('#lampbtn'));
+  state.reject_cmd = 403;
+  await click('#lampbtn');
+  check('灯命令失败不改变已确认状态', T('#lampbtn').includes('已开') && T('#opmsg').includes('需要先接管'),
+    T('#lampbtn') + ' / ' + T('#opmsg'));
+  state.reject_cmd = null;
+
   // 4. 定位：二次确认 + 载荷
   state.calls.length = 0;
+  state.machine_position = null;
+  state.machine_pos_source = 'unknown';
+  state.result = null;
+  await sleep(1100);
   $('#gtY').value = '1200'; $('#gtZ').value = '100';
   $('#gtY').dispatchEvent(new window.Event('input'));
-  window.__ok = true; window.__confirmed.length = 0;
+  window.__ok = true; window.__confirmed.length = 0; window.__confirmMessages.length = 0;
   await click('#gotobtn');
   check('定位前有二次确认', window.__confirmed.length === 1);
+  check('当前位置未知时不伪造 0 mm 距离', window.__confirmMessages[0].includes('无法计算距离') && !window.__confirmMessages[0].includes('0 mm'),
+    window.__confirmMessages[0]);
   check('定位载荷 = {y:1200, z:-100}',
     JSON.stringify(lastCmd()) === '{"kind":"goto","args":{"y":1200,"z":100}}', JSON.stringify(lastCmd()));
+  check('结构化位置结果更新可信读数', T('#actualpos').includes('Y=1200.0') && T('#actualpos').includes('最后成功目标'),
+    T('#actualpos'));
+  state.machine_position = [200.0, -20.0];
+  state.machine_pos_source = 'controller';
+  await sleep(1100);
 
   state.calls.length = 0;
   window.__ok = false;                       // 用户在确认框里点了取消
@@ -295,6 +332,11 @@ const lastCmd = () => {
     T('#opmsg').includes('巡检进行中') && T('#opmsg').includes('分钟后可用'), T('#opmsg'));
   state.reject_cmd = null;
 
+  state.command_network_error = true;
+  await click('[data-jog="Y+"]');
+  check('控制接口离线时给出可见反馈', T('#opmsg').includes('接口不可达'), T('#opmsg'));
+  state.command_network_error = false;
+
   // 8. 巡检进行中：提前上锁 + 说明还要等多久
   state.patrol_active = true;
   await sleep(1200);
@@ -315,6 +357,11 @@ const lastCmd = () => {
   await sleep(200);
   check('急停后标签显示已置位', T('#estopstate').includes('已置位'), T('#estopstate'));
   check('急停后出现复位按钮', $('#estopclear').disabled === false);
+  check('急停时已确认开灯仍允许关灯', $('#lampbtn').disabled === false, T('#lampbtn'));
+  await click('#lampbtn');
+  check('急停时补光灯只提交关灯', JSON.stringify(lastCmd()) === '{"kind":"lamp","args":{"on":false}}',
+    JSON.stringify(lastCmd()));
+  check('急停关灯后再次开灯保持禁用', $('#lampbtn').disabled === true, T('#lampbtn'));
   await click('#estopclear');
   await sleep(200);
   check('复位后回到未置位', T('#estopstate').includes('未置位'), T('#estopstate'));
@@ -401,6 +448,18 @@ const lastCmd = () => {
     T('#curve').includes('查不到') && T('#growthnote').includes('prod'), T('#growthnote'));
   state.growth_error = false;
 
+  // 快速切站时，慢返回的旧图像不能覆盖后选中的站位。
+  await click('#modeSeg [data-mode="realtime"]');
+  state.image_delay = { S101: 500, S102: 20 };
+  document.querySelector('.stn[data-id="S101"]').click();
+  await sleep(30);
+  document.querySelector('.stn[data-id="S102"]').click();
+  await sleep(750);
+  check('快速切站不串图像', T('#imgtitle').includes('S102') &&
+    Array.from(document.querySelectorAll('#imgs img')).every(img => img.alt.includes('S102')),
+    T('#imgtitle') + ' / ' + Array.from(document.querySelectorAll('#imgs img')).map(img => img.alt).join(', '));
+  state.image_delay = {};
+
   // 13. 实时画面（ADR-0017）：接管自动开、放开自动关、轮内不给看
   await click('#modeSeg [data-mode="realtime"]');
   check('页面里没有相机地址/口令，只有 /api/preview（浏览器只连 console）',
@@ -413,6 +472,12 @@ const lastCmd = () => {
   state.preview_down = false;
   await click('#takebtn');
   await sleep(500);
+  await click('#modeSeg [data-mode="history"]');
+  check('切到历史模式会关闭实时画面', !$('#pvimg').getAttribute('src'), $('#pvstate').textContent);
+  await click('#modeSeg [data-mode="realtime"]');
+  await sleep(500);
+  check('有效会话切回实时会恢复画面', ($('#pvimg').getAttribute('src') || '').startsWith('/api/preview'),
+    $('#pvimg').getAttribute('src') || '(无)');
   check('接管后自动打开画面（<img src="/api/preview">）',
     ($('#pvimg').getAttribute('src') || '').startsWith('/api/preview'),
     $('#pvimg').getAttribute('src') || '(无)');

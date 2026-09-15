@@ -67,6 +67,9 @@ class CommandResult:
     ok: bool
     detail: str = ""
     ended_at: str = ""
+    kind: str = ""
+    args: dict = field(default_factory=dict)
+    data: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -229,9 +232,18 @@ class ManualChannel:
         self._write(self.cmd_path, asdict(cmd))
         return cmd
 
-    def complete(self, cmd: Command, *, ok: bool, detail: str = "") -> CommandResult:
-        res = CommandResult(id=cmd.id, ok=ok, detail=detail,
-                            ended_at=self.now().isoformat(timespec="seconds"))
+    def complete(
+        self, cmd: Command, *, ok: bool, detail: str = "", data: dict | None = None
+    ) -> CommandResult:
+        res = CommandResult(
+            id=cmd.id,
+            ok=ok,
+            detail=detail,
+            ended_at=self.now().isoformat(timespec="seconds"),
+            kind=cmd.kind,
+            args=dict(cmd.args),
+            data=data or {},
+        )
         self._write(self.result_path, asdict(res))
         return res
 

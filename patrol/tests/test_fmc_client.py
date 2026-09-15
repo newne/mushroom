@@ -232,7 +232,7 @@ def test_goto_2axis_single_segment_full_params():
 
 
 def test_home_all_uses_per_axis_profile():
-    """Y 反向（负限位=2）回零、Z 向上（正限位=1）回零，参数各按本轴整定值。"""
+    """两轴都向**负限位**回零（Y 往左、Z 往上，ADR-0018），参数各按本轴整定值。"""
     client, lib = make_client()
     client.home_all()
     homes = lib.calls_of("home")

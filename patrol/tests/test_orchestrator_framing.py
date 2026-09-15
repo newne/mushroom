@@ -17,7 +17,7 @@ from patrol.orchestrator import FramingHook, StationCapture
 from patrol.stations import Station
 
 TS = datetime(2026, 9, 13, 20, 25, 42)
-LIMITS = (0.0, 4492.0, -212.0, 0.0)
+LIMITS = (0.0, 4492.0, 0.0, 212.0)
 
 
 class FakeFmc:
@@ -55,10 +55,10 @@ def hook_for(fmc: FakeFmc, *, target: tuple[float, float], scale=1.0, tol=2.0):
 
     **符号约定**（`FramingError` 的文档口径，别弄反）：
     * ``dx_px > 0`` = 目标偏画面右 ⇒ Y 增大方向（Y 向右为正）；
-    * ``dy_px > 0`` = 目标偏画面**下** ⇒ Z **减小**方向（Z 向上为正）。
-    所以纵向是 ``(z - target_z)``，不是 ``(target_z - z)``。
+    * ``dy_px > 0`` = 目标偏画面**下** ⇒ Z **增大**方向（Z 向下为正，ADR-0018）。
+    所以纵向是 ``(target_z - z)``（Z 增大 = 向下，ADR-0018）。
     """
-    recipe = FramingRecipe(mm_per_px_y=scale, mm_per_px_z=scale, sign_y=1.0, sign_z=-1.0,
+    recipe = FramingRecipe(mm_per_px_y=scale, mm_per_px_z=scale, sign_y=1.0, sign_z=1.0,
                            tol_px=tol, max_step_mm=50.0, max_taps=3)
 
     def pixels(result) -> bytes:
@@ -67,14 +67,15 @@ def hook_for(fmc: FakeFmc, *, target: tuple[float, float], scale=1.0, tol=2.0):
 
     def evaluate(pixels_bytes: bytes) -> FramingError:
         y, z = (float(v) for v in pixels_bytes.decode().split(","))
-        return FramingError(dx_px=(target[0] - y) / scale, dy_px=(z - target[1]) / scale,
+        # Z 增大 = 向下（ADR-0018）：目标在相机下方 ⇒ target_z > z ⇒ dy_px > 0
+        return FramingError(dx_px=(target[0] - y) / scale, dy_px=(target[1] - z) / scale,
                             confidence=1.0)
 
     return FramingHook(recipe=recipe, evaluate=evaluate, pixels=pixels)
 
 
 def station(**kw) -> Station:
-    base = {"id": "S101", "box_id": "B101", "y": 187.167, "z": -21.2, "layer": 1, "col": 1}
+    base = {"id": "S101", "box_id": "B101", "y": 187.167, "z": 21.2, "layer": 1, "col": 1}
     base.update(kw)
     return Station(**base)
 
@@ -93,9 +94,9 @@ def test_without_framing_it_is_one_capture_at_the_station_coordinates():
     fmc, cap = FakeFmc(), FakeCapture()
     meta = make_capture(fmc, cap).run(station(), ts=TS)
 
-    assert fmc.moves == [(187.167, -21.2)]
+    assert fmc.moves == [(187.167, 21.2)]
     assert len(cap.filenames) == 1
-    assert meta["yz"] == [187.167, -21.2]
+    assert meta["yz"] == [187.167, 21.2]
     assert "framing" not in meta
     assert fmc.lamp_states == [True, False], "补光窗口必须闭合"
 
@@ -103,10 +104,11 @@ def test_without_framing_it_is_one_capture_at_the_station_coordinates():
 def test_learned_trim_is_added_to_the_station_coordinates():
     """trim 是"上次学到的偏移"，出发位置要叠加它——否则微调等于白学。"""
     fmc, cap = FakeFmc(), FakeCapture()
-    meta = make_capture(fmc, cap).run(station(trim_y=12.5, trim_z=-3.0), ts=TS)
+    # trim 跟着坐标框架一起镜像：Z 旧的 -3.0 在新框架里是 +3.0（ADR-0018）
+    meta = make_capture(fmc, cap).run(station(trim_y=12.5, trim_z=3.0), ts=TS)
 
-    assert fmc.moves == [(187.167 + 12.5, -21.2 - 3.0)]
-    assert meta["yz"] == [199.667, -24.2]
+    assert fmc.moves == [(187.167 + 12.5, 21.2 + 3.0)]
+    assert meta["yz"] == [199.667, 24.2]
 
 
 # ---------- 有微调钩子 ----------
@@ -114,8 +116,8 @@ def test_learned_trim_is_added_to_the_station_coordinates():
 
 def test_framing_moves_to_the_target_and_hands_back_that_frame():
     fmc, cap = FakeFmc(), FakeCapture()
-    nominal = (187.167, -21.2)
-    target = (nominal[0] + 20.0, nominal[1] - 10.0)
+    nominal = (187.167, 21.2)
+    target = (nominal[0] + 20.0, nominal[1] + 10.0)   # 目标在基准的**下方**：Z 增大 = 向下
 
     meta = make_capture(fmc, cap, framing=hook_for(fmc, target=target)).run(station(), ts=TS)
 
@@ -123,8 +125,8 @@ def test_framing_moves_to_the_target_and_hands_back_that_frame():
     assert fmc.moves[-1] == pytest.approx(target), "微调应当把相机挪到目标位置"
     assert meta["yz"] == [round(target[0], 3), round(target[1], 3)]
     assert meta["framing"]["converged"] is True
-    assert meta["framing"]["trim"] == pytest.approx([20.0, -10.0], abs=1e-3)
-    assert meta["framing"]["suggested_trim"] == pytest.approx([20.0, -10.0], abs=1e-3)
+    assert meta["framing"]["trim"] == pytest.approx([20.0, 10.0], abs=1e-3)
+    assert meta["framing"]["suggested_trim"] == pytest.approx([20.0, 10.0], abs=1e-3)
     assert meta["framing"]["base_yz"] == [nominal[0], nominal[1]]
     # 交出去的是**好位置那张**（试探帧带 -probe 后缀）
     assert meta["object_name"].endswith("-probe1.jpg")
@@ -132,13 +134,13 @@ def test_framing_moves_to_the_target_and_hands_back_that_frame():
 
 def test_suggested_trim_accumulates_on_top_of_the_existing_one():
     fmc, cap = FakeFmc(), FakeCapture()
-    start = (187.167 + 10.0, -21.2)
-    target = (start[0] + 6.0, start[1] - 4.0)
+    start = (187.167 + 10.0, 21.2)
+    target = (start[0] + 6.0, start[1] + 4.0)
 
     meta = make_capture(fmc, cap, framing=hook_for(fmc, target=target)) \
         .run(station(trim_y=10.0), ts=TS)
 
-    assert meta["framing"]["suggested_trim"] == pytest.approx([16.0, -4.0], abs=1e-3)
+    assert meta["framing"]["suggested_trim"] == pytest.approx([16.0, 4.0], abs=1e-3)
 
 
 def test_unknown_target_keeps_the_baseline_frame(tmp_path=None):
@@ -152,7 +154,7 @@ def test_unknown_target_keeps_the_baseline_frame(tmp_path=None):
                        evaluate=evaluate, pixels=lambda _r: b"x")
     meta = make_capture(fmc, cap, framing=hook).run(station(), ts=TS)
 
-    assert fmc.moves == [(187.167, -21.2)], "只在基准位置拍，不该有第二步"
+    assert fmc.moves == [(187.167, 21.2)], "只在基准位置拍，不该有第二步"
     assert meta["framing"]["converged"] is False
     assert meta["framing"]["trim"] == [0.0, 0.0]
     assert meta["object_name"].endswith(".jpg")
@@ -173,7 +175,7 @@ def test_pixels_unavailable_degrades_to_a_plain_capture():
     meta = make_capture(fmc, cap, framing=hook, logs=logs).run(station(), ts=TS)
 
     assert meta["ok"] is True
-    assert fmc.moves == [(187.167, -21.2)]
+    assert fmc.moves == [(187.167, 21.2)]
     assert any("放弃微调" in m for m in logs)
     assert meta["framing"]["converged"] is False
 

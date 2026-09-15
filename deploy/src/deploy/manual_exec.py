@@ -30,7 +30,7 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from patrol.capture_client import CaptureClient, CaptureError
@@ -41,7 +41,7 @@ from patrol.fmc import (
     MotionAborted,
     MotionTimeoutError,
 )
-from patrol.motion_profile import M1
+from patrol.motion_profile import HOME_DIR_NEGATIVE, M1
 from patrol.stations import Station, image_object_name
 
 from deploy.manual import Command, ManualChannel, estop_allows
@@ -62,6 +62,7 @@ class CommandError(ValueError):
 class ExecOutcome:
     ok: bool
     detail: str
+    data: dict = field(default_factory=dict)
 
 
 def _require_float(args: dict, key: str, *, where: str) -> float:
@@ -137,7 +138,9 @@ class ManualExecutor:
         except Exception as e:  # noqa: BLE001 - 执行方不能被一条指令带走
             outcome = ExecOutcome(False, f"执行异常（{type(e).__name__}: {e}）")
             self.log(f"手动指令 {cmd.id} 执行异常：{type(e).__name__}: {e}")
-        self.channel.complete(cmd, ok=outcome.ok, detail=outcome.detail)
+        self.channel.complete(
+            cmd, ok=outcome.ok, detail=outcome.detail, data=outcome.data
+        )
         self.log(f"手动指令 {cmd.id} {'完成' if outcome.ok else '失败'}：{outcome.detail}")
         return cmd
 
@@ -224,6 +227,10 @@ class ManualExecutor:
         y, z = fmc.current_yz()
         return f"Y={y:.2f} Z={z:.2f}"
 
+    @staticmethod
+    def _position_data(y: float, z: float) -> dict:
+        return {"position_yz": [round(y, 3), round(z, 3)]}
+
     # ---------- 各指令 ----------
 
     def _stop(self, fmc: Fmc4030) -> ExecOutcome:
@@ -234,19 +241,31 @@ class ManualExecutor:
                 f"急停有 {len(failed)} 项未确认成功：{'、'.join(failed)}"
                 "——请立即确认轴已停下，必要时断电",
             )
-        return ExecOutcome(True, f"已停止（插补停止 + 两轴立即停止）；{self._where(fmc)}")
+        y, z = fmc.current_yz()
+        return ExecOutcome(
+            True,
+            f"已停止（插补停止 + 两轴立即停止）；Y={y:.2f} Z={z:.2f}",
+            self._position_data(y, z),
+        )
 
     def _lamp(self, fmc: Fmc4030, cmd: Command) -> ExecOutcome:
         on = cmd.args.get("on")
         if not isinstance(on, bool):
             raise CommandError(f"lamp 的 on 需要 true/false，收到 {on!r}")
         fmc.lamp(on)
-        return ExecOutcome(True, "补光灯 " + ("开" if on else "关"))
+        return ExecOutcome(True, "补光灯 " + ("开" if on else "关"), {"lamp_on": on})
 
     def _home(self, fmc: Fmc4030) -> ExecOutcome:
         fmc.home_all(timeout_s=MANUAL_TIMEOUT_S, abort=self.channel.raised)
+        y, z = fmc.current_yz()
+        # 方向文案**从参数派生**：2026-09-15 Z 的回零方向改过一次（ADR-0018），
+        # 写死的"Z 正限位"当场变成了谎话——现场排障时最不该被这种东西误导。
+        where = " / ".join(f"{s.name} {'负' if s.home_dir == HOME_DIR_NEGATIVE else '正'}限位"
+                           for s in M1.axes)
         return ExecOutcome(
-            True, f"回零完成（Y 负限位 / Z 正限位，落点为原点）；{self._where(fmc)}"
+            True,
+            f"回零完成（{where}，落点为原点）；Y={y:.2f} Z={z:.2f}",
+            self._position_data(y, z),
         )
 
     def _jog(self, fmc: Fmc4030, cmd: Command) -> ExecOutcome:
@@ -262,14 +281,24 @@ class ManualExecutor:
             raise MotionTimeoutError(
                 f"点动 {spec.name} {dist:+.2f} mm 未在 {JOG_WAIT_S:.0f}s 内停稳"
             )
-        return ExecOutcome(True, f"点动 {spec.name} {dist:+.2f} mm；{self._where(fmc)}")
+        y, z = fmc.current_yz()
+        return ExecOutcome(
+            True,
+            f"点动 {spec.name} {dist:+.2f} mm；Y={y:.2f} Z={z:.2f}",
+            self._position_data(y, z),
+        )
 
     def _goto(self, fmc: Fmc4030, cmd: Command) -> ExecOutcome:
         y = _require_float(cmd.args, "y", where="goto")
         z = _require_float(cmd.args, "z", where="goto")
         fmc.check_travel(y, z)      # 越界在**下发前**拒绝（控制器会把越界目标静默截断）
         fmc.goto(y, z, timeout_s=MANUAL_TIMEOUT_S, abort=self.channel.raised)
-        return ExecOutcome(True, f"已到位 Y={y:.2f} Z={z:.2f}；{self._where(fmc)}")
+        actual_y, actual_z = fmc.current_yz()
+        return ExecOutcome(
+            True,
+            f"已到位 Y={y:.2f} Z={z:.2f}；Y={actual_y:.2f} Z={actual_z:.2f}",
+            self._position_data(actual_y, actual_z),
+        )
 
     def _capture(self, fmc: Fmc4030, cmd: Command) -> ExecOutcome:
         if self.capture is None or self.append_index is None:
@@ -308,7 +337,14 @@ class ManualExecutor:
             except Exception as e:  # noqa: BLE001 - 同步失败不该把"拍到了"变成失败
                 self.log(f"手动抓拍的索引同步失败（记录仍在 outbox，可补传）：{e}")
         return ExecOutcome(
-            True, f"已抓拍 {station.id} → {object_name}（拍摄位置 Y={y:.2f} Z={z:.2f}）"
+            True,
+            f"已抓拍 {station.id} → {object_name}（拍摄位置 Y={y:.2f} Z={z:.2f}）",
+            {
+                "station_id": station.id,
+                "object_name": object_name,
+                "position_yz": [round(y, 3), round(z, 3)],
+                "lamp_on": False,
+            },
         )
 
     def _station_for(self, cmd: Command) -> Station:
