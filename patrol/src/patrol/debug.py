@@ -257,7 +257,10 @@ class DebugConsole:
             self._out(f"! {e}")
             self._out("  轴可能仍在运动，请用 status 查看")
         else:
-            self._out("回零完成（Y 负限位 / Z 正限位，落点为原点）")
+            # 文案由参数派生：方向搞反正是这次上机踩过的坑（ADR-0018），别再写死
+            where = " / ".join(f"{s.name} {'负' if s.home_dir == 2 else '正'}限位"
+                               for s in _PROFILE.axes)
+            self._out(f"回零完成（{where}，落点为原点）")
 
     def _do_stop(self) -> None:
         """急停：stop_everything 收集失败动作而非抛出，非空即必须上报。"""

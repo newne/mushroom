@@ -80,7 +80,7 @@ try:
     t0 = time.monotonic()
     th.start()
     v = M1.y.travel_speed
-    client._lib.FMC4030_Line_2Axis(client.id, M1.axis_mask, 374.33, -21.2, v, v * 10, v * 10)
+    client._lib.FMC4030_Line_2Axis(client.id, M1.axis_mask, 374.33, 21.2, v, v * 10, v * 10)
     t_issue = time.monotonic() - t0
     ok = client.wait_stop(timeout_s=60)
     t_ret = time.monotonic() - t0
@@ -99,7 +99,7 @@ try:
     th = threading.Thread(target=sampler, args=(time.monotonic(),), daemon=True)
     t0 = time.monotonic()
     th.start()
-    client.goto(374.33, -21.2)
+    client.goto(374.33, 21.2)
     t_ret = time.monotonic() - t0
     stop_flag.set()
     th.join(timeout=2)

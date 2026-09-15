@@ -8,13 +8,13 @@
 执行序列：
 
     P0 预检      位置 / 模式 / 各轴状态 / 软限位；任一轴在动即中止
-    P1 离开原点  Y +100、Z -40（M0 慢档），为「回零方向实证」造出可判别的距离
+    P1 离开原点  Y +100、Z +40（M0 慢档，**Z 增大 = 向下**，ADR-0018），为「回零方向实证」造距离
     P2 回零      逐轴计时。**方向对不对由耗时一个数量级地判出来**，不需要额外仪表：
                    Y 负限位回零：从 +100 出发只需走 100 mm ⇒ ~1.2 s
                                  方向若反了则要走 4392 mm ⇒ ~49 s
-                   Z 正限位回零：从 -40 出发只需走 40 mm ⇒ ~2.0 s
+                   Z 负限位回零（往上）：从 +40 出发只需走 40 mm ⇒ ~2.0 s
                                  方向若反了则要走 172 mm ⇒ ~9 s 后硬顶限位
-    P3 首站定位  蛇形第 1 站 S101（187.17, -21.2），M0 点动档单段直达
+    P3 首站定位  蛇形第 1 站 S101（187.17, +21.2），M0 点动档单段直达
     P4 单站采图  点灯 → 采图服务 → 熄灯，校验 HTTP 与落盘字节数
     P5 回原点    goto_2axis(0, 0)
 
@@ -50,7 +50,7 @@ PICTURE_DIR = (
     "/home/sysadmin/algorithm/mushroom_docker/"
     "xcloudsdk_py_offline_20260120_175307/saved_datas/picture"
 )
-JOG_Y, JOG_Z = 100.0, -40.0   # 离开原点的距离（正负号刻意与原点相反）
+JOG_Y, JOG_Z = 100.0, 40.0    # 离开原点的距离；Z 增大 = 向下（ADR-0018）
 HOME_TIMEOUT = 180.0
 
 Y_AXIS, Z_AXIS = M1.y.index, M1.z.index
@@ -114,14 +114,15 @@ try:
     if issues:
         for it in issues:
             print(f"    ! {it}", flush=True)
-        print("    （Y 必须生效在 [0,4495]；Z 已取消由本程序行程校验兜底，见 ADR-0008）", flush=True)
+        print("    （Y 必须生效在 [0,4495]；Z 必须生效在 [0,212]（2026-09-15 起，ADR-0018），见 ADR-0008）", flush=True)
     else:
         print("    OK（无窄于行程的软限位）", flush=True)
 
     station1 = build_grid()[0]
     print("\n  本机约定（motion_profile 单源）：", flush=True)
     for a in M1.axes:
-        d = "正向/向上" if a.home_dir == 1 else "反向/向左"
+        # homeDir=2 = 负限位 = **靠近电机端**（Y 往左、Z 往上）：两轴都是原点所在端（ADR-0018）
+        d = "正限位（远离电机端）" if a.home_dir == 1 else "负限位（靠近电机端）"
         print(f"    {a.name}  轴{a.index}  行程[{a.travel_min:g}, {a.travel_max:g}]"
               f"  回零 {d}  落点 {a.home_position:g}"
               f"  （回零档 {a.home_speed:g}/{a.home_acc:g}，M0 档 {a.jog_speed:g}/{a.jog_acc:g}）", flush=True)
@@ -145,7 +146,7 @@ try:
     describe(client, "离开后")
 
     # ---------------- P3 回零（方向实证） ----------------
-    head("回零：Y 反向回零→原点，Z 向上回零→0 点")
+    head("回零：两轴都向负限位（靠电机端）→原点：Y 往左、Z 往上（ADR-0018）")
     t_y = home_one(client, Y_AXIS)
     t_z = home_one(client, Z_AXIS)
     st = describe(client, "回零后")

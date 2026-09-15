@@ -40,7 +40,7 @@ def exercise(client, distance: float, trips: int, label: str) -> dict:
         for target, direction in ((distance, "→"), (0.0, "←")):
             t0 = time.monotonic()
             try:
-                client.goto(target, -21.2)
+                client.goto(target, 21.2)
                 ok += 1
                 times.append(time.monotonic() - t0)
             except TravelShortfallError as e:

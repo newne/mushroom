@@ -130,7 +130,7 @@ try:
         t_start = time.monotonic()
         short = None
         try:
-            client.goto(0.0, -21.2)
+            client.goto(0.0, 21.2)
             ok = True
         except TravelShortfallError as e:
             ok = False

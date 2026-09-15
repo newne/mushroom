@@ -42,7 +42,7 @@ def trace(target: float, label: str) -> None:
     t0 = time.monotonic()
     v = M1.y.travel_speed
     # 直接下发，绕过 wait_stop —— 本探针就是要自己看信号，不能被现有实现挡住
-    client._lib.FMC4030_Line_2Axis(client.id, M1.axis_mask, target, -21.2, v, v * 10, v * 10)
+    client._lib.FMC4030_Line_2Axis(client.id, M1.axis_mask, target, 21.2, v, v * 10, v * 10)
     prev = None
     marks: dict[str, float] = {}
     while time.monotonic() - t0 < 60:

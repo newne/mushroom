@@ -43,7 +43,7 @@ def pos() -> float:
 
 def go(target: float, label: str) -> tuple[float, float]:
     t0 = time.monotonic()
-    client.goto(target, -21.2)
+    client.goto(target, 21.2)
     dt = time.monotonic() - t0
     y = pos()
     err = target - y
@@ -63,7 +63,7 @@ try:
 
     shortfalls = 0
     for attempt in range(1, 21):
-        client.goto(0.0, -21.2)
+        client.goto(0.0, 21.2)
         y, err = go(FAR, f"第{attempt}趟 0→4442")
         if abs(err) > 1.0:
             shortfalls += 1

@@ -43,11 +43,11 @@ def raw() -> tuple[int, float, float]:
 
 
 def trace_goto(target: float, label: str) -> None:
-    """下一次 goto(target, -21.2)，20Hz 采样到 running 清零为止。"""
+    """下一次 goto(target, 21.2)，20Hz 采样到 running 清零为止。"""
     flags, y0, _ = raw()
     print(f"\n[{label}] goto → Y={target:.1f}（起点 Y={y0:.3f}）", flush=True)
     t0 = time.monotonic()
-    client.goto(target, -21.2)
+    client.goto(target, 21.2)
     host_dt = time.monotonic() - t0
     flags, y1, _ = raw()
     print(f"  goto 返回耗时 {host_dt:.2f} s   返回后读数 Y={y1:.3f}   "

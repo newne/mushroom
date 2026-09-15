@@ -37,7 +37,7 @@ def one_move(target: float, label: str) -> None:
     t0 = time.monotonic()
     kind, detail, dev = "ok", "", 0.0
     try:
-        client.goto(target, -21.2)
+        client.goto(target, 21.2)
     except TravelShortfallError as e:
         kind = "短停(计数不符)"
         detail = str(e)[:80]

@@ -92,7 +92,7 @@ def home_and_time_trip(label: str) -> tuple[float, float]:
 def leave_and_home(label: str) -> tuple[float, float]:
     """离开固定距离 D，再回零并测触限耗时（每次前都先回零，保证起点一致）。"""
     client.home_all(timeout_s=150)          # 起点固定在硬挡
-    client.goto(D, -21.2)                    # 两段速走到 D
+    client.goto(D, 21.2)                    # 两段速走到 D
     p = pos()                                # 每次都要确认真的到位了
     if abs(p - D) > 0.5:
         print(f"    ! 起点未到位：要求 Y={D:.1f}，实到 Y={p:.3f}", flush=True)
@@ -120,7 +120,7 @@ try:
         # 0.6 s 的空动作（第 1 次真的走了 30.3 s，第 2–4 次没动），而脚本看不出来。
         p0 = pos()
         t0 = time.monotonic()
-        client.goto(far, -21.2)
+        client.goto(far, 21.2)
         fwd, p1 = time.monotonic() - t0, pos()
         t0 = time.monotonic()
         client.goto(0.0, 0.0)

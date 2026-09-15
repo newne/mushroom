@@ -50,7 +50,7 @@ def run_segment(target: float, speed: float) -> tuple[bool, float, float, str]:
     """一段绝对移动，返回 (成功, 耗时, 位置偏差 mm, 说明)。显式给速度 ⇒ 原样下发。"""
     t0 = time.monotonic()
     try:
-        client.goto(target, -21.2, speed=speed, acc=speed * 10.0)
+        client.goto(target, 21.2, speed=speed, acc=speed * 10.0)
         return True, time.monotonic() - t0, 0.0, ""
     except TravelShortfallError as e:
         return False, time.monotonic() - t0, e.shortfall, str(e)

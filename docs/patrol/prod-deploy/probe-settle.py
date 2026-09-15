@@ -54,7 +54,7 @@ def raw() -> tuple[bool, float]:
 
 def move_and_trace(target: float, speed: float | None, label: str) -> dict:
     """下发一次 goto，然后 50 Hz 跟踪到静定。返回本次的关键量。"""
-    client.goto(target, -21.2, speed=speed, acc=(speed * 10.0 if speed else None))
+    client.goto(target, 21.2, speed=speed, acc=(speed * 10.0 if speed else None))
     t_end_issue = time.monotonic()
 
     t_clear = None

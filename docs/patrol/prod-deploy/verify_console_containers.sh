@@ -42,7 +42,7 @@ check_has() {  # check_has <说明> <子串> <文本>
 # ---------- 一次性配置（照抄上机的目录约定） ----------
 mkdir -p "$CFG/configs" "$CFG/data/trigger" "$CFG/data/cmd" "$CFG/Logs"
 printf 'room_id: "611"\nentry_date: "2026-09-04"\nbatch_no: "mogu-100"\n' > "$CFG/configs/room.yaml"
-printf 'stations:\n  - {id: S101, box_id: B101, y: 187.1, z: -21.2, layer: 1, col: 1}\n' \
+printf 'stations:\n  - {id: S101, box_id: B101, y: 187.1, z: 21.2, layer: 1, col: 1}\n' \
   > "$CFG/configs/stations.yaml"
 echo "配置目录：$CFG"
 

@@ -27,7 +27,7 @@ M1 巡检路径（``orchestrator.StationCapture`` -> ``client.goto()``）用的�
 
     python3 two-phase-goto-check.py              # 只读演练（不动机构）
     python3 two-phase-goto-check.py --go         # 真跑：回零 -> 去 -> 回，各一趟
-    python3 two-phase-goto-check.py --go --cycles 3 --dist 374.33 --z -21.2
+    python3 two-phase-goto-check.py --go --cycles 3 --dist 374.33 --z 21.2
 """
 
 from __future__ import annotations
