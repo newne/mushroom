@@ -92,6 +92,14 @@
   #curve svg{width:100%;height:170px;display:block}
   .legend{font-size:12px;color:var(--dim);display:flex;gap:14px;margin-top:4px}
   .legend i{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:4px}
+  /* ---- 实时画面（MJPEG）----
+     固定 16:9 的框：流没起来时也要占住位置，否则卡片高度会跳，下面的按钮跟着上下移动
+     ——点动的时候按钮乱跑是很烦的事。object-fit:contain 保证画面不被拉变形。 */
+  .pvwrap{position:relative;aspect-ratio:16/9;background:#05070a;border:1px solid var(--line);
+          border-radius:6px;overflow:hidden;display:flex;align-items:center;justify-content:center}
+  .pvwrap img{width:100%;height:100%;object-fit:contain;display:none}
+  .pvwrap .empty{position:absolute;left:8px;right:8px;text-align:center;padding:0}
+  #pvnote{font-size:12px;flex:1}
 </style>
 </head>
 <body>
@@ -202,6 +210,20 @@
 
       <div id="cmdline" class="empty" style="padding:6px 0 0">最近指令 —</div>
       <div id="opmsg"></div>
+    </div>
+
+    <!-- 实时画面（ADR-0017）：接管后自动打开，放开/切到历史模式就关掉。
+         为什么放在操作卡下面而不是右栏顶部：它是**手动操作的眼睛**，点动时要能同时看见。 -->
+    <div class="card">
+      <h2>实时画面 <span id="pvstate" class="tag">未打开</span></h2>
+      <div class="pvwrap">
+        <img id="pvimg" alt="实时画面">
+        <div class="empty" id="pvhint">接管后自动打开（相机实时画面，约 1 秒延迟）</div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="pvbtn">看画面</button>
+        <span id="pvnote" class="empty" style="padding:0"></span>
+      </div>
     </div>
 
     <div class="card">
@@ -545,14 +567,18 @@ async function refreshCmd(){
 
 async function takeSession(){
   const r = await jsend('/api/session', 'POST');
-  if(r.status === 201){ session = r.data.session; opmsg('已接管：可以手动操作了', 'ok'); }
-  else opmsg(r.data?.error || '接管失败', 'bad');
+  if(r.status === 201){
+    session = r.data.session;
+    opmsg('已接管：可以手动操作了', 'ok');
+    openPreview();                       // 眼睛跟着手动操作走（ADR-0017 §3）
+  }else opmsg(r.data?.error || '接管失败', 'bad');
   await refreshCmd();
 }
 
 async function dropSession(){
   const r = await jsend('/api/session', 'DELETE');
   session = null;
+  closePreview('已停止（回到未接管状态）');   // 放开=不再需要画面，顺手把相机那一路还回去
   opmsg(r.data?.detail || '已放开', r.data?.home_command ? 'ok' : 'info');
   await refreshCmd();
 }
@@ -612,6 +638,93 @@ function posNow(){
   return Array.isArray(p) ? p : null;
 }
 
+/* ---------------- 实时画面：RTSP→MJPEG（ADR-0017） ----------------
+   页面**不直连相机**，也不碰相机地址与口令：`<img src="/api/preview">` 由 console 反代。
+   于是这里只有三件事要做：什么时候开、什么时候关、开不了的时候把后端的话原样说出来。
+
+   两个"自动"值得记住：
+   - 接管后自动打开、放开后自动关闭（眼睛跟着手动操作走）；
+   - 巡检开始时自动关闭、本轮结束后自动恢复（轮内相机归那 60 张图）。
+   服务端还有一道兜底：轮次一开始，它会自己把已经开着的流断掉（不指望页面自觉）。 */
+
+const pv = {wanted:false, open:false, timer:null};
+
+function pvSet(state, cls, note){
+  const t = $('#pvstate');
+  t.textContent = state;
+  t.className = 'tag' + (cls ? ' ' + cls : '');
+  $('#pvnote').textContent = note || '';
+}
+
+function pvStartStream(){
+  const img = $('#pvimg');
+  img.style.display = '';
+  $('#pvhint').style.display = 'none';
+  // 每次换 URL：浏览器对同一个 <img> 的 MJPEG 只在 src **变化**时才重新建立连接
+  img.src = '/api/preview?t=' + Date.now();
+  img.onerror = () => { pv.open = false; pvSet('重连中', 'bad', '画面断了，正在重试…'); };
+  pv.open = true;
+  pvSet('播放中', 'on', '');
+}
+
+function pvStopStream(keepWanted){
+  const img = $('#pvimg');
+  if(img){ img.onerror = null; img.removeAttribute('src'); img.style.display = 'none'; }
+  $('#pvhint').style.display = '';
+  pv.open = false;
+  if(!keepWanted){
+    pv.wanted = false;
+    if(pv.timer){ clearInterval(pv.timer); pv.timer = null; }
+  }
+}
+
+async function pvTick(){
+  if(!pv.wanted) return;
+  // 轮内先自己关掉：后端也会断流，但"等它断"与"主动关"在观感上差很多
+  if(inRound()){
+    if(pv.open) pvStopStream(true);
+    $('#pvhint').textContent = '巡检进行中：相机这一路归本轮，' + etaText(lastStatus?.patrol);
+    pvSet('巡检中', 'bad', '本轮结束后自动恢复');
+    return;
+  }
+  let st;
+  try{ st = await jget('/api/preview/status'); }
+  catch(e){ st = {available:false, error:'接口不通：' + e.message}; }
+  if(!pv.wanted) return;
+  if(st.available){
+    if(!pv.open) pvStartStream();
+    const up = st.upstream || {};
+    pvSet('播放中', 'on', up.age_s != null
+      ? `${up.frames || 0} 帧 · 最新一帧 ${Number(up.age_s).toFixed(1)} 秒前`
+      : '');
+  }else{
+    if(pv.open) pvStopStream(true);
+    $('#pvhint').textContent = st.error || '暂时看不到画面';
+    pvSet(st.reason === 'patrolling' ? '巡检中' : '不可用', 'bad',
+          st.reason === 'patrolling' ? '本轮结束后自动恢复' : '每 2 秒重试');
+  }
+}
+
+function openPreview(why){
+  pv.wanted = true;
+  if(!pv.open) pvSet('连接中…', '', '');
+  if(!pv.timer) pv.timer = setInterval(pvTick, 2000);
+  pvTick();
+  if(why) opmsg(why, 'info');
+}
+
+function closePreview(why){
+  if(!pv.wanted && !pv.open) return;
+  pvStopStream(false);
+  $('#pvhint').textContent = why || '已停止（接管时会自动打开）';
+  pvSet('未打开', '', '');
+}
+
+function wirePreview(){
+  $('#pvbtn').onclick = () => { pv.wanted ? closePreview('已停止（接管时会自动打开）')
+                                           : openPreview(''); };
+}
+
 /* ---------------- 历史模式：时间轴 / 大图 / 生长曲线 ---------------- */
 
 let mode = 'realtime';
@@ -624,6 +737,8 @@ function setMode(m){
   $('#rtcol').style.display = m === 'realtime' ? '' : 'none';
   $('#hmain').style.display = m === 'history' ? '' : 'none';
   $('#hcol').style.display = m === 'history' ? '' : 'none';
+  // 历史模式下右栏整列是隐藏的：画面留着也看不见，纯属白占相机一路
+  if(m === 'history') closePreview('切到历史模式时已关闭');
   if(m === 'history') renderHistory();
 }
 
@@ -831,7 +946,10 @@ function wireHistory(){
   }catch(e){ $('#list').innerHTML = `<div class="empty">站位表读取失败：${e.message}</div>`; }
   wireOps();
   wireHistory();
+  wirePreview();
   await refreshCmd();
+  // 页面是刷新/重开后回来的，而后端可能还开着会话：把画面接着打开，别让人以为它坏了
+  if(cmd.session_active) openPreview();
   tick(); setInterval(tick, 1000);
 })();
 </script>

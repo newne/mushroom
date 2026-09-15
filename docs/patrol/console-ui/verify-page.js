@@ -57,6 +57,7 @@ const state = {
   patrol_active: false,
   reject_cmd: null,                           // 覆盖 POST /api/cmd 的状态码（测拒绝显示）
   growth_error: false,                        // 让 /api/growth 回"prod 查不到"
+  preview_down: false,                        // 让 /api/preview/status 回"预览服务连不上"
   images_error: false,
   // 真执行方会在几百毫秒内领走并写回结果；默认照做，否则页面会一直停在"执行中"，
   // 后面的用例就全被上锁挡住了（那是假后端的锅，不是页面的）。
@@ -105,6 +106,19 @@ function route(method, url, body) {
     if (state.growth_error) return json(200, { ok: false, error: 'prod 查询失败：不通', points: [] });
     return json(200, { ok: true, box_id: 'B102', points: GROWTH,
                        latest: GROWTH[GROWTH.length - 1] });
+  }
+  if (path === '/api/preview/status') {
+    // 与 deploy/console.py 的 /api/preview/status 同形状：available + 拒绝理由 + 上游健康
+    if (state.patrol_active) {
+      return json(200, { available: false, reason: 'patrolling',
+                         error: '巡检进行中：相机这一路归本轮，预计 7 分钟后可用',
+                         retry_after_s: 420, upstream: null });
+    }
+    if (state.preview_down) {
+      return json(200, { available: false, upstream: null, error: '预览服务连不上：preview 没起' });
+    }
+    return json(200, { available: true, error: null,
+                       upstream: { ok: true, frames: 42, age_s: 0.4, viewers: 1 } });
   }
   if (path === '/api/cmd' && method === 'GET') {
     return json(200, { inflight: state.cmd, result: state.result, estop: state.estop,
@@ -370,6 +384,66 @@ const lastCmd = () => {
   check('prod 查不到时如实报错（不是画一条空曲线）',
     T('#curve').includes('查不到') && T('#growthnote').includes('prod'), T('#growthnote'));
   state.growth_error = false;
+
+  // 13. 实时画面（ADR-0017）：接管自动开、放开自动关、轮内不给看
+  await click('#modeSeg [data-mode="realtime"]');
+  check('页面里没有相机地址/口令，只有 /api/preview（浏览器只连 console）',
+    !/192\.168\.|rtsp:|camera_pwd/.test(html), '命中片段：' +
+    (html.match(/192\.168\.|rtsp:|camera_pwd/gi) || []).join(',') || '（无）');
+
+  state.preview_down = false;
+  await click('#takebtn');
+  await sleep(500);
+  check('接管后自动打开画面（<img src="/api/preview">）',
+    ($('#pvimg').getAttribute('src') || '').startsWith('/api/preview'),
+    $('#pvimg').getAttribute('src') || '(无)');
+  check('画面状态标为播放中', T('#pvstate').includes('播放中'), T('#pvstate'));
+  check('画面信息来自 console 的 /api/preview/status（不是直连相机）',
+    !!lastCall('/api/preview/status') && !state.calls.some(c => /192\.168|:554/.test(c.url)),
+    JSON.stringify([...new Set(state.calls.map(c => c.url.split('?')[0]))].slice(-6)));
+
+  await click('#dropbtn');
+  await sleep(400);
+  check('放开接管后画面自动关闭',
+    !$('#pvimg').getAttribute('src'), $('#pvimg').getAttribute('src') || '(已清空)');
+
+  // 轮内：接管也拿不到画面，且要说清"本轮结束后自动恢复"
+  state.patrol_active = true;
+  await sleep(1400);                          // 等一拍 /api/status 把轮次读进来
+  await click('#takebtn');
+  await sleep(500);
+  check('巡检进行中不开画面', !$('#pvimg').getAttribute('src'),
+    $('#pvimg').getAttribute('src') || '(无 src)');
+  check('巡检中说明原因与恢复时机',
+    T('#pvstate').includes('巡检中') && T('#pvnote').includes('本轮结束后自动恢复'),
+    T('#pvstate') + ' / ' + T('#pvnote'));
+
+  state.patrol_active = false;
+  await sleep(2600);                          // 巡检结束 → 下一拍自己恢复
+  check('本轮结束后画面自动恢复',
+    ($('#pvimg').getAttribute('src') || '').startsWith('/api/preview'),
+    $('#pvimg').getAttribute('src') || '(无)');
+
+  // 预览服务不可用：把后端的话原样说出来，而不是"失败"
+  state.preview_down = true;
+  await sleep(2600);
+  check('预览不可用时原样显示后端话术',
+    T('#pvhint').includes('连不上') && T('#pvstate').includes('不可用'),
+    T('#pvstate') + ' / ' + T('#pvhint'));
+  state.preview_down = false;
+  await sleep(2600);
+  check('预览恢复后又自己接上', ($('#pvimg').getAttribute('src') || '').startsWith('/api/preview'),
+    $('#pvimg').getAttribute('src') || '(无)');
+
+  // 手动开关：接管中也能自己把画面停掉（不想占相机那一路时）
+  await click('#pvbtn');
+  await sleep(200);
+  check('手动"停画面"生效', !$('#pvimg').getAttribute('src') && T('#pvstate').includes('未打开'),
+    T('#pvstate'));
+  await click('#pvbtn');
+  await sleep(400);
+  check('手动"看画面"又开起来', ($('#pvimg').getAttribute('src') || '').startsWith('/api/preview'),
+    $('#pvimg').getAttribute('src') || '(无)');
 
   console.log(out.join('\n'));
   console.log('\n运行期错误：' + (errors.length ? '\n  ' + errors.join('\n  ') : '无'));

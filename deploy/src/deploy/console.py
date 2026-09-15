@@ -24,13 +24,15 @@ import json
 import os
 import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi import FastAPI, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from patrol.room import RoomStateError, load_room_state
 from patrol.stations import GRID_ANGLES, grid_geometry, load_stations
 from patrol.store import JsonlStore
@@ -48,6 +50,9 @@ EVENT_BUFFER = 50
 #: 为什么连补光灯和抓拍也拒：轮内机构和相机链路都归那一轮——插一张抓拍会进历史、
 #: 抢一次采图会话，而灯被人拨一下会打乱那一站的曝光窗口。
 MANUAL_GATED_KINDS = frozenset(ALL_KINDS) - {"stop"}
+
+#: 预览流开着时，每转发这么多块就回头看一眼"巡检开始了没"（ADR-0017 §4 的服务端兜底）
+PREVIEW_RECHECK_CHUNKS = 8
 
 
 class CmdBody(BaseModel):
@@ -75,6 +80,10 @@ class ConsoleDeps:
     trigger_dir: str = "/app/data/trigger"
     # 手动指令的落盘目录（console 只写，执行方 patrol-serve 领走执行）
     cmd_dir: str = "/app/data/cmd"
+    # 实时预览上游（ADR-0017：浏览器只连 console，相机地址与口令不进页面）
+    preview_url: str = "http://mushroom_preview:8003"
+    # 预览上游的打开器：`(path) -> async with 得 httpx 响应`（测试注入假的，不碰网络）
+    preview_open: object | None = None
     now: object = datetime.now
 
     def envelope(self) -> dict:
@@ -324,6 +333,64 @@ class Console:
                 "rows": rows[:limit]}
 
 
+def preview_block(deps: ConsoleDeps) -> dict | None:
+    """巡检进行中**不给预览**（ADR-0017 §4）：返回拒绝体；允许预览则返回 None。
+
+    为什么要拒：那一轮要用相机抓 60 张。实测这台 DVR 允许 ≥3 路并发 RTSP，但"预览 +
+    抓图 + 老系统整点抓 6 台"三方同时拉没做过长时间验证，不去赌。轮间（约 94% 的时间）
+    随时可看；急停**不**解锁预览——它停的是机构，本轮仍在跑。
+    """
+    patrol = patrol_state(deps.runs_dir)
+    if not patrol.get("active"):
+        return None
+    return {
+        "error": "巡检进行中：相机这一路归本轮，" + eta_text(patrol, now=deps.now()),
+        "reason": "patrolling",
+        "patrol": patrol,
+        "retry_after_s": round_eta_s(patrol, now=deps.now()),
+        "retry_hint": "本轮结束后预览自动可用；需要马上看画面可以等这一轮跑完",
+    }
+
+
+def _httpx_preview_opener(base_url: str):
+    """默认的上游打开器：httpx 异步流。
+
+    **读超时必须为 None**：MJPEG 在两帧之间会安静地等一整个帧间隔（5 fps 就是 200 ms），
+    相机卡一下会更久。给一个"合理"的读超时，等于让页面每隔几秒黑一次——而且是从
+    console 这一层断的，排障时看着像预览服务挂了。
+    """
+
+    @asynccontextmanager
+    async def open_upstream(path: str):
+        import httpx
+
+        timeout = httpx.Timeout(connect=5.0, read=None, write=10.0, pool=5.0)
+        async with (
+            httpx.AsyncClient(timeout=timeout) as client,
+            client.stream("GET", f"{base_url}{path}") as r,
+        ):
+            yield r
+
+    return open_upstream
+
+
+def _preview_opener(deps: ConsoleDeps):
+    return deps.preview_open or _httpx_preview_opener(deps.preview_url)
+
+
+async def _read_preview(deps: ConsoleDeps, path: str, limit: int = 65536):
+    """把上游一个**有限**响应读完（`/healthz`、`/frame.jpg`）。流不走这里。"""
+    opener = _preview_opener(deps)
+    async with opener(path) as r:
+        chunks, n = [], 0
+        async for chunk in r.aiter_bytes(8192):
+            chunks.append(chunk)
+            n += len(chunk)
+            if n >= limit:
+                break
+        return r.status_code, b"".join(chunks)
+
+
 def deps_from_env() -> ConsoleDeps:
     """从环境变量装配（容器里的默认路径；现场改 compose 的 environment 即可）。
 
@@ -343,6 +410,7 @@ def deps_from_env() -> ConsoleDeps:
         transport=HttpxTransport(allowed_hosts={host_port(analysis_url)}),
         trigger_dir=os.environ.get("PATROL_TRIGGER_DIR", "/app/data/trigger"),
         cmd_dir=os.environ.get("PATROL_CMD_DIR", "/app/data/cmd"),
+        preview_url=os.environ.get("PATROL_PREVIEW", "http://mushroom_preview:8003"),
     )
 
 
@@ -399,6 +467,90 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
         points = got.get("points", []) if isinstance(got, dict) else []
         latest = got.get("latest") if isinstance(got, dict) else None
         return {"ok": True, "box_id": box_id, "points": points, "latest": latest}
+
+    # ---------- 实时预览：从 console 反代到预览容器（ADR-0017） ----------
+    #
+    # 页面写 `<img src="/api/preview">`，不直连预览容器：相机地址与**口令**只存在于
+    # 服务端（与 ADR-0003 的单一 origin 一致），浏览器拿到的永远只是 MJPEG 字节流。
+
+    @app.get("/api/preview/status")
+    async def api_preview_status() -> JSONResponse:
+        """预览现在能不能看（页面每秒轮询，永不 500——与 /api/status 同样的规矩）。"""
+        block = preview_block(deps)
+        if block is not None:
+            return JSONResponse({**block, "available": False, "upstream": None})
+        try:
+            status, body = await _read_preview(deps, "/healthz")
+        except Exception as e:  # noqa: BLE001 - 预览没起不该让页面整页报错
+            return JSONResponse({"available": False, "upstream": None,
+                                 "error": f"预览服务连不上：{e}"})
+        try:
+            info = json.loads(body or b"{}")
+        except json.JSONDecodeError:
+            info = {"raw": body[:200].decode("utf-8", "replace")}
+        ok = status == 200
+        return JSONResponse({
+            "available": ok,
+            "upstream": info,
+            # 上游 /healthz 用 503 表达"还没有帧"（ffmpeg 正在连相机）：照实说
+            "error": None if ok else f"预览服务暂时没有画面（上游 HTTP {status}）",
+        })
+
+    @app.get("/api/preview/frame.jpg")
+    async def api_preview_frame() -> Response:
+        """单帧快照：流断了时页面可以退回"两秒一张"的降级显示，也方便排障。"""
+        block = preview_block(deps)
+        if block is not None:
+            return JSONResponse(block, status_code=409)
+        try:
+            status, body = await _read_preview(deps, "/frame.jpg")
+        except Exception as e:  # noqa: BLE001
+            return JSONResponse({"error": f"预览服务连不上：{e}"}, status_code=503)
+        if status != 200 or not body:
+            return JSONResponse({"error": f"还取不到画面（上游 HTTP {status}）"}, status_code=503)
+        return Response(content=body, media_type="image/jpeg",
+                        headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/preview")
+    async def api_preview() -> Response:
+        """MJPEG 流（`multipart/x-mixed-replace`）：`<img>` 直接就能播，页面零播放器。
+
+        必须先自己打开上游、看到它的状态码再返回：`StreamingResponse` 一旦返回，
+        状态码就定死了——上游 503（正在连相机）会变成"200 + 空流"，页面只看到一张
+        永远不出现的图，而错误理由全丢了。
+        """
+        block = preview_block(deps)
+        if block is not None:
+            return JSONResponse(block, status_code=409)
+        stack = AsyncExitStack()
+        try:
+            r = await stack.enter_async_context(_preview_opener(deps)("/stream.mjpg"))
+        except Exception as e:  # noqa: BLE001
+            await stack.aclose()
+            return JSONResponse({"error": f"预览服务连不上：{e}"}, status_code=503)
+        if r.status_code != 200:
+            await stack.aclose()
+            return JSONResponse({"error": f"预览服务没给流（上游 HTTP {r.status_code}）"},
+                                status_code=503)
+
+        async def relay() -> AsyncIterator[bytes]:
+            n = 0
+            try:
+                async for chunk in r.aiter_bytes(16384):
+                    # 流开着的时候巡检可能开始了（调度器不看页面）。**服务端**兜底把它断掉，
+                    # 而不是指望页面自觉——标签页卡住、网线掉了、页面是老版本，规则就没人执行了。
+                    # 按块数而不是按秒判：5 fps 下 8 块约 1.5 秒，且不引入第二个时钟。
+                    n += 1
+                    if n % PREVIEW_RECHECK_CHUNKS == 0 and preview_block(deps) is not None:
+                        break
+                    yield chunk
+            finally:
+                # 浏览器关掉 <img>（放开接管、切页）时这里会被调用：上游 http 连接必须
+                # 跟着断，否则预览容器会一直以为还有个观看者（广播队列白留一路）。
+                await stack.aclose()
+
+        return StreamingResponse(relay(), media_type="multipart/x-mixed-replace; boundary=frame",
+                                 headers={"Cache-Control": "no-store"})
 
     @app.post("/api/patrol/run", status_code=202)
     def api_patrol_run(reason: str = "", by: str = "scheduler") -> JSONResponse:

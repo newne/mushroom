@@ -10,10 +10,13 @@
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 from deploy.console import (
+    PREVIEW_RECHECK_CHUNKS,
     ConsoleDeps,
     create_app,
     eta_text,
@@ -44,7 +47,7 @@ def write_run(runs: Path, name: str, events: list[dict], *, age_s: float = 0.0) 
     return p
 
 
-def make_client(tmp_path, *, entry="2026-09-04", transport=None) -> TestClient:
+def make_client(tmp_path, *, entry="2026-09-04", transport=None, preview_open=None) -> TestClient:
     room = tmp_path / "room.yaml"
     write_room(room, entry)
     stations = tmp_path / "stations.yaml"
@@ -58,7 +61,7 @@ def make_client(tmp_path, *, entry="2026-09-04", transport=None) -> TestClient:
                        outbox_path=str(tmp_path / "outbox.jsonl"),
                        runs_dir=str(tmp_path / "runs"),
                        trigger_dir=str(tmp_path / "trigger"), cmd_dir=str(tmp_path / "cmd"),
-                       transport=transport, now=lambda: NOW)
+                       transport=transport, preview_open=preview_open, now=lambda: NOW)
     return TestClient(create_app(deps))
 
 
@@ -432,3 +435,145 @@ def test_lamp_off_is_allowed_under_estop(tmp_path):
         on = c.post("/api/cmd", json={"kind": "lamp", "args": {"on": True}})
     assert off.status_code == 202
     assert on.status_code == 409 and "急停" in on.json()["error"]
+
+
+# ---------- 实时预览的代理面（ADR-0017） ----------
+
+
+class FakeUpstream:
+    """假的预览上游响应：只需要 preview 代理真正用到的那两样（状态码 + 字节流）。"""
+
+    def __init__(self, status_code: int = 200, chunks: list[bytes] | None = None):
+        self.status_code = status_code
+        self._chunks = list(chunks or [])
+        self.closed = False
+
+    async def aiter_bytes(self, _n: int = 0):
+        for c in self._chunks:
+            yield c
+
+    async def aclose(self):
+        self.closed = True
+
+
+def make_preview_opener(status_code=200, chunks=None):
+    """`preview_open` 的形状：`(path) -> async with 得响应`；顺便记下被问过哪些路径。"""
+    seen: list[str] = []
+
+    @asynccontextmanager
+    async def open_upstream(path: str):
+        seen.append(path)
+        yield FakeUpstream(status_code, chunks if chunks is not None else [JPEG, JPEG])
+
+    return open_upstream, seen
+
+
+JPEG = b"\xff\xd8\xff\xe0jpeg-bytes\xff\xd9"
+
+
+@pytest.mark.anyio
+async def test_preview_stream_is_proxied_as_multipart(tmp_path):
+    """浏览器只连 console：`<img src="/api/preview">` 拿到的是 MJPEG，不是重定向。
+
+    这里用 `route.endpoint()` 而不是 TestClient：MJPEG 是无限流，TestClient 会读完它
+    （preview 侧第一版就是这么挂住的）。只取一段、然后关掉。
+    """
+    opener, seen = make_preview_opener()
+    deps = ConsoleDeps(room_path=str(tmp_path / "room.yaml"),
+                       stations_path=str(tmp_path / "stations.yaml"),
+                       runs_dir=str(tmp_path / "runs"), outbox_path=str(tmp_path / "o.jsonl"),
+                       trigger_dir=str(tmp_path / "trigger"), cmd_dir=str(tmp_path / "cmd"),
+                       preview_open=opener, now=lambda: NOW)
+    app = create_app(deps)
+    route = next(r for r in app.routes if getattr(r, "path", None) == "/api/preview")
+
+    resp = await route.endpoint()
+    assert resp.media_type.startswith("multipart/x-mixed-replace; boundary=frame")
+    assert resp.headers["cache-control"] == "no-store"
+    assert seen == ["/stream.mjpg"], "上游路径写死在这里，页面不该能挑路径"
+
+    body = resp.body_iterator
+    assert await anext(body) == JPEG
+    await body.aclose()
+
+
+def test_preview_is_refused_while_a_round_runs(tmp_path):
+    """巡检进行中拒绝预览（ADR-0017 §4），并且要说清"还要等多久"。"""
+    write_run(tmp_path / "runs", "20260914-100000-9.jsonl", [
+        {"event": "start", "ts": "2026-09-14T09:58:00", "stations": 60},
+        {"event": "station", "index": 12, "total": 60, "station_id": "S105"},
+    ])
+    opener, seen = make_preview_opener()
+    with make_client(tmp_path, preview_open=opener) as c:
+        r = c.get("/api/preview")
+        assert r.status_code == 409
+        assert "巡检进行中" in r.json()["error"]
+        assert r.json()["retry_after_s"] > 0
+        assert c.get("/api/preview/frame.jpg").status_code == 409
+        st = c.get("/api/preview/status").json()
+    assert st["available"] is False and st["reason"] == "patrolling"
+    assert seen == [], "被拒时一次都不该去连预览上游"
+
+
+def test_preview_status_reports_upstream_health(tmp_path):
+    """预览容器还没出画面时（上游 503）照实说，而不是让页面显示一张空图。"""
+    opener, _ = make_preview_opener(status_code=503, chunks=[b'{"ok": false, "frames": 0}'])
+    with make_client(tmp_path, preview_open=opener) as c:
+        st = c.get("/api/preview/status").json()
+    assert st["available"] is False
+    assert st["upstream"]["frames"] == 0
+    assert "没有画面" in st["error"]
+
+
+def test_preview_status_stays_200_when_upstream_is_down(tmp_path):
+    """预览没起（连不上）不该让页面整页报错——与 /api/status 同样的规矩。"""
+
+    @asynccontextmanager
+    async def broken(path: str):
+        raise ConnectionError("preview 没起")
+        yield  # pragma: no cover - 只为让它是个异步生成器
+
+    with make_client(tmp_path, preview_open=broken) as c:
+        r = c.get("/api/preview/status")
+        assert r.status_code == 200
+        assert r.json()["available"] is False and "连不上" in r.json()["error"]
+
+
+def test_preview_frame_is_proxied_as_jpeg(tmp_path):
+    opener, seen = make_preview_opener(chunks=[JPEG])
+    with make_client(tmp_path, preview_open=opener) as c:
+        r = c.get("/api/preview/frame.jpg")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg" and r.content == JPEG
+    assert seen == ["/frame.jpg"]
+
+
+@pytest.mark.anyio
+async def test_preview_stream_stops_itself_when_a_round_starts(tmp_path):
+    """轮次开跑时，**服务端**把已经开着的流断掉（ADR-0017 §4）。
+
+    不能只靠页面自觉：标签页卡住、网线掉了、页面还是老版本，规则就没人执行了。
+    """
+    chunks = [JPEG] * 40
+    opener, _ = make_preview_opener(chunks=chunks)
+    deps = ConsoleDeps(room_path=str(tmp_path / "room.yaml"),
+                       stations_path=str(tmp_path / "stations.yaml"),
+                       runs_dir=str(tmp_path / "runs"), outbox_path=str(tmp_path / "o.jsonl"),
+                       trigger_dir=str(tmp_path / "trigger"), cmd_dir=str(tmp_path / "cmd"),
+                       preview_open=opener, now=lambda: NOW)
+    route = next(r for r in create_app(deps).routes
+                 if getattr(r, "path", None) == "/api/preview")
+
+    resp = await route.endpoint()          # 开流时没有巡检：放行
+    body = resp.body_iterator
+    got = [await anext(body)]
+    # 中途巡检开始了（调度器不看页面）
+    write_run(tmp_path / "runs", "20260914-100000-8.jsonl", [
+        {"event": "start", "ts": "2026-09-14T09:58:00", "stations": 60},
+        {"event": "station", "index": 2, "total": 60, "station_id": "S102"},
+    ])
+    with pytest.raises(StopAsyncIteration):
+        while True:
+            got.append(await anext(body))
+    assert 0 < len(got) < PREVIEW_RECHECK_CHUNKS < len(chunks), \
+        "必须在轮次开始后不久就断掉，而不是把 40 块全发完"
