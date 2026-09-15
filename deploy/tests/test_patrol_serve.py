@@ -262,10 +262,36 @@ def test_dry_run_preflight_touches_nothing_and_reports_paths(tmp_path, capsys):
                        "--stations", str(tmp_path / "s.yaml"), "--room", str(tmp_path / "r.yaml"),
                        "--outbox", str(tmp_path / "o.jsonl"), "--log", ""])
     logs: list[str] = []
-    rc = preflight(args, store=make_store(tmp_path), manual=None, log=logs.append)
+    rc = preflight(args, store=make_store(tmp_path), manual=None, log=logs.append,
+                   load_sdk=lambda: object())
 
     assert rc == 0
     joined = "\n".join(logs)
     assert str(tmp_path / "trigger") in joined
+    assert "已加载" in joined
     assert "没有连接控制器" in joined
     assert "手动通道已关闭" in joined
+
+
+def test_preflight_fails_loudly_when_the_vendor_library_cannot_load(tmp_path):
+    """厂商库加载不了 ⇒ 预检必须失败并说清方向。
+
+    2026-09-15 上机时的真实报错是 ``GLIBCXX_3.4.32 not found``（容器里 C++ 运行时太旧）。
+    光看"库文件在不在"是看不出来的，所以预检要真的 load 一次；失败时把排查方向打出来，
+    而不是让人等到页面上点一下才发现。
+    """
+    from deploy.patrol_serve import parse_args, preflight
+
+    args = parse_args(["--dry-run", "--stations", "/s.yaml", "--room", "/r.yaml"])
+    logs: list[str] = []
+
+    def boom():
+        raise RuntimeError("无法加载 FMC4030 动态库: /opt/fmc-lib/libFMC4030_2009_1.so"
+                           "（原因: libstdc++.so.6: version `GLIBCXX_3.4.32' not found）")
+
+    rc = preflight(args, store=make_store(tmp_path), manual=None, log=logs.append, load_sdk=boom)
+
+    joined = "\n".join(logs)
+    assert rc == 2
+    assert "厂商库加载失败" in joined and "GLIBCXX" in joined
+    assert "预检失败" in joined

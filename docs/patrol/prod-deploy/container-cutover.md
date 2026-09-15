@@ -104,6 +104,15 @@ docker compose --profile patrol ps
 ## 4. 验收（逐条过，别跳）
 
 ```bash
+# 4.0 执行方预检：把要用的路径、配置与**厂商库能不能加载**一次打出来（不连控制器）
+docker run --rm -v /home/sysadmin/algorithm/mushroom_patrol/lib:/opt/fmc-lib:ro \
+  registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0 patrol-serve --dry-run \
+  --trigger-dir /app/data/trigger --cmd-dir /app/data/cmd \
+  --room /app/configs/room.yaml --stations /app/configs/stations.yaml \
+  --lib /opt/fmc-lib/libFMC4030_2009_1.so --log ""
+# 期望末行：厂商库 … —— 已加载 ✅ / 预检结束：**没有连接控制器，也没有进循环**（退出码 0）
+# 加载不了会**退出 2** 并指出方向（路径不对 vs C++ 运行时太旧）
+
 # 4.1 后端活着、门禁读得出来
 curl -s localhost:8001/healthz; echo
 curl -s localhost:8001/api/room | head -c 300; echo
@@ -176,7 +185,12 @@ sudo systemctl enable --now patrol-m1
 | 1 | `mushroom_patrol` 反复重启，日志只有 `unrecognized arguments: --room …` | `patrol-serve` 把 m1 的参数声明成**位置参数**（`nargs="*"`），而入口脚本是 `--trigger-dir X --room Y …` 的混合顺序；argparse 不支持位置参数与可选参数交替 | 改 `parse_known_args` 透传；加 `--dry-run` 预检；容器验证脚本改成按**入口角色 + 真实参数形状**跑（原来只跑 `--help`，所以没拦住） |
 | 2 | 页面能开，但 `/api/*` 与 `/healthz` 全 **502** | nginx 只在**启动时**解析一次 upstream；后端容器一重建（`compose up -d` 换 IP）就还指着旧地址 | nginx 用 `resolver 127.0.0.11` + 变量 `proxy_pass`，改成每次请求重新解析 |
 | 3 | 前端容器一直 `unhealthy`（服务其实好的） | 官方 nginx 镜像里**没有 wget**，healthcheck 必然失败 | 镜像里装 `curl`，healthcheck 换成 `curl -fsS` |
-| 4 | （预防性，上机前已修）后端"跑一轮"会失败 | console 整棵 `data` 只读，而触发请求/手动指令要写 `data/trigger`、`data/cmd` | 这两个子目录单独 rw 挂载，父目录仍 ro |
+| 4 | 页面点「抓拍」报 `连接控制器失败 … GLIBCXX_3.4.32 not found` | 厂商 `libFMC4030_2009_1.so` 需要 GLIBCXX_3.4.32，而 bookworm（GCC 12）的 libstdc++ 只到 3.4.30；宿主 Ubuntu 24.04 到 3.4.33，所以裸机跑得通、容器里跑不通 | 巡检镜像基础从 `python:3.12-slim-bookworm` 换成 **`-trixie`**（GCC 14 → 3.4.33）；`--dry-run` 预检改成**真的 load 一次**厂商库，把这类问题挡在部署前 |
+| 5 | （预防性，上机前已修）后端"跑一轮"会失败 | console 整棵 `data` 只读，而触发请求/手动指令要写 `data/trigger`、`data/cmd` | 这两个子目录单独 rw 挂载，父目录仍 ro |
+
+> 第 4 条是我在 Dockerfile 注释里**写错过**的一处判断：2026-09-14 只核对了"厂商库依赖哪些库"
+> （`readelf -d` 显示只要 libstdc++/libc），**没核对它需要的符号版本**，于是得出"bookworm 就行"。
+> 教训与现在的防线都记在 `docker/Dockerfile.patrol` 顶部。
 
 **现场状态与后续动作**：
 

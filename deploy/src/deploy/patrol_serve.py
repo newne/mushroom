@@ -158,11 +158,17 @@ def parse_args(argv: list[str] | None = None):
     return args
 
 
-def preflight(args, *, store: TriggerStore, manual=None, log=print) -> int:
-    """`--dry-run` 的实现：把"待会儿要用的东西"逐条打出来，一个都不碰。
+def preflight(args, *, store: TriggerStore, manual=None, log=print,
+              load_sdk=None) -> int:
+    """`--dry-run` 的实现：把"待会儿要用的东西"逐条打出来，**不连控制器、不动机构**。
 
     上机时的第一道检查——它会暴露"路径写错/挂载没生效/急停文件不在共享目录"这类问题，
     而这些问题在真跑一轮时才会以别的方式（比如"拍了 60 张但一张都没进 outbox"）暴露。
+
+    其中**厂商动态库要真的 load 一次**：2026-09-15 上机时页面报的
+    ``GLIBCXX_3.4.32 not found`` 就是"库在那儿、但容器里的 C++ 运行时太旧"，而
+    "库在那儿"这件事光看路径存在是看不出来的。load 不等于连控制器（后者要
+    ``FMC4030.connect``），所以这一步仍然是只读的。
     """
     from deploy.m1 import build_parser
 
@@ -182,6 +188,20 @@ def preflight(args, *, store: TriggerStore, manual=None, log=print) -> int:
     log(f"摄入端点   {m1.ingest}{'（同步已禁用）' if m1.no_sync else ''}")
     log(f"控制器     {m1.ip}:{m1.port}（device={m1.device}，本轮不连）")
     log(f"图像微调   {m1.framing}")
+
+    if load_sdk is None:                       # 真正 load 一次厂商库（不连接）
+        from patrol.fmc.loader import load_library
+        load_sdk = lambda: load_library(m1.lib)
+    try:
+        load_sdk()
+    except RuntimeError as e:
+        log(f"!! 厂商库加载失败：{e}")
+        log("   —— 路径不对/没挂进来，或者 C++ 运行时太旧（GLIBCXX 版本不够）：")
+        log("      `ldd <库>` 会直接指出缺哪个 GLIBCXX；本镜像基于 trixie 就是为这个。")
+        log("预检失败：厂商库都加载不了，手动指令与巡检都跑不起来")
+        return 2
+    log(f"厂商库     {m1.lib or '(环境变量 FMC4030_LIB_PATH)'} —— 已加载 ✅")
+
     log("预检结束：**没有连接控制器，也没有进循环**")
     return 0
 

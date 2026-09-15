@@ -98,13 +98,28 @@ echo "--- 4. 巡检执行方：用**入口脚本的真实调用形状**起一次
 #      那种"可选参数与位置参数交替"的形状；
 #   2) 镜像是**一个入口多角色**（`patrol-serve` 是角色名，不是 PATH 里的可执行文件），
 #      所以必须把角色当第一个参数传给入口脚本，不能用 `--entrypoint patrol-serve`。
+
+# 4a. 指向一个不存在的厂商库：预检必须**明确失败**（退出 2）并指出方向。
+#     本地没有厂商 .so，所以这条是"在哪都能跑"的确定性检查。
 docker run --rm mushroom_patrol:dev patrol-serve --dry-run \
   --trigger-dir /tmp/t --cmd-dir /tmp/c \
   --room /app/configs/room.yaml --stations /app/configs/stations.yaml \
-  --outbox /tmp/o.jsonl --log "" >/tmp/serve-dry.txt 2>&1
-check "patrol-serve 预检（角色 + 真实参数形状）" 0 "$?"
-check_has "预检打出了触发目录" "/tmp/t" "$(cat /tmp/serve-dry.txt)"
-check_has "预检明确没连控制器" "没有连接控制器" "$(cat /tmp/serve-dry.txt)"
+  --outbox /tmp/o.jsonl --lib /tmp/no-such-libFMC4030.so --log "" >/tmp/serve-bad.txt 2>&1
+check "patrol-serve 预检：缺厂商库时退出 2" 2 "$?"
+check_has "预检指出方向（GLIBCXX / 路径）" "厂商库加载失败" "$(cat /tmp/serve-bad.txt)"
+
+# 4b. 有真厂商库时（VENDOR_LIB=/host/path/libFMC4030_2009_1.so）再验一次"能加载"。
+#     这一步是最有价值的：上机时页面出现的 `GLIBCXX_3.4.32 not found` 就是它拦下的那类问题。
+if [ -n "${VENDOR_LIB:-}" ] && [ -f "$VENDOR_LIB" ]; then
+  docker run --rm -v "$(dirname "$VENDOR_LIB"):/opt/fmc-lib:ro" mushroom_patrol:dev \
+    patrol-serve --dry-run --trigger-dir /tmp/t --cmd-dir /tmp/c \
+    --room /app/configs/room.yaml --stations /app/configs/stations.yaml \
+    --lib "/opt/fmc-lib/$(basename "$VENDOR_LIB")" --log "" >/tmp/serve-lib.txt 2>&1
+  check "patrol-serve 预检：真厂商库可加载" 0 "$?"
+  check_has "预检确认已加载" "已加载" "$(cat /tmp/serve-lib.txt)"
+else
+  echo "[skip] 真厂商库检查（未设置 VENDOR_LIB；上机时设成宿主上的 libFMC4030_2009_1.so 再跑）"
+fi
 
 echo
 if [ "$fail" = 0 ]; then echo "=== 全部通过 ==="; else echo "=== 有失败项（上面标 FAIL 的）==="; fi

@@ -4,10 +4,20 @@
 #   cd /mnt/d/code/mushroom
 #   docker build -f docker/Dockerfile.patrol -t mushroom_patrol:dev .
 #
-# 为什么基础镜像可以是 bookworm：厂商库 libFMC4030_2009_1.so 只依赖 libstdc++ 与 libc
-# （2026-09-14 用 `readelf -d` 核实），不像 XCloudSDK 还要 libssl1.1，所以不必像
-# capture 那样死守 bullseye。
-FROM python:3.12-slim-bookworm
+# ## 为什么基础镜像是 trixie（而不是 bookworm）
+#
+# 厂商库 `libFMC4030_2009_1.so` 需要 **GLIBCXX_3.4.32**：
+#
+#   $ ldd /opt/fmc-lib/libFMC4030_2009_1.so
+#   ... version `GLIBCXX_3.4.32' not found (required by ...libFMC4030_2009_1.so)
+#
+# Debian 12（bookworm，GCC 12）的 libstdc++ 只到 GLIBCXX_3.4.30 —— 2026-09-15 上机时
+# 页面就是这么报错的（容器里 load 不了厂商库）。Debian 13（trixie，GCC 14）到 3.4.33，
+# 与宿主 Ubuntu 24.04 一致。
+#
+# ⚠️ 教训：当初只核对了"它依赖哪些库"（readelf -d 显示只有 libstdc++/libc），**没核对
+# 需要的符号版本**。`--dry-run` 预检现在会真的 load 一次这个库，把这类问题挡在部署前。
+FROM python:3.12-slim-trixie
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
