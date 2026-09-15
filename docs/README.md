@@ -2,7 +2,7 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| `adr/` | 架构决策记录（0001–0016）。跨两个子系统的决策也放这里 |
+| `adr/` | 架构决策记录（0001–0017）。跨两个子系统的决策也放这里 |
 | `agents/` | 给协作代理看的流程约定：issue 追踪、triage 标签、领域文档规范 |
 | `patrol/` | **巡检工程**的文档与现场记录 |
 | `patrol/console-ui/` | 巡检台规格（`spec.md`）、单页原型（`prototype.html`）、jsdom 回归（`verify.js`）、五张实施票 |
@@ -19,6 +19,7 @@
 | 算法工程（调度 / 视觉 / 决策） | `../src/`、`../tests/` | `../pyproject.toml`、`../uv.lock`、`../docker/` | `technical/`、`algorithms/`、`business/` |
 | 巡检工程（导轨 / 采图 / 接收 API） | `../patrol/`、`../deploy/`、`../measure/`、`../analysis/` | `../patrol-workspace/`（独立 uv 项目）、`../docker/Dockerfile.patrol` | `patrol/` |
 | 巡检台前端（页面，独立产物） | `../web/console/` | nginx，见 `../docker/mushroom_solution.yml` 的 `mushroom_console_web` | `patrol/console-ui/`（规格与原型） |
+| 实时画面（RTSP→MJPEG 转码，独立容器） | `../deploy/src/deploy/preview.py` | 同一个 `Dockerfile.patrol`，容器角色 `preview` | `adr/0017`、`deploy/README.md` §6.1 |
 
 其它顶层目录：`third_party/`（vendored：相机截图服务 `capture/`）、`archive/`（冻结归档 `legacy/`）、
 `models/`、`data/`、`examples/`、`notebooks/`。

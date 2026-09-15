@@ -20,6 +20,7 @@
 | `GET /api/status`、`/api/room`、`/api/stations`、`/api/grid` | 实时状态 |
 | `GET /api/images?station_id=`、`/api/events` | 历史图像与日志 |
 | `GET /api/growth?box_id=` | 生长曲线（console 代理 prod 的 `/growth`，保持单一 origin） |
+| `GET /api/preview`（MJPEG 流）、`/api/preview/status`、`/api/preview/frame.jpg` | 实时画面（console 反代预览容器；巡检中拒绝，ADR-0017） |
 | `POST/DELETE /api/session`、`GET/POST /api/cmd`、`POST/DELETE /api/stop` | 手动控制（受 ADR-0013/0016 约束：巡检中拒绝、急停是闩锁） |
 
 **前端不持有任何控制逻辑**：它不认识控制器、SDK、库房主机路径，只发 HTTP。控制面接口
@@ -35,14 +36,15 @@
 | 公共 | 门禁带 | 库房 · 入库日期 · 第几天 · 今天能不能巡检（现场第一疑问） |
 | 公共 | 左栏 | 导轨平面图（Y–Z，标出当前站位）+ 按层分组的站位列表 |
 | 实时 | 中栏 | 上一轮 / 本轮状态 + 选中站位的历史图像（本地待同步 + prod 双源） |
-| 实时 | 右栏 | **急停（常驻）** · 接管/放开 + 会话倒计时 · 定位（二次确认）/回零 · 点动（0.5/1/5/10）· 补光灯 · 抓拍 · 机器信息 · 事件日志 |
+| 实时 | 右栏 | **急停（常驻）** · 接管/放开 + 会话倒计时 · 定位（二次确认）/回零 · 点动（0.5/1/5/10）· 补光灯 · 抓拍 · **实时画面**（接管自动开、放开自动关）· 机器信息 · 事件日志 |
 | 历史 | 中栏 | 时间轴（按日期分组、失败帧标灰）· 大图（1×/2×/4× + 滚轮 + 拖拽）· 生长曲线（SVG，长度/伞盖两条线 + 最近测量值表） |
 | 历史 | 右栏 | 筛选（日期范围 / 角度档，只列数据里真实存在的档）· 机器信息 · 事件日志 |
 
 手动面的行为边界（越界在浏览器侧拦、403/409 话术原样显示、`Esc` 只中断在飞的那条、
 放开会话 = 回零 + 撤权）见 `docs/patrol/console-ui/spec.md` §10.4/§10.5 与 ADR-0016；
-历史模式的现状与缺口见 §10.6。
-回归脚本：`docs/patrol/console-ui/verify-page.js`（jsdom，**58 项断言**）。
+历史模式的现状与缺口见 §10.6；实时画面见 §10.7 与 ADR-0017
+（页面里**只有 `/api/preview`**——相机地址与口令不出现在任何浏览器可见的地方）。
+回归脚本：`docs/patrol/console-ui/verify-page.js`（jsdom，**70 项断言**）。
 
 ## 本机开发
 
@@ -76,6 +78,13 @@ scp -r web/console sysadmin@<服务器>:/home/sysadmin/algorithm/mushroom_patrol
 # 3) 在服务器上起两个容器
 cd /home/sysadmin/algorithm/mushroom_service
 docker compose --profile patrol up -d mushroom_console mushroom_console_web
+```
+
+实时画面还要多一个容器（同一个巡检镜像的 `preview` 角色，无宿主端口；页面通过 console
+的 `/api/preview` 拿流）：
+
+```bash
+docker compose --profile patrol up -d mushroom_preview
 ```
 
 上位机访问 `http://<服务器IP>:8002/`。**对外只暴露这一个端口**：后端 8001 只给前端容器

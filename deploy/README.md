@@ -347,6 +347,35 @@ python3 -m deploy.patrol_serve --cmd-dir /app/data/cmd      # 容器里的 patro
 
 ---
 
+## 6.1 实时画面（接管时的那双眼睛）
+
+手动点动最缺的是"看见自己挪到哪儿了"。这一路是**独立的一个容器**（同一个巡检镜像的
+`preview` 角色），因为它与控制器毫无关系——ffmpeg 崩了只该重启预览：
+
+```
+相机 192.168.1.238:554 (RTSP) → mushroom_preview（ffmpeg → MJPEG 广播）
+                                       ↑
+页面 <img src="/api/preview"> → nginx → console（反代；巡检中回 409）
+```
+
+```bash
+python3 -m deploy.preview --stations /app/configs/stations.yaml   # 容器里的 preview 角色
+```
+
+| 关键点 | 说明 |
+| --- | --- |
+| 相机凭据只有一个来源 | `stations.yaml` 的 `camera_user`/`camera_pwd`，与抓拍共用；URL 里的口令在任何日志里都打码 |
+| 页面**只连 console** | 相机地址与口令不出现在任何浏览器可见的配置里（ADR-0003 单一 origin） |
+| 一个 ffmpeg 服务所有观看者 | 5 fps 下慢客户端丢帧（队列 3）而不是拖住别人；断流按 1/2/5/10 s 退避重启 |
+| 巡检进行中不给看 | 那一轮要抓 60 张；console 拒绝**新**请求（409 + 还要等多久），并且每 8 块回头看一眼，把**已经开着**的流也断掉 |
+| 它有 `/healthz`（503 = 还没有帧） | 判据是"画面是新的"，不是"进程活着"；直接排障用 `/frame.jpg` 取单帧 |
+
+**为什么不用采图服务当预览**：单次抓图 ≈5.2 s 且必然落一个文件（没有"只回图不落盘"），
+边挪边看没有意义。**为什么不用 HLS/WebRTC**：`<img>` 原生支持 `multipart/x-mixed-replace`，
+页面零播放器、零 vendor 依赖（spec §8 的"零构建"仍然成立）。实测数据与边界见 ADR-0017。
+
+---
+
 ## 7. 已知边界
 
 - **`--ingest` 端点已就位**（2026-09-13 关掉 gap-list G1）：`http://10.77.77.39:8000/ingest`，

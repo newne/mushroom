@@ -43,6 +43,7 @@
 | 图像索引（image index） | 把每帧图像的 MinIO 对象名关联到站位/时间/角度档的记录，采图时落库（ADR-0005） |
 | 两段速（two-phase goto） | `Line_2Axis` 的单条指令走两段：先按**巡检档**走空程到"距目标 `approach_margin`（5 mm）"，再切**接近档**走完余程；段序由 ADR-0007 / F6 修正，真机验收见 §2.2.2 |
 | 链路（link / Transport） | patrol 与外部服务之间的**唯一**出网形状：`transport(url, *, params=None, body=None) -> dict`；M1 由 `deploy.transport.HttpxTransport` 实现（ADR-0011） |
+| 实时画面（live preview） | 接管时看的那路相机画面：相机 RTSP →（`preview` 容器里的 ffmpeg）→ MJPEG 广播 → console 反代 → 浏览器 `<img>`；**不录制、不进历史**（ADR-0017） |
 | 部署包（deploy） | 持有真实 HTTP、时钟、常驻循环的**胶水包**；patrol 保持"库内零网络调用"安全基线，二者以 `links.Transport` 协议对接（ADR-0011） |
 
 ## 部署单元
@@ -53,7 +54,11 @@
 - **patrol**（库房主机，Ubuntu x86_64）：FMC4030 运动 + 采图调度 + outbox；**库内零网络调用**
 - **deploy**（与 patrol 同机，ADR-0011）：装配入口 `patrol-m1`——真实 `Transport`（httpx）+ 触发式/常驻循环；
   patrol 的依赖注入由它提供，跨进程边界也在这里
-- **console**（与 patrol 同机，ADR-0003）：巡检台界面与手动控制服务；浏览器只与它通信
+- **console**（与 patrol 同机，ADR-0003）：巡检台界面与手动控制服务；浏览器只与它通信。
+  2026-09-15 起**前后端分离**（ADR-0015）：页面产物在 `web/console/`（nginx 发静态页 + 反代 `/api`），
+  控制接口全在 `deploy.console` 里
+- **preview**（与 patrol 同机，ADR-0017）：实时画面单元——RTSP→MJPEG 转码 + 广播；
+  与控制器无关（ffmpeg 崩了只重启它），**无宿主端口**，只由 console 反代
 - **capture**（同机 vendored 组件）：XCloud 相机截图服务（:7003）；**用 HTTP 500 表示业务失败**（响应体仍是完整信封），
   须与链路故障区分——否则一次抖动会打断整轮
 - **analysis**（prod 服务器 10.77.77.39）：环境入库 + 对齐分析 + 接收 API；`images` 表承载图像索引（ADR-0005）

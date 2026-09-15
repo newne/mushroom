@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# 巡检台两个容器的端到端验证（在 WSL 里跑；不动真机、不动现场数据）。
+# 巡检台容器的端到端验证（在 WSL 里跑；不动真机、不动现场数据，预览那一段用假上游）。
 #
-# 验的是"上机时最容易坏、坏了又最难查"的四件事：
+# 验的是"上机时最容易坏、坏了又最难查"的五件事：
 #   1. 前端容器出得来页面，并且把 /api 反代到了后端（单一 origin）；
 #   2. 后端**能写**协调文件——data/trigger（触发请求）与 data/cmd（手动指令/会话/急停）。
 #      这两处必须是 rw 挂载：整棵 data 只读时，页面看起来正常，一点"跑一轮"就 500；
 #   3. 手动面在真容器里能走完"接管 → 提交 → 读回"，且急停能置位；
-#   4. 页面目录里的开发文件（dev.py/README/nginx.conf）不会被当成静态资源发出去。
+#   4. 页面目录里的开发文件（dev.py/README/nginx.conf）不会被当成静态资源发出去；
+#   5. 实时预览这一层：ffmpeg 在镜像里、`preview` 角色起得来、console 的
+#      /api/preview/status 在**没有上游**时也回 200（页面不能被它拖垮）。
 #
-# 前置：两个镜像已在本地（没推过 registry 也能验）
+# 前置：镜像已在本地（没推过 registry 也能验）
 #   docker build -f docker/Dockerfile.patrol       -t mushroom_patrol:dev       .
 #   docker build -f docker/Dockerfile.console-web  -t mushroom_console_web:dev  .
 set -uo pipefail
@@ -22,7 +24,7 @@ PORT_BE=18061
 PORT_FE=18062
 
 cleanup() {
-  docker rm -f "$SVC" "$WEB" >/dev/null 2>&1
+  docker rm -f "$SVC" "$WEB" cverify_preview >/dev/null 2>&1
   docker network rm "$NET" >/dev/null 2>&1
   rm -rf "$CFG"
 }
@@ -120,6 +122,48 @@ if [ -n "${VENDOR_LIB:-}" ] && [ -f "$VENDOR_LIB" ]; then
 else
   echo "[skip] 真厂商库检查（未设置 VENDOR_LIB；上机时设成宿主上的 libFMC4030_2009_1.so 再跑）"
 fi
+
+echo "--- 5. 实时预览这一层（ADR-0017） ---"
+# 5a. ffmpeg 必须在镜像里：转码放在容器做，宿主上没有 ffmpeg。
+check_has "镜像里有 ffmpeg" "ffmpeg version" "$(docker run --rm mushroom_patrol:dev ffmpeg -version 2>&1 | head -1)"
+
+# 5b. preview 角色的参数形状（与入口脚本一致：角色名当第一个参数）。
+#     站位表**读不到**时必须明确说"拿不到 RTSP 地址"并退出 2，而不是空转等一个永远不来的画面。
+#     ⚠️ 别用"站位表里没有 camera_ip"来触发这个分支：`Station.camera_ip` 有全场默认值
+#     （`patrol.stations.CAMERA_IP`），所以那种表照样能拼出地址、照样一直跑（这是设计：
+#     相机晚到一会儿不该让容器反复重启）。本文件第一版就是那么写的，于是把 docker run 挂住了。
+docker run --rm -v "$CFG/configs:/app/configs:ro" mushroom_patrol:dev \
+  preview --stations /app/configs/no-such-stations.yaml >/tmp/preview-nocam.txt 2>&1
+check "preview：读不到站位表时退出 2（不空转）" 2 "$?"
+check_has "preview：说清缺什么" "拿不到 RTSP 地址" "$(cat /tmp/preview-nocam.txt)"
+
+# 5c. 有上游（这里用一个假的 RTSP 地址 + 一个不存在的 ffmpeg）时，HTTP 面仍然要起得来。
+#     /healthz 会回 503（还没有帧）——**这正是页面要看到的"暂时没有画面"**，
+#     而不是连不上；console 的 /api/preview/status 必须把它翻译成 available:false。
+docker run -d --name cverify_preview --network "$NET" --network-alias mushroom_preview \
+  mushroom_patrol:dev preview --rtsp "rtsp://127.0.0.1:1/none" \
+  --ffmpeg /bin/false --stations /app/configs/stations.yaml >/dev/null
+sleep 3
+check "preview：/healthz 在没有帧时回 503" 503 \
+  "$(docker run --rm --network "$NET" mushroom_patrol:dev \
+     curl -s -o /dev/null -w '%{http_code}' -m 5 http://mushroom_preview:8003/healthz)"
+check "preview：取不到画面时 /frame.jpg 回 503" 503 \
+  "$(docker run --rm --network "$NET" mushroom_patrol:dev \
+     curl -s -o /dev/null -w '%{http_code}' -m 5 http://mushroom_preview:8003/frame.jpg)"
+check "console：有上游但没画面时 /api/preview/frame.jpg 回 503" 503 \
+  "$(curl -s -o /dev/null -w '%{http_code}' -m 8 "$FE/api/preview/frame.jpg")"
+docker rm -f cverify_preview >/dev/null 2>&1
+
+# 5d. 上游不在时（现场最常见：预览容器没起），console 的状态口必须**仍然是 200**——
+#     页面每秒读它，一个坏依赖不该让整页变错误，只说"暂时看不到画面"。
+#     这里的 console 没有设 PATROL_PREVIEW，用的是默认的 http://mushroom_preview:8003，
+#     而上面那个假上游刚被删掉：于是走的正是"连不上"这条真实路径。
+check "console：上游不在时 /api/preview/status 仍回 200" 200 \
+  "$(curl -s -o /dev/null -w '%{http_code}' -m 8 "$FE/api/preview/status")"
+check_has "console：状态里 available=false（页面据此显示「看不到画面」）" '"available":false' \
+  "$(curl -s -m 8 "$FE/api/preview/status")"
+check "console：上游不在时 /api/preview 回 503（不是空流）" 503 \
+  "$(curl -s -o /dev/null -w '%{http_code}' -m 8 "$FE/api/preview")"
 
 echo
 if [ "$fail" = 0 ]; then echo "=== 全部通过 ==="; else echo "=== 有失败项（上面标 FAIL 的）==="; fi

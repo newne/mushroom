@@ -88,18 +88,19 @@ scp docker/mushroom_solution.yml $SSH:$BASE/mushroom_service/mushroom_solution.y
 
 ```bash
 cd $BASE/mushroom_service
-docker compose --profile patrol pull mushroom_patrol mushroom_console mushroom_console_web
-docker compose --profile patrol up -d mushroom_patrol mushroom_console mushroom_console_web
+docker compose --profile patrol pull mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
+docker compose --profile patrol up -d mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
 docker compose --profile patrol ps
 ```
 
-三个容器各自是什么：
+四个容器各自是什么：
 
 | 容器 | 角色 | 端口 | 说明 |
 | --- | --- | --- | --- |
 | `mushroom_patrol` | `patrol-serve` | 无 | **唯一持有控制器**的进程；被触发才跑一轮，同时执行手动指令 |
 | `mushroom_console` | `console` | 8001 | 收请求、读写协调文件、提供 `/api/*`；**不连控制器** |
 | `mushroom_console_web` | nginx | **8002** | 发页面 + 把 `/api` 与 `/healthz` 反代给 console（单一 origin） |
+| `mushroom_preview` | `preview` | 无 | 相机实时画面（RTSP→MJPEG，ADR-0017）。**没有宿主端口**：只由 console 反代 |
 
 ## 4. 验收（逐条过，别跳）
 
@@ -128,6 +129,16 @@ ls -l $BASE/mushroom_patrol/data/trigger/run.json
 
 # 4.4 执行方领到了吗（5 秒内应看到日志）
 docker logs --tail 20 mushroom_patrol
+
+# 4.5 实时预览（ADR-0017）：容器健康 + 上游真的有帧 + 反代通了
+docker compose --profile patrol ps mushroom_preview         # Up (healthy)
+curl -s localhost:8003/healthz 2>/dev/null || \
+  docker compose exec mushroom_preview curl -fsS localhost:8003/healthz; echo
+# 期望 {"ok":true,"frames":N,"age_s":<1.0,...}；frames 一直在涨 = ffmpeg 在出帧
+docker compose exec mushroom_console curl -fsS localhost:8001/api/preview/status; echo
+curl -s -o /tmp/f.jpg -w '%{http_code} %{content_type} %{size_download}\n' \
+  localhost:8002/api/preview/frame.jpg     # 期望 200 image/jpeg 几十 KB
+# 浏览器：接管 → 操作卡下面那张「实时画面」自己亮起来；放开 → 自己关掉
 ```
 
 浏览器打开 `http://10.77.77.39:8002/`，确认：门禁带、站位列表、平面图、事件日志都在；
@@ -141,12 +152,14 @@ docker logs --tail 20 mushroom_patrol
    位置读数变化 → `回零` → 放开（放开会自动排一条回零）。
 3. **急停链路**：点动一条较大的移动，运动中按急停 → 机构应立刻停住、日志里出现
    "收到急停请求"、页面药丸变"已急停"；**然后复位急停**（它是闩锁，不复位后面每一轮都会失败）。
+4. **实时画面**（新增，只需眼看）：接管 → 画面自动出现（约 1 秒延迟）→ 点一次 0.5mm 点动，
+   画面里的人/物标尺确实跟着动 → 放开 → 画面自动消失。
 
 ## 5. 回滚
 
 ```bash
 cd $BASE/mushroom_service
-docker compose --profile patrol stop mushroom_patrol mushroom_console mushroom_console_web
+docker compose --profile patrol stop mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
 # 需要彻底撤掉时
 docker compose --profile patrol down
 ```
@@ -204,3 +217,35 @@ sudo systemctl enable --now patrol-m1
   改动前的 `mushroom_solution.yml` 与 `.env` 备份为 `*.bak-20260915`。
 - 只动了三个巡检服务：`mushroom_solution` / `mlflow` / `postgres_db` / `caddy` 未重启
   （服务器那份 compose 里 `mushroom_solution` 的镜像 tag 是 2026-03-20 的，**合并时保留，没有回退**）。
+
+---
+
+## 8. 2026-09-15 第二次上机：实时画面（ADR-0017）
+
+现场用了半天之后提的新需求：**接管时看不见画面**，点动/定位只能靠坐标猜。查过三条路
+（采图服务当预览 5.2 s 一张且必然落文件；相机没有 HTTP MJPEG，ISAPI 全 404；相机有 RTSP），
+选了 RTSP→MJPEG 转码，决定与实测数据在 `docs/adr/0017`。
+
+这一步上机**只新增一个容器**，另外三个一行没改：
+
+```bash
+# 1) 重建并推送巡检镜像（多了 ffmpeg 与 preview 角色）
+cd /mnt/d/code/mushroom
+docker build -f docker/Dockerfile.patrol -t $REG/mushroom_patrol:0.1.0 .
+docker push $REG/mushroom_patrol:0.1.0
+
+# 2) 推 compose 与页面（页面改了，镜像不用重建）
+scp docker/mushroom_solution.yml $SSH:$BASE/mushroom_service/mushroom_solution.yml
+scp -r web/console/* $SSH:$BASE/mushroom_patrol/web/
+
+# 3) 起预览容器（其余三个不动）
+docker compose --profile patrol pull mushroom_patrol mushroom_preview
+docker compose --profile patrol up -d mushroom_preview
+docker compose --profile patrol up -d --no-deps mushroom_console     # 只换 console 的镜像
+docker compose --profile patrol restart mushroom_console_web         # 只重读 nginx 配置
+```
+
+**这一节要盯的两个数**：`mushroom_preview` 的 `/healthz` 里 `frames` 要一直在涨（不涨就是
+ffmpeg 没连上相机，日志里会有打码后的 RTSP 地址与 ffmpeg 的 stderr）；console 的
+`/api/preview/status` 在巡检进行中必须是 `available:false`（这是设计，不是故障）。
+
