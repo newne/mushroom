@@ -48,7 +48,7 @@ from patrol.sync import PROD_INGEST_URL, SyncClient
 from deploy.framing_wire import build as build_framing
 from deploy.framing_wire import make_apply_trim
 from deploy.manual import ManualChannel
-from deploy.transport import HttpxTransport, host_port
+from deploy.transport import HttpxTransport, host_port, split_host_port
 
 DEFAULT_STATIONS_PATH = "/opt/mushroom-patrol/stations.yaml"
 DEFAULT_ROOM_PATH = "/opt/mushroom-patrol/room.yaml"   # 入库日期 ⇒ 巡检准入门禁
@@ -103,14 +103,20 @@ def make_capture(args) -> CaptureClient:
     """采图客户端。抽成工厂是因为**手动抓拍要用同一个**（同一台相机、同一个服务）：
     两处各建一个客户端，迟早会在"重试次数/错误分类"上漂移。
 
+    **地址要显式传进去**：客户端的默认地址是裸机那套（`127.0.0.1:7003`），容器里采图服务
+    发布在宿主上、必须走网桥网关（`172.17.0.1:7003`）。2026-09-15 上机时就是这里漏了，
+    于是每条采图都被传输层白名单拦下（`目标不在白名单内: 127.0.0.1:7003`）——白名单只
+    写了 `--capture-host`，而客户端还在用默认地址。
+
     accept_json_errors：采图服务用 HTTP 500 表示"**这一次**没拍成"（body 仍是完整
     信封），不是"服务挂了"。放它按链路故障抛错会把业务失败误判成基础设施故障，
     也会丢掉重试所需的 error_code/message。交给 CaptureClient._interpret 分类。
     """
+    host, port = split_host_port(args.capture_host)
     transport: Transport = HttpxTransport(
         allowed_hosts={args.capture_host}, accept_json_errors=("success",)
     )
-    return CaptureClient(transport=transport)
+    return CaptureClient(transport=transport, host=host, port=port)
 
 
 def make_sync(args) -> SyncClient | _NullSync:

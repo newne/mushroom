@@ -114,6 +114,21 @@ def test_defaults_match_field_conventions():
     assert args.log.endswith("m1.log"), "默认就要落盘——上次上机的 stdout 只活在管道里"
 
 
+def test_capture_client_points_at_the_configured_host():
+    """采图客户端的地址必须等于 `--capture-host`。
+
+    2026-09-15 上机实测：客户端退回默认的 `127.0.0.1:7003`，而传输层白名单是
+    `172.17.0.1:7003`（容器里要走宿主网桥）——于是每条采图都被自己的白名单拦下，
+    页面报 `采图链路失败: 目标不在白名单内: 127.0.0.1:7003`。
+    """
+    from deploy.m1 import make_capture
+
+    for host in ("172.17.0.1:7003", "127.0.0.1:7003", "10.77.77.39:7003"):
+        args = build_parser().parse_args(["--capture-host", host])
+        client = make_capture(args)
+        assert client.url == f"http://{host}/pool_capture"
+
+
 # ---------- 日志落盘 ----------
 
 

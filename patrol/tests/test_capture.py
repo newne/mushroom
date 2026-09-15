@@ -2,7 +2,8 @@ from datetime import datetime
 
 import pytest
 from patrol.capture_client import (
-    CAPTURE_URL,
+    CAPTURE_HOST,
+    CAPTURE_PORT,
     CaptureClient,
     CaptureError,
     DeviceOfflineError,
@@ -58,10 +59,32 @@ def test_object_name_format():
 # ---------- capture client（links.Transport 形状：send(url, *, params, body)） ----------
 
 def ok_transport(url: str, *, params=None, body=None) -> dict:
-    assert url == CAPTURE_URL  # URL 字面量在库内，adapter 只接参数
+    assert url == f"http://{CAPTURE_HOST}:{CAPTURE_PORT}/pool_capture"   # 默认（裸机）地址
     # 真实截图服务会把请求中的 filename（补 .jpg 后）回显在响应里
     return {"success": True, "message": "ok", "filename": params["filename"] + ".jpg",
             "cloud_url": "http://minio/bucket/" + params["filename"] + ".jpg"}
+
+
+def test_capture_url_follows_the_configured_host_and_port():
+    """采图服务地址由部署侧给（容器里要指向宿主网桥 `172.17.0.1:7003`）。
+
+    2026-09-15 上机教训：地址原先是写死的字面量 `127.0.0.1:7003`，而传输层白名单写的是
+    `--capture-host`（容器里是 `172.17.0.1:7003`）——于是每条采图都被自己的白名单拦下：
+    `采图失败: 目标不在白名单内: 127.0.0.1:7003（允许: ['172.17.0.1:7003']）`。
+    """
+    seen = {}
+
+    def t(url, *, params=None, body=None):
+        seen["url"] = url
+        return {"success": True, "filename": params["filename"] + ".jpg"}
+
+    client = CaptureClient(transport=t, host="172.17.0.1", port=7003)
+    client.capture(ip="192.168.1.238", filename="20260915/B101_S101_top45_113000")
+    assert seen["url"] == "http://172.17.0.1:7003/pool_capture"
+    assert client.url == "http://172.17.0.1:7003/pool_capture"
+
+    # 不给 host/port 时保持裸机默认（向后兼容）
+    assert CaptureClient(transport=t).url == f"http://{CAPTURE_HOST}:{CAPTURE_PORT}/pool_capture"
 
 
 def test_capture_success():

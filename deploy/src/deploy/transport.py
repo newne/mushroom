@@ -32,6 +32,23 @@ def host_port(url: str) -> str:
     return f"{parts.hostname}:{port}"
 
 
+def split_host_port(value: str, *, default_port: int | None = None) -> tuple[str, int]:
+    """把 ``host:port``（也接受 URL）拆成 ``(host, port)``。
+
+    与 `host_port()` 的区别：那个收的是 URL，这个还接受裸的 ``host:port`` —— compose 里
+    ``PATROL_CAPTURE_HOST=172.17.0.1:7003`` 就是这种形状。采图客户端的地址要用它来填，
+    否则客户端会退回默认的 ``127.0.0.1:7003``，被传输层白名单拦下（2026-09-15 上机实测：
+    `目标不在白名单内: 127.0.0.1:7003（允许: ['172.17.0.1:7003']）`）。
+    """
+    text = host_port(value) if "://" in value else value
+    host, _, port = text.rpartition(":")
+    if not host or not port.isdigit():
+        if default_port is None:
+            raise TransportError(f"需要 host:port 形状（或 URL），收到 {value!r}")
+        return text, default_port
+    return host, int(port)
+
+
 class HttpxTransport:
     """``patrol.links.Transport`` 的 httpx 实现，带目标白名单与统一超时。
 
