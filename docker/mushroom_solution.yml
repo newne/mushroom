@@ -268,7 +268,8 @@ services:
     depends_on:
       - mushroom_console
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      # 用 curl：官方 nginx 镜像没有 wget，写 wget 会让容器永远 unhealthy（服务其实好的）
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost/"]
       interval: 30s
       timeout: 10s
       retries: 3

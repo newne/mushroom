@@ -211,3 +211,61 @@ def test_no_manual_channel_keeps_the_plain_sleep(tmp_path):
     except KeyboardInterrupt:
         pass
     assert slept == [5.0, 5.0, 5.0]
+
+
+# ---------- 参数解析：入口脚本的调用形状（2026-09-15 上机时炸的就是这里） ----------
+
+
+def test_m1_options_after_our_own_are_passed_through():
+    """入口脚本把 m1 的参数**跟在后面**，混合顺序也必须能吃下。
+
+    现场表现：容器反复重启，日志只有一句 ``unrecognized arguments: --room …``。
+    根因是 m1 参数原先声明成位置参数（`nargs="*"`），而 argparse 不支持"位置参数与
+    可选参数交替"。
+    """
+    from deploy.patrol_serve import parse_args
+
+    argv = ["--trigger-dir", "/t", "--cmd-dir", "/c",
+            "--room", "/r.yaml", "--stations", "/s.yaml", "--outbox", "/o.jsonl",
+            "--log", "/l.log", "--capture-host", "172.17.0.1:7003",
+            "--ingest", "http://172.17.0.1:8000/ingest"]
+    args = parse_args(argv)
+
+    assert args.trigger_dir == "/t" and args.cmd_dir == "/c"
+    assert args.m1_args == argv[4:], "m1 的参数要原样、按序透传"
+
+
+def test_double_dash_separator_is_accepted_too():
+    """`--` 分隔符在不在都行（两种写法都要活）。"""
+    from deploy.patrol_serve import parse_args
+
+    args = parse_args(["--trigger-dir", "/t", "--", "--room", "/r.yaml"])
+    assert args.trigger_dir == "/t" and args.m1_args == ["--room", "/r.yaml"]
+
+
+def test_our_own_flags_are_not_swallowed_by_the_passthrough():
+    """我们自己的开关不能被当成 m1 的参数漏过去（否则执行方会去跑巡检的常驻模式）。"""
+    from deploy.patrol_serve import parse_args
+
+    args = parse_args(["--max-rounds", "2", "--no-manual", "--manual-poll", "1.5",
+                       "--dry-run", "--room", "/r.yaml"])
+    assert args.max_rounds == 2 and args.no_manual and args.manual_poll == 1.5 and args.dry_run
+    assert args.m1_args == ["--room", "/r.yaml"]
+
+
+def test_dry_run_preflight_touches_nothing_and_reports_paths(tmp_path, capsys):
+    """`--dry-run` 是上机第一道检查：把要用的路径与配置打出来，**不连控制器、不进循环**。"""
+    from deploy.patrol_serve import parse_args, preflight
+
+    args = parse_args(["--trigger-dir", str(tmp_path / "trigger"),
+                       "--cmd-dir", str(tmp_path / "cmd"), "--dry-run",
+                       "--stations", str(tmp_path / "s.yaml"), "--room", str(tmp_path / "r.yaml"),
+                       "--outbox", str(tmp_path / "o.jsonl"), "--log", ""])
+    logs: list[str] = []
+    rc = preflight(args, store=make_store(tmp_path), manual=None, log=logs.append)
+
+    assert rc == 0
+    joined = "\n".join(logs)
+    assert str(tmp_path / "trigger") in joined
+    assert "没有连接控制器" in joined
+    assert "手动通道已关闭" in joined

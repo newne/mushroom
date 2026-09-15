@@ -157,3 +157,36 @@ sudo systemctl enable --now patrol-m1
 - 页面的**历史模式**目前只有"选站位 → 该站位历史图"的简版；时间轴/大图缩放/生长曲线
   见 `docs/patrol/console-ui/spec.md` §5.3 与票 05 的 Comments。
 - 一期的**让位握手**不做（ADR-0013）：巡检进行中手动操作会被拒，等轮末（约 94% 的时间可用）。
+
+---
+
+## 7. 2026-09-15 首次上机实录（库房主机 10.77.77.39）
+
+**结果**：三个容器 running/healthy；
+`http://10.77.77.39:8002/` 出页面，`/healthz`、`/api/status`、`/api/stations`、`/api/cmd` 全通；
+**调度 → 触发 → 执行方 → 门禁**整条链跑通——今天库房第 183 天，门禁按设计拒绝
+（`skipped`，日志明确"跳过启动预检（本轮不碰控制器）"，机构一步没动）。
+手动面的拒绝路径也验了：没接管 → 403；急停置位中 → 409（且急停优先于"上一条没结束"）；
+急停标志文件写入/清除正常。**动机构的两步（手动点动、急停链路）刻意留到有人在场时做。**
+
+上机过程中发现并修掉四个真问题——都属于"只有真跑一次才会露头"的那类：
+
+| # | 现象 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 1 | `mushroom_patrol` 反复重启，日志只有 `unrecognized arguments: --room …` | `patrol-serve` 把 m1 的参数声明成**位置参数**（`nargs="*"`），而入口脚本是 `--trigger-dir X --room Y …` 的混合顺序；argparse 不支持位置参数与可选参数交替 | 改 `parse_known_args` 透传；加 `--dry-run` 预检；容器验证脚本改成按**入口角色 + 真实参数形状**跑（原来只跑 `--help`，所以没拦住） |
+| 2 | 页面能开，但 `/api/*` 与 `/healthz` 全 **502** | nginx 只在**启动时**解析一次 upstream；后端容器一重建（`compose up -d` 换 IP）就还指着旧地址 | nginx 用 `resolver 127.0.0.11` + 变量 `proxy_pass`，改成每次请求重新解析 |
+| 3 | 前端容器一直 `unhealthy`（服务其实好的） | 官方 nginx 镜像里**没有 wget**，healthcheck 必然失败 | 镜像里装 `curl`，healthcheck 换成 `curl -fsS` |
+| 4 | （预防性，上机前已修）后端"跑一轮"会失败 | console 整棵 `data` 只读，而触发请求/手动指令要写 `data/trigger`、`data/cmd` | 这两个子目录单独 rw 挂载，父目录仍 ro |
+
+**现场状态与后续动作**：
+
+- `room.yaml` 是**真值**：入库 2026-03-16 ⇒ 第 183 天 ⇒ 门禁关闭，自动巡检不会跑（设计如此）。
+  要让机构真动（跑一轮或手动点动），要么等新批次进入第 2–25 天，要么显式用 `room.test.yaml`
+  ——**后者会让机构真的移动，必须有人在机器旁**。
+- 配置已复制到 `/home/sysadmin/algorithm/mushroom_patrol/configs/`，**从今天起它是活的那一份**；
+  `deploy-fetch-room` 与 `patrol-teach` 都应当指向它（老的 `/opt/mushroom-patrol/` 原样保留，
+  宿主的 `patrol-m1.service` 仍未 enable）。
+- 回滚：`docker compose -f mushroom_solution.yml --profile patrol stop mushroom_patrol mushroom_console mushroom_console_web`；
+  改动前的 `mushroom_solution.yml` 与 `.env` 备份为 `*.bak-20260915`。
+- 只动了三个巡检服务：`mushroom_solution` / `mlflow` / `postgres_db` / `caddy` 未重启
+  （服务器那份 compose 里 `mushroom_solution` 的镜像 tag 是 2026-03-20 的，**合并时保留，没有回退**）。

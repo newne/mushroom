@@ -117,15 +117,19 @@ def serve_forever(
     return rounds
 
 
-def main(argv: list[str] | None = None) -> int:
-    """命令行入口（容器里的 `patrol-serve` 角色）。
+def parse_args(argv: list[str] | None = None):
+    """解析执行方自己的参数，**其余原样透给 `deploy.m1`**。
 
-    跑一轮用的就是 `deploy.m1 --once`：准入判定、软限位校验、急停链、取证与同步
-    全都在那一条路径上，这里**不复制**任何一条——复制出来的第二份迟早会与第一份不一致。
+    为什么用 `parse_known_args`：入口脚本（`docker/patrol-entrypoint.sh` 的 `patrol-serve`
+    角色）把 m1 的参数**跟在后面**：
+
+        patrol-serve --trigger-dir X --room Y --stations Z --outbox …
+
+    而 argparse 不支持"位置参数与可选参数交替"——2026-09-15 上机时正是这里炸的：容器
+    反复重启，日志里只有一句 ``unrecognized arguments: --room …``。改成 parse_known_args
+    之后，顺序随便、`--` 分隔符可有可无，未识别的部分原样交给 m1（真写错了 m1 会自己报错）。
     """
     import argparse
-
-    from deploy.m1 import main as m1_main
 
     ap = argparse.ArgumentParser(prog="deploy.patrol_serve",
                                  description="触发请求与手动指令的执行方（单实例，持有控制器）")
@@ -142,12 +146,61 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-manual", action="store_true",
                     help="不接手动通道（只跑巡检；排障时用来排除干扰）")
     ap.add_argument("--max-rounds", type=int, default=None, help="跑够几轮就退出（调试用）")
-    # 其余参数原样透给 deploy.m1（--room/--stations/--outbox/--log/--capture-host/--ingest …）
-    ap.add_argument("m1_args", nargs="*", help="透传给 deploy.m1 的参数")
-    args = ap.parse_args(argv)
+    ap.add_argument("--dry-run", action="store_true",
+                    help="只做预检：解析参数、装配执行方并打印结论后退出，"
+                         "**不连控制器、不进循环**（上机第一步用它）")
+    # 其余参数（--room/--stations/--outbox/--log/--capture-host/--ingest/--no-estop …）
+    # 原样透给 deploy.m1
+    args, passthrough = ap.parse_known_args(argv)
+    # 分隔符本身不留（没有位置参数时 argparse 会把它留在 extras 里）；m1 那边不需要它，
+    # 留着只会让"透传了什么"这件事多一个要看懂的符号。
+    args.m1_args = [a for a in passthrough if a != "--"]
+    return args
+
+
+def preflight(args, *, store: TriggerStore, manual=None, log=print) -> int:
+    """`--dry-run` 的实现：把"待会儿要用的东西"逐条打出来，一个都不碰。
+
+    上机时的第一道检查——它会暴露"路径写错/挂载没生效/急停文件不在共享目录"这类问题，
+    而这些问题在真跑一轮时才会以别的方式（比如"拍了 60 张但一张都没进 outbox"）暴露。
+    """
+    from deploy.m1 import build_parser
+
+    m1 = build_parser().parse_args(list(args.m1_args))
+    log(f"触发目录   {store.dir_path}（每 {args.poll:.0f} 秒看一次）")
+    log(f"指令目录   {args.cmd_dir}{'（手动通道已关闭 --no-manual）' if manual is None else ''}")
+    if manual is not None:
+        log(f"急停标志   {manual.channel.estop_path}"
+            f"{'（已存在：当前处于急停闩锁）' if manual.channel.raised() else ''}")
+        log(f"站位表     {len(manual.stations)} 个站位"
+            f"{'（读不到，抓拍会被拒绝）' if not manual.stations else ''}")
+    log(f"库房状态   {m1.room}")
+    log(f"站位表     {m1.stations}")
+    log(f"outbox     {m1.outbox}")
+    log(f"日志       {m1.log or '(只打 stdout)'}")
+    log(f"采图服务   {m1.capture_host}")
+    log(f"摄入端点   {m1.ingest}{'（同步已禁用）' if m1.no_sync else ''}")
+    log(f"控制器     {m1.ip}:{m1.port}（device={m1.device}，本轮不连）")
+    log(f"图像微调   {m1.framing}")
+    log("预检结束：**没有连接控制器，也没有进循环**")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """命令行入口（容器里的 `patrol-serve` 角色）。
+
+    跑一轮用的就是 `deploy.m1 --once`：准入判定、软限位校验、急停链、取证与同步
+    全都在那一条路径上，这里**不复制**任何一条——复制出来的第二份迟早会与第一份不一致。
+    """
+    from deploy.m1 import main as m1_main
+
+    args = parse_args(argv)
 
     store = TriggerStore(dir_path=args.trigger_dir)
     manual = None if args.no_manual else build_manual(args)
+
+    if args.dry_run:
+        return preflight(args, store=store, manual=manual)
 
     # 跑一轮用的仍是 `deploy.m1 --once`（准入/软限位/急停链/取证全在那条路上），只把
     # **指令目录**显式带过去：两边必须看同一个 ESTOP 文件，否则"按了急停"拦不住正在

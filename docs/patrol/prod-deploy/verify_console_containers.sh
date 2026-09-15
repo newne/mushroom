@@ -91,9 +91,20 @@ check "急停标志落盘" yes "$([ -f "$CFG/data/cmd/ESTOP" ] && echo yes || ec
 check "复位急停 HTTP" 200 "$(curl -s -o /dev/null -w '%{http_code}' -m 5 -X DELETE "$BE/api/stop")"
 check "急停标志已清" no "$([ -f "$CFG/data/cmd/ESTOP" ] && echo yes || echo no)"
 
-echo "--- 4. 巡检进程的容器也在（patrol-serve 只认 --help，不连控制器）---"
-docker run --rm mushroom_patrol:dev patrol-serve --help >/dev/null 2>&1
-check "patrol-serve 可执行" 0 "$?"
+echo "--- 4. 巡检执行方：用**入口脚本的真实调用形状**起一次预检 ---"
+# 两个坑都在这一步：
+#   1) 2026-09-15 上机时容器反复重启，日志只有一句 `unrecognized arguments: --room …`
+#      ——`--help` 能过，但入口脚本把 m1 的参数**跟在后面**，argparse 的位置参数吃不下
+#      那种"可选参数与位置参数交替"的形状；
+#   2) 镜像是**一个入口多角色**（`patrol-serve` 是角色名，不是 PATH 里的可执行文件），
+#      所以必须把角色当第一个参数传给入口脚本，不能用 `--entrypoint patrol-serve`。
+docker run --rm mushroom_patrol:dev patrol-serve --dry-run \
+  --trigger-dir /tmp/t --cmd-dir /tmp/c \
+  --room /app/configs/room.yaml --stations /app/configs/stations.yaml \
+  --outbox /tmp/o.jsonl --log "" >/tmp/serve-dry.txt 2>&1
+check "patrol-serve 预检（角色 + 真实参数形状）" 0 "$?"
+check_has "预检打出了触发目录" "/tmp/t" "$(cat /tmp/serve-dry.txt)"
+check_has "预检明确没连控制器" "没有连接控制器" "$(cat /tmp/serve-dry.txt)"
 
 echo
 if [ "$fail" = 0 ]; then echo "=== 全部通过 ==="; else echo "=== 有失败项（上面标 FAIL 的）==="; fi
