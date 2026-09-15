@@ -111,11 +111,50 @@ src/
    置信档阈值（85/50）。这一处**没动**——哪份是想要的语义需要你确认，之后再合并成一处。
    顺带一提：现有公式里单图也有 1.1 的"一致性"加成，即基线不是 1.0。
 
-## 6. 仍未定的一件事
+## 6. 动态导入：已查清，**没有运行期才知道的模块名**（2026-09-15）
 
-**`vision/mushroom_image_encoder.py:32` 的 `import_module(module_name)`**：那个变量从哪来？
-（配置里的模块名？）——动态名字进不了 codemod，必须人工处理，否则会在运行期才炸。
-这是重构开始前唯一还需要你回答的问题。
+原先担心的是 `vision/mushroom_image_encoder.py:32` 的 `importlib.import_module(module_name)`
+——"变量形式的动态导入，codemod 处理不了"。查过之后结论相反：
+
+`module_name` 只是同文件里一个 3 行小工具的**形参**：
+
+```python
+def _timed_import(module_name: str, label: str):     # ← 量各段 import 各花多少毫秒
+    module = importlib.import_module(module_name)
+    _last = _record_import_step(label, _last)
+    return module
+```
+
+它的 14 个调用点**全是字符串字面量**（`"numpy"`、`"PIL.Image"`、`"environment.processor"`、
+`"utils.create_table"`、`"vision.mushroom_image_processor"` …），没有任何调用方传变量进来。
+
+**怎么确定的**（这套办法也是重构前/后各跑一次的自检）：
+
+1. 读定义——`_timed_import` 就是 `import_module` 外面套了一层计时；
+2. 列全部调用点（`grep '_timed_import('` → 14 处，都在同一文件）；
+3. 看有没有非字面量实参——多行调用的那几处（44/47/50/71 行）看着像变量，读全文都是字面量；
+4. 确认这个工具没有在别的文件被复用（只在 `mushroom_image_encoder.py` 里定义与使用）；
+5. 用 AST 把整个 `src/` 扫一遍（`scan_dynamic_imports.py`，跟着本方案一起入库）：
+   **字面量动态导入 30 处，"实参不是字面量"只有 2 处，而这两处都是小工具的形参**
+   （另一个是我给 `storage/models/_lazy.py` 加的惰性再导出）：
+
+```
+$ python3 docs/technical/scan_dynamic_imports.py src
+字面量动态导入：30 处
+...
+**运行期才知道模块名：2 处**
+  storage/models/_lazy.py:34        参数= source        import_module(source)
+  vision/mushroom_image_encoder.py:32  参数= module_name   importlib.import_module(module_name)
+```
+
+**对重构的意义**：codemod 的规则因此是完备的、可机械化的——
+
+* 改 `from X… import` / `import X…` 语句；
+* 改 `importlib.import_module("X")` / `__import__("X")` / `_timed_import("X", …)` 的
+  **第一个字符串实参**，但**仅当**它的第一段是本地那 11 个包名（`numpy`/`torch`/`loguru`/
+  `PIL`/`sqlalchemy`/`requests`/`transformers` 一律不许动）；
+* 改各 shim 里 `reexport(__name__, "utils.create_table", __all__)` 的那个字面量；
+* 重构前后各跑一次 `scan_dynamic_imports.py`，把"运行期才知道模块名"的数量钉在 2（且都是形参）。
 
 ## 7. 与其它两条线的关系
 
