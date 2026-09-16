@@ -273,3 +273,107 @@ ffmpeg 没连上相机，日志里会有打码后的 RTSP 地址与 ffmpeg 的 s
 `.env` 里新增了四行（`PATROL_PREVIEW` / `PREVIEW_PORT` / `PREVIEW_SCALE` / `PREVIEW_FPS`），
 compose 与 `.env` 都留了 `*.bak-20260915b` 备份。
 
+---
+
+## 9. 2026-09-16 发版：巡检侧按版本 tag 重发一通
+
+**起因**：现场要求"发版到 prod"。先只读核查现状，结论是**巡检侧三个容器已经在跑
+`feat/patrol-merge` 的 HEAD**，只有 `mushroom_preview` 还挂在旧镜像上。所以这次发版的实际
+内容是：**给巡检侧一个可回滚的版本 tag、把现场 `.env` 钉住、四个容器一起重建、逐条复验**。
+
+### 9.1 发版前的核查（逐条有证据，不是推断）
+
+| 项 | 现场实际 | 与 HEAD（`3667c09`）比 |
+| --- | --- | --- |
+| `mushroom_patrol` / `mushroom_console` | 镜像 `ba4728d6a804`（09-15 17:51 创建） | **一致**：容器内 `console.py` / `manual_exec.py` / `preview.py` / `patrol_serve.py` 的 sha256 与工作区逐字节相同 |
+| `mushroom_console_web` | 镜像 `14b19113a8b5` | **一致**：`nginx.conf` sha256 `622e1628…` |
+| 页面 | 宿主 `mushroom_patrol/web/index.html` | **一致**：sha256 `4935763d…` |
+| `mushroom_solution.yml` | 宿主副本 | **一致**：sha256 `6cef277f…` |
+| 宿主 `analysis`（`:8000`） | `/opt/mushroom-analysis/src` | **一致**（本地是 CRLF，按内容比对 8 个文件全同） |
+| `mushroom_preview` | 镜像 `d17f5ee2ef51`（09-15 13:57 创建） | ⚠️ **旧镜像**：里面的 `deploy/m1.py` 是 Z 框架迁移（ADR-0018）之前的版本 |
+
+### 9.2 发版内容
+
+```bash
+# 开发机（WSL）：构建并推送（上下文＝仓库根）
+cd /mnt/d/code/mushroom
+REG=registry.cn-beijing.aliyuncs.com/ncgnewne
+TAG=0.1.0-20260916114407-3667c09          # 0.1.0-<YYYYMMDDHHMMSS>-<短 SHA>，同算法侧惯例
+docker build -f docker/Dockerfile.patrol      -t $REG/mushroom_patrol:$TAG      -t $REG/mushroom_patrol:0.1.0      .
+docker build -f docker/Dockerfile.console-web -t $REG/mushroom_console_web:$TAG -t $REG/mushroom_console_web:0.1.0 .
+docker push $REG/mushroom_patrol:$TAG      && docker push $REG/mushroom_patrol:0.1.0
+docker push $REG/mushroom_console_web:$TAG && docker push $REG/mushroom_console_web:0.1.0
+```
+
+| 产物 | tag | digest |
+| --- | --- | --- |
+| `mushroom_patrol` | `0.1.0-20260916114407-3667c09`（＝`0.1.0`） | `sha256:58e4981595a2318b1da452ad08a103e6d4705cf21edb50c2995ee7a4e78c7be8` |
+| `mushroom_console_web` | `0.1.0-20260916114407-3667c09`（＝`0.1.0`） | `sha256:97e6df932bc430a6f5aab6ea5c2d698764af596f2277a33507f81404dde0d0f3` |
+
+> **构建是全缓存命中的**：Dockerfile 与构建上下文一个字节没变，导出层的摘要与现场正在跑的
+> 镜像**逐层相同**（`ba4728d6a804` / `14b19113a8b5`）。也就是说这一版**没有代码变更**，
+> 换来的是"现场钉在一个带版本号的 tag 上"这件事本身——之前四个容器都挂在浮动的 `:0.1.0`
+> 上，回滚只能靠记镜像 ID（见 9.4）。
+
+```bash
+# 库房主机：钉住 tag（只改两行，改前先备份）
+TAG=0.1.0-20260916114407-3667c09
+REG=registry.cn-beijing.aliyuncs.com/ncgnewne
+cd /home/sysadmin/algorithm/mushroom_service
+cp -a .env .env.bak-$(date +%Y%m%d-%H%M%S)
+sed -i -e "s|^PATROL_IMAGE=.*|PATROL_IMAGE=$REG/mushroom_patrol:$TAG|" \
+       -e "s|^CONSOLE_WEB_IMAGE=.*|CONSOLE_WEB_IMAGE=$REG/mushroom_console_web:$TAG|" .env
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol up -d mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
+```
+
+**发版前先跑的本地门禁**（都在开发机，不碰现场）：
+
+| 检查 | 结果 |
+| --- | --- |
+| `patrol-workspace` 全量测试 | **647 passed**（98.7 s） |
+| `ruff check .` | All checks passed |
+| `verify_console_containers.sh`（真容器、假配置） | **全部通过**；其中用**现场那份真厂商库**（`VENDOR_LIB=…/libFMC4030_2009_1.so`）跑了 `patrol-serve --dry-run`，确认新镜像里**能加载**（GLIBCXX 那条老坑） |
+
+### 9.3 现场动作与验收（2026-09-16 11:46–11:49）
+
+1. `cp -a .env .env.bak-20260916-114629` → `PATROL_IMAGE` / `CONSOLE_WEB_IMAGE` 由 `:0.1.0`
+   改成版本 tag（`mushroom_solution.yml` 没动：sha256 与仓库一致）。
+2. `pull` + `up -d` 四个服务：**四个容器全部 Recreated**，`mushroom_preview` 因此换到了新镜像。
+3. 逐条验收（`container-cutover` §4）：
+
+| 检查 | 结果 |
+| --- | --- |
+| 四个容器 | 全部 `Up (healthy)`，镜像 tag 都是 `0.1.0-20260916114407-3667c09` |
+| `patrol-serve --dry-run`（真厂商库） | `厂商库 … —— 已加载 ✅` / `预检结束：**没有连接控制器，也没有进循环**`，退出码 0 |
+| `/healthz` `/api/room` `/api/stations` `/api/grid` | 全通；`/api/grid` → `z 0…212`（Z 新框架）；门禁 `allowed:false`（第 184 天） |
+| 页面 `http://10.77.77.39:8002/` | 200，标题「蘑菇房巡检台」，`/healthz` 反代通 |
+| 触发链路 `POST /api/patrol/run?reason=release-20260916` | 202 + `run.json` 落盘；执行方 1 秒内领走（日志 `领到巡检请求 20260916-114816`） |
+| **门禁是否拦住机构** | 拦住：`准入未通过：跳过启动预检（本轮不碰控制器）` → `单轮结束：skipped`；`data/runs/` 不存在（**一轮取证都没有 = 机构一步没动**） |
+| 触发请求是否残留 | 已消费（`run.json` 里 `consumed_at=2026-09-16T11:48:17`），日志里只出现 1 次"领到"——不会在门禁放开时诈尸 |
+| 实时预览 | `/healthz` 两次采样 `frames 530 → 555`（≈5 fps，`restarts:0`）；页面侧 `/api/preview/frame.jpg` → `200 image/jpeg 15435` 字节 |
+| 控制器 | `/api/status` → `state:IDLE, connected:false`——发版前后都没有进程占着它 |
+
+### 9.4 回滚
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_service
+cp .env.bak-20260916-114629 .env
+docker compose -f mushroom_solution.yml --profile patrol up -d \
+  mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
+```
+
+⚠️ **靠 tag 回滚不了这一版**：内容没变，所以 `:0.1.0` 与版本 tag 指向**同一个 digest**。
+真正的回滚点是上面那份 `.env` 备份；再往回（09-15 之前）的镜像是 `ba4728d6a804`
+（patrol/console）与 `14b19113a8b5`（console_web），两者在现场宿主上都还在。
+
+### 9.5 这次发版**没有**覆盖的（欠账，不是漏做）
+
+- **算法侧 `mushroom_solution` 仍是 2026-03-20 的镜像**（compose 里 tag
+  `0.1.0-20260320172444-a615909`）。实测该容器里**没有** `PATROL_RUN_URL`，即
+  `src/scheduling` 那个"每 3 小时触发巡检"的 job（步骤 2/5）**没在 prod 上跑**——
+  现在触发一轮只能靠页面按钮或 `POST /api/patrol/run`。ADR-0012 §7 原本就把算法侧发版
+  押后（"巡检跑稳之前不变"），且 `src/` 里有 `wip(solution)` 在建重构快照，故本次不动。
+- `patrol-m1.service`（宿主 systemd 那份）依旧 inactive：控制器现在由 `mushroom_patrol`
+  容器独占，两者不能同时跑（本文件 §0 第 1 条）。
+
