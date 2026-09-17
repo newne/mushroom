@@ -377,3 +377,156 @@ docker compose -f mushroom_solution.yml --profile patrol up -d \
 - `patrol-m1.service`（宿主 systemd 那份）依旧 inactive：控制器现在由 `mushroom_patrol`
   容器独占，两者不能同时跑（本文件 §0 第 1 条）。
 
+---
+
+## 10. 2026-09-16 追加：实时画面左右镜像——先定位，再选一条修法
+
+**现象**：接管后看实时画面，左右与现场相反（ADR-0017 补记）。
+
+**定位（先证伪自己这条链，再怀疑上游）**：
+
+| 检查 | 结果 |
+| --- | --- |
+| 转码链 | `deploy/preview.py` 的滤镜只有 `scale=<w>:-2`；全仓 grep 无 `hflip/vflip/transpose` |
+| 页面 | `web/console/index.html` 对图像只有缩放/平移，无 `scaleX(-1)` |
+| 抓拍链 | `third_party/capture` 与 `patrol.capture_client` 无任何图像变换 |
+| **两条链对照** | 同一静止场景（2026-09-16 16:04）：预览帧（RTSP 640×360）与同期 SDK 抓拍原图（2880×1616）**朝向完全一致**。两张原图存在 `mirrorcheck/`，可自行复核 |
+
+⇒ 镜像在上游（DVR 图像设置，或相机朝向使画面相对现场左右相反），**预览与抓拍同时受影响**。
+
+**两条修法（推荐先 A）**：
+
+```bash
+# A. DVR 侧修根因（一次修好三条消费方：预览、抓拍、老系统）
+#    浏览器开 Web Viewer（http://192.168.1.238/）→ 图像/编码设置里的"镜像/翻转"关掉。
+#    改完刷新页面即可看到；本仓不用动、不用发版。
+```
+
+```bash
+# B. 只纠预览（动不了 DVR 时）：现场 .env 改一行 + 只重建 preview 容器
+cd /home/sysadmin/algorithm/mushroom_service
+cp -a .env .env.bak-$(date +%Y%m%d-%H%M%S)
+sed -i 's|^PREVIEW_FLIP=.*|PREVIEW_FLIP=hflip|' .env   # 没有该行就手动追加 PREVIEW_FLIP=hflip
+docker compose -f mushroom_solution.yml --profile patrol up -d mushroom_preview
+# 生效证据：容器日志出现「预览服务就绪：rtsp://… 翻转=hflip」；
+# 仍不对就换 vflip（上下颠倒）或 both（180°）——认不出的值会当场报错退出，不会静默忽略。
+```
+
+> B 的边界：**只翻预览**，抓拍与历史照片仍是镜像的（对算法无碍——视觉训练本就带
+> `hflip_prob=0.5` 的水平翻转增强）。**日后若在 DVR 侧修好，必须把 `PREVIEW_FLIP` 改回
+> `none`**，否则会翻两次。
+
+---
+
+## 11. 2026-09-17 发版：console 改版（`d87486f`）——先只发了页面，再补镜像
+
+**起因**：现场要求"发版到 prod"，内容是 `feat/patrol-merge` 上的 console 改版 `d87486f`
+（运动中显示实时位置/速度、导轨图移入中栏放大、删除补光灯开关、抓拍并入实时画面卡）。
+
+### 11.1 关键发现：这一版**不能只发镜像**，也不能**只发页面**
+
+`d87486f` 动了 12 个文件，但按"打进镜像 vs 宿主挂载"拆开看，落点完全不同：
+
+| 改动 | 落在哪 | 发版动作 |
+| --- | --- | --- |
+| `web/console/index.html` | 宿主目录 bind-mount 进 nginx（`Dockerfile.console-web` 注释：**改页面 = scp 一次**） | 拷文件 |
+| `deploy/src/deploy/{console,manual,manual_exec}.py` | 打进 `mushroom_patrol` 镜像（`console` 角色） | 重建镜像 |
+| `patrol/src/patrol/fmc/client.py`（`status_listener`） | 同上 | 重建镜像 |
+| `nginx.conf` / `Dockerfile.patrol` / `mushroom_solution.yml` | 打进镜像 | **本次未动**（一个字节没变） |
+
+**发版前核查发现的真相**：现场在跑的 `mushroom_patrol`（`ba4728d6a804`，tag
+`0.1.0-20260916114407-3667c09`）里 **代码是重构前那一版**——`console.py` / `manual.py` /
+`manual_exec.py` 三个文件与 `d87486f` **不同**（`preview.py` 相同）。也就是说 09-16 那次
+"重发"确实没有代码变更，console 改版从未上过机。所以第一次只换页面等于**制造了版本错配**：
+页面在调一个后端还不存在的 `progress` 字段。
+
+> 页面侧对此是**向后兼容**的：`liveProgress()` 第一行就是 `if(!busy() || !cmd.inflight ||
+> !cmd.progress) return null;`，所以错配期间不报错、只是"实时位置/速度"那几处不显示。
+> 但不该把它留在现场——所以随后补发了镜像。
+
+### 11.2 发版内容
+
+```bash
+# 开发机（WSL）：构建并推送。上下文＝workbuddy worktree（内容 = d87486f）
+cd /mnt/c/Users/niucg1/WorkBuddy/Worktrees/mushroom/feat-patrol-merge-17681f41
+REG=registry.cn-beijing.aliyuncs.com/ncgnewne
+TAG=0.1.0-20260917134707-d87486f
+docker build -f docker/Dockerfile.patrol      -t $REG/mushroom_patrol:$TAG      -t $REG/mushroom_patrol:0.1.0      .
+docker build -f docker/Dockerfile.console-web -t $REG/mushroom_console_web:$TAG -t $REG/mushroom_console_web:0.1.0 .
+docker push $REG/mushroom_patrol:$TAG      && docker push $REG/mushroom_patrol:0.1.0
+docker push $REG/mushroom_console_web:$TAG && docker push $REG/mushroom_console_web:0.1.0
+```
+
+| 产物 | tag | digest |
+| --- | --- | --- |
+| `mushroom_patrol` | `0.1.0-20260917134707-d87486f`（＝`0.1.0`） | `sha256:c1d4763d1e109373a218aecb7fea91a0998899f35eb9c381f3daf3eb5aab03a1` |
+| `mushroom_console_web` | `0.1.0-20260917134707-d87486f`（＝`0.1.0`） | `sha256:7735cd3573d96509bc572e2f9e34dd1cfe82ebc892e5f6eef8706225d4694e26` |
+
+> `mushroom_console_web` 的新旧 digest **不同**（旧 `97e6df93…` / 新 `7735cd35…`），但内容
+> 等价：镜像里只有 `nginx.conf`，而它没改；差异来自重建（`apt-get install curl` 层的时间戳）。
+> 页面不在镜像里，所以"重建前端镜像"对页面本身没有影响。
+
+**发版前先跑的本地门禁**（开发机，不碰现场）：
+
+| 检查 | 结果 |
+| --- | --- |
+| `deploy`/`patrol` 相关单测（console / manual / manual_exec / fmc_client） | **116 passed** |
+| jsdom 无头页面校验 `verify-page.js` | **101/101 通过**，运行期错误：无 |
+| `verify_console_containers.sh`（真容器、假配置、**真厂商库**） | **全部通过**；含 `patrol-serve --dry-run` 加载现场那份 `libFMC4030_2009_1.so` 成功（GLIBCXX 老坑） |
+
+```bash
+# 库房主机：钉住 tag + 页面 + 重建四个容器
+TAG=0.1.0-20260917134707-d87486f
+REG=registry.cn-beijing.aliyuncs.com/ncgnewne
+cd /home/sysadmin/algorithm/mushroom_service
+cp -a .env .env.bak-$(date +%Y%m%d-%H%M%S)
+sed -i -e "s|^PATROL_IMAGE=.*|PATROL_IMAGE=$REG/mushroom_patrol:$TAG|" \
+       -e "s|^CONSOLE_WEB_IMAGE=.*|CONSOLE_WEB_IMAGE=$REG/mushroom_console_web:$TAG|" .env
+# 页面：备份后原子替换（校验 sha256 再 mv，避免 nginx 读到半个文件）
+cd /home/sysadmin/algorithm/mushroom_patrol/web
+cp -a index.html index.html.bak-20260917-134111
+# 页面 sha256：旧 4935763d…（仅 7dd2345）→ 新 043d0645d9020a3d6d6bd9dca91fee8479b95f9031bde624078b582090d21c07
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol up -d  mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
+```
+
+### 11.3 现场验收（2026-09-17 13:41–13:52）
+
+| 检查 | 结果 |
+| --- | --- |
+| 四个容器 | 全部 `Recreated` → `Up (healthy)`，tag 都是 `0.1.0-20260917134707-d87486f` |
+| **容器内代码 == `d87486f`** | `console.py` / `manual.py` / `manual_exec.py` / `preview.py` 四个文件 LF 归一化 sha256 **逐个 SAME**（这是"镜像里真是这一版"的直接证据，不是推断） |
+| 新后端生效 | `/api/cmd` 回包里出现 `progress` 字段（旧后端没有这个键）——哪怕空闲时是 `null`，键本身即证据 |
+| 页面 | `http://10.77.77.39:8002/` → 200、69578 字节、sha256 `043d0645…`；`maphover/mapcap/capbtn` 命中 10 处；`lampbtn` **0 处**（补光灯开关确已移除） |
+| 反代与后端 | `/healthz` 200；`/api/room` 门禁 `allowed:false`（第 185 天，>25）——判定正确 |
+| 协调文件可写 | 容器内 `/app/data` 与 `/app/Logs` 均 rw |
+| 实时预览 | `available:true`、`frames` 递增、`restarts:0`、`last_frame_age_s 0.08`；`/api/preview/frame.jpg` → `200 image/jpeg 16371` 字节 |
+| 控制器 | `state:IDLE, connected:false`——发版前后都没有进程占着它 |
+| **机构是否动过** | **一步没动**：门禁拦住（`准入未通过：跳过启动预检（本轮不碰控制器）` → `单轮结束：skipped`），`data/runs/` **不存在** |
+
+> 触发链路（`POST /api/patrol/run`）在**页面发完、镜像补发之前**用旧容器验过一次：
+> 202 + `run.json` 落盘、执行方 1 秒内领走、门禁拦住、`runs/` 仍为空。补发镜像后**没有
+> 再触发一次**——`patrol-serve` 的路径本次未改，重触发只会往取证账上多记一次。
+
+### 11.4 回滚
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_service
+cp .env.bak-<STAMP> .env                     # 回到 3667c09 那两个 tag
+docker compose -f mushroom_solution.yml --profile patrol up -d \
+  mushroom_patrol mushroom_console mushroom_console_web mushroom_preview
+# 页面单独回滚（与镜像无关）：
+cd /home/sysadmin/algorithm/mushroom_patrol/web && cp -a index.html.bak-20260917-134111 index.html
+```
+
+### 11.5 这次暴露的两个"文档/工具与实现不符"（欠账）
+
+1. **本文件 §4.0 的预检命令是错的**：写的是 `patrol --dry-run`，但 `--dry-run` 只存在于
+   **`patrol-serve` 角色**（`deploy.m1` 的 argparse 根本不认这个参数，实测 `exit 2`、
+   `unrecognized arguments: --dry-run`）。本节按 `verify_console_containers.sh` §4 的写法
+   （`docker run … patrol-serve --dry-run`）才跑得通。§4.0 待更正。
+2. **开发机 `docker/.env` 与现场 `docker/.env` 不是同一份**：开发机那份的 `PATROL_IMAGE` /
+   `CONSOLE_WEB_IMAGE` 仍是浮动的 `:0.1.0`，现场那份才是版本 tag。发版必须**改现场那一份**
+   （`/home/sysadmin/algorithm/mushroom_service/.env`），别把开发机的 `.env` 拷过去——
+   那会把现场其他变量（`PATROL_RUN_URL`、`PATROL_PREVIEW`、MinIO/MLflow 口令等）一起覆盖。
+
