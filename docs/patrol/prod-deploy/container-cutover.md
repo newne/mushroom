@@ -578,6 +578,12 @@ python -c "import socket;s=socket.socket();s.settimeout(5);s.connect(('192.168.1
 
 ### 12.4 现场验收（发完页面 + 重建 console 之后）
 
+> ⚠️ **本节原先把发版面写小了**（2026-09-17 实发时改正）：只重建 `mushroom_console` 是**不够**的
+> ——`deploy/manual_exec.py` 不只被 console 用，`patrol_serve.py:257/297` 也用它装配手动执行方，
+> 而跑 `patrol-serve` 的是 `mushroom_patrol`。也就是说根因 2 的修复对**守护进程**同样必要，
+> 否则计划/运动巡检的抓拍仍会索引一个不带 `.jpg`、没有 `cloud_url` 的名字。
+> 正确做法见 §13.2：`PATROL_IMAGE` 一把影响 patrol / console / preview 三个，一起重建。
+
 ```bash
 cd /home/sysadmin/algorithm/mushroom_service
 # 只动了环境变量与后端代码 ⇒ 重建并重启 console；页面是挂载的，单独拷一次
@@ -587,7 +593,8 @@ scp web/console/index.html sysadmin@10.77.77.39:/home/sysadmin/algorithm/mushroo
 # 1) 字段已经不再下发（期望空输出）
 curl -s 'localhost:8002/api/images?limit=3' | grep -c cloud_url
 
-# 2) 取图真的通（期望 200 + image/jpeg + 几十 KB）
+# 2) 取图真的通（期望 200 + image/jpeg；实际约 750 KB——相机原图 1080×648，
+#    不是缩略图。历史模式一屏几帧就会拉几 MB，见 §13.4 的欠账）
 curl -s -o /dev/null -w '%{http_code} %{content_type} %{size_download}\n' \
   'localhost:8002/api/image?object_name=20260917/B101_S101_top45_141012'
 
@@ -600,3 +607,87 @@ curl -s 'localhost:8002/api/image?object_name=20260917/NOPE.jpg' ; echo
 
 > 判据分得开才叫修好：**200 但图黑** = 相机/补光的问题；**502 或"图取不到"** = 取图链路
 > 的问题。旧版本这两种情况在页面上长得一模一样。
+
+## 13. 2026-09-17 发版实录：cc94258（历史图同源代理 + 抓拍索引补全）
+
+上一节是"定位与修复"，本节是这一版**真的上机**的记录。
+
+### 13.1 产物
+
+```bash
+# 开发机（WSL）：构建并推送。上下文＝workbuddy worktree（内容 = cc94258）
+REG=registry.cn-beijing.aliyuncs.com/ncgnewne
+TAG=0.1.0-20260917153139-cc94258
+docker build -f docker/Dockerfile.patrol -t $REG/mushroom_patrol:$TAG -t $REG/mushroom_patrol:0.1.0 .
+docker push  $REG/mushroom_patrol:$TAG && docker push $REG/mushroom_patrol:0.1.0
+```
+
+| 产物 | tag | digest | 本地 image id |
+| --- | --- | --- | --- |
+| `mushroom_patrol` | `0.1.0-20260917153139-cc94258`（＝`0.1.0`） | `sha256:13522d942c40f81737e457ac62b82cdf8a6052d27c095e178b9969b87670f708` | `sha256:94b40634d732…` |
+
+`mushroom_console_web` **没重建**：页面是 bind-mount 的、`nginx.conf` 一个字节没变
+（§11.1 同一结论），所以 `CONSOLE_WEB_IMAGE` 保持 `0.1.0-20260917134707-d87486f`。
+
+### 13.2 发版范围：**三个容器**，不是文档原先写的"一个"
+
+`PATROL_IMAGE` 被 `mushroom_patrol` / `mushroom_console` / `mushroom_preview` 共用：
+
+```bash
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_patrol mushroom_console mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate \
+  mushroom_patrol mushroom_console mushroom_preview
+```
+
+为什么要带 `mushroom_patrol`：`patrol_serve.py` 装配手动执行方用的就是
+`deploy.manual_exec.ManualExecutor`——根因 2 的修复对守护进程同样必要（见 §12.4 的更正）。
+
+> **发版前先门禁复核**，且写成 fail-closed：`/api/room` 的 `allowed` 不是 `false` 就整体中止。
+> 理由是重建 `mushroom_patrol` 会走一次启动预检；门禁关着（现场 `day:185 > max_day:25`）
+> 才会 `skipped`、一步不碰控制器。
+
+### 13.3 现场验收（2026-09-17 15:57–16:08）
+
+| 检查 | 结果 |
+| --- | --- |
+| 门禁 | `allowed:false`（第 185 天）⇒ 重建不影响机构 |
+| 三个容器 | `Recreated` → `Up (healthy)`，tag 全是 `…-cc94258`；`console_web` 保持 `…-d87486f` |
+| **容器内代码 == `cc94258`** | `console.py` `80a1e12e…`、`manual_exec.py` `94144bb4…`，与仓库 LF 归一化 sha256 **逐个 SAME** |
+| 页面 | 经 `:8002` 发出来的字节 **71740 B / `348e3021…`**，与 git blob 逐字节一致 |
+| 页面里的旧路径 | `192.168.1.250` **0 处**、`cloud_url` 仅剩 1 处（注释里解释"为什么不能用它"） |
+| `PATROL_MINIO` | 容器内 `http://172.17.0.1:9000` / bucket `mogu` |
+| `/api/images` 不再泄露控制网地址 | `cloud_url` **0 处** |
+| **取图真的通** | 不带 `.jpg` 的名字 `20260917/B101_S101_top45_141012` → **200 `image/jpeg` 766370 B**（带后缀同值，证明补齐逻辑对） |
+| 取不到时说清楚 | `NOPE.jpg` → **502** + JSON 理由（指向 `172.17.0.1:9000` 的 404），不是黑块 |
+| 非法入参 | 完整 URL / `../` 穿越 / 缺参 → 全 **400**（地址不可被请求方改写） |
+| **肉眼确认** | 把 `/api/image` 的字节取回本地打开：真实灰阶帧、`2026-09-17 14:10:02`、`CAM01`——**不再是黑的** |
+| **历史模式截图** | 无头 Chrome 打真页面：大图与时间轴缩略图**都出图**，且出图的正是那条"不带 `.jpg`、`cloud_url:null`"的旧行 |
+| 基础健康 | `/healthz` 200；`/api/preview/frame.jpg` 200 `image/jpeg` 16598 B；`frames` 递增、`restarts:0` |
+| 机构是否动过 | `data/runs/` **不存在**（门禁拦住），日志 `巡检执行方就绪` |
+
+> 截图的两个坑记一下，免得下次误判成"图还是黑的"：
+> 1. `core.autocrlf=true` ⇒ 工作区那份页面是 **CRLF**，直接 scp 会把 CRLF 发上机。
+>    prod 上一直是 **LF**（旧文件 69578 B == git blob 的 sha256 `043d0645…`）。
+>    **要发的是 git blob 的字节**：`git show <sha>:web/console/index.html > 产物`。
+> 2. 历史模式要**三次点击**才看到图：切模式 → 选站位（触发 `renderHistory`）→ 挑一帧。
+>    只做前两步的话 `#bigimg` 根本没有 `src`，截出来那块深色是**空容器**，不是"图黑"。
+
+### 13.4 这版留下的欠账
+
+1. **`/api/image` 给的是原图，没有缩略图参数**——实测 **766 KB/帧**（1080×648）。历史模式
+   一屏几帧就是几 MB；现场走 VPN 会更慢。`spec.md` §10.10 记的 `w=` 未决项就是这个，
+   建议下一步给 `/api/image` 加 `w=`（服务端降采样，或落一份 MinIO 侧缩略图）。
+2. **`docker system df`：镜像 45.06 GB，其中 32.78 GB 可回收**（140 个镜像 / 58 个容器）。
+   发版没动它，但值得排一次批量清理——别在生产机上随手 `prune`，先列出再决定。
+
+### 13.5 回滚
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_service
+cp .env.bak-20260917-155719 .env
+cp mushroom_solution.yml.bak-20260917-155719 mushroom_solution.yml
+docker compose -f mushroom_solution.yml --profile patrol up -d \
+  mushroom_patrol mushroom_console mushroom_preview
+# 页面单独回滚（与镜像无关）：
+cd /home/sysadmin/algorithm/mushroom_patrol/web && cp -a index.html.bak-20260917-155719 index.html
+```
