@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -24,6 +24,7 @@ from deploy.console import (
     room_state,
     round_eta_s,
 )
+from deploy.manual import ManualChannel
 from fastapi.testclient import TestClient
 
 NOW = datetime(2026, 9, 14, 10, 0, 0)
@@ -435,6 +436,45 @@ def test_lamp_off_is_allowed_under_estop(tmp_path):
         on = c.post("/api/cmd", json={"kind": "lamp", "args": {"on": True}})
     assert off.status_code == 202
     assert on.status_code == 409 and "急停" in on.json()["error"]
+
+
+def test_cmd_state_carries_live_progress_only_when_fresh_and_matching(tmp_path):
+    """运动中的实时位置/速度：只有"属于在飞指令"且"写回还新鲜"的 progress 才透出。
+
+    id 对不上或写回停了的都是残值——残值冒充实时位置比"没有位置"更害人。
+    """
+    ch = ManualChannel(str(tmp_path / "cmd"), now=lambda: NOW)
+    with make_client(tmp_path) as c:
+        c.post("/api/session")
+        r = c.post("/api/cmd", json={"kind": "goto", "args": {"y": 100.0, "z": 0.0}})
+        assert r.status_code == 202
+        cmd_id = r.json()["command"]["id"]
+        # 还没有进度文件
+        assert c.get("/api/cmd").json()["progress"] is None
+        # 属于在飞这条、且刚写的：带出去
+        ch.write_progress({"id": cmd_id, "kind": "goto", "ts": NOW.isoformat(timespec="seconds"),
+                           "position_yz": [50.0, 0.0], "speed_yz": [40.0, 0.0], "moving": True})
+        got = c.get("/api/cmd").json()["progress"]
+        assert got is not None and got["position_yz"] == [50.0, 0.0] and got["moving"] is True
+        # id 对不上：残值，不透出
+        ch.write_progress({"id": "c-别的", "kind": "goto", "ts": NOW.isoformat(timespec="seconds"),
+                           "position_yz": [0, 0], "speed_yz": [0, 0], "moving": True})
+        assert c.get("/api/cmd").json()["progress"] is None
+        # 写回停了（执行方死了/卡了）：也不透出
+        stale = (NOW - timedelta(seconds=30)).isoformat(timespec="seconds")
+        ch.write_progress({"id": cmd_id, "kind": "goto", "ts": stale,
+                           "position_yz": [50.0, 0.0], "speed_yz": [0.0, 0.0], "moving": True})
+        assert c.get("/api/cmd").json()["progress"] is None
+
+
+def test_cmd_state_has_no_progress_without_inflight(tmp_path):
+    """没有在飞指令时，即使通道里躺着 progress 文件也不带出去。"""
+    ch = ManualChannel(str(tmp_path / "cmd"), now=lambda: NOW)
+    ch.write_progress({"id": "c-1", "kind": "goto", "ts": NOW.isoformat(timespec="seconds"),
+                       "position_yz": [50.0, 0.0], "speed_yz": [0.0, 0.0], "moving": False})
+    with make_client(tmp_path) as c:
+        state = c.get("/api/cmd").json()
+    assert state["inflight"] is None and state["progress"] is None
 
 
 # ---------- 实时预览的代理面（ADR-0017） ----------

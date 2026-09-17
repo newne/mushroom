@@ -10,6 +10,7 @@ import pytest
 from deploy.manual import Command, ManualChannel
 from deploy.manual_exec import ManualExecutor, axis_of
 from patrol.fmc import MotionAborted, TravelLimitError
+from patrol.fmc.status import AxisStatus, MachineStatus
 from patrol.motion_profile import M1
 from patrol.stations import Station
 
@@ -368,3 +369,66 @@ def test_result_is_written_for_every_claim(tmp_path):
     assert executor.service_once() is not None
     assert channel.result().ok is True
     assert channel.inflight() is None        # 结果写回后不再"在飞"
+
+
+# ---------- 运动中的实时位置/速度（观测通道，2026-09-17） ----------
+
+
+class StatusFmc(FakeFmc):
+    """会在"运动"中出状态字的假控制器：把注册着的 listener 按脚本调几遍。
+
+    真机上等待原语以 20–50Hz 轮询状态字，`Fmc4030.get_status` 里的钩子就是这么
+    被驱动的——这里模拟的是同一个进入口，而不是另造一条侧路。
+    """
+
+    def __init__(self, statuses=(), **kw):
+        super().__init__(**kw)
+        self.statuses = list(statuses)
+        self.status_listener = None
+
+    def goto(self, y, z, *, timeout_s=None, abort=None, **kw):
+        for st in self.statuses:
+            if self.status_listener is not None:
+                self.status_listener(st)
+        return super().goto(y, z, timeout_s=timeout_s, abort=abort, **kw)
+
+
+def live_status(y, z, vy=0.0, vz=0.0, *, running=True):
+    """一条运动中的状态字（3 轴布局：X 未接线，Y=槽1、Z=槽2）。"""
+    axes = tuple(AxisStatus(running=running) for _ in range(3))
+    return MachineStatus(real_pos=(0.0, y, z), real_speed=(0.0, vy, vz),
+                         inputs=0, outputs=0, run_mode="manual", axes=axes)
+
+
+def test_progress_is_streamed_during_motion_and_cleared_after(tmp_path):
+    """运动过程中位置/速度按条写回；结果落地后 progress 立即清掉（残值不冒充实时）。"""
+    fmc = StatusFmc(statuses=[live_status(100.0, 5.0, 40.0, 0.0),
+                              live_status(200.0, 10.0, running=False)])
+    channel, fmc, executor, _rows, _logs = make(tmp_path, fmc=fmc, progress_write_s=0)
+    written = []
+    orig_write = channel.write_progress
+    channel.write_progress = lambda p: (written.append(p), orig_write(p))
+    channel.open_session("t")
+    cmd, res = run(channel, executor, "goto", {"y": 1200.0, "z": 100.0})
+    assert res.ok is True
+    assert [p["position_yz"] for p in written] == [[100.0, 5.0], [200.0, 10.0]]
+    assert all(p["id"] == cmd.id and p["kind"] == "goto" for p in written)
+    assert written[0]["speed_yz"] == [40.0, 0.0] and written[0]["moving"] is True
+    assert written[1]["moving"] is False
+    assert channel.read_progress() is None, "收场即清：残值不能冒充实时位置"
+    assert fmc.status_listener is None, "动作结束钩子要摘掉"
+
+
+def test_progress_write_failure_does_not_break_the_command(tmp_path):
+    """观测通道的故障（盘满/权限）绝不能把运动搞挂——只记日志，动作照常。"""
+    fmc = StatusFmc(statuses=[live_status(100.0, 5.0)])
+    channel, fmc, executor, _rows, logs = make(tmp_path, fmc=fmc, progress_write_s=0)
+    channel.open_session("t")
+
+    def boom(_payload):
+        raise OSError("盘满了")
+
+    channel.write_progress = boom
+    _cmd, res = run(channel, executor, "goto", {"y": 1200.0, "z": 100.0})
+    assert res.ok is True
+    assert any("实时位置写回失败" in line for line in logs)

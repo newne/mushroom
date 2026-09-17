@@ -95,9 +95,12 @@
   .legend i{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:4px}
   /* ---- 实时画面（MJPEG，中栏第一张）----
      固定 16:9 的框：流没起来时也要占住位置，否则卡片高度会跳，下面的按钮跟着上下移动
-     ——点动的时候按钮乱跑是很烦的事。object-fit:contain 保证画面不被拉变形。 */
-  .pvwrap{position:relative;aspect-ratio:16/9;background:#05070a;border:1px solid var(--line);
-          border-radius:6px;overflow:hidden;display:flex;align-items:center;justify-content:center}
+     ——点动的时候按钮乱跑是很烦的事。object-fit:contain 保证画面不被拉变形。
+     max-height 是给导轨图腾位置（2026-09-17）：1080p 下画面卡 + 全宽导轨图要同屏可见，
+     画面让一点高度（约 44vh），换来"边挪边看 + 图上点目标"不翻页。 */
+  .pvwrap{position:relative;width:100%;aspect-ratio:16/9;max-height:44vh;background:#05070a;
+          border:1px solid var(--line);border-radius:6px;overflow:hidden;display:flex;
+          align-items:center;justify-content:center}
   .pvwrap img{width:100%;height:100%;object-fit:contain;display:none}
   .pvwrap .empty{position:absolute;left:8px;right:8px;text-align:center;padding:0}
   #pvnote{font-size:12px;margin-left:8px}
@@ -126,10 +129,16 @@
   #rtcol,#hcol{background:var(--soft);border-left:1px solid var(--line)}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:12px;box-shadow:var(--shadow)}
   .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)}
-  main>section:first-child>.card:first-child{flex:0 0 auto}
-  main>section:first-child>.card:nth-child(2){min-height:0;overflow:hidden;display:flex;flex-direction:column}
+  /* 左栏只剩站位列表一张卡（导轨图 2026-09-17 移去中栏放大）：它吃满整列、#list 自己滚 */
+  main>section:first-child>.card{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column}
   #list{min-height:0;overflow-y:auto;padding-right:2px}
-  #map{height:190px;background:#fbfcfd;border:1px solid var(--line);border-radius:6px}
+  /* 导轨图：中栏全宽，viewBox 与 aspect-ratio 同比例 ⇒ 像素坐标与图内坐标是线性映射，
+     点击/悬停换算不需要处理 letterbox（preserveAspectRatio 的留白）。crosshair 提示可点。
+     170 的图高是压扁过的：1080p 下与 44vh 的实时画面同屏，不挤成滚动才见得着的第二页。 */
+  #map{width:100%;height:auto;aspect-ratio:92/17;background:#fbfcfd;border:1px solid var(--line);
+       border-radius:6px;cursor:crosshair;touch-action:manipulation;display:block}
+  .mapcap{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--dim);margin-top:6px}
+  .mapcap .mono{white-space:nowrap}
   .stn{color:var(--fg);background:transparent;border-color:transparent;text-align:left;min-height:40px}
   .stn:hover{background:var(--soft)} .stn.sel{background:var(--accent-soft);border-color:#bcd4ff}
   .layer{font-weight:600;letter-spacing:.04em;color:var(--dim);padding-top:10px}
@@ -178,7 +187,6 @@
     .readout .v{font-size:12px}
   }
   @media (max-height:820px){
-    #map{height:150px}
     .card{padding:10px 12px;margin-bottom:9px}
     .pvwrap{aspect-ratio:16/8.5}
     .readout{padding:6px 8px}
@@ -202,11 +210,6 @@
 <main>
   <section>
     <div class="card">
-      <h2>导轨平面图（Y 向右 · Z 向下）</h2>
-      <svg id="map" viewBox="0 0 320 150" preserveAspectRatio="xMidYMid meet"></svg>
-      <div class="empty" id="maphint">点位与巡检当前站位</div>
-    </div>
-    <div class="card">
       <h2>站位（按层）</h2>
       <div id="list" class="empty">读取中…</div>
     </div>
@@ -223,8 +226,10 @@
         <img id="pvimg" alt="实时画面">
         <div class="empty" id="pvhint">接管后自动打开（相机实时画面，约 1 秒延迟）</div>
       </div>
+      <!-- 抓拍与看画面同一张卡：拍的就是"此刻画面里的这个位置"（2026-09-17 从右栏点动区并入） -->
       <div class="row" style="margin-top:8px">
         <button id="pvbtn">看画面</button>
+        <button id="capbtn" disabled title="拍当前位置，照片归到左栏选中的站位">抓拍</button>
         <span id="pverr" class="empty" style="padding:0"></span>
       </div>
       <div class="readouts" aria-live="polite">
@@ -232,6 +237,17 @@
         <div class="readout"><span class="k">目标站位</span><span id="targetpos" class="v unknown">未选择</span></div>
         <div class="readout"><span class="k">直线距离</span><span id="distance" class="v unknown">不可计算</span></div>
         <div class="readout"><span class="k">当前动作</span><span id="cmdstage" class="v unknown">空闲</span></div>
+      </div>
+    </div>
+    <!-- 导轨图（2026-09-17 从左栏移入中栏并放大）：滑台在 Y/Z 两轴自由移动，图就是"往哪挪"
+         的主交互面。点击任意位置 = 填坐标（仍走「移动到该点」+二次确认）；点站点 = 选中站位。 -->
+    <div class="card">
+      <h2>导轨平面图（Y 向右 · Z 向下）</h2>
+      <svg id="map" viewBox="0 0 920 170" preserveAspectRatio="xMidYMid meet"
+           role="img" aria-label="导轨平面图：Y 向右，Z 向下，点击任意位置设为目标点"></svg>
+      <div class="mapcap">
+        <span id="maphover" class="mono">移到图上查看坐标 · 点击任意位置设为目标点</span>
+        <span>Z 方向放大显示（实际 Y:Z ≈ 21:1）· 点站点 = 选中站位</span>
       </div>
     </div>
     <div class="card">
@@ -305,8 +321,6 @@
           <option value="0.5">0.5</option><option value="1">1</option>
           <option value="5" selected>5</option><option value="10">10</option>
         </select>
-        <button id="lampbtn">补光灯</button>
-        <button id="capbtn" disabled>抓拍</button>
       </div>
       <div class="jogpad" aria-label="空间方向点动">
         <button data-jog="Z-" aria-label="Z 负方向，上">↑<span class="sr-only"> Z −（上）</span></button>
@@ -364,7 +378,6 @@ let cmd = {inflight:null, result:null, estop:false, session_active:false};
 let session = null;              // {token, expires_at}；本地只用来显示倒计时
 let clockSkewMs = 0;             // 服务器时间 − 浏览器时间：倒计时用服务器口径算
 let lastCommandedPosition = null;
-let lampConfirmed = null;
 let observedResultId = '';
 let stationRequestSeq = 0;
 let historyRequestSeq = 0;
@@ -448,7 +461,18 @@ function stationTarget(st){
   return Number.isFinite(y) && Number.isFinite(z) ? [y, z] : null;
 }
 
+/* 运动中的实时位置：执行方（patrol-serve）在等待原语轮询状态字时顺手把
+   位置/速度写回通道，console 随 /api/cmd 带出。只有"属于在飞那条指令"的进度
+   才算数——id 对不上的是残值，残值冒充实时位置比"没有位置"更害人。 */
+function liveProgress(){
+  if(!busy() || !cmd.inflight || !cmd.progress) return null;
+  if(cmd.progress.id !== cmd.inflight.id) return null;
+  return validPosition(cmd.progress.position_yz) ? cmd.progress : null;
+}
+
 function positionState(){
+  const live = liveProgress();
+  if(live) return {value:[Number(live.position_yz[0]), Number(live.position_yz[1])], source:'live'};
   const m = lastStatus?.machine || {};
   if(validPosition(m.real_pos) && (m.pos_source === 'controller' || m.pos_source === 'observed')){
     return {value:[Number(m.real_pos[0]), Number(m.real_pos[1])], source:'controller'};
@@ -473,19 +497,14 @@ function observeCommandResult(result){
   if(result.ok && validPosition(data.position_yz)){
     lastCommandedPosition = [Number(data.position_yz[0]), Number(data.position_yz[1])];
   }
-  if(result.ok && result.kind === 'lamp' && typeof data.lamp_on === 'boolean'){
-    lampConfirmed = data.lamp_on;
-  }
-  if(result.ok && result.kind === 'capture' && data.lamp_on === false){
-    lampConfirmed = false;
-  }
 }
 
 function positionText(state){
   if(!state.value) return '位置未知';
-  const source = state.source === 'controller' ? '控制器实读'
+  const source = state.source === 'live' ? '控制器实时'
+    : state.source === 'controller' ? '控制器实读'
     : state.source === 'patrol' ? '巡检站位推定' : '最后成功目标';
-  return `Y=${state.value[0].toFixed(1)} Z=${state.value[1].toFixed(1)} · ${source}`;
+  return `Y=${state.value[0].toFixed(2)} Z=${state.value[1].toFixed(2)} · ${source}`;
 }
 
 function renderPositionReadouts(){
@@ -498,7 +517,7 @@ function renderPositionReadouts(){
   const target = stationTarget(stations.find(st => st.id === selected));
   const targetEl = $('#targetpos');
   if(targetEl){
-    targetEl.textContent = target ? `${selected} · Y=${target[0].toFixed(1)} Z=${target[1].toFixed(1)}` : '未选择';
+    targetEl.textContent = target ? `${selected} · Y=${target[0].toFixed(2)} Z=${target[1].toFixed(2)}` : '未选择';
     targetEl.className = 'v' + (target ? '' : ' unknown');
   }
   const distance = $('#distance');
@@ -510,35 +529,94 @@ function renderPositionReadouts(){
   }
   const stage = $('#cmdstage');
   if(stage){
-    stage.textContent = busy() ? '执行中' : (cmd.result ? (cmd.result.ok ? '已完成' : '失败') : '空闲');
+    const live = liveProgress();
+    if(busy() && live && validPosition(live.speed_yz)){
+      const v = Math.hypot(Number(live.speed_yz[0]), Number(live.speed_yz[1]));
+      stage.textContent = `移动中 · v=${v.toFixed(1)} mm/s`;
+    }else{
+      stage.textContent = busy() ? '执行中' : (cmd.result ? (cmd.result.ok ? '已完成' : '失败') : '空闲');
+    }
     stage.className = 'v' + (busy() || cmd.result ? '' : ' unknown');
   }
 }
 
+/* 导轨图几何：viewBox 920×170 与 CSS aspect-ratio（92/17）同比例 ⇒
+   getBoundingClientRect 的像素与图内坐标是**线性映射**，点击/悬停换算不用管
+   preserveAspectRatio 的 letterbox。所有图元内联设色（不依赖 CSS 类——旧版
+   .map-band/.map-grid 等类一条规则都没写，层带与路径其实是默认黑色）。 */
+const MAP = {W:920, H:170, padL:26, padR:12, padT:14, padB:22};
+
+function mapScale(){
+  const {y_min, y_max, z_min, z_max} = grid;
+  const iw = MAP.W - MAP.padL - MAP.padR, ih = MAP.H - MAP.padT - MAP.padB;
+  return {
+    // Z 向下为正（原点在顶端，ADR-0018）：z 越大越靠下，第 1 层用 z_min 起算。
+    X: y => MAP.padL + (y - y_min) / Math.max(1, y_max - y_min) * iw,
+    Y: z => MAP.padT + (z - z_min) / Math.max(1, z_max - z_min) * ih,
+  };
+}
+
+function mapViewCoords(e){
+  const svg = $('#map');
+  const r = svg.getBoundingClientRect();
+  if(!r.width || !r.height) return null;
+  return [(e.clientX - r.left) / r.width * MAP.W, (e.clientY - r.top) / r.height * MAP.H];
+}
+
+function mapPointFromEvent(e){
+  if(!grid) return null;
+  const v = mapViewCoords(e); if(!v) return null;
+  const fx = (v[0] - MAP.padL) / (MAP.W - MAP.padL - MAP.padR);
+  const fy = (v[1] - MAP.padT) / (MAP.H - MAP.padT - MAP.padB);
+  const y = grid.y_min + Math.min(1, Math.max(0, fx)) * (grid.y_max - grid.y_min);
+  const z = grid.z_min + Math.min(1, Math.max(0, fy)) * (grid.z_max - grid.z_min);
+  return [y, z];
+}
+
+function mapStationAt(vx, vy){
+  const {X, Y} = mapScale();
+  let best = null, bestD = 12;      // 12 图内单位的命中圈：比站点好戳，又不至于吞掉空白处点击
+  for(const st of stations){
+    const t = stationTarget(st); if(!t) continue;
+    const d = Math.hypot(X(t[0]) - vx, Y(t[1]) - vy);
+    if(d < bestD){ bestD = d; best = st; }
+  }
+  return best;
+}
+
 function drawMap(){
-  const svg = $('#map'); if(!grid){ return; }
+  const svg = $('#map'); if(!svg || !grid){ return; }
   const {cols, layers, y_min, y_max, z_min, z_max} = grid;
-  const W = 320, H = 150, pad = 14;
-  const X = y => pad + (y - y_min) / Math.max(1, y_max - y_min) * (W - 2*pad);
-  // Z 向下为正（原点在顶端，ADR-0018）：z 越大越靠下。层从**原点那一侧**排下去，
-  // 所以第 1 层（最上）用 z_min 起算——按 z_max 起算会把第 1 层画到最下面（旧代码就是）。
-  const Y = z => pad + (z - z_min) / Math.max(1, z_max - z_min) * (H - 2*pad);
+  const {W, H, padL, padR, padT, padB} = MAP;
+  const {X, Y} = mapScale();
   const zPitch = (z_max - z_min) / layers;
   let s = '';
-  // 层带
+  // 层带（第 1 层在最上：Z 原点在顶端、向下为正）
   for(let L = 1; L <= layers; L++){
     const y0 = Y(z_min + (L-1)*zPitch), y1 = Y(z_min + L*zPitch);
-    if(L % 2 === 1) s += `<rect class="map-band" x="${pad}" y="${y0}" width="${W-2*pad}" height="${y1-y0}"/>`;
+    if(L % 2 === 1) s += `<rect x="${padL}" y="${y0.toFixed(1)}" width="${W-padL-padR}" height="${(y1-y0).toFixed(1)}" fill="#f5f8fc"/>`;
   }
-  // 网格线
+  // 外框 + 网格线
+  s += `<rect x="${padL}" y="${padT}" width="${W-padL-padR}" height="${H-padT-padB}" fill="none" stroke="#c7d2e2"/>`;
   for(let c = 0; c <= cols; c++){
-    const x = pad + c*(W-2*pad)/cols;
-    s += `<line class="map-grid" x1="${x}" y1="${pad}" x2="${x}" y2="${H-pad}"/>`;
+    const x = padL + c*(W-padL-padR)/cols;
+    s += `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${H-padB}" stroke="#dbe3ef" stroke-width="0.8"/>`;
   }
   for(let L = 0; L <= layers; L++){
-    const y = pad + L*(H-2*pad)/layers;
-    s += `<line class="map-grid" x1="${pad}" y1="${y}" x2="${W-pad}" y2="${y}"/>`;
+    const y = padT + L*(H-padT-padB)/layers;
+    s += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W-padR}" y2="${y.toFixed(1)}" stroke="#dbe3ef" stroke-width="0.8"/>`;
   }
+  // 列号（下）、层号（左）、量程（右上）
+  for(let c = 1; c <= cols; c++){
+    const x = padL + (c-0.5)*(W-padL-padR)/cols;
+    s += `<text x="${x.toFixed(1)}" y="${H-7}" text-anchor="middle" font-size="9" fill="#6b7785">${c}</text>`;
+  }
+  for(let L = 1; L <= layers; L++){
+    const y = padT + (L-0.5)*(H-padT-padB)/layers;
+    s += `<text x="${padL-9}" y="${(y+3).toFixed(1)}" text-anchor="middle" font-size="9" fill="#6b7785">${L}</text>`;
+  }
+  s += `<text x="${W-padR}" y="${padT-4}" text-anchor="end" font-size="9" fill="#6b7785">Y ${esc(y_min)} → ${esc(y_max)} mm · Z ${esc(z_min)} → ${esc(z_max)} mm</text>`;
+  // 蛇形路径（巡检走法：层内单向、换层同侧——不允许斜向段）
   const ordered = [...stations].sort((a, b) => a.layer - b.layer ||
     (a.layer % 2 ? a.col - b.col : b.col - a.col));
   const coords = st => {
@@ -549,37 +627,70 @@ function drawMap(){
     const point = coords(st);
     return point ? `${i ? 'L' : 'M'}${point[0].toFixed(1)},${point[1].toFixed(1)}` : '';
   }).filter(Boolean).join(' ');
-  if(path) s += `<path class="map-path" d="${path}"/>`;
-  // 站位点
+  if(path) s += `<path d="${path}" fill="none" stroke="#b9c6da" stroke-width="1" stroke-dasharray="3 2.4"/>`;
+  // 站位点：半径 7（选中/当前 9）。tooltip 里是**毫米坐标**——旧版填的是 SVG 像素，
+  // 悬停看到的"Y=234.5"根本不是坐标。
   const cur = lastStatus?.patrol?.current_station;
   for(const st of stations){
     const sel = st.id === selected, isCur = st.id === cur;
-    const point = coords(st); if(!point) continue;
-    s += `<circle class="map-station ${sel?'selected':''} ${isCur?'current':''}"
-            cx="${point[0].toFixed(1)}" cy="${point[1].toFixed(1)}" r="${sel||isCur?6:3.2}"
+    const target = stationTarget(st); if(!target) continue;
+    const point = [X(target[0]), Y(target[1])];
+    if(isCur) s += `<circle cx="${point[0].toFixed(1)}" cy="${point[1].toFixed(1)}" r="12.5" fill="none" stroke="#1f6feb" stroke-width="1.2"/>`;
+    s += `<circle class="map-station" data-id="${esc(st.id)}"
+            cx="${point[0].toFixed(1)}" cy="${point[1].toFixed(1)}" r="${sel||isCur?9:7}"
             fill="${isCur ? '#1f6feb' : (sel ? '#18794e' : '#697887')}"
-            stroke="${sel?'#18794e':'none'}" data-id="${esc(st.id)}"><title>${esc(st.id)} · ${esc(st.box_id)} ·
-            第${esc(st.layer)}层第${esc(st.col)}框 · Y=${point[0].toFixed(1)} Z=${point[1].toFixed(1)}</title></circle>`;
+            stroke="${sel||isCur ? '#ffffff' : 'none'}" stroke-width="1.5" style="cursor:pointer"><title>${esc(st.id)} · ${esc(st.box_id)} ·
+            第${esc(st.layer)}层第${esc(st.col)}框 · Y=${target[0].toFixed(2)} Z=${target[1].toFixed(2)} mm</title></circle>`;
+  }
+  // 待定目标（坐标输入框的当前值）：虚线方框，跟着输入/点击走，执行仍走「移动到该点」+二次确认
+  const py = parseFloat($('#gtY').value), pz = parseFloat($('#gtZ').value);
+  if(Number.isFinite(py) && Number.isFinite(pz) && py >= y_min && py <= y_max && pz >= z_min && pz <= z_max){
+    s += `<rect class="map-pending" x="${(X(py)-7).toFixed(1)}" y="${(Y(pz)-7).toFixed(1)}" width="14" height="14"
+            fill="none" stroke="#a35d00" stroke-width="1.4" stroke-dasharray="3 2"/>`;
   }
   const target = stationTarget(stations.find(st => st.id === selected));
   const current = positionState().value;
-  if(target){
-    const point = [X(target[0]), Y(target[1])];
-    s += `<rect class="map-target" x="${(point[0]-5).toFixed(1)}" y="${(point[1]-5).toFixed(1)}" width="10" height="10"/>`;
-    if(current){
-      s += `<line class="map-link" x1="${X(current[0]).toFixed(1)}" y1="${Y(current[1]).toFixed(1)}"
-              x2="${point[0].toFixed(1)}" y2="${point[1].toFixed(1)}"/>`;
-    }
+  if(target && current){
+    s += `<line x1="${X(current[0]).toFixed(1)}" y1="${Y(current[1]).toFixed(1)}"
+            x2="${X(target[0]).toFixed(1)}" y2="${Y(target[1]).toFixed(1)}"
+            stroke="#d94a3d" stroke-width="1" stroke-dasharray="3 3" opacity="0.55"/>`;
   }
   if(current){
-    s += `<g class="map-live"><line x1="${X(current[0])-5}" y1="${Y(current[1])}"
-      x2="${X(current[0])+5}" y2="${Y(current[1])}"/><line x1="${X(current[0])}" y1="${Y(current[1])-5}"
-      x2="${X(current[0])}" y2="${Y(current[1])+5}"/><circle cx="${X(current[0])}" cy="${Y(current[1])}" r="3.5"/></g>`;
+    const cx = X(current[0]), cy = Y(current[1]);
+    s += `<g><line x1="${(cx-8).toFixed(1)}" y1="${cy.toFixed(1)}" x2="${(cx+8).toFixed(1)}" y2="${cy.toFixed(1)}" stroke="#d94a3d" stroke-width="1.4"/>
+      <line x1="${cx.toFixed(1)}" y1="${(cy-8).toFixed(1)}" x2="${cx.toFixed(1)}" y2="${(cy+8).toFixed(1)}" stroke="#d94a3d" stroke-width="1.4"/>
+      <circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="4" fill="#d94a3d" stroke="#ffffff" stroke-width="1.2"/></g>`;
   }
-  s += `<text class="map-label" x="${pad}" y="${H-2}">Y ${esc(y_min)} → ${esc(y_max)} mm</text>`;
-  s += `<text class="map-label" x="${W-86}" y="${H-2}">Z ${esc(z_min)} → ${esc(z_max)} mm</text>`;
   svg.innerHTML = s;
-  svg.querySelectorAll('.map-station').forEach(c => c.onclick = () => selectStation(c.dataset.id));
+  svg.querySelectorAll('.map-station').forEach(c => c.onclick = ev => {
+    ev.stopPropagation();            // 站点自己的命中优先，别再走"空白处设目标"
+    selectStation(c.dataset.id);
+  });
+}
+
+function wireMap(){
+  const svg = $('#map');
+  // 点击：站点命中圈内 = 选中站位；空白处 = 把该点坐标填进输入框（不直接动机构——
+  // 移动永远只走「移动到该点」+二次确认这一条路，图上点歪了的代价是重点一下）。
+  svg.addEventListener('click', e => {
+    if(!grid) return;
+    const v = mapViewCoords(e); if(!v) return;
+    const st = mapStationAt(v[0], v[1]);
+    if(st){ selectStation(st.id); return; }
+    const pt = mapPointFromEvent(e); if(!pt) return;
+    $('#gtY').value = pt[0].toFixed(2);
+    $('#gtZ').value = pt[1].toFixed(2);
+    validateTargets();
+    drawMap();
+    $('#maphover').textContent = `已设目标 Y=${pt[0].toFixed(2)} Z=${pt[1].toFixed(2)}（点右栏「移动到该点」执行）`;
+  });
+  svg.addEventListener('mousemove', e => {
+    const pt = mapPointFromEvent(e);
+    if(pt) $('#maphover').textContent = `光标 Y=${pt[0].toFixed(2)} mm · Z=${pt[1].toFixed(2)} mm`;
+  });
+  svg.addEventListener('mouseleave', () => {
+    $('#maphover').textContent = '移到图上查看坐标 · 点击任意位置设为目标点';
+  });
 }
 
 function drawList(){
@@ -592,7 +703,7 @@ function drawList(){
       <button type="button" class="stn ${st.id===selected?'sel':''}" data-id="${esc(st.id)}"
         aria-selected="${st.id===selected}" aria-label="${esc(st.id)}，第 ${esc(st.layer)} 层第 ${esc(st.col)} 框">
         <span>${st.id===cur?'<span class="cur">▶ </span>':''}${esc(st.id)}</span>
-        <span class="mono" style="color:var(--dim)">${Number(st.target_y ?? st.y).toFixed(0)}, ${Number(st.target_z ?? st.z).toFixed(1)}
+        <span class="mono" style="color:var(--dim)">${Number(st.target_y ?? st.y).toFixed(2)}, ${Number(st.target_z ?? st.z).toFixed(2)}
         ${(st.trim_y||st.trim_z)?'⇥':''}</span>
       </button>`).join('');
     return `<div class="layer" role="heading" aria-level="3">第 ${esc(L)} 层</div>${rows}`;
@@ -611,7 +722,7 @@ async function selectStation(id){
   hist.picked = null;
   const station = stations.find(st => st.id === id);
   const target = stationTarget(station);
-  if(target){ $('#gtY').value = target[0]; $('#gtZ').value = target[1]; }
+  if(target){ $('#gtY').value = target[0].toFixed(2); $('#gtZ').value = target[1].toFixed(2); }
   renderPositionReadouts();
   validateTargets();
   $('#imgtitle').textContent = station ? '· ' + station.id : '';
@@ -767,17 +878,8 @@ function renderOps(){
   const locked = est || !active || busy() || inRound();
   $('#homebtn').disabled = locked;
   $('#gotobtn').disabled = locked || !targetsOk();
-  $('#lampbtn').disabled = est && lampConfirmed !== true;
   document.querySelectorAll('[data-jog]').forEach(b => b.disabled = locked);
   $('#capbtn').disabled = locked || !selected;        // 抓拍要有选中的站位（照片归到它名下）
-
-  const lamp = $('#lampbtn');
-  if(lamp){
-    lamp.textContent = lampConfirmed === true ? '补光灯（已开）'
-      : lampConfirmed === false ? '补光灯（已关）' : '补光灯（状态未知）';
-    lamp.setAttribute('aria-pressed', lampConfirmed === true ? 'true' : 'false');
-    lamp.title = lampConfirmed === null ? '尚未收到控制器确认' : '控制器已确认当前状态';
-  }
 
   const el = $('#cmdline');
   if(busy()){
@@ -874,6 +976,7 @@ function applyCommandState(value){
   // 会话真值以后端为准：本地那份只是拿来显示倒计时的
   if(!cmd.session_active) session = null;
   renderOps();
+  drawMap();          // busy 时这条按 300ms 节奏来：地图上的十字跟着实时位置走
 }
 
 function scheduleCmdRefresh(){
@@ -933,17 +1036,13 @@ function wireOps(){
     const detail = current
       ? `直线约 ${Math.hypot(y - current[0], z - current[1]).toFixed(0)} mm`
       : '当前位置未知，无法计算距离';
-    if(confirm(`移动到 Y=${y} Z=${z}（${detail}）？`)) await sendCmd('goto', {y, z});
+    if(confirm(`移动到 Y=${y.toFixed(2)} Z=${z.toFixed(2)}（${detail}）？`)) await sendCmd('goto', {y, z});
   };
   document.querySelectorAll('[data-jog]').forEach(b => b.onclick = async () => {
     const [axis, sign] = [b.dataset.jog[0], b.dataset.jog[1]];
     const step = parseFloat($('#step').value) * (sign === '+' ? 1 : -1);
     await sendCmd('jog', {axis, mm: step});
   });
-  $('#lampbtn').onclick = async () => {
-    const on = lampConfirmed !== true;
-    await sendCmd('lamp', {on});
-  };
   $('#capbtn').onclick = async () => {
     if(!selected){ opmsg('先在左栏选一个站位：照片要归到它名下', 'bad'); return; }
     await sendCmd('capture', {station_id:selected});
@@ -1312,6 +1411,7 @@ function wireHistory(){
   wireOps();
   wireHistory();
   wirePreview();
+  wireMap();
   await refreshCmd();
   // 页面是刷新/重开后回来的，而后端可能还开着会话：把画面接着打开，别让人以为它坏了
   if(cmd.session_active) openPreview();

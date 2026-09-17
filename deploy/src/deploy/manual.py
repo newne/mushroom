@@ -120,6 +120,10 @@ class ManualChannel:
     def estop_path(self) -> Path:
         return self.dir_path / "ESTOP"
 
+    @property
+    def progress_path(self) -> Path:
+        return self.dir_path / "progress.json"
+
     def _write(self, path: Path, payload: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(path.name + f".tmp{os.getpid()}")
@@ -255,3 +259,21 @@ class ManualChannel:
             return CommandResult(**raw)
         except TypeError:
             return None
+
+    # ---------- 运动中的实时位置/速度（执行方写，console 读） ----------
+
+    def write_progress(self, payload: dict) -> None:
+        """写一条运动进度（位置/速度/是否在动）。与指令同目录、同样原子落盘。
+
+        这是**观测**通道，不是控制通道：写失败不该影响运动本身（调用方自理）。
+        """
+        self._write(self.progress_path, payload)
+
+    def read_progress(self) -> dict | None:
+        return self._read(self.progress_path)
+
+    def clear_progress(self) -> None:
+        try:
+            self.progress_path.unlink()
+        except OSError:
+            pass

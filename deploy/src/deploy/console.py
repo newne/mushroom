@@ -54,6 +54,10 @@ MANUAL_GATED_KINDS = frozenset(ALL_KINDS) - {"stop"}
 #: 预览流开着时，每转发这么多块就回头看一眼"巡检开始了没"（ADR-0017 §4 的服务端兜底）
 PREVIEW_RECHECK_CHUNKS = 8
 
+#: 运动进度超过这么久没更新 ⇒ 执行方多半已经不在写它了（进程死了/动作卡死），
+#: 页面再显示"实时位置"就是把残值当现在——宁可没有，不要假的。
+PROGRESS_STALE_S = 5.0
+
 
 class CmdBody(BaseModel):
     """手动指令请求体。`kind` 走白名单校验，未知指令在执行层被拒（400）。"""
@@ -651,12 +655,28 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
 
     @app.get("/api/cmd")
     def api_cmd_state() -> dict:
-        """当前指令与最近一次结果（页面按这个轮询）。"""
+        """当前指令与最近一次结果（页面按这个轮询）。
+
+        `progress` 是执行方在**运动过程中**写回的实时位置/速度（`progress.json`）：
+        只有"属于当前在飞的那条指令"且"足够新鲜"才带出去——id 对不上或写回停了，
+        页面拿到的就是残值，而残值冒充实时位置比"没有位置"更害人。
+        """
         ch = channel()
         inflight = ch.inflight()
         result = ch.result()
+        progress = None
+        if inflight is not None:
+            raw = ch.read_progress()
+            if raw and raw.get("id") == inflight.id:
+                try:
+                    age = (deps.now() - datetime.fromisoformat(str(raw.get("ts") or ""))).total_seconds()
+                except ValueError:
+                    age = PROGRESS_STALE_S + 1
+                if age <= PROGRESS_STALE_S:
+                    progress = raw
         return {"inflight": asdict(inflight) if inflight else None,
                 "result": asdict(result) if result else None,
+                "progress": progress,
                 "estop": ch.raised(),
                 "session_active": ch.active_session() is not None}
 

@@ -54,6 +54,7 @@ const state = {
   session: null,                              // {token, opened_at, expires_at}
   cmd: null,                                  // 在飞的那条
   result: null,
+  progress: null,                             // 执行方写回的运动实时位置/速度
   patrol_active: false,
   reject_cmd: null,                           // 覆盖 POST /api/cmd 的状态码（测拒绝显示）
   growth_error: false,                        // 让 /api/growth 回"prod 查不到"
@@ -64,7 +65,6 @@ const state = {
   command_network_error: false,
   machine_position: [200.0, -20.0],
   machine_pos_source: 'controller',
-  lamp_on: false,
   // 真执行方会在几百毫秒内领走并写回结果；默认照做，否则页面会一直停在"执行中"，
   // 后面的用例就全被上锁挡住了（那是假后端的锅，不是页面的）。
   auto_complete_ms: 150,
@@ -78,10 +78,10 @@ function completeSoon() {
     const data = {};
     if (cmd.kind === 'goto') data.position_yz = [cmd.args.y, cmd.args.z];
     if (cmd.kind === 'home') data.position_yz = [0, 0];
-    if (cmd.kind === 'lamp') { state.lamp_on = !!cmd.args.on; data.lamp_on = state.lamp_on; }
     state.result = { id: cmd.id, kind: cmd.kind, args: cmd.args, data,
       ok: true, detail: '已执行（假后端）', ended_at: NOW };
     state.cmd = null;
+    state.progress = null;                    // 结果落地，实时流收场（与执行方一致）
   }, state.auto_complete_ms);
 }
 
@@ -139,8 +139,8 @@ function route(method, url, body) {
   }
   if (path === '/api/cmd' && method === 'GET') {
     if (state.command_network_error) throw new Error('offline');
-    return json(200, { inflight: state.cmd, result: state.result, estop: state.estop,
-                       session_active: !!state.session });
+    return json(200, { inflight: state.cmd, result: state.result, progress: state.progress,
+                       estop: state.estop, session_active: !!state.session });
   }
   if (path === '/api/session' && method === 'POST') {
     state.session = { token: 't-1', opened_at: NOW, expires_at: '2026-09-14T10:05:00' };
@@ -227,10 +227,40 @@ const lastCmd = () => {
     T('#envlbl').includes('Z 0…212') && T('#envlbl').includes('向下'), T('#envlbl'));
   const dots = Array.from(document.querySelectorAll('#map circle'));
   const yOf = id => Number(dots.find(c => c.dataset.id === id)?.getAttribute('cy'));
-  check('第 1 层的点画在图的上半部（Z 原点在顶端）', yOf('S101') < 75, 'cy=' + yOf('S101'));
+  check('第 1 层的点画在图的上半部（Z 原点在顶端）', yOf('S101') < 100, 'cy=' + yOf('S101'));
   check('点动按钮标出物理方向（Z + 是向下）',
     T('[data-jog="Z+"]').includes('下') && T('[data-jog="Z-"]').includes('上'),
     T('[data-jog="Z+"]') + ' / ' + T('[data-jog="Z-"]'));
+
+  // 1c. 导轨图（2026-09-17 改版）：放大移到**中栏**，滑台两轴自由移动 ⇒ 点击任意位置设目标
+  check('导轨图在中栏（左栏只留站位列表）',
+    !!$('#rtmain #map') && !document.querySelector('main>section:first-child #map'),
+    $('#rtmain #map') ? '中栏 ✓' : '不在中栏');
+  check('站点 tooltip 给的是毫米坐标（两位小数），不是 SVG 像素',
+    (dots.find(c => c.dataset.id === 'S101')?.querySelector('title')?.textContent || '')
+      .includes('Y=187.10 Z=21.20 mm'),
+    dots.find(c => c.dataset.id === 'S101')?.querySelector('title')?.textContent || '(无 title)');
+  check('站位列表坐标也是两位小数', T('.stn .mono').includes('187.10, 21.20'), T('.stn .mono'));
+
+  // 点击空白处 = 填坐标（不发指令！移动永远走「移动到该点」+二次确认）；
+  // jsdom 不做坐标命中，补一个 getBoundingClientRect 让换算有输入。
+  const mapsvg = $('#map');
+  mapsvg.getBoundingClientRect = () => ({ left: 0, top: 0, width: 920, height: 170 });
+  state.calls.length = 0;
+  mapsvg.dispatchEvent(new window.MouseEvent('click', { clientX: 460, clientY: 85, bubbles: true }));
+  await sleep(120);
+  check('地图空白处点击填入两位小数坐标', $('#gtY').value === '2210.35' && $('#gtZ').value === '112.33',
+    $('#gtY').value + ' / ' + $('#gtZ').value);
+  check('地图点击**不直接发指令**', lastCmd() === null || lastCmd() === undefined,
+    JSON.stringify(lastCmd()));
+  check('待定目标画出了虚线框', !!document.querySelector('#map .map-pending'));
+  mapsvg.dispatchEvent(new window.MouseEvent('mousemove', { clientX: 460, clientY: 85, bubbles: true }));
+  check('悬停显示光标处坐标', T('#maphover').includes('Y=2210.35') && T('#maphover').includes('Z=112.33'),
+    T('#maphover'));
+  // 收尾：别把坐标/选中态带进后面的用例（历史模式断言"未选站位"的提示）
+  $('#gtY').value = ''; $('#gtZ').value = '';
+  $('#gtY').dispatchEvent(new window.Event('input'));
+  mapsvg.dispatchEvent(new window.MouseEvent('mouseleave', { bubbles: true }));
 
   // 1b. 历史模式：**还没选站位**时该给提示而不是空白表格
   await click('#modeSeg [data-mode="history"]');
@@ -264,14 +294,8 @@ const lastCmd = () => {
   check('步长切到 0.5 生效', JSON.stringify(lastCmd()) === '{"kind":"jog","args":{"axis":"Y","mm":-0.5}}',
     JSON.stringify(lastCmd()));
 
-  // 灯状态只接受执行方的结构化确认；提交失败不能把按钮改成另一个事实。
-  await click('#lampbtn');
-  check('结构化结果确认补光灯已开', T('#lampbtn').includes('已开'), T('#lampbtn'));
-  state.reject_cmd = 403;
-  await click('#lampbtn');
-  check('灯命令失败不改变已确认状态', T('#lampbtn').includes('已开') && T('#opmsg').includes('需要先接管'),
-    T('#lampbtn') + ' / ' + T('#opmsg'));
-  state.reject_cmd = null;
+  // 补光灯开关已从页面删除（现场无实际作用）——连 DOM 都不该再有
+  check('页面上没有补光灯开关（无实际作用，2026-09-17 删除）', !$('#lampbtn') && !html.includes('lampbtn'));
 
   // 4. 定位：二次确认 + 载荷
   state.calls.length = 0;
@@ -288,7 +312,8 @@ const lastCmd = () => {
     window.__confirmMessages[0]);
   check('定位载荷 = {y:1200, z:-100}',
     JSON.stringify(lastCmd()) === '{"kind":"goto","args":{"y":1200,"z":100}}', JSON.stringify(lastCmd()));
-  check('结构化位置结果更新可信读数', T('#actualpos').includes('Y=1200.0') && T('#actualpos').includes('最后成功目标'),
+  check('结构化位置结果更新可信读数（两位小数）',
+    T('#actualpos').includes('Y=1200.00') && T('#actualpos').includes('Z=100.00') && T('#actualpos').includes('最后成功目标'),
     T('#actualpos'));
   state.machine_position = [200.0, -20.0];
   state.machine_pos_source = 'controller';
@@ -312,10 +337,17 @@ const lastCmd = () => {
   $('#gtY').dispatchEvent(new window.Event('input'));
   check('回到范围内即恢复可提交', $('#gotobtn').disabled === false && $('#gtY').className === '');
 
-  // 6. 抓拍：没选站位不让点；选了就带上 station_id
+  // 6. 抓拍：没选站位不让点；选了就带上 station_id。
+  //    抓拍 2026-09-17 并入实时画面卡（拍的就是"此刻画面里的这个位置"），与「看画面」并列。
   check('未选站位时抓拍禁用', $('#capbtn').disabled === true);
-  await click('.stn[data-id="S102"]');
-  await sleep(200);
+  check('抓拍与「看画面」在同一张卡（实时画面卡）',
+    !!$('#rtmain #capbtn') && $('#capbtn').closest('.card') === $('#pvbtn').closest('.card'));
+  // 这次从**地图**上点站位（S102 图心 ≈ 136,27，命中圈内）：地图也是选站入口
+  mapsvg.dispatchEvent(new window.MouseEvent('click', { clientX: 136, clientY: 27, bubbles: true }));
+  await sleep(400);
+  check('点地图上的站点 = 选中站位', T('#imgtitle').includes('S102'), T('#imgtitle'));
+  check('选中后坐标框填成该站目标（两位小数）', $('#gtY').value === '561.50' && $('#gtZ').value === '21.20',
+    $('#gtY').value + ' / ' + $('#gtZ').value);
   check('选中站位后抓拍可用', $('#capbtn').disabled === false);
   state.calls.length = 0;
   await click('#capbtn');
@@ -357,11 +389,6 @@ const lastCmd = () => {
   await sleep(200);
   check('急停后标签显示已置位', T('#estopstate').includes('已置位'), T('#estopstate'));
   check('急停后出现复位按钮', $('#estopclear').disabled === false);
-  check('急停时已确认开灯仍允许关灯', $('#lampbtn').disabled === false, T('#lampbtn'));
-  await click('#lampbtn');
-  check('急停时补光灯只提交关灯', JSON.stringify(lastCmd()) === '{"kind":"lamp","args":{"on":false}}',
-    JSON.stringify(lastCmd()));
-  check('急停关灯后再次开灯保持禁用', $('#lampbtn').disabled === true, T('#lampbtn'));
   await click('#estopclear');
   await sleep(200);
   check('复位后回到未置位', T('#estopstate').includes('未置位'), T('#estopstate'));
@@ -387,6 +414,32 @@ const lastCmd = () => {
   state.auto_complete_ms = 150;
   await sleep(1200);
   check('结果如实显示（失败的原因原样带出）', T('#cmdline').includes('等待运动被中止'), T('#cmdline'));
+
+  // 10b. 运动中的实时位置/速度：执行方随 /api/cmd 写回 progress，页面按它渲染——
+  //      但**只有属于在飞那条指令**的进度才算数（id 对不上的是残值，残值更害人）。
+  state.auto_complete_ms = 0;
+  state.cmd = { id: 'c-live', kind: 'goto', args: { y: 2210.35, z: 111.17 }, started_at: NOW };
+  state.result = null;
+  state.progress = { id: 'c-live', kind: 'goto', ts: NOW,
+                     position_yz: [1105.17, 55.59], speed_yz: [40.0, 0.0], moving: true };
+  await sleep(1400);                          // busy ⇒ /api/cmd 按 300ms 加密轮询
+  check('实时位置来自执行方写回（标「控制器实时」，两位小数）',
+    T('#actualpos').includes('Y=1105.17') && T('#actualpos').includes('Z=55.59') && T('#actualpos').includes('控制器实时'),
+    T('#actualpos'));
+  check('移动中显示合成速度', T('#cmdstage').includes('移动中') && T('#cmdstage').includes('v=40.0 mm/s'),
+    T('#cmdstage'));
+  state.progress = { id: 'c-old', kind: 'goto', ts: NOW,
+                     position_yz: [0, 0], speed_yz: [0, 0], moving: true };
+  await sleep(1200);
+  check('进度 id 对不上时不冒充实时位置', !T('#actualpos').includes('控制器实时'), T('#actualpos'));
+  state.cmd = null; state.progress = null;
+  state.result = { id: 'c-live', ok: true, detail: '已到位（假后端）', ended_at: NOW,
+                   data: { position_yz: [2210.35, 111.17] } };
+  state.auto_complete_ms = 150;
+  await sleep(1200);
+  check('到位后实时流收场，回到控制器实读（不再冒充实时）',
+    T('#actualpos').includes('Y=200.00') && T('#actualpos').includes('控制器实读') && !T('#actualpos').includes('控制器实时'),
+    T('#actualpos'));
 
   // 11. 放开会话：后端排回零，页面把话说清楚
   await click('#takebtn');

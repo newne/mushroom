@@ -41,6 +41,7 @@ from patrol.fmc import (
     MotionAborted,
     MotionTimeoutError,
 )
+from patrol.fmc.status import MachineStatus
 from patrol.motion_profile import HOME_DIR_NEGATIVE, M1
 from patrol.stations import Station, image_object_name
 
@@ -49,6 +50,9 @@ from deploy.manual import Command, ManualChannel, estop_allows
 MANUAL_TIMEOUT_S = 60.0     # 手动定位/回零的到位确认预算（比巡检档宽松：人看着）
 JOG_WAIT_S = 30.0           # 点动的到位确认预算
 STALE_COMMAND_S = 60.0      # 提交后多久没被领走就不再执行（见模块注释第 2 条）
+#: 运动中实时位置/速度的写回节流（秒）。等待原语本身以 20–50Hz 轮询状态字，
+#: 文件写回压到约 4Hz：页面按 300ms 轮询 /api/cmd，再快它也看不见。
+PROGRESS_WRITE_S = 0.25
 
 #: 轴名 → 控制器轴号（从参数单源派生，改接线不会漏改；与 M0 的 `patrol.debug` 同源）
 AXIS_BY_NAME: Mapping[str, int] = {spec.name.upper(): spec.index for spec in M1.axes}
@@ -109,6 +113,7 @@ class ManualExecutor:
         sleep: Callable[[float], None] = time.sleep,
         now: Callable[[], datetime] = datetime.now,
         stale_after_s: float = STALE_COMMAND_S,
+        progress_write_s: float = PROGRESS_WRITE_S,
     ) -> None:
         self.channel = channel
         self.connect = connect
@@ -121,6 +126,8 @@ class ManualExecutor:
         self._sleep = sleep
         self.now = now
         self.stale_after_s = stale_after_s
+        #: 实时位置写回的节流间隔（测试可给 0，逐次断言每一次状态回调）
+        self.progress_write_s = progress_write_s
 
     # ---------- 对外：领一条、执行、写回 ----------
 
@@ -141,6 +148,9 @@ class ManualExecutor:
         self.channel.complete(
             cmd, ok=outcome.ok, detail=outcome.detail, data=outcome.data
         )
+        # 进度文件只服务于"这条还在跑"的窗口期；结果已落，实时流就收场——
+        # 留着它页面会把上一条的残值当成现在。
+        self.channel.clear_progress()
         self.log(f"手动指令 {cmd.id} {'完成' if outcome.ok else '失败'}：{outcome.detail}")
         return cmd
 
@@ -160,17 +170,17 @@ class ManualExecutor:
             )
 
         if cmd.kind == "stop":
-            return self._with_client(self._stop)
+            return self._with_client(self._stop, cmd)
         if cmd.kind == "lamp":
-            return self._with_client(lambda fmc: self._lamp(fmc, cmd))
+            return self._with_client(lambda fmc: self._lamp(fmc, cmd), cmd)
         if cmd.kind == "home":
-            return self._with_client(self._home)
+            return self._with_client(self._home, cmd)
         if cmd.kind == "jog":
-            return self._with_client(lambda fmc: self._jog(fmc, cmd))
+            return self._with_client(lambda fmc: self._jog(fmc, cmd), cmd)
         if cmd.kind == "goto":
-            return self._with_client(lambda fmc: self._goto(fmc, cmd))
+            return self._with_client(lambda fmc: self._goto(fmc, cmd), cmd)
         if cmd.kind == "capture":
-            return self._with_client(lambda fmc: self._capture(fmc, cmd))
+            return self._with_client(lambda fmc: self._capture(fmc, cmd), cmd)
         return ExecOutcome(False, f"未知指令 {cmd.kind!r}")
 
     # ---------- 内部 ----------
@@ -190,8 +200,13 @@ class ManualExecutor:
             )
         return None
 
-    def _with_client(self, action: Callable[[Fmc4030], ExecOutcome]) -> ExecOutcome:
-        """连控制器 → 执行 → 关闭。连接失败如实回给操作者（页面要能看见原因）。"""
+    def _with_client(self, action: Callable[[Fmc4030], ExecOutcome], cmd: Command) -> ExecOutcome:
+        """连控制器 → 执行 → 关闭。连接失败如实回给操作者（页面要能看见原因）。
+
+        执行期间给客户端挂上**实时位置监听器**（`_progress_listener`）：等待原语
+        轮询状态字时顺手把位置/速度写回通道，页面因此能看到"正在往哪动"——
+        控制器本来就出实时位置与速度（厂商软件就是这么显示的），不另开轮询。
+        """
         try:
             fmc = self.connect()
         except FmcError as e:
@@ -199,6 +214,7 @@ class ManualExecutor:
         except Exception as e:  # noqa: BLE001 - 例如厂商动态库缺失
             return ExecOutcome(False, f"连接控制器失败（{type(e).__name__}: {e}）")
         try:
+            fmc.status_listener = self._progress_listener(cmd)
             return action(fmc)
         except MotionAborted as e:
             # **急停**：先把轴真的停住，再如实上报；停不干净也必须一起报出去。
@@ -213,9 +229,42 @@ class ManualExecutor:
             return ExecOutcome(False, f"{e}")
         finally:
             try:
+                fmc.status_listener = None
+            except Exception:  # noqa: BLE001,S110 - 摘钩子失败不掩盖动作结论
+                pass
+            try:
                 fmc.close()
             except Exception as e:  # noqa: BLE001 - 关闭失败不改变结论
                 self.log(f"关闭控制器连接异常：{e}")
+
+    def _progress_listener(self, cmd: Command) -> Callable[[MachineStatus], None]:
+        """生成一个**节流**的状态监听器：把实时位置/速度写进 `progress.json`。
+
+        节流的时钟用单调时钟（与注入的业务时钟分开——后者在测试里是冻结的）。
+        写失败只记日志：这是观测通道，绝不能反过来把运动搞挂。
+        """
+        last = {"t": 0.0}
+
+        def listener(st: MachineStatus) -> None:
+            now = time.monotonic()
+            if now - last["t"] < self.progress_write_s:
+                return
+            last["t"] = now
+            try:
+                self.channel.write_progress({
+                    "id": cmd.id,
+                    "kind": cmd.kind,
+                    "ts": self.now().isoformat(timespec="seconds"),
+                    "position_yz": [round(st.real_pos[M1.y.index], 3),
+                                    round(st.real_pos[M1.z.index], 3)],
+                    "speed_yz": [round(st.real_speed[M1.y.index], 2),
+                                 round(st.real_speed[M1.z.index], 2)],
+                    "moving": any(st.axes[a].running for a in M1.axis_indices),
+                })
+            except Exception as e:  # noqa: BLE001 - 观测通道的故障不该影响运动
+                self.log(f"实时位置写回失败（不影响本次动作）：{type(e).__name__}: {e}")
+
+        return listener
 
     def _safe_stop(self, fmc: Fmc4030) -> list[str]:
         try:

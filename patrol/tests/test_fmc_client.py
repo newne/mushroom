@@ -377,3 +377,27 @@ def test_script_download_and_start():
     client.stop_script()
     assert lib.calls_of("download") == [(1, b"/tmp/patrol.elo", 2)]
     assert lib.calls_of("start_script") == [(1, b"patrol.elo")]
+
+
+def test_status_listener_is_called_with_each_status():
+    """实时位置/速度的观测钩子：每次状态读取成功都回调（执行方靠它写运动进度）。"""
+    client, _lib = make_client()
+    seen = []
+    client.status_listener = seen.append
+    st = client.get_status()
+    assert seen == [st]
+    client.status_listener = None
+    client.get_status()
+    assert len(seen) == 1, "摘掉钩子之后不该再回调"
+
+
+def test_status_listener_failure_does_not_break_control():
+    """观测绝不能反过来影响控制：监听器炸了，状态读取照常返回。"""
+    client, _lib = make_client()
+
+    def boom(_st):
+        raise RuntimeError("观测炸了")
+
+    client.status_listener = boom
+    st = client.get_status()
+    assert st is not None

@@ -103,6 +103,10 @@ class Fmc4030:
         self.ip = ip
         self.port = port
         self._open = False
+        #: 状态观测钩子：每次 ``get_status`` 成功解析后被调用（运动等待原语轮询时
+        #: 自然以 20–50Hz 触发，执行方借此把**实时位置/速度**写回手动通道）。
+        #: 观测绝不能反过来影响控制——监听器抛出的任何异常都在这里吞掉。
+        self.status_listener: Callable[[MachineStatus], None] | None = None
 
     # ---------- 连接管理 ----------
 
@@ -145,7 +149,13 @@ class Fmc4030:
     def get_status(self) -> MachineStatus:
         buf = (ctypes.c_ubyte * ctypes.sizeof(MachineStatusStruct))()
         self._check(self._lib.FMC4030_Get_Machine_Status(self.id, buf), "get_status")
-        return parse_machine_status(bytes(buf))
+        st = parse_machine_status(bytes(buf))
+        if self.status_listener is not None:
+            try:
+                self.status_listener(st)
+            except Exception:      # noqa: BLE001,S110 - 观测失败不能影响控制链路
+                pass
+        return st
 
     def current_yz(self) -> Point:
         """两轴当前实际坐标 (y, z) mm。控制器仍是 3 轴状态字，未接线的 X 被丢弃。"""

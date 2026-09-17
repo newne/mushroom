@@ -186,3 +186,26 @@ def test_broken_command_file_reads_as_nothing_in_flight(tmp_path):
     c.cmd_path.write_text('{"id": "x", "kind":', encoding="utf-8")
     assert c.inflight() is None
     assert c.claim() is None
+
+
+# ---------- 运动中的实时位置/速度（观测通道） ----------
+
+
+def test_progress_roundtrip_and_clear(tmp_path):
+    """执行方写、console 读、收场清：同一份文件，坏文件同样按"没有"处理。"""
+    c = chan(tmp_path)
+    assert c.read_progress() is None
+    c.write_progress({"id": "c-1", "kind": "goto", "ts": "2026-09-14T10:00:00",
+                      "position_yz": [1105.172, 55.587], "speed_yz": [40.0, 0.0], "moving": True})
+    got = c.read_progress()
+    assert got is not None and got["id"] == "c-1" and got["position_yz"] == [1105.172, 55.587]
+    c.clear_progress()
+    assert c.read_progress() is None
+    c.clear_progress()          # 幂等：已经没了也不该炸
+
+
+def test_broken_progress_file_reads_as_nothing(tmp_path):
+    c = chan(tmp_path)
+    c.progress_path.parent.mkdir(parents=True, exist_ok=True)
+    c.progress_path.write_text('{"id": "x",', encoding="utf-8")
+    assert c.read_progress() is None
