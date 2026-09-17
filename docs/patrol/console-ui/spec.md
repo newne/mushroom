@@ -249,8 +249,8 @@ ADR-0008（控制器整定参数与软限位）
 | --- | --- | --- |
 | GET | `/api/stations` | `[{id, box_id, layer, col, y, z, angle_profile, camera_ip, exposure_note, last_capture_ts, image_count}]`；`layer` 1…5 自顶向下、`col` 1…12 沿 Y 递增（§2.1） |
 | GET | `/api/grid` | `{cols, layers, y_pitch, z_pitch, y_min/y_max/z_min/z_max}` — 网格几何（`grid_geometry()`），供平面图绘制，避免前后端各推一套 |
-| GET | `/api/images` | `?station_id=&angle=&date_from=&date_to=&limit=` → `[{ts, station_id, box_id, angle_profile, object_name, ok, source, url, thumb}]`，`source ∈ {local, prod}` |
-| GET | `/api/image` | `?object=<object_name>&w=320` → 图像字节（`w` 省略为原图；console 侧按 `object_name` 缓存） |
+| GET | `/api/images` | `?station_id=&angle=&date_from=&date_to=&limit=` → `[{ts, station_id, box_id, angle_profile, object_name, ok, source}]`，`source ∈ {local, prod}`。**不回 `cloud_url`**：那是控制网地址，浏览器够不着（§10.10） |
+| GET | `/api/image` | `?object_name=<对象名>` → 图像字节（`image/jpeg`）。对象名由**服务端**拼成 MinIO 地址，请求里给不了主机；后缀缺 `.jpg` 时自动补（手动抓拍落索引的就是不带后缀的名字）。`w=320` 缩略图**待做**——控制面镜像里没有 Pillow，为一个缩略图给巡检镜像加热解码不划算（§10.10）|
 | GET | `/api/measurements` | `?box_id=&ts_from=&ts_to=` → 生长曲线数据（`measurements` 表行） |
 | GET | `/api/rounds` | `?limit=50` → `rounds` 表行，作时间轴刻度 |
 
@@ -369,7 +369,7 @@ batch_no`，但表里原先没有这三列，写入时被**静默丢弃**——�
 | `job.progress` 进度条 | 只有"执行中…"+ 结果；进度条留给中栏的巡检进度 | 指令是异步文件通道，后端不知道运动百分比 |
 | `POST /api/abs`（单轴绝对） | 不做 | 两个坐标框 + `goto` 已覆盖现场需要；少一条动机构的路径 |
 | `esc` 可中断运动 | `esc` **只在有指令在飞时**发急停 | 空闲时误按会把急停闩上，之后每一轮巡检都失败——代价太大 |
-| MinIO 预签名 URL 显示缩略图 | 直接用 `cloud_url` 给 `<img>` | 现场浏览器能到 MinIO；拿不到图时那一格留空、行不丢 |
+| ~~MinIO 预签名 URL 显示缩略图~~ | **已作废**（2026-09-17）：页面只认 `/api/image?object_name=`，字节由 console 取（§10.10） | 原假设"现场浏览器能到 MinIO"是错的：MinIO 在控制网，上位机走 VPN 只到另一段，直连必然超时 |
 
 ### 10.6 历史模式的现状（2026-09-15）
 
@@ -471,9 +471,46 @@ Fmc4030.get_status（等待原语 20–50Hz 轮询顺带触发，不另开轮询
 对不上不透出；写回停超 5 秒（执行方死了/卡了）不透出。到位后页面回到"控制器实读 >
 巡检站位推定 > 最后成功目标 > 未知"的旧链。
 
-`docs/patrol/console-ui/verify-page.js` 当前覆盖 **101 项**行为断言，包括地图点击设目标、
+### 10.10 历史图像为什么必须经 console 代理（2026-09-17 现场故障）
+
+**症状**：`http://<库房主机>:8002/` 上"所有历史图像都是黑色的"，实时模式抓拍之后那一格
+也不出现。
+
+**根因（两个，独立）**
+
+1. **页面直连了 MinIO 的控制网地址。** prod 主机是双网卡：`eno1` 在**控制网**（就是
+   `tools_minio` 那条 host 网络的落点），`tun0` 在 VPN 段；上位机走 VPN，只被推到 VPN
+   那一段。所以 `cloud_url`（`http://<控制网 IP>:9000/mogu/...`）对浏览器是个**黑洞**：
+   `<img>` 每格等一次 TCP 超时，`.im img` 的深色底就留成一块黑。看着像"相机拍出来是
+   黑的"，实际是**一张都没取到**——这正是 ADR-0003 早就定下"历史图像经 console 转发或
+   代理、页面不直连 MinIO"要避免的事，实现时漏了。
+2. **手动抓拍把采图结果丢了。** `ManualExecutor._capture` 调 `capture()` 却**不接返回值**，
+   于是索引里存的是 `image_object_name()` 的原始值（**不带 `.jpg`**，截图服务才会补后缀），
+   而 `cloud_url` 干脆没写。结果那一行既没有站得住的 key、也没有地址，历史页无从取图。
+
+**怎么改的**
+
+- `GET /api/image?object_name=...`：地址由服务端用 `PATROL_MINIO` + bucket 拼，请求里
+  **给不了主机**（比"校验 URL 是不是 http/https"更强——后者挡不住"请去取内网元数据地址"）。
+  对象名只做**形状**校验（相对路径、≤3 段、字符集受限、后缀自动补 `.jpg`），不做语义校验：
+  形状错了 400 且一次网络都不发，语义错了让 MinIO 回 404/502。
+- `/api/images` **不再回 `cloud_url`**：留在响应里只会诱使下一个人再拿它喂 `<img>`。
+- 页面 `imageUrlFor(row)` 只从 `object_name` 拼 `/api/image?...`；取不到图时那一格标
+  `noimg` 并显示"图取不到"，而不是留一块和"拍黑了"分不开的深色方块。
+- `_capture` 把截图服务回的 `object_name`（带 `.jpg`）与 `cloud_url` 一起落索引。
+
+**为什么不让浏览器开个洞到控制网**：那条路要求给上位机加静态路由或让 MinIO 对外监听，
+是把一个显示问题换成一条**网络边界**问题；而 console 本来就跟 MinIO 同机，取字节是一跳
+本机请求。
+
+**未决**：`w=` 缩略图（一屏 20 帧、每帧 2880×1616 JPEG，走 VPN 是几十 MB）。控制面镜像里
+没有 Pillow，加它等于把图像解码塞进控制面镜像（与 ADR-0017 拒绝在控制面装解码器同一个
+理由）。要么给 console 单独一个小镜像，要么让 analysis 侧预生成缩略图对象。
+
+`docs/patrol/console-ui/verify-page.js` 当前覆盖 **105 项**行为断言，包括地图点击设目标、
 两位小数读数、实时位置/速度渲染与 id 不匹配拒显、结构化位置结果、未知位置确认、网络离线、
-快速切站、实时/历史预览恢复，以及急停闩锁。
+快速切站、实时/历史预览恢复、图像地址必须同源（不含控制网地址）与取不到图的可视化，以及
+急停闩锁。
 
 ### 10.2 页面缺的、系统已经有的（按 价值/成本 排序）
 

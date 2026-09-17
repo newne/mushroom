@@ -107,3 +107,15 @@ docker compose --profile patrol up -d mushroom_preview
 >
 > 排障：页面空白 vs 接口 500 现在是**两件事**——`curl -s localhost:8002/` 看页面、
 > `curl -s localhost:8002/healthz` 看后端；后者通、前者空说明产物没拷过去。
+>
+> **历史图全黑 / 抓拍后那一格不出现**（2026-09-17 现场）：先分清楚是"没取到图"还是
+> "拍出来是黑的"。取图链路是
+> `页面 <img src="/api/image?object_name=...">` → console → MinIO（**服务端**取字节），
+> 所以：
+> ```bash
+> curl -s -o /dev/null -w '%{http_code}\n' 'localhost:8002/api/image?object_name=20260917/B101_S101_top45_141012'
+> # 200 = 取到了（那页面上的黑就是真的拍黑了）
+> # 400 = 对象名形状不对    502 = console 到不了 MinIO（查 PATROL_MINIO）
+> ```
+> 页面**不再直连 MinIO**：`cloud_url` 是控制网地址，上位机走 VPN 够不着它（ADR-0003
+> 要求的就是这个代理）。谁把 `cloud_url` 塞回 `<img src>`，"整页黑图"就会回来。

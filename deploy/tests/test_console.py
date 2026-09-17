@@ -48,7 +48,9 @@ def write_run(runs: Path, name: str, events: list[dict], *, age_s: float = 0.0) 
     return p
 
 
-def make_client(tmp_path, *, entry="2026-09-04", transport=None, preview_open=None) -> TestClient:
+def make_client(tmp_path, *, entry="2026-09-04", transport=None, preview_open=None,
+                minio_base="http://minio-test:9000", minio_bucket="mogu",
+                image_fetch=None) -> TestClient:
     room = tmp_path / "room.yaml"
     write_room(room, entry)
     stations = tmp_path / "stations.yaml"
@@ -62,6 +64,8 @@ def make_client(tmp_path, *, entry="2026-09-04", transport=None, preview_open=No
                        outbox_path=str(tmp_path / "outbox.jsonl"),
                        runs_dir=str(tmp_path / "runs"),
                        trigger_dir=str(tmp_path / "trigger"), cmd_dir=str(tmp_path / "cmd"),
+                       minio_base=minio_base, minio_bucket=minio_bucket,
+                       image_fetch=image_fetch,
                        transport=transport, preview_open=preview_open, now=lambda: NOW)
     return TestClient(create_app(deps))
 
@@ -255,6 +259,80 @@ def test_images_filter_by_station(tmp_path):
     with make_client(tmp_path) as c:
         got = c.get("/api/images?station_id=S102").json()
     assert [r["station_id"] for r in got["rows"]] == ["S102"]
+
+
+def test_images_never_leak_the_control_network_url(tmp_path):
+    """`cloud_url` 是控制网地址，上位机够不着——回给页面就是把"黑图"这个坑重挖一遍。
+
+    2026-09-17 现场：历史图全是黑的，因为页面拿这个地址当 `<img src>`，而浏览器走 VPN
+    只到 `10.77.77.x`，`192.168.1.250` 对它是个黑洞（连上要等超时，`<img>` 就留一块黑）。
+    """
+    def transport(url, *, params=None, body=None):
+        return [{"ts": "2026-09-13T10:00:00", "station_id": "S101", "ok": 1,
+                 "object_name": "20260913/B101_S101_top45_100000.jpg",
+                 "cloud_url": "http://192.168.1.250:9000/mogu/20260913/B101_S101_top45_100000.jpg"}]
+
+    with make_client(tmp_path, transport=transport) as c:
+        rows = c.get("/api/images").json()["rows"]
+    assert rows and all("cloud_url" not in r for r in rows)
+    # 页面要的是对象名（字节由 /api/image 给），所以它必须留着
+    assert rows[0]["object_name"] == "20260913/B101_S101_top45_100000.jpg"
+
+
+def test_image_is_proxied_from_the_configured_minio(tmp_path):
+    seen = []
+
+    def fetch(url):
+        seen.append(url)
+        return b"\xff\xd8\xff\xe0jpegbytes"
+
+    with make_client(tmp_path, image_fetch=fetch) as c:
+        r = c.get("/api/image", params={"object_name": "20260917/B101_S101_top45_141012.jpg"})
+    assert r.status_code == 200
+    assert r.content == b"\xff\xd8\xff\xe0jpegbytes"
+    assert r.headers["content-type"] == "image/jpeg"
+    assert "max-age" in r.headers.get("cache-control", "")
+    assert seen == ["http://minio-test:9000/mogu/20260917/B101_S101_top45_141012.jpg"]
+
+
+def test_image_appends_jpg_for_manual_capture_names(tmp_path):
+    """手动抓拍落索引的是**不带 .jpg** 的名字（截图服务补后缀），代理得补回去。
+
+    不补的话：库里几十行手动抓拍全都取不到图——正是 2026-09-17 现场的另一半症状。
+    """
+    seen = []
+    with make_client(tmp_path, image_fetch=lambda url: seen.append(url) or b"x") as c:
+        r = c.get("/api/image", params={"object_name": "20260917/B101_S101_top45_141012"})
+    assert r.status_code == 200
+    assert seen == ["http://minio-test:9000/mogu/20260917/B101_S101_top45_141012.jpg"]
+
+
+@pytest.mark.parametrize("bad", [
+    "",                                   # 空
+    "../../etc/passwd",                   # 路径穿越
+    "/etc/passwd",
+    "20260917/..%2F..%2Fetc",
+    "20260917/B101:x.jpg",                # 冒号（URL 拼接里是危险字符）
+    "a/b/c/d.jpg",                        # 段数超出约定（一层日期 + 一层名字）
+    "20260917/B101 .jpg",                 # 空格
+    "http://evil.example/x.jpg",          # 想当 URL 用：段里有 ':' 被挡
+])
+def test_image_rejects_object_names_that_are_not_shape_safe(tmp_path, bad):
+    calls = []
+    with make_client(tmp_path, image_fetch=lambda url: calls.append(url) or b"x") as c:
+        r = c.get("/api/image", params={"object_name": bad})
+    assert r.status_code == 400
+    assert calls == []                    # 一次网络都不该发出去
+
+
+def test_image_reports_minio_failure_instead_of_hanging(tmp_path):
+    def boom(url):
+        raise ConnectionError("MinIO 连不上")
+
+    with make_client(tmp_path, image_fetch=boom) as c:
+        r = c.get("/api/image", params={"object_name": "20260917/B101_S101_top45_141012"})
+    assert r.status_code == 502
+    assert "MinIO 连不上" in r.json()["error"]
 
 
 # ---------- 生长曲线：代理 prod，查不到就如实说 ----------

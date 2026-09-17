@@ -81,6 +81,17 @@ def _require_float(args: dict, key: str, *, where: str) -> float:
     return value
 
 
+def _shot_field(shot: object, key: str) -> str | None:
+    """从采图结果里取一个字符串字段；没有/空串都算 None。
+
+    采图结果可能是 `CaptureResult`（正常路径）也可能是别的形状（测试里的假件、
+    将来换了采图实现）——取不到就当没有，绝不让"多一个字段没读到"变成一次抓拍失败。
+    """
+    value = getattr(shot, key, None)
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
 def axis_of(args: dict, *, where: str) -> int:
     """从 ``{"axis": "Y"|"Z"|1|2}`` 取轴号（大小写不敏感；不认识就拒绝，不猜）。"""
     raw = args.get("axis")
@@ -356,10 +367,11 @@ class ManualExecutor:
         ts = self.now()
         y, z = fmc.current_yz()      # **先读位置**：这是这张照片唯一可回溯的事实
         object_name = image_object_name(station, ts)
+        shot = None
         try:
             fmc.lamp(True)
             self._sleep(M1.lamp_settle_s)
-            self.capture.capture(
+            shot = self.capture.capture(
                 ip=station.camera_ip,
                 user=station.camera_user,
                 pwd=station.camera_pwd,
@@ -367,6 +379,13 @@ class ManualExecutor:
             )
         finally:
             fmc.lamp(False)
+        # 采图结果**必须**接着往下传，不能像原先那样丢掉返回值：
+        # `image_object_name()` 给的是**不带 .jpg** 的名字（截图服务会补后缀），而截图服务
+        # 回的是它真正写进 MinIO 的那个 key。拿请求值去落索引，库里就存了个 MinIO 里并
+        # 不存在的名字；`cloud_url` 一起丢掉之后，历史页那一格连"图在哪"都不知道了——
+        # 2026-09-17 现场"抓拍完不显示"就是这条路径。
+        stored_name = _shot_field(shot, "object_name") or object_name
+        cloud_url = _shot_field(shot, "cloud_url")
         self.append_index({
             "kind": "image_index",
             "ts": ts.isoformat(timespec="seconds"),
@@ -376,7 +395,8 @@ class ManualExecutor:
             "angle_profile": station.angle_profile,
             "camera_ip": station.camera_ip,
             "yz": [round(y, 3), round(z, 3)],
-            "object_name": object_name,
+            "object_name": stored_name,
+            "cloud_url": cloud_url,
             "manual": True,     # 额外字段：prod 的 images 表只取约定列，多的会被忽略
             **self.room_fields(),
         })
@@ -387,10 +407,11 @@ class ManualExecutor:
                 self.log(f"手动抓拍的索引同步失败（记录仍在 outbox，可补传）：{e}")
         return ExecOutcome(
             True,
-            f"已抓拍 {station.id} → {object_name}（拍摄位置 Y={y:.2f} Z={z:.2f}）",
+            f"已抓拍 {station.id} → {stored_name}（拍摄位置 Y={y:.2f} Z={z:.2f}）",
             {
                 "station_id": station.id,
-                "object_name": object_name,
+                "object_name": stored_name,
+                "cloud_url": cloud_url,
                 "position_yz": [round(y, 3), round(z, 3)],
                 "lamp_on": False,
             },

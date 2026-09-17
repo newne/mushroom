@@ -6,8 +6,13 @@
    所以这里每一条断言都对着一个"发错就出事"或"没说清就误判"的点。
 
    本仓库不带 node 工具链（spec §8：零构建、纯 Python），所以 jsdom 用 NODE_PATH
-   指向任意一份已装的即可：
-     NODE_PATH=/d/code/energy-agent/console/node_modules node verify-page.js <页面> */
+   指向任意一份已装的即可：在本目录（docs/patrol/console-ui/）下
+
+     NODE_PATH=/d/code/energy-agent/console/node_modules \
+       node verify-page.js ../../../web/console/index.html
+
+   ⚠️ 页面路径写**绝对路径**最省事：从本目录到仓库根是三级（`../../../`），
+   少一级会去开 `docs/web/console/index.html` 并报 ENOENT。 */
 const fs = require('fs');
 const { JSDOM } = require('jsdom');
 
@@ -31,15 +36,17 @@ const STATIONS = [
 const GRID = { cols: 12, layers: 5, y_min: 0.0, y_max: 4492.0, z_min: 0.0, z_max: 212.0 };
 
 // 历史模式用：两天的帧 + 一帧失败 + 一条本地待同步；两条生长点（都要有数值才画得出线）
+//
+// ⚠️ 这里**故意不写 `cloud_url`**：console 的 `/api/images` 已经不再回这个字段
+// （它是控制网地址，浏览器够不着）。谁要是又改回"页面直接用 cloud_url 当 <img src>"，
+// 这个假件不会喂给它任何地址 → 用例当场红。
 const IMAGES = [
   { ts: '2026-09-14T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
-    ok: true, object_name: '20260914/B102_S102_top45_093000', cloud_url: 'http://minio/a.jpg',
-    source: 'prod' },
+    ok: true, object_name: '20260914/B102_S102_top45_093000', source: 'prod' },
   { ts: '2026-09-14T06:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
-    ok: false, object_name: null, cloud_url: '', source: 'prod' },
+    ok: false, object_name: null, source: 'prod' },
   { ts: '2026-09-13T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top0',
-    ok: true, object_name: '20260913/B102_S102_top0_093000', cloud_url: 'http://minio/b.jpg',
-    source: 'local' },
+    ok: true, object_name: '20260913/B102_S102_top0_093000', source: 'local' },
 ];
 const GROWTH = [
   { ts: '2026-09-13T09:30:00', mean_len_mm: 28.4, mean_cap_mm: 12.1, verdict: 'no_prev',
@@ -460,6 +467,30 @@ const lastCmd = () => {
     document.querySelectorAll('.tl .im').length + ' 帧');
   check('失败帧被标出来', T('#timeline').includes('采图失败'));
   check('本地待同步那一帧有标记', !!document.querySelector('.tl .im.local'));
+
+  // 历史图的地址**必须**走 console（ADR-0003）：页面不直连 MinIO。
+  // 2026-09-17 现场："历史图全是黑的"、抓拍完不显示——页面把 MinIO 的**控制网地址**
+  // 当 `<img src>`，而上位机走 VPN 只到 10.77.77.x，那个地址对它是黑洞：每格等一次
+  // 超时，最后留一块深色方块。看着像"相机拍黑了"，其实是一张都没取到。
+  const shotSrc = Array.from(document.querySelectorAll('.tl .im img'))
+    .map(img => img.getAttribute('src') || '');
+  // 用 pathname 比：`safeImageUrl` 会把地址规范化成绝对 URL，别去赌字符串前缀
+  const shotPath = shotSrc.map(s => { try { return new URL(s, 'http://console.local').pathname; }
+                                      catch (e) { return '(非法)'; } });
+  check('缩略图走 /api/image（同源代理），不是 MinIO 直连地址',
+    shotPath.length === 2 && shotPath.every(p => p === '/api/image'), shotSrc.join(' | ') || '(没有 img)');
+  check('缩略图地址里没有控制网地址',
+    !shotSrc.some(s => s.includes('192.168') || s.includes(':9000')), shotSrc.join(' | '));
+  check('地址带的是对象名（端口/主机由后端拼）',
+    shotSrc.some(s => s.includes(encodeURIComponent('20260914/B102_S102_top45_093000'))),
+    shotSrc.join(' | '));
+
+  // 取不到图时要说"取不到"，而不是留一块黑方块（两者现场看着一模一样）
+  document.querySelectorAll('.tl .im img')
+    .forEach(img => img.dispatchEvent(new window.Event('error')));
+  check('取不到图的格子标成 noimg（不是一块黑方块）',
+    document.querySelectorAll('.tl .im.noimg').length === 2,
+    document.querySelectorAll('.tl .im.noimg').length + ' 格');
   check('角度档只列数据里有的（全部 + top0 + top45）',
     document.querySelectorAll('#angleSel option').length === 3,
     document.querySelectorAll('#angleSel option').length + ' 项');

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -58,6 +59,46 @@ PREVIEW_RECHECK_CHUNKS = 8
 #: 页面再显示"实时位置"就是把残值当现在——宁可没有，不要假的。
 PROGRESS_STALE_S = 5.0
 
+#: 图像对象名的一段允许的字符（key 由站位表拼出来，不含空格与中文；放宽到"任意字符"
+#: 只是给路径穿越留门，没有别的好处）。
+_OBJECT_SEGMENT = re.compile(r"^[A-Za-z0-9_.\-]+$")
+#: 认识的图像后缀（截图服务只会产出 jpg；png 是给将来的其它来源留的）。
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png")
+_MEDIA_TYPES = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png"}
+
+
+def safe_object_name(value: str) -> str | None:
+    """把调用方给的对象名规范成 MinIO 的 key；形状不对返回 `None`。
+
+    **只收对象名、不收 URL**：地址由服务端用配置拼（`minio_base`），请求里没有任何一段
+    能决定"去哪儿取"。这比"校验 URL 是不是 http/https"更强——后者只挡住了 `file:` 与
+    `javascript:`，挡不住"请帮我取 169.254.169.254 那个地址"。
+
+    也不做语义校验（这一站这一天到底存不存在）：语义错了的后果只是 404/502，
+    取不到别的对象，所以留给 MinIO 去回答就行。
+    """
+    raw = (value or "").strip()
+    # 对象 key 是**相对**的：开头的 `/`、中间的 `//`、以及 `\`/`:` 都不是我们产出的形状，
+    # 与其猜用户想说什么，不如不认——它们只在"有人想拿它当路径或 URL 用"时才出现。
+    if (not raw or len(raw) > 200 or raw.startswith("/") or "//" in raw
+            or "\\" in raw or ":" in raw):
+        return None
+    parts = raw.split("/")
+    if len(parts) > 3:
+        return None
+    if any(p in (".", "..") or not _OBJECT_SEGMENT.match(p) for p in parts):
+        return None
+    # 手动抓拍落索引时用的是 `image_object_name()` 的原始值（**不带** .jpg，由截图服务补），
+    # 而巡检路径落的是截图服务回的带后缀名字——两种都要能拼出同一个 key。
+    if not parts[-1].lower().endswith(_IMAGE_EXTS):
+        parts[-1] += ".jpg"
+    return "/".join(parts)
+
+
+def image_media_type(key: str) -> str:
+    dot = key.rfind(".")
+    return _MEDIA_TYPES.get(key[dot:].lower() if dot >= 0 else "", "image/jpeg")
+
 
 class CmdBody(BaseModel):
     """手动指令请求体。`kind` 走白名单校验，未知指令在执行层被拒（400）。"""
@@ -88,6 +129,14 @@ class ConsoleDeps:
     preview_url: str = "http://mushroom_preview:8003"
     # 预览上游的打开器：`(path) -> async with 得 httpx 响应`（测试注入假的，不碰网络）
     preview_open: object | None = None
+    # 历史图像的来源（ADR-0003：图像**经 console 代理**，页面不直连 MinIO）。
+    # 为什么非得代理：MinIO 是宿主上的 host 网络容器，地址在控制网（`192.168.1.250`）——
+    # 上位机走 VPN 只被推到 `10.77.77.x` 这一段，浏览器打开它就是个黑洞，
+    # `<img src="http://192.168.1.250:9000/...">` 只会超时成一块黑。
+    minio_base: str = "http://172.17.0.1:9000"
+    minio_bucket: str = "mogu"
+    # 取字节的函数：`(url) -> bytes`（测试注入假的，不碰网络）
+    image_fetch: object | None = None
     now: object = datetime.now
 
     def envelope(self) -> dict:
@@ -331,10 +380,25 @@ class Console:
             except Exception as e:  # noqa: BLE001 - prod 不通不该让历史页整页打不开
                 prod_error = str(e)
         rows.sort(key=lambda r: str(r.get("ts") or ""), reverse=True)
+        # `cloud_url` 是**控制网**地址（`http://192.168.1.250:9000/...`），上位机走 VPN
+        # 够不着它。留在响应里只会诱使下一个改页面的人直接拿去喂 `<img>`，然后整页黑图
+        # ——这正是 2026-09-17 现场那次"历史图全是黑的"的成因。页面要的是对象名，
+        # 字节由 `/api/image` 给（ADR-0003：浏览器只与 console 一个 origin 通信）。
+        keep = [{k: v for k, v in r.items() if k != "cloud_url"} for r in rows[:limit]]
         return {"ok": prod_error is None, "prod_error": prod_error,
-                "n_local": sum(1 for r in rows if r["source"] == "local"),
-                "n_prod": sum(1 for r in rows if r["source"] == "prod"),
-                "rows": rows[:limit]}
+                "n_local": sum(1 for r in keep if r["source"] == "local"),
+                "n_prod": sum(1 for r in keep if r["source"] == "prod"),
+                "rows": keep}
+
+    def image_url(self, object_name: str) -> str:
+        """对象名 → MinIO 的完整地址（**服务端**拼，不来自请求）。"""
+        base = self.deps.minio_base.rstrip("/")
+        return f"{base}/{self.deps.minio_bucket}/{object_name}"
+
+    def fetch_image(self, object_name: str) -> bytes:
+        """取回一张历史图的字节。地址不合法在这里已经被上游挡掉（`safe_object_name`）。"""
+        fetch = self.deps.image_fetch or _httpx_image_fetch
+        return fetch(self.image_url(object_name))
 
 
 def preview_block(deps: ConsoleDeps) -> dict | None:
@@ -354,6 +418,19 @@ def preview_block(deps: ConsoleDeps) -> dict | None:
         "retry_after_s": round_eta_s(patrol, now=deps.now()),
         "retry_hint": "本轮结束后预览自动可用；需要马上看画面可以等这一轮跑完",
     }
+
+
+def _httpx_image_fetch(url: str, timeout_s: float = 15.0) -> bytes:
+    """从 MinIO 取回对象字节（现场是回环/内网地址，不走代理）。
+
+    地址由 `ConsoleDeps.minio_base` 拼出来，请求里没有任何一段能改它——所以这里
+    不需要 transport 那层白名单：白名单要防的是"请求驱动我们去访问任意主机"。
+    """
+    import httpx
+
+    resp = httpx.get(url, timeout=timeout_s)
+    resp.raise_for_status()
+    return resp.content
 
 
 def _httpx_preview_opener(base_url: str):
@@ -415,6 +492,12 @@ def deps_from_env() -> ConsoleDeps:
         trigger_dir=os.environ.get("PATROL_TRIGGER_DIR", "/app/data/trigger"),
         cmd_dir=os.environ.get("PATROL_CMD_DIR", "/app/data/cmd"),
         preview_url=os.environ.get("PATROL_PREVIEW", "http://mushroom_preview:8003"),
+        # MinIO 是宿主上的 host 网络容器，桥接容器走 docker0 网关就到它（与上面
+        # PATROL_ANALYSIS / PATROL_CAPTURE_HOST 同一个套路）。控制网地址
+        # `192.168.1.250:9000` 在这里同样可用，但**不选它**：那个地址浏览器够不着，
+        # 一旦哪天有人把它抄回页面就会重现"整页黑图"。
+        minio_base=os.environ.get("PATROL_MINIO", "http://172.17.0.1:9000"),
+        minio_bucket=os.environ.get("PATROL_MINIO_BUCKET", "mogu"),
     )
 
 
@@ -448,6 +531,29 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
     @app.get("/api/images")
     def api_images(station_id: str = "", limit: int = Query(200, ge=1, le=2000)) -> dict:
         return console.images(station_id=station_id or None, limit=limit)
+
+    @app.get("/api/image")
+    def api_image(object_name: str = "") -> Response:
+        """一张历史图的字节（ADR-0003：图像经 console 转发，页面不直连 MinIO）。
+
+        为什么不是"把 MinIO 的 URL 给页面"：MinIO 在控制网（`192.168.1.250`），上位机
+        走的是 VPN（`10.77.77.x`），浏览器打开那个地址只会超时——`<img>` 上就留一块黑。
+        排障时那看起来像"相机拍出来是黑的"，实际是**一张都没取到**，两件事必须分得开：
+        所以这里取不到时返回 502 + 理由，让页面能如实说"图取不到"。
+
+        参数只有对象名，地址由服务端拼；不合法立刻 400，不去碰网络。
+        """
+        key = safe_object_name(object_name)
+        if key is None:
+            return JSONResponse({"error": "对象名不合法", "object_name": object_name},
+                                status_code=400)
+        try:
+            body = console.fetch_image(key)
+        except Exception as e:  # noqa: BLE001 - 取图失败不该让整页报错，只让那一格说清楚
+            return JSONResponse({"error": f"取图失败：{e}", "object_name": key},
+                                status_code=502)
+        return Response(content=body, media_type=image_media_type(key),
+                        headers={"Cache-Control": "private, max-age=3600"})
 
     @app.get("/api/growth")
     def api_growth(box_id: str = "", limit: int = Query(50, ge=1, le=500)) -> dict:

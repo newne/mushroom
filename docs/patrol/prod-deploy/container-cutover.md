@@ -530,3 +530,73 @@ cd /home/sysadmin/algorithm/mushroom_patrol/web && cp -a index.html.bak-20260917
    （`/home/sysadmin/algorithm/mushroom_service/.env`），别把开发机的 `.env` 拷过去——
    那会把现场其他变量（`PATROL_RUN_URL`、`PATROL_PREVIEW`、MinIO/MLflow 口令等）一起覆盖。
 
+
+## 12. 2026-09-17：历史图全黑 / 抓拍后不显示——定位与修复
+
+**现场报告**（`http://10.77.77.39:8002/`）：所有历史图像都是黑的；实时模式抓拍之后那一格
+也不出现。
+
+### 12.1 定位过程（都是可复现的命令，不是推测）
+
+```bash
+# 1) prod 的 /api/images：行是有的，但最新的几行 cloud_url 是 null
+curl -s 'http://10.77.77.39:8002/api/images?limit=3'
+#   {"ts":"2026-09-17T14:10:12","station_id":"S101",
+#    "object_name":"20260917/B101_S101_top45_141012","cloud_url":null,...}
+
+# 2) 175 行里 163 行有 cloud_url，且都是控制网地址
+#    http://192.168.1.250:9000/mogu/20260913/B103_S103_top45_215319.jpg
+
+# 3) 上位机到不到那个地址？——不通（5s 超时），而 prod 的 8002/8000 是 0.03s 通
+#    本机路由表只有 10.77.77.0/24 与 192.168.124.0/24，**没有 192.168.1.0/24**
+python -c "import socket;s=socket.socket();s.settimeout(5);s.connect(('192.168.1.250',9000))"
+```
+
+`gap-list.md` §A3 已经写着这台 prod 是双网卡：`eno1 = 192.168.1.250/24`（控制网）、
+`tun0 = 10.77.77.39/24`（VPN）。**MinIO 就落在控制网那一段**——上位机走 VPN 够不着它。
+
+### 12.2 两个独立根因
+
+| # | 根因 | 表现 |
+| --- | --- | --- |
+| 1 | 页面把 `cloud_url`（控制网地址）直接当 `<img src>`，违反 ADR-0003"页面不直连 MinIO" | 每格等一次 TCP 超时 → `.im img` 的深色底留成**一块黑**；163 行全黑 |
+| 2 | `ManualExecutor._capture` **丢掉**了 `capture()` 的返回值 | 索引里存的是不带 `.jpg` 的 `image_object_name()`，且没有 `cloud_url` → 抓拍那一格无从取图 |
+
+第 2 条的 6 行在 prod 里能直接看到（`ok=1` 但 `object_name` 不带后缀、`cloud_url` 为
+`null`）：`20260915/B103…`、`20260915/B308…`、`20260917/B304…`、`20260917/B106…`×2、
+`20260917/B101…`——时间戳正是现场那几次手动抓拍。
+
+### 12.3 修复（本次改动）
+
+- `console.py`：新增 `GET /api/image?object_name=<对象名>`，**服务端**拼 MinIO 地址取字节；
+  `/api/images` 不再回 `cloud_url`；新增 `PATROL_MINIO` / `PATROL_MINIO_BUCKET` 环境变量。
+- `manual_exec.py`：`_capture` 接着往下传截图服务回的 `object_name`（带 `.jpg`）与 `cloud_url`。
+- `web/console/index.html`：`imageUrlFor(row)` 只从对象名拼同源地址；取不到图时标 `noimg`
+  并显示"图取不到"（不再留一块和"拍黑了"分不开的深色方块）。
+- `docker/mushroom_solution.yml`：`mushroom_console` 增两个环境变量（**现场 `.env` 不必改**，
+  默认值即宿主 docker0 网关）。
+
+### 12.4 现场验收（发完页面 + 重建 console 之后）
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_service
+# 只动了环境变量与后端代码 ⇒ 重建并重启 console；页面是挂载的，单独拷一次
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate mushroom_console
+scp web/console/index.html sysadmin@10.77.77.39:/home/sysadmin/algorithm/mushroom_patrol/web/
+
+# 1) 字段已经不再下发（期望空输出）
+curl -s 'localhost:8002/api/images?limit=3' | grep -c cloud_url
+
+# 2) 取图真的通（期望 200 + image/jpeg + 几十 KB）
+curl -s -o /dev/null -w '%{http_code} %{content_type} %{size_download}\n' \
+  'localhost:8002/api/image?object_name=20260917/B101_S101_top45_141012'
+
+# 3) 取不到时是"说清楚"而不是黑块（期望 502 + JSON 理由）
+curl -s 'localhost:8002/api/image?object_name=20260917/NOPE.jpg' ; echo
+
+# 4) 浏览器打开 http://10.77.77.39:8002/ → 历史模式：缩略图出图；
+#    断网/停 MinIO 时应显示"图取不到"，不是一块黑
+```
+
+> 判据分得开才叫修好：**200 但图黑** = 相机/补光的问题；**502 或"图取不到"** = 取图链路
+> 的问题。旧版本这两种情况在页面上长得一模一样。

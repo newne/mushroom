@@ -32,9 +32,14 @@
   .layer{padding:6px 0 2px;color:var(--dim);font-size:12px}
   .imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
   .im{background:#0e1319;border:1px solid var(--line);border-radius:6px;overflow:hidden;font-size:12px}
-  .im img{width:100%;height:110px;object-fit:cover;display:block;background:#000}
+  .im img{width:100%;height:110px;object-fit:cover;display:block;background:#0e1319}
   .im .m{padding:5px 7px;color:var(--dim)} .im .m b{color:var(--fg);font-weight:500}
   .im.fail{outline:1px solid var(--bad)} .im.local .m::after{content:" · 本地待同步";color:var(--warn)}
+  /* 取不到图时**说清楚**，而不是留一块深色方块——那和"拍出来是黑的"看起来一模一样，
+     现场排障会先去怀疑相机。img 一旦 error 就藏掉它，换成这行字。 */
+  .im .noimg{display:none;height:110px;align-items:center;justify-content:center;color:var(--dim)}
+  .im.noimg img{display:none}
+  .im.noimg .noimg{display:flex}
   #log{max-height:220px;overflow:auto;font-size:12.5px}
   #log div{padding:2px 0;border-bottom:1px solid #202834;color:var(--dim)}
   .empty{color:var(--dim);font-size:13px;padding:8px 0}
@@ -173,6 +178,7 @@
   .viewer{height:100%;min-height:260px;border-color:#c6d1dc;background:#16212b}
   .tl{display:flex;gap:10px;overflow-x:auto;padding:8px 0}
   .tl .im{flex:0 0 128px}
+  .tl .im .noimg{height:96px}
   .tlhead{margin-top:8px;border-bottom-color:var(--line);font-weight:600}
   #log,#log2{font-family:ui-monospace,Consolas,monospace}
   #opmsg.info{background:var(--accent-soft);color:#14538f}
@@ -398,6 +404,28 @@ function safeImageUrl(value){
     if(url.protocol !== 'http:' && url.protocol !== 'https:') return '';
     return url.href;
   }catch(e){ return ''; }
+}
+
+// 历史图的地址**一律走 console**（ADR-0003：浏览器只与 console 一个 origin 通信）。
+// 页面手里只有对象名，字节由后端去 MinIO 取。
+//
+// 为什么不能像原来那样直接把 `cloud_url` 塞进 <img>：那是 MinIO 在**控制网**上的地址，
+// 而上位机走的是 VPN（另一个网段）——浏览器打开它只会超时。2026-09-17 现场"历史图
+// 全是黑的"就是这个：不是拍黑了，是一张都没取到。
+//
+// 没有对象名 = 这一帧本来就没拍成（失败帧），留空位，**不要**编一个地址出来。
+function imageUrlFor(row){
+  const name = String((row && row.object_name) || '').trim();
+  if(!name) return '';
+  return safeImageUrl('/api/image?object_name=' + encodeURIComponent(name));
+}
+
+// <img> 加载失败时把那一格标成"图取不到"：默认的 `.im img{background:...}` 会留一块
+// 深色方块，看上去和"拍出来是黑的"一模一样——排障时这两件事必须分得开。
+function wireShotFallbacks(root){
+  (root || document).querySelectorAll('.im img').forEach(img => {
+    img.onerror = () => { const tile = img.closest('.im'); if(tile) tile.classList.add('noimg'); };
+  });
 }
 
 function request(url, opt){
@@ -735,13 +763,15 @@ async function selectStation(id){
     if(!data.rows.length){ $('#imgs').innerHTML = '<div class="empty">这个站位还没有图像索引</div>'; }
     else{
       $('#imgs').innerHTML = data.rows.map(r => {
-        const url = safeImageUrl(r.cloud_url || '');
+        const url = imageUrlFor(r);
         const ok = r.ok !== false && r.ok !== 0;
         return `<div class="im ${ok?'':'fail'} ${r.source==='local'?'local':''}">
           ${url ? `<a href="${esc(url)}" target="_blank" rel="noopener"><img loading="lazy" src="${esc(url)}" alt="${esc(r.station_id || id)} ${esc(r.ts || '')}"></a>` : '<div style="height:110px"></div>'}
+          <div class="noimg">${ok ? '图取不到' : '采图失败'}</div>
           <div class="m"><b>${esc(String(r.ts||'').replace('T',' '))}</b><br>${esc(r.object_name || '') || (ok?'':'采图失败')}
           <br>${r.source==='local'?'本地':'prod'}</div></div>`;
       }).join('');
+      wireShotFallbacks($('#imgs'));
     }
     if(data.prod_error){
       const note = document.createElement('div');
@@ -1216,17 +1246,19 @@ function renderHistory(){
     tl.innerHTML = Object.keys(byDate).sort().reverse().map(d => `
       <div class="tlhead">${esc(d)} · ${byDate[d].length} 帧</div>
       <div class="tl">${byDate[d].map(r => {
-        const url = safeImageUrl(r.cloud_url || '');
+        const url = imageUrlFor(r);
         const id = String(r.object_name ?? r.ts ?? '');
         const on = hist.picked === id;
         return `<div class="im ${rowOk(r)?'':'fail'} ${r.source==='local'?'local':''} ${on?'sel':''} ${url?'':'gone'}"
                      data-pick="${esc(encodeURIComponent(id))}" data-url="${esc(url)}">
           ${url ? `<img loading="lazy" src="${esc(url)}" alt="${esc(id)}">` : '<div style="height:96px"></div>'}
+          <div class="noimg">${rowOk(r) ? '图取不到' : '采图失败'}</div>
           <div class="m"><b>${esc(String(r.ts||'').slice(11,19) || '—')}</b><br>
             ${esc(r.angle_profile || '—')} · ${r.source === 'local' ? '本地' : 'prod'}
             ${rowOk(r) ? '' : '<br><span style="color:#f85149">采图失败</span>'}</div>
         </div>`;
       }).join('')}</div>`).join('');
+    wireShotFallbacks(tl);
     tl.querySelectorAll('[data-pick]').forEach(el => el.onclick = () => {
       history_pick(decodeURIComponent(el.dataset.pick), el.dataset.url);
     });
@@ -1237,7 +1269,15 @@ function renderHistory(){
 function history_pick(id, url){
   hist.picked = id;
   const img = $('#bigimg');
-  if(url){ img.src = url; img.style.display = ''; $('#viewhint').textContent = id; }
+  if(url){
+    // 取不到就说取不到：大图区留白 + 一句人话，比一块黑更接近真相
+    img.onerror = () => {
+      img.style.display = 'none';
+      $('#viewhint').textContent = '这张图取不到：' + id + '（对象不在 MinIO，或服务端取图失败）';
+    };
+    img.onload = () => { $('#viewhint').textContent = id; };
+    img.src = url; img.style.display = ''; $('#viewhint').textContent = id;
+  }
   else { img.style.display = 'none'; $('#viewhint').textContent = '这一帧没有可用的图（失败帧或对象已不在）'; }
   hist.zoom = 1; hist.px = hist.py = 0;
   applyZoom();

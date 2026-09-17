@@ -230,6 +230,13 @@ services:
       # 实时预览的上游（同 compose 网络里的服务名）。console 只是**反代**它：
       # 预览挂了状态接口照常 200（页面显示"暂时看不到画面"），不拖垮整页。
       - PATROL_PREVIEW=${PATROL_PREVIEW:-http://mushroom_preview:8003}
+      # 历史图像的来源（ADR-0003：图像**经 console 代理**，页面不直连 MinIO）。
+      # MinIO 是宿主上的 host 网络容器，桥接容器走 docker0 网关就到它——与上面
+      # PATROL_ANALYSIS / PATROL_CAPTURE_HOST 同一个套路。取字节的是**服务端**，
+      # 所以这里用控制网地址（192.168.1.250:9000）也能通；真正不许的是把这个地址
+      # 发给浏览器（那正是 2026-09-17"历史图全是黑的"的成因）。
+      - PATROL_MINIO=${PATROL_MINIO:-http://172.17.0.1:9000}
+      - PATROL_MINIO_BUCKET=${PATROL_MINIO_BUCKET:-mogu}
     volumes:
       # 只读挂配置与数据：console 不改任何东西
       - ../mushroom_patrol/configs:/app/configs:ro

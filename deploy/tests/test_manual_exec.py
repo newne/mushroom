@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import pytest
 from deploy.manual import Command, ManualChannel
 from deploy.manual_exec import ManualExecutor, axis_of
+from patrol.capture_client import CaptureResult
 from patrol.fmc import MotionAborted, TravelLimitError
 from patrol.fmc.status import AxisStatus, MachineStatus
 from patrol.motion_profile import M1
@@ -87,6 +88,13 @@ class FakeFmc:
 
 
 class FakeCapture:
+    """假的采图客户端：形状对齐**真的** `CaptureClient.capture`（回 `CaptureResult`）。
+
+    对齐这件事不是洁癖：截图服务会把 `.jpg` 补上、并把对象传到 MinIO，回的就是那个
+    真正的 key 与 URL。这里的假件要是回一个"随手的 dict"，被测代码丢掉返回值也照样
+    通过——2026-09-17 那次"抓拍完历史里没有图"就是这么漏过去的。
+    """
+
     def __init__(self, fail: bool = False):
         self.fail = fail
         self.shots: list[dict] = []
@@ -97,7 +105,12 @@ class FakeCapture:
 
             raise CaptureError("这台相机没拍成")
         self.shots.append({"ip": ip, "filename": filename})
-        return {"ok": True, "object_name": filename}
+        return CaptureResult(
+            object_name=f"{filename}.jpg",              # 截图服务补的后缀
+            file_path=None,
+            cloud_url=f"http://minio:9000/mogu/{filename}.jpg",
+            raw={"success": True},
+        )
 
 
 def make(tmp_path, *, fmc=None, capture=None, stations=STATIONS, **kw):
@@ -302,13 +315,32 @@ def test_capture_writes_index_with_actual_position(tmp_path):
     assert capture.shots and capture.shots[0]["filename"].endswith("B105_S105_top45_100000")
     assert fmc.called("lamp") == [("lamp", True), ("lamp", False)]  # 拍完必须灭灯
     assert res.data["station_id"] == "S105"
-    assert res.data["object_name"] == capture.shots[0]["filename"]
+    # 落库的是**截图服务回的那个 key**（带 .jpg），不是我们请求时给的名字
+    assert res.data["object_name"] == capture.shots[0]["filename"] + ".jpg"
     assert res.data["position_yz"] == [505.0, -50.0]
     assert res.data["lamp_on"] is False
     (row,) = rows
     assert row["kind"] == "image_index" and row["manual"] is True
     assert row["station_id"] == "S105" and row["box_id"] == "B105"
     assert row["yz"] == [505.0, -50.0]           # 记的是**实际位置**，不是站位坐标
+
+
+def test_capture_index_keeps_the_key_and_url_the_service_returned(tmp_path):
+    """索引里必须带上截图服务回的 object_name 与 cloud_url。
+
+    2026-09-17 现场："实时模式下抓拍后不显示"。根因就在这条路径上——原先 `_capture`
+    把 `capture()` 的返回值**丢了**，于是索引里存的是请求时那个不带 `.jpg` 的名字，
+    `cloud_url` 干脆没有。名字在 MinIO 里不存在、地址又没有，历史页那一格无从取图。
+
+    这里钉住的是"数据对不对"，不是"页面好不好看"：页面的取图地址由对象名拼出来。
+    """
+    capture = FakeCapture()
+    _channel, _fmc, executor, rows, _logs = make(tmp_path, capture=capture)
+    run(_channel, executor, "capture", {"station_id": "S101"})
+    (row,) = rows
+    assert row["object_name"].endswith(".jpg")
+    assert row["cloud_url"].startswith("http://minio:9000/mogu/")
+    assert row["cloud_url"].endswith(row["object_name"])
 
 
 def test_capture_needs_a_known_station(tmp_path):
