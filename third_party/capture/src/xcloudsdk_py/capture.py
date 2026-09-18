@@ -83,6 +83,110 @@ def _wait_for_file_ready(path: Path, *, timeout_s: float = 5.0, interval_s: floa
     return False
 
 
+#: limited-range（studio swing）的两个端点：SDK 把满量程压到这里。
+LEVELS_LOW = 16
+LEVELS_HIGH = 235
+#: "已经是满量程"的判据。**留了余量**：JPEG 在强边缘有振铃，被压过的图实测
+#: `min/max = 11/239`（并不是干净的 16/235），所以门槛必须低于 16/高于 235，
+#: 否则一张已经正确的图会被再拉一遍。
+FULL_RANGE_LO = 4
+FULL_RANGE_HI = 251
+
+
+def _levels_enabled() -> bool:
+    """电平修正默认开着；现场可用 `CAPTURE_NORMALIZE_LEVELS=0` 一键关掉。
+
+    留这个开关，是为了"补丁本身出问题"时能**不改文件、不重建镜像**就退回去。
+    """
+    return os.environ.get("CAPTURE_NORMALIZE_LEVELS", "1").strip().lower() \
+        not in ("0", "false", "no", "off")
+
+
+def _normalize_levels(file_path: Path) -> dict[str, Any]:
+    """把 SDK 压进 16..235 的电平拉回满量程；返回可直接并进响应的诊断字段。
+
+    ## 为什么要做这件事
+
+    SDK 的成像管线把**满量程**输入（相机 RTSP 是 `yuvj420p` + `color_range=pc`）
+    当 limited-range 输出，写出的 JPEG 服从 `out = 16 + in*219/255`。而 JPEG 没有
+    "我这是 limited range"的元数据——任何解码方（浏览器、PIL、ffmpeg）都按满量程解释，
+    于是黑停在 16、白停在 235：整幅发灰、对比度塌掉。现场对它的描述是"图像太糊、
+    和相机软件不一样"，但**细节其实没丢**，只是电平契约错了。2026-09-18 现场实测：
+
+    | 来源 | 灰度 min/max | 近白(>240) | 拉开电平后梯度能量 |
+    | --- | --- | --- | --- |
+    | XCloudSDK 抓拍（修正前） | 11 / 239 | 0.00% | 11.117 → 12.666 |
+    | 同相机 RTSP 直出帧 | 0 / 255 | 0.32% | 13.894 → 15.386 |
+
+    抓拍的 max 永远到不了 240 —— 这就是"它被压过"最直接的证据。
+
+    ## 为什么修在采图侧，而不是显示侧
+
+    MinIO 里存的就是这些字节。在显示侧修，等于要求**每一处分发点**都记得再修一遍
+    （历史回看、离线分析、以后新增的消费者），而且历史图永远是错的。在这里修一次，
+    入库即正确。
+
+    ## 失败必须放行（fail-open）
+
+    没装 Pillow、或读写失败时**原样返回**，只记一条 warning 并在响应里带
+    `levels_normalized=false`。这台服务掉了就是一张图都没有，比"图发灰"严重得多；
+    而且 Pillow 对厂商镜像是**可选依赖**（镜像只装了 fastapi/uvicorn/boto3），
+    现场靠挂载注入，所以"没有它"是预期内的情况而不是异常。
+
+    ## 落盘用临时文件 + 原子替换
+
+    直接 `save(file_path)` 一旦中途失败（磁盘满、被杀），留下一张**截断的 JPEG**，
+    而且它已经覆盖了唯一一份有效数据。所以写同目录的临时文件、成功后再 `os.replace`。
+    """
+    if not _levels_enabled():
+        return {"levels_normalized": False, "levels_reason": "disabled_by_env"}
+    try:
+        from PIL import Image
+    except Exception as e:  # noqa: BLE001 - 没装 Pillow 是**预期内**的情况
+        logger.warning("levels: Pillow 不可用，按原图放行（原因：%s）", e)
+        return {"levels_normalized": False, "levels_reason": "pillow_unavailable"}
+
+    tmp_path = file_path.with_name(file_path.name + ".levels-tmp")
+    try:
+        with Image.open(file_path) as im:
+            im.load()
+            lo, hi = im.convert("L").getextrema()
+            if lo <= FULL_RANGE_LO or hi >= FULL_RANGE_HI:
+                logger.info("levels: 已是满量程（min=%d max=%d），不动", lo, hi)
+                return {"levels_normalized": False, "levels_reason": "already_full_range",
+                        "levels_before": [lo, hi]}
+            span = LEVELS_HIGH - LEVELS_LOW
+            lut = [min(255, max(0, round((v - LEVELS_LOW) * 255 / span))) for v in range(256)]
+            fixed = im.point(lut * len(im.getbands()))
+
+        # 重编码质量取 95，**故意不用 `quality="keep"`**：
+        #   1) `im.point()` 派生出来的新图不带 `format`/`quantization`，而 Pillow 的
+        #      'keep' 判据正是 `im.format != "JPEG"`（JpegImagePlugin.py:707/753），
+        #      必然抛错；要让它成立得把 provenance 手工搬过去，等于多一条只在特定
+        #      Pillow 版本上成立的代码路径。
+        #   2) 就算搬得动，'keep' 沿用**原图那套较粗的量化表**，是在原有损失上再加一代
+        #      同样粗的损失；q=95 用更细的表，多出来这一代的损失反而更小。
+        # 代价是文件大 19%（实测 1050 KB → 1246 KB），换来的是更少的新增损失。
+        fixed.save(tmp_path, format="JPEG", quality=95)
+
+        with Image.open(tmp_path) as chk:
+            chk.load()
+            after_lo, after_hi = chk.convert("L").getextrema()
+        os.replace(tmp_path, file_path)     # 原子：不会留下半张图
+        logger.info("levels: 电平修正 min/max %d/%d -> %d/%d（%d 字节）",
+                    lo, hi, after_lo, after_hi, file_path.stat().st_size)
+        return {"levels_normalized": True, "levels_reason": "remapped",
+                "levels_before": [lo, hi], "levels_after": [after_lo, after_hi]}
+    except Exception as e:  # noqa: BLE001 - 任何失败都不能让抓图变成失败
+        logger.warning("levels: 电平修正失败，按原图放行（原因：%s）", e)
+        return {"levels_normalized": False, "levels_reason": f"error: {e}"}
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:  # pragma: no cover - 清不掉临时文件不该影响结果
+            pass
+
+
 class CaptureService:
     def __init__(
         self,
@@ -273,6 +377,8 @@ class CaptureService:
                 "play_data_param2": play_data_p2,
             }
 
+        levels = _normalize_levels(file_path)
+
         response: dict[str, Any] = {
             "success": True,
             "message": "Screenshot captured successfully",
@@ -281,6 +387,7 @@ class CaptureService:
             "file_path": str(file_path),
             "file_exists": True,
             "display": display_env,
+            **levels,
             "x11_window_handle": hwnd,
             "snap_result": snap_rc,
             "snap_method": snap_method,
@@ -383,6 +490,8 @@ class CaptureService:
                 "total_time_ms": connection_time_ms + capture_time_ms,
             }
 
+        levels = _normalize_levels(file_path)
+
         response: dict[str, Any] = {
             "success": True,
             "message": "Screenshot captured successfully (connection pool optimized)",
@@ -390,6 +499,7 @@ class CaptureService:
             "filename": object_name,
             "file_path": str(file_path),
             "file_exists": True,
+            **levels,
             "snap_result": snap_rc,
             "play_handle": conn.play_handle,
             "login_handle": conn.login_handle,
