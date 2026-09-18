@@ -459,17 +459,31 @@ def _preview_opener(deps: ConsoleDeps):
     return deps.preview_open or _httpx_preview_opener(deps.preview_url)
 
 
-async def _read_preview(deps: ConsoleDeps, path: str, limit: int = 65536):
-    """把上游一个**有限**响应读完（`/healthz`、`/frame.jpg`）。流不走这里。"""
+#: 单帧 JPEG 的接收上限。**够大但仍然有界**：1280×718@q:v 7 实测 ≈61 KB，而 JPEG 大小
+#: 随画面高频细节浮动（1920 宽 + 低 q:v 的量级是几百 KB）。
+#: 2026-09-18 预览从 640×5 提到 1280×15 后，单帧由 ≈16 KB 涨到 61 KB——离原先写死的
+#: 64 KiB 只剩 4 KB，画面一"忙"就会被**截成半张 JPEG，还带 200 状态码**。
+PREVIEW_FRAME_MAX = 2 * 1024 * 1024
+
+
+async def _read_preview(deps: ConsoleDeps, path: str,
+                        limit: int = 65536) -> tuple[int, bytes, bool]:
+    """把上游一个**有限**响应读完（`/healthz`、`/frame.jpg`）。流不走这里。
+
+    返回 `(状态码, 字节, 是否触到上限)`。第三项必须由调用方处理：**半张 JPEG 比一个错误
+    更坏**——它看起来像数据损坏，会把人引到相机上去查（"整页黑图"那次就是这么烧掉半天的）。
+    `/healthz` 的 JSON 体很短，截断无所谓；图片那条路必须显式报错。
+    """
     opener = _preview_opener(deps)
     async with opener(path) as r:
-        chunks, n = [], 0
+        chunks, n, truncated = [], 0, False
         async for chunk in r.aiter_bytes(8192):
             chunks.append(chunk)
             n += len(chunk)
             if n >= limit:
+                truncated = True
                 break
-        return r.status_code, b"".join(chunks)
+        return r.status_code, b"".join(chunks), truncated
 
 
 def deps_from_env() -> ConsoleDeps:
@@ -590,7 +604,7 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
         if block is not None:
             return JSONResponse({**block, "available": False, "upstream": None})
         try:
-            status, body = await _read_preview(deps, "/healthz")
+            status, body, _ = await _read_preview(deps, "/healthz")
         except Exception as e:  # noqa: BLE001 - 预览没起不该让页面整页报错
             return JSONResponse({"available": False, "upstream": None,
                                  "error": f"预览服务连不上：{e}"})
@@ -613,9 +627,16 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
         if block is not None:
             return JSONResponse(block, status_code=409)
         try:
-            status, body = await _read_preview(deps, "/frame.jpg")
+            status, body, truncated = await _read_preview(
+                deps, "/frame.jpg", limit=PREVIEW_FRAME_MAX)
         except Exception as e:  # noqa: BLE001
             return JSONResponse({"error": f"预览服务连不上：{e}"}, status_code=503)
+        if truncated:
+            # 宁可直说，也不返回半张 JPEG 让它看着像相机坏了
+            return JSONResponse(
+                {"error": f"预览单帧超过 {PREVIEW_FRAME_MAX // 1024} KiB 上限，已中止"
+                          "（返回截断的 JPEG 会被误判成相机/取图故障）"},
+                status_code=503)
         if status != 200 or not body:
             return JSONResponse({"error": f"还取不到画面（上游 HTTP {status}）"}, status_code=503)
         return Response(content=body, media_type="image/jpeg",

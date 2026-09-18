@@ -666,6 +666,23 @@ def test_preview_frame_is_proxied_as_jpeg(tmp_path):
     assert seen == ["/frame.jpg"]
 
 
+def test_preview_frame_over_the_cap_errors_instead_of_returning_half_a_jpeg(tmp_path):
+    """超过上限时必须报错，**不能**返回半张 JPEG 配 200。
+
+    半张 JPEG 看起来像数据损坏/相机故障，会把人引到相机上去查——"整页黑图"那次的时间
+    就是这么烧掉的。触发条件很实在：预览从 640 宽提到 1280 宽后单帧由 ≈16 KB 涨到 61 KB，
+    而这条路的接收上限写的是 64 KiB（只剩 4 KB 余量）。
+    """
+    from deploy.console import PREVIEW_FRAME_MAX
+
+    oversized = b"\xff\xd8\xff" + b"\x00" * (PREVIEW_FRAME_MAX + 8192) + b"\xff\xd9"
+    opener, _ = make_preview_opener(chunks=[oversized])
+    with make_client(tmp_path, preview_open=opener) as c:
+        r = c.get("/api/preview/frame.jpg")
+    assert r.status_code == 503, "200 + 截断字节是最坏的选项"
+    assert "上限" in r.json()["error"]
+
+
 @pytest.mark.anyio
 async def test_preview_stream_stops_itself_when_a_round_starts(tmp_path):
     """轮次开跑时，**服务端**把已经开着的流断掉（ADR-0017 §4）。
