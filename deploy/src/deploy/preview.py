@@ -32,9 +32,24 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 DEFAULT_PORT = 8090
-DEFAULT_SCALE_WIDTH = 640      # 够看清"对着哪儿"；再大只是白烧 CPU 与带宽
-DEFAULT_FPS = 5
-DEFAULT_QUALITY = 7            # ffmpeg 的 -q:v（2 最好 31 最差）；7 在 640 宽下约 30–60 KB/帧
+#: 2026-09-17 现场实测后从 640×5 提到 1280×15，理由见下面这段——**别按直觉把它改小**：
+#:
+#: * **640 会被放大上屏**。页面里 `#pv` 的容器是 `aspect-ratio:16/9; max-height:44vh`，
+#:   1080p 下高度被压到 475px，`object-fit:contain` 反推显示宽度 ≈844px ⇒ 640 宽的帧
+#:   要放大 1.3 倍才落到屏幕上。"糊"里最大的一块就是这里，而不是相机。
+#: * **帧率要对齐源，不是往大写**。相机 RTSP（`Channels/101`）声明 `r_frame_rate=15/1`，
+#:   真解码 10 秒流时间得 151 帧 ⇒ **15 fps**（子码流 102 同为 2880×1616、150 帧）。
+#:   现场口口相传的 25 fps 是 DVR 侧的编码设置，我们改不动；写 `-r 25` 只会**复制帧**，
+#:   观感一样而带宽涨到 1.7 倍。
+#: * **分辨率是线性成本**。MJPEG 无帧间压缩，带宽 = 帧大小 × 帧率，实测量级：
+#:   640×5@q7 ≈ 0.66 Mbps、1280×12@q7 ≈ 6.0 Mbps、1280×15@q7 ≈ 7.5 Mbps。
+#:   现场 VPN 实测可用 ≈28 Mbps（单张 766 KB 图 0.216 s 下完），单路观众有余量。
+#: * `PREVIEW_SCALE` / `PREVIEW_FPS` 都能从 `.env` 直接调；`q:v` **不能**（见下）。
+DEFAULT_SCALE_WIDTH = 1280
+DEFAULT_FPS = 15
+#: ffmpeg 的 `-q:v`（2 最好 31 最差）。1280 宽下约 60 KB/帧 ≈ 7.5 Mbps @15fps。
+#: ⚠️ 它是**硬编码在取命令行里**的，`.env` 改不动它——想调必须改这里并重建镜像。
+DEFAULT_QUALITY = 7
 RESTART_BACKOFF_S = (1.0, 2.0, 5.0, 10.0)
 SOI = b"\xff\xd8\xff"          # JPEG 起始
 EOI = b"\xff\xd9"              # JPEG 结束

@@ -303,8 +303,11 @@ services:
     command: ["preview"]
     environment:
       - PREVIEW_PORT=${PREVIEW_PORT:-8003}
-      - PREVIEW_SCALE=${PREVIEW_SCALE:-640}
-      - PREVIEW_FPS=${PREVIEW_FPS:-5}
+      # 1280×15：640 会在页面上被放大到 ≈844px（`max-height:44vh` + `object-fit:contain`），
+      # 这是"看着糊"的主因；15 是相机 RTSP 源的真实帧率（实测真解码 10 s = 151 帧），
+      # 写成 25 只会复制帧、带宽翻倍。证据与带宽量级见 deploy/src/deploy/preview.py 顶部。
+      - PREVIEW_SCALE=${PREVIEW_SCALE:-1280}
+      - PREVIEW_FPS=${PREVIEW_FPS:-15}
     volumes:
       # 只要站位表：相机 IP 与凭据**只有一个来源**，与抓拍共用同一份（ADR-0017 §5）
       - ../mushroom_patrol/configs:/app/configs:ro

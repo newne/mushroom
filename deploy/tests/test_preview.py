@@ -121,15 +121,27 @@ async def test_ffmpeg_stderr_is_redacted_before_it_reaches_the_page():
 # ---------- ffmpeg 命令 ----------
 
 
-def test_ffmpeg_command_keeps_the_picture_small_and_bounded():
+def test_ffmpeg_command_shape():
     url = "rtsp://admin:pw@192.168.1.238:554/Streaming/Channels/101"
-    cmd = build_ffmpeg_cmd(url, scale=640, fps=5)
+    cmd = build_ffmpeg_cmd(url, scale=1280, fps=15)
     joined = " ".join(cmd)
     assert "-rtsp_transport tcp" in joined, "UDP 在这台 DVR 上不稳"
-    assert "scale=640:-2" in joined, "宽度限定、高度按比例"
+    assert "scale=1280:-2" in joined, "宽度限定、高度按比例（-2 保证偶数）"
     assert "-an" in joined, "不要音频"
     assert cmd[-2:] == ["mjpeg", "-"], "输出 MJPEG 到 stdout"
     assert url in cmd
+
+
+def test_defaults_are_pinned_to_display_size_and_camera_fps():
+    """默认值 = 两件现场实测，别按直觉改。
+
+    2026-09-17 之前默认是 640×5：640 宽在 1080p 页面上会被放大到 ≈844px（`max-height:44vh`
+    + `object-fit:contain`）——"看着糊"的主因；5 fps 只有相机源（实测 151 帧/10 s = 15 fps）
+    的三分之一。这条断言存在的意义就是让"改小回去"必须先面对那份证据。
+    """
+    cmd = build_ffmpeg_cmd("rtsp://admin:@192.168.1.238:554/Streaming/Channels/101")
+    assert "scale=1280:-2" in " ".join(cmd), "640 宽会被页面放大到 ≈844px 才上屏"
+    assert cmd[cmd.index("-r") + 1] == "15", "相机源实测 15 fps（主流 101 与子流 102 都是）"
 
 
 # ---------- 监督循环：ffmpeg 挂了要自愈 ----------
