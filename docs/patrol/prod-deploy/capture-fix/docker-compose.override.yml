@@ -7,8 +7,25 @@
 #
 #   ⚠️ ./capture-entrypoint.sh 与 ./capture-healthcheck.py 必须**先存在于本目录**再 up，
 #      否则 Docker 会把不存在的 bind-mount 源创建成**目录**，挂进容器就成了目录而不是文件。
+#      ./levels-fix/ 那两条挂载同理（要的是真实文件，不是目录）。
 #
 # 回滚：  docker compose up -d --force-recreate 之前删掉本文件即可（回到厂商原入口）。
+#
+# -----------------------------------------------------------------------------
+# 2026-09-18 追加：「抓拍电平修正」
+#
+# 厂商 SDK 的成像管线把满量程输入（RTSP 是 yuvj420p + color_range=pc）当 limited-range
+# 输出，写出的 JPEG 服从 `out = 16 + in*219/255`；而 JPEG 没有范围元数据，浏览器按满量程
+# 解码 ⇒ 黑停在 16、白停在 235，整幅发灰（现场对它的描述是"图像太糊"）。
+# 现场实测：抓拍 min/max = 11/239，同一相机 RTSP 直出帧 = 0/255。
+#
+# 修法：把补丁版 capture.py **盖到站点包里的那一个文件**上，并给容器注入一个 Pillow
+# （厂商镜像只有 fastapi/uvicorn/boto3，没有 Pillow），在落盘后、上传 MinIO 前把电平拉回
+# 满量程。厂商镜像一个字节都没改，SDK .so 也没碰。
+#
+# 只回滚这一项（保留其他加固）：删掉下面的 PYTHONPATH 与两条 ./levels-fix/* 挂载，
+# 再 `docker compose up -d --force-recreate`。要临时软关不改文件：加
+# `CAPTURE_NORMALIZE_LEVELS: "0"`（补丁会原样放行，只记一条 log）。
 # =============================================================================
 services:
   xcloud-capture:
@@ -23,10 +40,17 @@ services:
       TZ: "Asia/Shanghai"
       # 让 healthcheck 与入口用的是同一个 display
       XVFB_DISPLAY: ":99"
+      # 抓拍电平修正用的 Pillow（厂商镜像里没有，从离线 wheel 解包后随包分发）
+      PYTHONPATH: "/app/levels-fix/pylib"
 
     volumes:
       - ./capture-entrypoint.sh:/app/capture-entrypoint.sh:ro
       - ./capture-healthcheck.py:/app/capture-healthcheck.py:ro
+      # 抓拍电平修正：补丁版模块**覆盖**站点包里那一个文件（只覆盖这一个，影子面最小）。
+      # 覆盖能生效是因为 Python 按 (mtime, size) 判 pyc 是否过期——挂上来的文件两者都不同，
+      # 一定会重新编译，不会读到旧的 __pycache__。
+      - ./levels-fix/capture.py:/usr/local/lib/python3.10/site-packages/xcloudsdk_py/capture.py:ro
+      - ./levels-fix/pylib:/app/levels-fix/pylib:ro
 
     healthcheck:
       # 双查「X socket 真能连」+「HTTP /healthz ok」。

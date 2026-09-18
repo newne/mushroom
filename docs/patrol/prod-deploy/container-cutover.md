@@ -691,3 +691,226 @@ docker compose -f mushroom_solution.yml --profile patrol up -d \
 # 页面单独回滚（与镜像无关）：
 cd /home/sysadmin/algorithm/mushroom_patrol/web && cp -a index.html.bak-20260917-155719 index.html
 ```
+
+---
+
+## 14. 2026-09-18：预览提质（1280×15）+ 抓拍电平修正
+
+现场一句话反馈：
+
+> 图像太糊了，和直接使用摄像头软件看到的质量不一样，且视频流是支持25帧的。
+
+拆开是**两条互不相干的根因**，各自修各自的。第 0 步先把"25 帧"这个前提证伪——它错了，
+而且错的方向会让人去做一件纯亏的事（把 `-r` 写成 25）。
+
+### 14.1 先把前提钉死：相机流是 **15 fps**，不是 25
+
+`ffprobe` 的 `avg_frame_rate` 只是容器里的声明，**不能直接信**；要**真解码一段流时间数帧**。
+
+```bash
+IMG=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-<tag>   # 这个镜像里有 ffmpeg 7.1.5
+# ⚠️ 口令为空也必须写那个冒号：admin:@host。写成 admin@host 会被 DVR 判 401。
+docker run --rm --network host --entrypoint ffprobe "$IMG" -rtsp_transport tcp \
+  -show_entries stream=codec_name,width,height,avg_frame_rate,pix_fmt,color_range \
+  -of default=nw=1 'rtsp://admin:@192.168.1.238:554/Streaming/Channels/101'
+docker run --rm --network host --entrypoint ffmpeg "$IMG" -loglevel info \
+  -rtsp_transport tcp -i 'rtsp://admin:@192.168.1.238:554/Streaming/Channels/101' \
+  -t 10 -an -f null -            # ← 看结尾的 frame= 计数
+```
+
+实测（2026-09-18，相机 192.168.1.238）：
+
+| | 主流 101 | 子流 102 |
+| --- | --- | --- |
+| 编码 / 分辨率 | hevc **2880×1616** | hevc **2880×1616**（与主流同分辨率） |
+| `r_frame_rate` | **15/1** | 15/1 |
+| 真解码 10 s 流时间 | **151 帧 ⇒ 15.1 fps** | 150 帧 ⇒ 15.0 fps |
+| `pix_fmt` / `color_range` | `yuvj420p` / **`pc`（满量程）** | 同左 |
+
+⇒ **25 fps 是 DVR 侧的编码设置，我们这边改不动**；把 `PREVIEW_FPS` 写成 25 只会让 ffmpeg
+**复制帧**（观感不变）而带宽 ×1.7。所以取 15，与源对齐。
+
+> `color_range=pc` 这一项同时是 §14.3 的对照组：**相机给的是满量程**，被抓拍链路压窄了。
+
+### 14.2 根因 A：预览 640 宽在页面上被放大到 ≈844px
+
+页面里预览容器是 `aspect-ratio:16/9; max-height:44vh`，1080p 下高度被压到 475px，
+`object-fit:contain` 反推**显示宽度 ≈844px**。而转码命令写的是 `scale=640:-2` ⇒ 每帧都要
+**放大 1.3 倍**才上屏。"糊"里最大的一块就是这里，跟相机没关系。
+
+改动（**只改默认值 + 现场 `.env`，不重建任何镜像**）：
+
+- `deploy/src/deploy/preview.py`：`DEFAULT_SCALE_WIDTH 640→1280`、`DEFAULT_FPS 5→15`
+  （顶部注释里写了上面那份证据，另加一条测试 `test_defaults_are_pinned_to_display_size_and_camera_fps`
+  钉住，防止有人凭直觉改小回去）
+- `docker/mushroom_solution.yml`：`PREVIEW_SCALE:-1280`、`PREVIEW_FPS:-15`
+- 现场 `.env` 显式写上这两个值（原来没写，吃的是 compose 默认值）
+
+发版（**只重建 `mushroom_preview` 一个容器**）：
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_service
+docker compose -f mushroom_solution.yml --profile patrol up -d mushroom_preview
+# 生效证据：日志里会打出**真实的** ffmpeg 命令行
+docker logs mushroom_preview 2>&1 | grep '启动转码'
+```
+
+实测（重建后 10 分钟）：
+
+| 指标 | 改前 | 改后 |
+| --- | --- | --- |
+| 单帧 | 640×360 / ≈16 KB | **1280×718 / 61096 B** |
+| 输出帧率 | 5 | **14.9**（healthz 的 frames 计数差分，10 s） |
+| 带宽（回环实测） | ≈0.66 Mbps | **7.31 Mbps**（914 KB/s × 10 s） |
+| 色域 | — | `yuvj420p` / `color_range=pc` ✅ |
+| 容器 CPU / 内存 | — | **36%**（limit 1.5 核）/ **264 MiB**（limit 512 MiB） |
+
+> 带宽是**每个观看者**一份（转码只做一次，但字节要发给每个人）。现场 VPN 实测可用 ≈28 Mbps
+> （单张 766 KB 图 0.216 s 下完），单路观众有余量，2–3 路会开始吃紧。
+> `q:v` 仍硬编码为 7——`PREVIEW_SCALE/FPS` 能靠 `.env` 调，**`q:v` 不能**，要调必须改代码重建镜像。
+
+### 14.3 根因 B：抓拍被压进了 limited range（"发灰"的那一层）
+
+XCloudSDK 的成像管线把**满量程**输入当 limited-range 输出，写出的 JPEG 服从
+`out = 16 + in*219/255`。而 JPEG **没有"我是 limited range"这种元数据**，浏览器/PIL/ffmpeg
+一律按满量程解释 ⇒ 黑停在 16、白停在 235：整幅发灰、对比度塌掉。
+
+**细节其实没丢**，只是电平契约错了 —— 这一点必须先确认，否则会跑去查相机/镜头/曝光：
+
+| 2026-09-18 实测（2880×1616） | min/max | p01/p99 | 近黑(<16) | 近白(>240) | 标准差 | 梯度能量 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 抓拍（修正前） | **11 / 239** | 60 / 214 | 0.01% | **0.00%** | 30.64 | 11.117 |
+| 抓拍（修正后） | **0 / 255** | 51 / 231 | 0.40% | 0.69% | **35.65** | 12.478 |
+| 同相机 RTSP 直出帧 | **0 / 255** | 59 / 220 | 0.07% | 0.32% | 34.01 | 13.894 |
+
+最直接的证据：**抓拍的 max 永远到不了 240**（0.00% 近白），而同一台相机直出的流有 0.32%。
+量工具是 `levels.py`（见 §14.5）。
+
+修法（**厂商镜像一个字节都没改**）：在离线包 `xcloudsdk_py_offline_20260120_175307/` 下新增
+
+```
+levels-fix/
+  capture.py            # 补丁版模块，**覆盖**站点包里那一个文件
+  pylib/                # Pillow 12.2.0（cp310 + manylinux2014，glibc 2.17 ⇒ bullseye 可用）
+```
+
+并在 `docker-compose.override.yml`（厂商 compose 的覆盖层）里加两处：
+
+```yaml
+    environment:
+      PYTHONPATH: "/app/levels-fix/pylib"
+    volumes:
+      - ./levels-fix/capture.py:/usr/local/lib/python3.10/site-packages/xcloudsdk_py/capture.py:ro
+      - ./levels-fix/pylib:/app/levels-fix/pylib:ro
+```
+
+> ⚠️ **为什么不重建厂商镜像**：这份镜像是离线包 `docker load` 进来的（`image.tar.gz` 127 MB），
+> 里面只有 fastapi/uvicorn/boto3；而且 SDK 的 `.so` 对运行库版本敏感，重打一遍基础镜像风险远
+> 大于收益。挂载覆盖只动一个文件，**回滚 = 删两行 + `up -d --force-recreate`**。
+> ⚠️ `./levels-fix/` 下的文件**必须先存在**再 `up`——bind-mount 源不存在时 Docker 会把它建成
+> **目录**，挂进容器就成了目录。
+
+补丁的三条硬约束（都有单测钉住：
+
+```bash
+cd third_party/capture
+uv run --no-project --with pytest --with pillow --with boto3 pytest tests -q
+```
+
+）:
+
+1. **fail-open**：没 Pillow 或读写失败 ⇒ 原样放行 + WARNING + 响应里带
+   `levels_normalized=false`。这台服务掉了就是**一张图都没有**，比"图发灰"严重得多；
+   而 Pillow 对厂商镜像是**可选**依赖（靠挂载注入），所以"没有它"是预期内的情况。
+2. **不重复拉**：端点 ≤4 或 ≥251 判为已是满量程 ⇒ 跳过。防的是"厂商哪天修好了，我们把它再烤一遍"。
+3. **不毁原图**：写同目录临时文件再 `os.replace` 原子替换。直接 `save(file_path)` 一旦中途失败，
+   留下的是**截断的 JPEG**，而它已经覆盖了唯一一份有效数据。
+
+> 重编码取 `q=95` 而非 `quality="keep"`：`im.point()` 派生出的新图没有 `format`/`quantization`，
+> 而 Pillow 的 'keep' 判据正是 `im.format != "JPEG"`（`JpegImagePlugin.py:707/753`）⇒ 必然抛错；
+> 且 'keep' 沿用**原图那套较粗的量化表**，是在原有损失上再加一代同样粗的损失，q=95 反而更小。
+> 代价是文件大 **19%**（1050 KB → 1198 KB）。
+
+发版（**只重建采图容器**，且必须先做写文件+预检，再动容器）：
+
+```bash
+B=/home/sysadmin/algorithm/mushroom_docker/xcloudsdk_py_offline_20260120_175307
+cd $B
+cp -a docker-compose.override.yml docker-compose.override.yml.bak-$(date +%Y%m%d%H%M%S)
+# 1) 先把 levels-fix/ 落好，2) 用 --rm 一次性容器预检，3) 再 up
+docker compose config >/dev/null && echo "覆盖层解析 OK"     # ⚠️ 不要写成 `-f docker-compose.yml`，会跳过覆盖层
+docker compose up -d
+```
+
+**动容器之前**用 `--rm` 一次性容器把三件事验完（不碰相机、不影响运行中的服务）：
+
+```bash
+docker run --rm -v "$B/levels-fix/pylib:/app/levels-fix/pylib:ro" \
+  -e PYTHONPATH=/app/levels-fix/pylib --entrypoint python3 xcloudsdk-py:0.1.0 \
+  -c "import PIL; from PIL import Image, features; print(PIL.__version__, features.check('libjpeg_turbo'))"
+docker run --rm -v "$B/levels-fix/capture.py:/usr/local/lib/python3.10/site-packages/xcloudsdk_py/capture.py:ro" \
+  -v "$B/levels-fix/pylib:/app/levels-fix/pylib:ro" -e PYTHONPATH=/app/levels-fix/pylib \
+  --entrypoint python3 xcloudsdk-py:0.1.0 -c "import xcloudsdk_py.capture as c; print(c.__file__, c._levels_enabled())"
+```
+
+### 14.4 发版范围：这次是**两个互不相干的部署单元**
+
+| 项 | 落点 | 发版动作 | commit |
+| --- | --- | --- | --- |
+| 预览 1280×15 | `deploy/src/deploy/preview.py` + compose 默认值 | 传 compose + 改 `.env`，**只重建 `mushroom_preview`**（不重建镜像） | `09bb891` |
+| 抓拍电平 | `third_party/capture/src/xcloudsdk_py/capture.py` | 离线包 `levels-fix/` 挂载 + **只重建采图容器**（不重建厂商镜像） | `3e84e2c` |
+| 预览单帧截断 | `deploy/src/deploy/console.py` | **需要重建 `mushroom_patrol` 镜像**——本次**未发**，见 §14.7 | `4324c78` |
+
+### 14.5 现场验收
+
+```bash
+# A) 预览：生效证据是日志里那条真实命令行，以及 healthz 的计数
+docker logs mushroom_preview 2>&1 | grep '启动转码'
+docker exec mushroom_preview sh -c 'tr "\0" "\n" < /proc/1/environ | grep ^PREVIEW_'
+docker exec mushroom_preview curl -s -o /dev/null -w '%{size_download}\n' --max-time 10 \
+  http://127.0.0.1:8003/stream.mjpg          # ≈ 9.1 MB / 10 s ⇒ ≈7.3 Mbps
+
+# B) 抓拍：响应对里直接带电平字段，这是最省事的判据
+curl -s -m 90 'http://127.0.0.1:7003/pool_capture?ip=192.168.1.238&user=admin&storage=local&filename=check' \
+  | grep -o '"levels_[^}]*'
+#   期望： "levels_normalized":true,"levels_reason":"remapped","levels_before":[12,240],"levels_after":[0,255]
+
+# C) 把图取回本地，用与"改前"完全相同的量法复测（别只看服务自己的自述）
+python levels.py before.jpg after.jpg       # 端点应贴满 0/255，近白占比 >0
+```
+
+### 14.6 回滚
+
+```bash
+# A) 预览：只回环境变量 + compose，重建一个容器
+cd /home/sysadmin/algorithm/mushroom_service
+cp .env.bak-20260918110536 .env
+cp mushroom_solution.yml.bak-20260918110536 mushroom_solution.yml
+docker compose -f mushroom_solution.yml --profile patrol up -d mushroom_preview
+
+# B) 抓拍电平：软关（最快，不改文件、不重建）
+#    在 docker-compose.override.yml 的 environment 下加 CAPTURE_NORMALIZE_LEVELS: "0"，再 up -d
+#    彻底回滚：
+cd /home/sysadmin/algorithm/mushroom_docker/xcloudsdk_py_offline_20260120_175307
+cp docker-compose.override.yml.bak-20260918113710 docker-compose.override.yml
+docker compose up -d --force-recreate
+
+# C) 整个覆盖层停用（连加固一起退回厂商原入口）
+mv docker-compose.override.yml docker-compose.override.yml.off && docker compose up -d --force-recreate
+```
+
+### 14.7 这版留下的欠账
+
+1. **`console.py` 的 64 KiB 单帧上限修复（`4324c78`）还没上机**——它需要重建 `mushroom_patrol`
+   镜像。改动本身是必要的：预览提到 1280 宽后单帧 61096 B，离原来写死的 64 KiB 只剩 4 KB，
+   而旧实现触顶时返回的是 **200 + 截断的 JPEG**（半张图看着像相机坏了）。
+   现场下次重建镜像时会一起带上。
+2. **`q:v` 仍然硬编码**（`preview.py` 的 `DEFAULT_QUALITY = 7`）。1280×15 下约 61 KB/帧 ≈7.3 Mbps；
+   若现场觉得 VPN 吃紧，最省事的是把它做成 `PREVIEW_QUALITY` 环境变量（下次重建时一起做）。
+3. **带宽随观看人数线性叠加**：转码只做一次，但每个观看者都要收 7.3 Mbps。上位机多人同时看时
+   要留意。
+4. **抓拍单张 5.2 s** 由 SDK 决定（`capture_time_ms: 5200`，电平修正只加 ≈0.1 s）。
+   另外 SDK 里还有一个未被 Python 绑定的 `XCloudSDK_Device_DevSnap`（设备侧抓图、不依赖播放窗口），
+   值得将来试它能不能更快/更清。
+5. **历史图仍是"旧电平"**：MinIO 里 2026-09-18 之前的对象都没修过。要不要批量重刷是产品决定
+   （重刷会把已入库的图再编码一代，不建议无差别做）。

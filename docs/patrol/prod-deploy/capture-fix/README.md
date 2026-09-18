@@ -97,3 +97,66 @@ docker compose up -d --force-recreate          # 回到厂商原入口
   现在是禁用的所以不会启动，但**别 enable 它**——那会和容器互相顶掉。
 - **容器内时钟为 UTC**（宿主 CST，差 8 h）。覆盖层已用 `TZ=Asia/Shanghai` 修掉；
   老系统传的 `filename` 自带宿主时间戳，不受影响。
+
+## 七、2026-09-18 追加：抓拍电平修正（"图像太糊"的第二条根因）
+
+> 完整的调查过程、数字与验收命令在 `../container-cutover.md` §14。这里只写**这个包怎么部署**。
+
+### 问题
+
+厂商 SDK 把满量程输入（相机 RTSP 是 `yuvj420p` + `color_range=pc`）当 limited-range 输出，
+写出的 JPEG 服从 `out = 16 + in*219/255`。JPEG 没有范围元数据，浏览器按满量程解码
+⇒ 黑停在 16、白停在 235，整幅发灰。实测抓拍 `min/max = 11/239`、近白(>240) **0.00%**；
+同一相机 RTSP 直出是 `0/255`。**细节没丢，是电平契约错了。**
+
+### 加了什么
+
+| 新增 | 作用 |
+| --- | --- |
+| `levels-fix/capture.py` | 补丁版模块，**覆盖**站点包里 `xcloudsdk_py/capture.py` |
+| `levels-fix/pylib/` | Pillow 12.2.0（cp310 + manylinux2014，glibc 2.17 ⇒ bullseye 可用） |
+| `docker-compose.override.yml` | 追加 `PYTHONPATH` + 两条 `./levels-fix/*` 挂载 |
+
+### 部署顺序（**必须先落文件再 up**）
+
+```bash
+B=/home/sysadmin/algorithm/mushroom_docker/xcloudsdk_py_offline_20260120_175307
+cd "$B"
+[ -f levels-fix/capture.py ] && [ -f levels-fix/pylib/PIL/__init__.py ] || exit 9   # 源不存在会被建成果目录
+cp -a docker-compose.override.yml docker-compose.override.yml.bak.$(date +%Y%m%d%H%M%S)
+docker compose config >/dev/null && echo "覆盖层解析 OK"      # ⚠️ 不能带 -f docker-compose.yml
+docker compose up -d
+docker compose ps
+```
+
+动容器**之前**可以先在 `--rm` 一次性容器里验（不碰相机、不影响在跑的服务）：
+
+```bash
+docker run --rm -v "$B/levels-fix/pylib:/app/levels-fix/pylib:ro" \
+  -e PYTHONPATH=/app/levels-fix/pylib --entrypoint python3 xcloudsdk-py:0.1.0 \
+  -c "import PIL; from PIL import features; print(PIL.__version__, features.check('libjpeg_turbo'))"
+```
+
+### 验证
+
+```bash
+curl -s -m 90 'http://127.0.0.1:7003/pool_capture?ip=192.168.1.238&user=admin&storage=local&filename=check' \
+  | grep -o '"levels_[^}]*'
+#   期望 "levels_normalized":true, ..., "levels_before":[12,240], "levels_after":[0,255]
+python3 ../levels.py <取回的图>      # 端点应贴满 0..255
+```
+
+### 回滚
+
+```bash
+# 软关（不改文件、不重建）：覆盖层 environment 下加 CAPTURE_NORMALIZE_LEVELS: "0"，再 up -d
+cp docker-compose.override.yml.bak.<ts> docker-compose.override.yml && docker compose up -d --force-recreate
+```
+
+### 三条硬约束（单测钉住：`third_party/capture` 下 `uv run --no-project --with pytest --with pillow --with boto3 pytest tests -q`）
+
+1. **fail-open**：没 Pillow 或读写失败 ⇒ 原样放行 + WARNING + 响应带 `levels_normalized=false`。
+   采图服务掉了就是一张图都没有，比"图发灰"严重得多。
+2. **不重复拉**：端点 ≤4 或 ≥251 判为已是满量程 ⇒ 跳过（防厂商修好后被我们再烤一遍）。
+3. **不毁原图**：临时文件 + `os.replace` 原子替换。直接 `save` 失败会留下截断的 JPEG，
+   而它已经覆盖了唯一一份有效数据。
