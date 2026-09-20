@@ -4,35 +4,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>蘑菇房巡检台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%231f6feb'/%3E%3Cpath d='M9 17l5 5 9-10' stroke='%23fff' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <style>
-  :root{--bg:#12161c;--panel:#1a2029;--line:#2a3340;--fg:#e6edf3;--dim:#8b98a5;
-        --ok:#3fb950;--warn:#d29922;--bad:#f85149;--accent:#58a6ff;}
+  /* ---- 基础规则（与主题无关：颜色一律 var(--*)，浅色主题取值见下方 :root）----
+     2026-09-20 清理（console-ui review P0-2）：这里原本是一整块**暗色**主题，浅色工作台
+     后来整块覆盖了它，漏掉的硬编码色（#0e1319/#202834/#f85149…）在白界面上变成一块块
+     深色补丁（缩略图底板、日志分隔线、进度条底槽、曲线图、时间轴失败标记）。
+     现在只保留"浅色块没有重新定义、且自身不带颜色"的规则；两遍定义并存的维护陷阱解除。 */
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,"Microsoft YaHei",sans-serif}
-  header{display:flex;align-items:center;gap:16px;padding:10px 18px;background:var(--panel);
-         border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
-  h1{font-size:17px;margin:0;font-weight:600}
   .pill{padding:3px 12px;border-radius:999px;font-size:13px;border:1px solid var(--line)}
   .pill.idle{color:var(--dim)} .pill.run{color:var(--accent);border-color:var(--accent)}
   .pill.ok{color:var(--ok);border-color:var(--ok)} .pill.bad{color:var(--bad);border-color:var(--bad)}
   .pill.warn{color:var(--warn);border-color:var(--warn)}
-  #gate{padding:8px 18px;font-size:14px;border-bottom:1px solid var(--line)}
-  #gate.allow{background:#0d2a17;color:#7ee2a8} #gate.deny{background:#2a1416;color:#ffb3ae}
-  main{display:grid;grid-template-columns:360px 1fr 340px;gap:14px;padding:14px 18px;align-items:start}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:14px}
-  .card h2{font-size:13px;margin:0 0 10px;color:var(--dim);font-weight:600;letter-spacing:.04em}
   .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px}
   .kv b{color:var(--dim);font-weight:400}
   .mono{font-family:ui-monospace,Consolas,monospace}
-  #map{width:100%;height:auto;display:block}
   .stn{display:flex;justify-content:space-between;padding:5px 8px;border-radius:5px;cursor:pointer;
        font-size:13px;border:1px solid transparent}
-  .stn:hover{background:#212936} .stn.sel{background:#1f3350;border-color:var(--accent)}
   .stn .cur{color:var(--accent);font-weight:700}
-  .layer{padding:6px 0 2px;color:var(--dim);font-size:12px}
   .imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
-  .im{background:#0e1319;border:1px solid var(--line);border-radius:6px;overflow:hidden;font-size:12px}
-  .im img{width:100%;height:110px;object-fit:cover;display:block;background:#0e1319}
+  .im{background:var(--soft);border:1px solid var(--line);border-radius:6px;overflow:hidden;font-size:12px}
+  .im img{width:100%;height:110px;object-fit:cover;display:block;background:var(--soft)}
   .im .m{padding:5px 7px;color:var(--dim)} .im .m b{color:var(--fg);font-weight:500}
   .im.fail{outline:1px solid var(--bad)} .im.local .m::after{content:" · 本地待同步";color:var(--warn)}
   /* 取不到图时**说清楚**，而不是留一块深色方块——那和"拍出来是黑的"看起来一模一样，
@@ -41,59 +33,41 @@
   .im.noimg img{display:none}
   .im.noimg .noimg{display:flex}
   #log{max-height:220px;overflow:auto;font-size:12.5px}
-  #log div{padding:2px 0;border-bottom:1px solid #202834;color:var(--dim)}
+  #log div{padding:2px 0;border-bottom:1px solid var(--line);color:var(--dim)}
   .empty{color:var(--dim);font-size:13px;padding:8px 0}
-  .bar{height:8px;background:#0e1319;border-radius:4px;overflow:hidden;margin-top:6px}
+  .bar{height:8px;background:var(--soft);border-radius:4px;overflow:hidden;margin-top:6px}
   .bar i{display:block;height:100%;background:var(--accent)}
-  /* ---- 操作区（手动控制）：急停常驻右栏顶部，不随滚动隐藏（ADR-0004/0016） ---- */
-  .estopcard{position:sticky;top:52px;z-index:4;background:#2a1416;border-color:#5a1f22}
-  .estopcard h2{color:#ffb3ae}
-  button{font:inherit;color:var(--fg);background:#232c38;border:1px solid var(--line);
-         border-radius:6px;padding:9px 10px;min-height:44px;cursor:pointer}
-  button:hover:not(:disabled){background:#2b3644}
-  button:disabled{opacity:.45;cursor:not-allowed}
-  button.primary{background:#1f3350;border-color:var(--accent)}
-  button.danger{background:#7d1d20;border-color:#b62327;color:#fff;font-weight:700;font-size:16px}
-  button.danger:hover:not(:disabled){background:#96262a}
+  /* ---- 操作区（手动控制）：急停常驻右栏顶部，不随滚动隐藏（ADR-0004/0016）---- */
+  .estopcard{position:sticky;z-index:4}
+  /* 44px 最小点击高度是现场要求：只写在基础块里，浅色块不重复（重复两遍必漂移） */
+  button{font:inherit;padding:9px 10px;min-height:44px;cursor:pointer}
+  input,select{font:inherit;padding:9px 8px;min-height:44px;width:100%}
+  input.bad{border-color:var(--bad);color:var(--bad)}
   .row{display:flex;gap:6px;align-items:center;margin:6px 0}
   .row>*{flex:1}
   .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:6px 0}
   .grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin:6px 0}
-  input,select{font:inherit;color:var(--fg);background:#0e1319;border:1px solid var(--line);
-               border-radius:6px;padding:9px 8px;min-height:44px;width:100%}
-  input.bad{border-color:var(--bad);color:#ffb3ae}
   .lbl{color:var(--dim);font-size:12px;margin:8px 0 2px;clear:both}
   #opmsg{font-size:13px;padding:8px 10px;border-radius:6px;margin-top:8px;display:none}
-  #opmsg.info{display:block;background:#12233a;color:#9dc7ff}
-  #opmsg.ok{display:block;background:#0d2a17;color:#7ee2a8}
-  #opmsg.bad{display:block;background:#2a1416;color:#ffb3ae}
   #sessionline{font-size:13px;color:var(--dim)}
   .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;
        border:1px solid var(--line);color:var(--dim)}
   .tag.on{color:var(--ok);border-color:var(--ok)}
   .tag.bad{color:var(--bad);border-color:var(--bad)}
-  /* ---- 模式切换（实时 / 历史）---- */
   .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
-  .seg button{border:0;border-radius:0;min-height:36px;padding:6px 14px;background:transparent;
-              color:var(--dim)}
-  .seg button.on{background:#1f3350;color:#fff}
-  /* ---- 时间轴（历史模式）---- */
-  .tlhead{padding:6px 0 2px;color:var(--dim);font-size:12px;border-bottom:1px solid var(--line);
-          margin-top:6px}
-  .tl{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px;margin:8px 0}
+  .tlhead{padding:6px 0 2px;color:var(--dim);font-size:12px;border-bottom:1px solid var(--line)}
   .tl .im{cursor:pointer}
   .tl .im.sel{outline:2px solid var(--accent)}
   .tl .im.gone{opacity:.55}
   /* ---- 大图查看器 ---- */
-  .viewer{position:relative;overflow:hidden;background:#05070a;border:1px solid var(--line);
-          border-radius:6px;height:340px;display:flex;align-items:center;justify-content:center;
-          cursor:grab}
+  .viewer{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:6px;
+          display:flex;align-items:center;justify-content:center;cursor:grab}
   .viewer.dragging{cursor:grabbing}
   .viewer img{max-width:100%;max-height:100%;transition:transform .08s linear;
               transform-origin:center center;user-select:none;-webkit-user-drag:none}
   .viewer .hint{position:absolute;left:8px;bottom:6px;font-size:12px;color:var(--dim)}
   table.meas{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px}
-  table.meas th,table.meas td{border-bottom:1px solid #202834;padding:4px 6px;text-align:left}
+  table.meas th,table.meas td{border-bottom:1px solid var(--line);padding:4px 6px;text-align:left}
   table.meas th{color:var(--dim);font-weight:500}
   #curve svg{width:100%;height:170px;display:block}
   .legend{font-size:12px;color:var(--dim);display:flex;gap:14px;margin-top:4px}
@@ -103,7 +77,7 @@
      ——点动的时候按钮乱跑是很烦的事。object-fit:contain 保证画面不被拉变形。
      max-height 是给导轨图腾位置（2026-09-17）：1080p 下画面卡 + 全宽导轨图要同屏可见，
      画面让一点高度（约 44vh），换来"边挪边看 + 图上点目标"不翻页。 */
-  .pvwrap{position:relative;width:100%;aspect-ratio:16/9;max-height:44vh;background:#05070a;
+  .pvwrap{position:relative;width:100%;aspect-ratio:16/9;max-height:44vh;
           border:1px solid var(--line);border-radius:6px;overflow:hidden;display:flex;
           align-items:center;justify-content:center}
   .pvwrap img{width:100%;height:100%;object-fit:contain;display:none}
@@ -170,12 +144,14 @@
   .seg{background:var(--soft);border-color:var(--line);padding:2px}
   .seg button{color:var(--dim);min-height:34px}
   .seg button.on{background:var(--panel);color:var(--fg);font-weight:600;box-shadow:var(--shadow)}
-  #hmain{display:grid;grid-template-rows:minmax(300px,1.25fr) minmax(150px,.55fr) minmax(150px,.7fr);gap:12px;overflow-y:auto}
-  #hmain>.card{min-height:0;overflow:auto;margin:0}
-  #hmain>.card:nth-child(2){grid-row:1}
-  #hmain>.card:nth-child(1){grid-row:2}
-  #hmain>.card:nth-child(3){grid-row:3}
-  .viewer{height:100%;min-height:260px;border-color:#c6d1dc;background:#16212b}
+  /* 历史模式三张卡按 DOM 顺序排（2026-09-20 review P1-2）：原先靠 grid-row 把"大图"提到
+     第一行，于是 Tab 焦点先经过时间轴、读屏大纲顺序也和眼睛看到的相反。现在 DOM 顺序
+     就是视觉顺序（大图 → 时间轴 → 曲线），HTML 里已按此调整。
+     布局退回普通块级堆叠：原先的 grid 固定比例行（minmax(300px,1.25fr) 那套）把卡片卡死在
+     小高度里各自内滚——帧导航、缩放按钮被折在大图卡折叠区，时间轴缩略图和曲线表格也被裁；
+     试过 grid-template-rows:auto，但 align-content 会把 auto 行拉伸成等高，一样裁。块级
+     堆叠 + #hmain 整列统一滚，没有任何内容被裁。 */
+  .viewer{min-height:260px;border-color:#c6d1dc;background:#16212b}
   .tl{display:flex;gap:10px;overflow-x:auto;padding:8px 0}
   .tl .im{flex:0 0 128px}
   .tl .im .noimg{height:96px}
@@ -186,6 +162,22 @@
   #opmsg.bad{background:var(--bad-soft);color:#8e2424}
   .empty{color:var(--dim)}
   .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+  /* ---- 2026-09-20 review 新增组件 ---- */
+  /* P2-5 页内确认（取代原生 confirm()：同样的二次确认语义，样式不割裂、不阻塞主线程） */
+  .confirm-pop{position:fixed;left:50%;top:16%;transform:translateX(-50%);z-index:30;max-width:440px;
+               background:var(--panel);border:1px solid var(--line);border-radius:10px;
+               box-shadow:0 12px 40px rgba(24,38,52,.22);padding:14px 16px}
+  .confirm-pop p{margin:0 0 12px;font-size:14px;line-height:1.55;white-space:pre-line}
+  .confirm-pop .row{margin:0}
+  /* P2-3 大图逐帧导航 */
+  .framenav{display:flex;gap:6px;align-items:center;margin-top:8px}
+  .framenav button{min-height:36px;padding:6px 10px;font-size:13px}
+  .framenav #frameinfo{flex:1;font-size:12px;color:var(--dim);text-align:center}
+  /* P2-4 左栏（站位列表）可折叠：窄屏/平板让中栏全宽 */
+  .listtoggle{float:right;min-height:22px;padding:1px 8px;font-size:11px;font-weight:400;
+              letter-spacing:0;text-transform:none}
+  main.list-hidden{grid-template-columns:0 minmax(0,1fr) minmax(320px,360px)}
+  main.list-hidden>section:first-child{display:none}
   @media (max-width:1500px){
     main{grid-template-columns:280px minmax(0,1fr) 320px}
     main>section{padding:10px}
@@ -196,6 +188,11 @@
     .card{padding:10px 12px;margin-bottom:9px}
     .pvwrap{aspect-ratio:16/8.5}
     .readout{padding:6px 8px}
+  }
+  /* P2-4：1024~1280 的平板/小屏，三栏各让一步（左栏还能整列折叠） */
+  @media (max-width:1280px){
+    main{grid-template-columns:220px minmax(0,1fr) 300px}
+    .readouts{grid-template-columns:repeat(2,minmax(0,1fr))}
   }
   @media (prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
 </style>
@@ -216,7 +213,9 @@
 <main>
   <section>
     <div class="card">
-      <h2>站位（按层）</h2>
+      <h2>站位（按层）
+        <button type="button" id="listtoggle" class="listtoggle" aria-expanded="true">收起</button>
+      </h2>
       <div id="list" class="empty">读取中…</div>
     </div>
   </section>
@@ -238,11 +237,16 @@
         <button id="capbtn" disabled title="拍当前位置，照片归到左栏选中的站位">抓拍</button>
         <span id="pverr" class="empty" style="padding:0"></span>
       </div>
-      <div class="readouts" aria-live="polite">
+      <!-- P0-5：抓拍置灰的原因要说出来。只写 title 的话鼠标不悬停就看不到，
+           现场最常见的疑问就是"为什么抓拍点不动"。 -->
+      <div id="capnote" class="empty" style="padding:2px 0 0;font-size:12px"></div>
+      <!-- P1-1：容器上的 aria-live 已撤（每秒刷新会把读屏吵死）；"当前动作"改由
+           #stagelive 这个 sr-only 节点**只在文本变化时**播报。 -->
+      <div class="readouts">
         <div class="readout"><span class="k">当前位置</span><span id="actualpos" class="v unknown">未知</span></div>
         <div class="readout"><span class="k">目标站位</span><span id="targetpos" class="v unknown">未选择</span></div>
         <div class="readout"><span class="k">直线距离</span><span id="distance" class="v unknown">不可计算</span></div>
-        <div class="readout"><span class="k">当前动作</span><span id="cmdstage" class="v unknown">空闲</span></div>
+        <div class="readout"><span class="k">当前动作</span><span id="cmdstage" class="v unknown">空闲</span><span id="stagelive" class="sr-only" aria-live="polite"></span></div>
       </div>
     </div>
     <!-- 导轨图（2026-09-17 从左栏移入中栏并放大）：滑台在 Y/Z 两轴自由移动，图就是"往哪挪"
@@ -269,10 +273,6 @@
 
   <section id="hmain" style="display:none">
     <div class="card">
-      <h2>时间轴 <span id="tltitle" style="color:var(--dim);font-weight:400"></span></h2>
-      <div id="timeline" class="empty">点左侧任一站位，看它的历史帧</div>
-    </div>
-    <div class="card">
       <h2>大图 <span id="zoomlabel" style="color:var(--dim);font-weight:400"></span></h2>
       <div class="viewer" id="viewer">
         <img id="bigimg" alt="" style="display:none">
@@ -282,6 +282,17 @@
         <button data-zoom="1">1×</button><button data-zoom="2">2×</button>
         <button data-zoom="4">4×</button><button id="fitbtn">适应</button>
       </div>
+      <!-- P2-3：逐帧导航（多天长条时间轴里，翻最近一帧以前只能靠滚） -->
+      <div class="framenav">
+        <button type="button" id="prevframe">‹ 上一帧</button>
+        <span id="frameinfo">未选帧</span>
+        <button type="button" id="nextframe">下一帧 ›</button>
+        <button type="button" id="latestframe">跳到最近</button>
+      </div>
+    </div>
+    <div class="card">
+      <h2>时间轴 <span id="tltitle" style="color:var(--dim);font-weight:400"></span></h2>
+      <div id="timeline" class="empty">点左侧任一站位，看它的历史帧</div>
     </div>
     <div class="card">
       <h2>生长曲线 <span id="curvetitle" style="color:var(--dim);font-weight:400"></span></h2>
@@ -294,12 +305,16 @@
     <!-- 急停常驻（ADR-0004/0016）：不随滚动隐藏，永远可点，不需要会话 -->
     <div class="card estopcard">
       <h2>急停</h2>
-      <button id="estopbtn" class="danger" style="width:100%">急停（Esc）</button>
+      <!-- P0-3：按钮文案不许再承诺"Esc 随时能用"——Esc 只在指令执行中响应
+           （1080 行起有解释：空闲误按会把急停闩上，之后巡检全失败）。
+           承诺与行为不一致，比没有承诺更糟。 -->
+      <button id="estopbtn" class="danger" style="width:100%"
+              title="指令执行中也可按 Esc 中断；空闲时请直接点此按钮">急停</button>
       <div class="row" style="margin-top:8px">
         <span id="estopstate" class="tag">未置位</span>
         <button id="estopclear" disabled>复位急停</button>
       </div>
-      <div class="empty" style="padding:4px 0 0">软件急停（约 1 秒内生效），不替代硬件急停回路</div>
+      <div class="empty" style="padding:4px 0 0">软件急停（约 1 秒内生效），不替代硬件急停回路 · 指令执行中可按 Esc 中断</div>
     </div>
 
     <div class="card">
@@ -558,13 +573,21 @@ function renderPositionReadouts(){
   const stage = $('#cmdstage');
   if(stage){
     const live = liveProgress();
+    let text;
     if(busy() && live && validPosition(live.speed_yz)){
       const v = Math.hypot(Number(live.speed_yz[0]), Number(live.speed_yz[1]));
-      stage.textContent = `移动中 · v=${v.toFixed(1)} mm/s`;
+      text = `移动中 · v=${v.toFixed(1)} mm/s`;
     }else{
-      stage.textContent = busy() ? '执行中' : (cmd.result ? (cmd.result.ok ? '已完成' : '失败') : '空闲');
+      text = busy() ? '执行中' : (cmd.result ? (cmd.result.ok ? '已完成' : '失败') : '空闲');
     }
     stage.className = 'v' + (busy() || cmd.result ? '' : ' unknown');
+    // P1-1：只在**文本真的变了**时写节点——同一串字重复赋值也会触发 live region，
+    // 每秒刷新就等于读屏每秒念一遍。#stagelive 是 sr-only，视觉上看不见。
+    if(stage.textContent !== text){
+      stage.textContent = text;
+      const spoken = $('#stagelive');
+      if(spoken) spoken.textContent = text;
+    }
   }
 }
 
@@ -612,8 +635,19 @@ function mapStationAt(vx, vy){
   return best;
 }
 
-function drawMap(){
-  const svg = $('#map'); if(!svg || !grid){ return; }
+/* 导轨图分两层画（2026-09-20 review P1-3）：静态层（层带/网格/列层号/蛇形路径/站位点）
+   只在"数据或选中态真的变了"时重建；动态层（待定方框/目标虚线/当前十字）每拍只改几个
+   属性。原先 tick(1s) 与指令轮询(300ms) 都整段 innerHTML 重建并重新绑事件，滑台持续
+   移动时主线程被白耗——静态层的关键串不变就整个跳过。 */
+let mapStaticKey = null;                 // 上一次静态层的输入指纹
+
+function mapStaticSignature(){
+  const cur = lastStatus?.patrol?.current_station || '';
+  return JSON.stringify([grid, selected, cur,
+    stations.map(st => [st.id, st.target_y ?? st.y, st.target_z ?? st.z])]);
+}
+
+function mapStaticSvg(){
   const {cols, layers, y_min, y_max, z_min, z_max} = grid;
   const {W, H, padL, padR, padT, padB} = MAP;
   const {X, Y} = mapScale();
@@ -670,6 +704,13 @@ function drawMap(){
             stroke="${sel||isCur ? '#ffffff' : 'none'}" stroke-width="1.5" style="cursor:pointer"><title>${esc(st.id)} · ${esc(st.box_id)} ·
             第${esc(st.layer)}层第${esc(st.col)}框 · Y=${target[0].toFixed(2)} Z=${target[1].toFixed(2)} mm</title></circle>`;
   }
+  return s;
+}
+
+function mapDynamicSvg(){
+  const {y_min, y_max, z_min, z_max} = grid;
+  const {X, Y} = mapScale();
+  let s = '';
   // 待定目标（坐标输入框的当前值）：虚线方框，跟着输入/点击走，执行仍走「移动到该点」+二次确认
   const py = parseFloat($('#gtY').value), pz = parseFloat($('#gtZ').value);
   if(Number.isFinite(py) && Number.isFinite(pz) && py >= y_min && py <= y_max && pz >= z_min && pz <= z_max){
@@ -685,15 +726,36 @@ function drawMap(){
   }
   if(current){
     const cx = X(current[0]), cy = Y(current[1]);
-    s += `<g><line x1="${(cx-8).toFixed(1)}" y1="${cy.toFixed(1)}" x2="${(cx+8).toFixed(1)}" y2="${cy.toFixed(1)}" stroke="#d94a3d" stroke-width="1.4"/>
+    s += `<line x1="${(cx-8).toFixed(1)}" y1="${cy.toFixed(1)}" x2="${(cx+8).toFixed(1)}" y2="${cy.toFixed(1)}" stroke="#d94a3d" stroke-width="1.4"/>
       <line x1="${cx.toFixed(1)}" y1="${(cy-8).toFixed(1)}" x2="${cx.toFixed(1)}" y2="${(cy+8).toFixed(1)}" stroke="#d94a3d" stroke-width="1.4"/>
-      <circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="4" fill="#d94a3d" stroke="#ffffff" stroke-width="1.2"/></g>`;
+      <circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="4" fill="#d94a3d" stroke="#ffffff" stroke-width="1.2"/>`;
   }
-  svg.innerHTML = s;
+  return s;
+}
+
+function bindMapStations(svg){
   svg.querySelectorAll('.map-station').forEach(c => c.onclick = ev => {
     ev.stopPropagation();            // 站点自己的命中优先，别再走"空白处设目标"
     selectStation(c.dataset.id);
   });
+}
+
+function drawMap(){
+  const svg = $('#map'); if(!svg || !grid){ return; }
+  const sig = mapStaticSignature();
+  if(sig !== mapStaticKey){
+    svg.innerHTML = '<g class="map-static">' + mapStaticSvg() + '</g><g class="map-dyn"></g>';
+    mapStaticKey = sig;
+    bindMapStations(svg);            // 只在静态层重建时绑一次（原先每拍都重绑）
+  }
+  updateMapDynamic();
+}
+
+function updateMapDynamic(){
+  const svg = $('#map');
+  const dyn = svg && svg.querySelector('.map-dyn');
+  if(!dyn || !grid) return;
+  dyn.innerHTML = mapDynamicSvg();
 }
 
 function wireMap(){
@@ -739,6 +801,14 @@ function drawList(){
   $('#list').querySelectorAll('.stn').forEach(el => el.onclick = () => selectStation(el.dataset.id));
 }
 
+/* 实时模式的"历史图像"网格与历史模式的时间轴喝的是同一口井（2026-09-20 review P1-4）：
+   地址拼装、行解析与 prod 失败提示只写一份，两边各自只负责渲染。谁再照抄一遍，
+   两边的行为就会慢慢漂移（比如一处加了 prod_error 提示、另一处没有）。 */
+async function fetchStationImages(stationId){
+  const data = await jget('/api/images?station_id=' + encodeURIComponent(stationId));
+  return {rows: data.rows || [], prod_error: data.prod_error || ''};
+}
+
 async function selectStation(id){
   const requestId = ++stationRequestSeq;
   historyRequestSeq++;
@@ -753,16 +823,18 @@ async function selectStation(id){
   if(target){ $('#gtY').value = target[0].toFixed(2); $('#gtZ').value = target[1].toFixed(2); }
   renderPositionReadouts();
   validateTargets();
+  // 按钮态立即跟上（原先要等下一秒的 /api/status 轮询才解锁，选完站有最多 1 秒的"假死"）
+  renderOps();
   $('#imgtitle').textContent = station ? '· ' + station.id : '';
   $('#imgs').innerHTML = '<div class="empty">读取中…</div>';
   try{
-    const data = await jget('/api/images?station_id=' + encodeURIComponent(id));
+    const {rows, prod_error} = await fetchStationImages(id);
     if(requestId !== stationRequestSeq || selected !== id) return;
-    hist.rows = data.rows || [];
+    hist.rows = rows;
     hist.loadedFor = id;
-    if(!data.rows.length){ $('#imgs').innerHTML = '<div class="empty">这个站位还没有图像索引</div>'; }
+    if(!rows.length){ $('#imgs').innerHTML = '<div class="empty">这个站位还没有图像索引</div>'; }
     else{
-      $('#imgs').innerHTML = data.rows.map(r => {
+      $('#imgs').innerHTML = rows.map(r => {
         const url = imageUrlFor(r);
         const ok = r.ok !== false && r.ok !== 0;
         return `<div class="im ${ok?'':'fail'} ${r.source==='local'?'local':''}">
@@ -773,10 +845,10 @@ async function selectStation(id){
       }).join('');
       wireShotFallbacks($('#imgs'));
     }
-    if(data.prod_error){
+    if(prod_error){
       const note = document.createElement('div');
       note.className = 'empty';
-      note.textContent = '⚠ prod 查询失败（只显示了本地待同步的）：' + data.prod_error;
+      note.textContent = '⚠ prod 查询失败（只显示了本地待同步的）：' + prod_error;
       $('#imgs').prepend(note);
     }
   }catch(e){
@@ -910,6 +982,9 @@ function renderOps(){
   $('#gotobtn').disabled = locked || !targetsOk();
   document.querySelectorAll('[data-jog]').forEach(b => b.disabled = locked);
   $('#capbtn').disabled = locked || !selected;        // 抓拍要有选中的站位（照片归到它名下）
+  // P0-5：置灰的原因要说出来（title 只有悬停才看得见，现场就卡在这一步）
+  const capNote = $('#capnote');
+  if(capNote) capNote.textContent = !selected ? '先选站位 → 抓拍可用（照片归到它名下）' : '';
 
   const el = $('#cmdline');
   if(busy()){
@@ -1049,6 +1124,36 @@ async function clearEstop(){
   await refreshCmd();
 }
 
+/* P2-5：页内二次确认，取代原生 confirm()。确认的**语义**不变（goto/home 必须点一下才发），
+   换来三件事：样式不割裂、不阻塞主线程、Enter/Esc 可键盘操作。
+   ⚠️ 这里的 Esc 是 capture 阶段的，会先于"Esc=急停"的那个监听执行并 stopPropagation——
+   弹窗开着的时候按 Esc = 取消，不是急停。 */
+function confirmAction(message){
+  return new Promise(resolve => {
+    const pop = document.createElement('div');
+    pop.className = 'confirm-pop';
+    pop.setAttribute('role', 'dialog');
+    pop.setAttribute('aria-modal', 'true');
+    pop.innerHTML = `<p>${esc(message)}</p><div class="row">
+      <button type="button" class="primary" data-yes>确认执行</button>
+      <button type="button" data-no>取消</button></div>`;
+    document.body.appendChild(pop);
+    const done = value => {
+      pop.remove();
+      document.removeEventListener('keydown', onKey, true);
+      resolve(value);
+    };
+    const onKey = e => {
+      if(e.key === 'Escape'){ e.preventDefault(); e.stopPropagation(); done(false); }
+      else if(e.key === 'Enter'){ e.preventDefault(); e.stopPropagation(); done(true); }
+    };
+    document.addEventListener('keydown', onKey, true);
+    pop.querySelector('[data-yes]').onclick = () => done(true);
+    pop.querySelector('[data-no]').onclick = () => done(false);
+    pop.querySelector('[data-yes]').focus();
+  });
+}
+
 function wireOps(){
   $('#takebtn').onclick = takeSession;
   $('#dropbtn').onclick = dropSession;
@@ -1057,7 +1162,7 @@ function wireOps(){
   $('#gtY').oninput = validateTargets;
   $('#gtZ').oninput = validateTargets;
   $('#homebtn').onclick = async () => {
-    if(confirm('回零会把两轴开到硬限位重新建立坐标系。\n当前机构会真的移动，确认执行？'))
+    if(await confirmAction('回零会把两轴开到硬限位重新建立坐标系。\n当前机构会真的移动，确认执行？'))
       await sendCmd('home', {});
   };
   $('#gotobtn').onclick = async () => {
@@ -1066,7 +1171,8 @@ function wireOps(){
     const detail = current
       ? `直线约 ${Math.hypot(y - current[0], z - current[1]).toFixed(0)} mm`
       : '当前位置未知，无法计算距离';
-    if(confirm(`移动到 Y=${y.toFixed(2)} Z=${z.toFixed(2)}（${detail}）？`)) await sendCmd('goto', {y, z});
+    if(await confirmAction(`移动到 Y=${y.toFixed(2)} Z=${z.toFixed(2)}（${detail}）？`))
+      await sendCmd('goto', {y, z});
   };
   document.querySelectorAll('[data-jog]').forEach(b => b.onclick = async () => {
     const [axis, sign] = [b.dataset.jog[0], b.dataset.jog[1]];
@@ -1097,6 +1203,24 @@ function posNow(){
    服务端还有一道兜底：轮次一开始，它会自己把已经开着的流断掉（不指望页面自觉）。 */
 
 const pv = {wanted:false, open:false, timer:null, startedAt:0};
+/* P1-6 帧率采样：上游 /healthz 给的是**累计** frames，浏览器侧按两次轮询的差值算窗口帧率
+   （提质到 1280×15 之后，"糊不糊"要有数据口径，不能只靠肉眼）。frames 归零 = ffmpeg
+   重连过，那一段不采样；观众数 updaters 里现成有。 */
+const pvFps = {frames:null, at:0, samples:[]};
+
+function pvFpsSample(frames){
+  const now = Date.now();
+  if(typeof frames !== 'number') return null;
+  if(pvFps.frames === null || frames < pvFps.frames){ pvFps.frames = frames; pvFps.at = now; return null; }
+  const dt = (now - pvFps.at) / 1000;
+  if(dt < 1){ return null; }
+  const fps = (frames - pvFps.frames) / dt;
+  pvFps.frames = frames; pvFps.at = now;
+  if(fps > 0 && fps < 60){ pvFps.samples.push(fps); if(pvFps.samples.length > 5) pvFps.samples.shift(); }
+  return pvFps.samples.length
+    ? Math.round(pvFps.samples.reduce((a, b) => a + b, 0) / pvFps.samples.length)
+    : null;
+}
 
 /* ⚠️ 这里必须写 `display:'block'` 而不是 `display:''`：
    CSS 里 `.pvwrap img{display:none}` 是**默认隐藏**，`''` 只是清掉内联样式，
@@ -1107,6 +1231,10 @@ function pvSetState(state, cls, note){
   t.textContent = state;
   t.className = 'tag' + (cls ? ' ' + cls : '');
   $('#pvnote').textContent = note || '';
+  // P0-4：按钮文案跟着"想不想看"走——打开后必须变成"关闭画面"。
+  // 原版恒为"看画面"，现场只能从右上角小标签反推，按钮像个坏掉的开关。
+  const b = $('#pvbtn');
+  if(b) b.textContent = pv.wanted ? '关闭画面' : '看画面';
 }
 
 function pvStartStream(){
@@ -1134,6 +1262,7 @@ function pvStopStream(keepWanted){
 
 async function pvTick(){
   if(!pv.wanted) return;
+  if(document.hidden) return;         // P1-5：页面不可见就不轮询（流本身交给浏览器）
   // 轮内先自己关掉：后端也会断流，但"等它断"与"主动关"在观感上差很多
   if(inRound()){
     if(pv.open) pvStopStream(true);
@@ -1156,9 +1285,13 @@ async function pvTick(){
       return;
     }
     if(!pv.open) pvStartStream();
-    pvSetState('播放中', 'on', typeof age === 'number'
-      ? `${up.frames || 0} 帧 · 最新一帧 ${age.toFixed(1)} 秒前`
-      : '');
+    const fps = pvFpsSample(up.frames);
+    const parts = [];
+    if(fps !== null) parts.push('~' + fps + ' fps');
+    parts.push(`${up.frames || 0} 帧`);
+    if(typeof up.viewers === 'number') parts.push(`${up.viewers} 名观众`);
+    if(typeof age === 'number') parts.push(`最新一帧 ${age.toFixed(1)} 秒前`);
+    pvSetState('播放中', 'on', parts.join(' · '));
   }else{
     if(pv.open) pvStopStream(true);
     $('#pvhint').textContent = st.error || '暂时看不到画面';
@@ -1255,7 +1388,7 @@ function renderHistory(){
           <div class="noimg">${rowOk(r) ? '图取不到' : '采图失败'}</div>
           <div class="m"><b>${esc(String(r.ts||'').slice(11,19) || '—')}</b><br>
             ${esc(r.angle_profile || '—')} · ${r.source === 'local' ? '本地' : 'prod'}
-            ${rowOk(r) ? '' : '<br><span style="color:#f85149">采图失败</span>'}</div>
+            ${rowOk(r) ? '' : '<br><span style="color:var(--bad)">采图失败</span>'}</div>
         </div>`;
       }).join('')}</div>`).join('');
     wireShotFallbacks(tl);
@@ -1264,6 +1397,7 @@ function renderHistory(){
     });
   }
   drawCurve();
+  updateFrameInfo();
 }
 
 function history_pick(id, url){
@@ -1282,12 +1416,34 @@ function history_pick(id, url){
   hist.zoom = 1; hist.px = hist.py = 0;
   applyZoom();
   renderHistory();
+  updateFrameInfo();
 }
 
 function applyZoom(){
   const img = $('#bigimg');
   img.style.transform = `translate(${hist.px}px, ${hist.py}px) scale(${hist.zoom})`;
   $('#zoomlabel').textContent = `· ${hist.zoom}×`;
+}
+
+/* ---- P2-3 逐帧导航：时间轴是多天长条，翻"最近一帧"以前只能靠滚 ---- */
+function timelineFrames(){
+  return Array.from(document.querySelectorAll('.tl .im[data-pick]'));
+}
+function updateFrameInfo(){
+  const els = timelineFrames();
+  const i = els.findIndex(el => el.classList.contains('sel'));
+  $('#frameinfo').textContent = els.length
+    ? (i >= 0 ? `第 ${i + 1} / ${els.length} 帧` : `共 ${els.length} 帧，未选`)
+    : '当前筛选下没有帧';
+}
+function pickRelative(delta){
+  const els = timelineFrames();
+  if(!els.length) return;
+  const i = els.findIndex(el => el.classList.contains('sel'));
+  const j = Math.min(els.length - 1, Math.max(0, (i < 0 ? 0 : i) + delta));
+  const el = els[j];
+  history_pick(decodeURIComponent(el.dataset.pick), el.dataset.url);
+  if(el.scrollIntoView) el.scrollIntoView({block:'nearest', inline:'nearest'});
 }
 
 function drawCurve(){
@@ -1322,19 +1478,22 @@ function drawCurve(){
     return seg;
   };
   box.className = '';
+  /* P0-1：曲线图整体改用浅色主题色（原来是暗色主题遗留的硬编码：深灰轴 #2a3340、
+     中灰刻度 #8b98a5、蓝 #58a6ff / 浅绿 #7ee2a8——贴在白卡片上像一块补丁，
+     而 #7ee2a8 在白底上辨识度很差）。取值与中栏导轨图的内联浅色同一套。 */
   box.innerHTML = `<svg viewBox="0 0 ${W} ${H}">
-    <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${H-padB}" stroke="#2a3340"/>
-    <line x1="${padL}" y1="${H-padB}" x2="${W-padR}" y2="${H-padB}" stroke="#2a3340"/>
-    <text x="2" y="${Y(hi)+4}" fill="#8b98a5" font-size="10">${hi.toFixed(1)}</text>
-    <text x="2" y="${Y(lo)+4}" fill="#8b98a5" font-size="10">${lo.toFixed(1)}</text>
-    <text x="${padL}" y="${H-6}" fill="#8b98a5" font-size="10">${esc(String(pts[0].ts).slice(0,16))}</text>
-    <text x="${W-padR}" y="${H-6}" text-anchor="end" fill="#8b98a5" font-size="10">${esc(String(pts[pts.length-1].ts).slice(0,16))}</text>
-    <path d="${line('mean_len_mm')}" fill="none" stroke="#58a6ff" stroke-width="2"/>
-    <path d="${line('mean_cap_mm')}" fill="none" stroke="#7ee2a8" stroke-width="2"/>
-    ${pts.map((p, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(typeof p.mean_len_mm === 'number' ? p.mean_len_mm : lo).toFixed(1)}" r="3" fill="#58a6ff"><title>${esc(p.ts)} · 判词 ${esc(p.verdict || '—')}</title></circle>`).join('')}
+    <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${H-padB}" stroke="#6b7785"/>
+    <line x1="${padL}" y1="${H-padB}" x2="${W-padR}" y2="${H-padB}" stroke="#6b7785"/>
+    <text x="2" y="${Y(hi)+4}" fill="#6b7785" font-size="10">${hi.toFixed(1)}</text>
+    <text x="2" y="${Y(lo)+4}" fill="#6b7785" font-size="10">${lo.toFixed(1)}</text>
+    <text x="${padL}" y="${H-6}" fill="#6b7785" font-size="10">${esc(String(pts[0].ts).slice(0,16))}</text>
+    <text x="${W-padR}" y="${H-6}" text-anchor="end" fill="#6b7785" font-size="10">${esc(String(pts[pts.length-1].ts).slice(0,16))}</text>
+    <path d="${line('mean_len_mm')}" fill="none" stroke="#1f6feb" stroke-width="2"/>
+    <path d="${line('mean_cap_mm')}" fill="none" stroke="#18794e" stroke-width="2"/>
+    ${pts.map((p, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(typeof p.mean_len_mm === 'number' ? p.mean_len_mm : lo).toFixed(1)}" r="3" fill="#1f6feb"><title>${esc(p.ts)} · 判词 ${esc(p.verdict || '—')}</title></circle>`).join('')}
   </svg>
-  <div class="legend"><span><i style="background:#58a6ff"></i>平均长度 mm</span>
-    <span><i style="background:#7ee2a8"></i>平均伞盖 mm</span>
+  <div class="legend"><span><i style="background:#1f6feb"></i>平均长度 mm</span>
+    <span><i style="background:#18794e"></i>平均伞盖 mm</span>
     <span>最新判词：${esc((g.latest && g.latest.verdict_text) || (g.latest && g.latest.verdict) || '—')}</span></div>`;
   const recent = pts.slice(-8).reverse();
   note.innerHTML = `<table class="meas"><tr><th>时间</th><th>长度 mm</th><th>伞盖 mm</th><th>判词</th></tr>
@@ -1356,11 +1515,11 @@ async function loadHistory(force){
   $('#timeline').className = 'empty';
   $('#timeline').textContent = '读取中…';
   try{
-    const data = await jget('/api/images?station_id=' + encodeURIComponent(stationId));
+    const {rows, prod_error} = await fetchStationImages(stationId);
     if(requestId !== historyRequestSeq || selected !== stationId) return;
-    hist.rows = data.rows || [];
+    hist.rows = rows;
     hist.loadedFor = stationId;
-    if(data.prod_error) $('#filterinfo').textContent = '⚠ prod 查询失败（只显示本地待同步的）：' + data.prod_error;
+    if(prod_error) $('#filterinfo').textContent = '⚠ prod 查询失败（只显示本地待同步的）：' + prod_error;
   }catch(e){
     if(requestId !== historyRequestSeq || selected !== stationId) return;
     hist.rows = [];
@@ -1409,6 +1568,52 @@ function wireHistory(){
     hist.zoom = Number(b.dataset.zoom); hist.px = hist.py = 0; applyZoom();
   });
   $('#fitbtn').onclick = () => { hist.zoom = 1; hist.px = hist.py = 0; applyZoom(); };
+  // P2-3：逐帧导航（按钮 + 左右方向键；输入框聚焦时不抢键）
+  $('#prevframe').onclick = () => pickRelative(-1);
+  $('#nextframe').onclick = () => pickRelative(1);
+  $('#latestframe').onclick = () => {
+    const els = timelineFrames();
+    if(!els.length) return;
+    const el = els[0];                       // DOM 顺序已是"日期倒序、日内正序" ⇒ 0 号就是最近
+    history_pick(decodeURIComponent(el.dataset.pick), el.dataset.url);
+    if(el.scrollIntoView) el.scrollIntoView({block:'nearest', inline:'nearest'});
+  };
+  document.addEventListener('keydown', e => {
+    if(mode !== 'history' || !hist.picked) return;
+    const t = e.target;
+    if(t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    if(e.key === 'ArrowLeft'){ e.preventDefault(); pickRelative(-1); }
+    else if(e.key === 'ArrowRight'){ e.preventDefault(); pickRelative(1); }
+  });
+  // P2-2：触屏。单指拖动 = 平移（放大后），双指捏合 = 缩放。巡检用的是平板，
+  // 原来只有滚轮 + 鼠标，触屏上大图区完全没法看细节。
+  // （变量名避开同作用域后面那个 const viewer：同一个函数里两个 const viewer 会直接语法错误）
+  const viewerBox = $('#viewer');
+  let touchPrev = null;                       // 上一拍的触点状态
+  viewerBox.addEventListener('touchstart', e => {
+    if(!$('#bigimg').src) return;
+    touchPrev = Array.from(e.touches).map(t => ({x:t.clientX, y:t.clientY}));
+  }, {passive:true});
+  viewerBox.addEventListener('touchmove', e => {
+    if(!touchPrev || !$('#bigimg').src) return;
+    e.preventDefault();
+    const now = Array.from(e.touches).map(t => ({x:t.clientX, y:t.clientY}));
+    if(now.length === 1 && touchPrev.length === 1 && hist.zoom > 1){
+      hist.px += now[0].x - touchPrev[0].x;
+      hist.py += now[0].y - touchPrev[0].y;
+      applyZoom();
+    }else if(now.length === 2 && touchPrev.length === 2){
+      const d0 = Math.hypot(touchPrev[0].x - touchPrev[1].x, touchPrev[0].y - touchPrev[1].y);
+      const d1 = Math.hypot(now[0].x - now[1].x, now[0].y - now[1].y);
+      if(d0 > 0){
+        hist.zoom = Math.min(8, Math.max(1, hist.zoom * (d1 / d0)));
+        if(hist.zoom === 1){ hist.px = hist.py = 0; }
+        applyZoom();
+      }
+    }
+    touchPrev = now;
+  }, {passive:false});
+  viewerBox.addEventListener('touchend', () => { touchPrev = null; }, {passive:true});
   const viewer = $('#viewer');
   viewer.addEventListener('wheel', e => {
     if(!$('#bigimg').src) return;
@@ -1430,7 +1635,26 @@ function wireHistory(){
   window.addEventListener('mouseup', () => { drag = null; viewer.classList.remove('dragging'); });
 }
 
+/* P1-5：轮询跟着页面可见性走。现场常多开几个标签，隐藏的 tab 还每秒打 /api/status
+   纯属浪费；急停是按钮动作、不依赖轮询，隐藏期间不影响安全。 */
+let tickTimer = null;
+function startPolling(){ if(!tickTimer) tickTimer = setInterval(tick, 1000); }
+function stopPolling(){ if(tickTimer){ clearInterval(tickTimer); tickTimer = null; } }
+document.addEventListener('visibilitychange', () => {
+  if(document.hidden){ stopPolling(); }
+  else{ tick(); startPolling(); }        // 回来先补一拍，别让显示停在隐藏前的旧值
+});
+
 (async function init(){
+  // P2-4：左栏折叠（窄屏/平板让中栏全宽）
+  const listToggle = $('#listtoggle');
+  if(listToggle) listToggle.onclick = () => {
+    const main = document.querySelector('main');
+    main.classList.toggle('list-hidden');
+    const hidden = main.classList.contains('list-hidden');
+    listToggle.textContent = hidden ? '展开' : '收起';
+    listToggle.setAttribute('aria-expanded', String(!hidden));
+  };
   try{
     const data = await jget('/api/stations');
     if(!data.ok){
@@ -1455,7 +1679,7 @@ function wireHistory(){
   await refreshCmd();
   // 页面是刷新/重开后回来的，而后端可能还开着会话：把画面接着打开，别让人以为它坏了
   if(cmd.session_active) openPreview();
-  tick(); setInterval(tick, 1000);
+  tick(); startPolling();
 })();
 </script>
 </body>

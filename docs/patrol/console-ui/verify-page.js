@@ -248,6 +248,22 @@ const lastCmd = () => {
       .includes('Y=187.10 Z=21.20 mm'),
     dots.find(c => c.dataset.id === 'S101')?.querySelector('title')?.textContent || '(无 title)');
   check('站位列表坐标也是两位小数', T('.stn .mono').includes('187.10, 21.20'), T('.stn .mono'));
+  check('有内联 favicon（P2-6：不再每次加载 404）',
+    !!document.querySelector('link[rel="icon"]'), document.querySelector('link[rel="icon"]') ? '有' : '(无)');
+
+  // P2-4：左栏可折叠（窄屏/平板让中栏全宽）
+  // ⚠️ jsdom 不把样式表规则反映到 .style 上，所以这里只断言 DOM 层的 class/文案/aria，
+  //    "整列真的隐藏了"由 CSS 规则 main.list-hidden>section:first-child 负责（浏览器里生效）。
+  await click('#listtoggle');
+  check('收起后 main 打上 list-hidden（左栏由 CSS 收起）',
+    document.querySelector('main').classList.contains('list-hidden'),
+    document.querySelector('main').className);
+  check('折叠按钮文案与 aria-expanded 同步',
+    T('#listtoggle') === '展开' && $('#listtoggle').getAttribute('aria-expanded') === 'false',
+    T('#listtoggle') + ' / ' + $('#listtoggle').getAttribute('aria-expanded'));
+  await click('#listtoggle');
+  check('再点一次恢复', !document.querySelector('main').classList.contains('list-hidden')
+    && T('#listtoggle') === '收起', T('#listtoggle'));
 
   // 点击空白处 = 填坐标（不发指令！移动永远走「移动到该点」+二次确认）；
   // jsdom 不做坐标命中，补一个 getBoundingClientRect 让换算有输入。
@@ -264,6 +280,15 @@ const lastCmd = () => {
   mapsvg.dispatchEvent(new window.MouseEvent('mousemove', { clientX: 460, clientY: 85, bubbles: true }));
   check('悬停显示光标处坐标', T('#maphover').includes('Y=2210.35') && T('#maphover').includes('Z=112.33'),
     T('#maphover'));
+
+  // P1-3：导轨图拆成静态层/动态层——每秒轮询不该再把整张图重建一遍
+  const mapStaticBefore = $('#map .map-static');
+  await sleep(1200);                      // 至少等一拍 tick（1s）
+  check('导轨图静态层不随每秒轮询重建',
+    !!mapStaticBefore && $('#map .map-static') === mapStaticBefore,
+    mapStaticBefore ? '同一节点 ✓' : '(缺失 .map-static)');
+  check('动态层独立存在（十字/虚线每拍只更新它）', !!$('#map .map-dyn'),
+    $('#map .map-dyn') ? '✓' : '(缺失 .map-dyn)');
   // 收尾：别把坐标/选中态带进后面的用例（历史模式断言"未选站位"的提示）
   $('#gtY').value = ''; $('#gtZ').value = '';
   $('#gtY').dispatchEvent(new window.Event('input'));
@@ -304,7 +329,20 @@ const lastCmd = () => {
   // 补光灯开关已从页面删除（现场无实际作用）——连 DOM 都不该再有
   check('页面上没有补光灯开关（无实际作用，2026-09-17 删除）', !$('#lampbtn') && !html.includes('lampbtn'));
 
-  // 4. 定位：二次确认 + 载荷
+  // 3b. 抓拍置灰原因要说出来（P0-5）：不写 title 也能看见
+  check('未选站位时抓拍下方给出原因', T('#capnote').includes('先选站位'), T('#capnote'));
+  // 3c. 读屏不再被每秒刷新的读数区骚扰（P1-1）：容器无 aria-live，"当前动作"走独立节点
+  check('读数区容器不带 aria-live（原先每秒播报一次）',
+    !$('.readouts').hasAttribute('aria-live'), $('.readouts').getAttribute('aria-live') || '(无)');
+  check('"当前动作"有独立的 sr-only 播报节点',
+    !!$('#stagelive') && $('#stagelive').getAttribute('aria-live') === 'polite'
+    && $('#stagelive').className.includes('sr-only'), $('#stagelive') ? $('#stagelive').className : '(缺失)');
+  // 3d. 历史模式三张卡 DOM 顺序 = 视觉顺序（P1-2：原先 grid-row 重排，Tab 焦点与读屏大纲错位）
+  const hmainFirst = document.querySelector('#hmain .card h2');
+  check('历史模式第一张卡是"大图"（DOM 顺序即视觉顺序）',
+    !!hmainFirst && hmainFirst.textContent.includes('大图'), hmainFirst ? hmainFirst.textContent : '(无)');
+
+  // 4. 定位：页内二次确认（P2-5，取代原生 confirm()）+ 载荷
   state.calls.length = 0;
   state.machine_position = null;
   state.machine_pos_source = 'unknown';
@@ -312,12 +350,16 @@ const lastCmd = () => {
   await sleep(1100);
   $('#gtY').value = '1200'; $('#gtZ').value = '100';
   $('#gtY').dispatchEvent(new window.Event('input'));
-  window.__ok = true; window.__confirmed.length = 0; window.__confirmMessages.length = 0;
   await click('#gotobtn');
-  check('定位前有二次确认', window.__confirmed.length === 1);
-  check('当前位置未知时不伪造 0 mm 距离', window.__confirmMessages[0].includes('无法计算距离') && !window.__confirmMessages[0].includes('0 mm'),
-    window.__confirmMessages[0]);
-  check('定位载荷 = {y:1200, z:-100}',
+  check('定位前弹出页内确认（.confirm-pop，不是原生 confirm）',
+    !!document.querySelector('.confirm-pop'), document.querySelector('.confirm-pop') ? '有弹窗' : '(无弹窗)');
+  check('当前位置未知时不伪造 0 mm 距离',
+    T('.confirm-pop p').includes('无法计算距离') && !T('.confirm-pop p').includes('0 mm'),
+    T('.confirm-pop p'));
+  await sleep(50);
+  document.querySelector('.confirm-pop [data-yes]').click();
+  await sleep(400);
+  check('确认后定位载荷 = {y:1200, z:-100}',
     JSON.stringify(lastCmd()) === '{"kind":"goto","args":{"y":1200,"z":100}}', JSON.stringify(lastCmd()));
   check('结构化位置结果更新可信读数（两位小数）',
     T('#actualpos').includes('Y=1200.00') && T('#actualpos').includes('Z=100.00') && T('#actualpos').includes('最后成功目标'),
@@ -327,12 +369,15 @@ const lastCmd = () => {
   await sleep(1100);
 
   state.calls.length = 0;
-  window.__ok = false;                       // 用户在确认框里点了取消
   await click('#gotobtn');
-  check('取消确认后**一条都不发**', lastCmd() === null || lastCmd() === undefined);
+  check('点"移动到该点"先弹确认（不是直接发指令）', !!document.querySelector('.confirm-pop'),
+    document.querySelector('.confirm-pop') ? '有弹窗' : '(无弹窗)');
+  document.querySelector('.confirm-pop [data-no]').click();
+  await sleep(300);
+  check('取消确认后**一条都不发**', lastCmd() === null || lastCmd() === undefined,
+    JSON.stringify(lastCmd()));
 
   // 5. 浏览器侧软限位：越界不发、当场标红
-  window.__ok = true;
   state.calls.length = 0;
   $('#gtY').value = '9999';                  // Y 上限 4492
   $('#gtY').dispatchEvent(new window.Event('input'));
@@ -524,6 +569,24 @@ const lastCmd = () => {
   check('清空筛选后回到 3 帧', document.querySelectorAll('.tl .im').length === 3,
     document.querySelectorAll('.tl .im').length + ' 帧');
 
+  // P2-3：逐帧导航（按钮 + 帧计数）。DOM 顺序 = 日期倒序、日内正序 ⇒ 第 1 帧就是最近
+  check('帧计数指出当前位置', T('#frameinfo').includes('第 1 / 3 帧'), T('#frameinfo'));
+  await click('#nextframe');
+  check('下一帧切到第 2 帧', T('#frameinfo').includes('第 2 / 3 帧'), T('#frameinfo'));
+  check('失败帧说明"没有可用的图"（不是一块黑）', T('#viewhint').includes('没有可用的图'),
+    T('#viewhint').slice(0, 40));
+  await click('#latestframe');
+  check('跳到最近回到第 1 帧', T('#frameinfo').includes('第 1 / 3 帧'), T('#frameinfo'));
+  // 方向键也能翻帧（输入框聚焦时不抢键——真实浏览器里 keydown 的 target 是聚焦元素，
+  // 所以这里要从输入框上派发，而不是从 document 上派发）
+  document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
+  await sleep(150);
+  check('右方向键也能翻到下一帧', T('#frameinfo').includes('第 2 / 3 帧'), T('#frameinfo'));
+  $('#fromDate').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
+  await sleep(150);
+  check('输入框聚焦时方向键不抢（不翻帧）', T('#frameinfo').includes('第 2 / 3 帧'), T('#frameinfo'));
+  await click('#latestframe');
+
   // prod 查不到 vs 还没有测量值：两件事，必须分开说
   state.growth_error = true;
   await click('#reloadbtn');
@@ -572,6 +635,8 @@ const lastCmd = () => {
   check('播放中提示文字让位', $('#pvhint').style.display === 'none',
     'hint display=' + ($('#pvhint').style.display || '(空)'));
   check('画面状态标为播放中', T('#pvstate').includes('播放中'), T('#pvstate'));
+  // P0-4：按钮文案必须跟着状态走（原版恒为"看画面"，现场把它当坏开关）
+  check('画面打开后按钮变成"关闭画面"', T('#pvbtn') === '关闭画面', T('#pvbtn'));
   check('画面信息来自 console 的 /api/preview/status（不是直连相机）',
     !!lastCall('/api/preview/status') && !state.calls.some(c => /192\.168|:554/.test(c.url)),
     JSON.stringify([...new Set(state.calls.map(c => c.url.split('?')[0]))].slice(-6)));
@@ -628,10 +693,12 @@ const lastCmd = () => {
   await sleep(200);
   check('手动"停画面"生效', !$('#pvimg').getAttribute('src') && T('#pvstate').includes('未打开'),
     T('#pvstate'));
+  check('关掉后按钮回到"看画面"', T('#pvbtn') === '看画面', T('#pvbtn'));
   await click('#pvbtn');
   await sleep(400);
   check('手动"看画面"又开起来', ($('#pvimg').getAttribute('src') || '').startsWith('/api/preview'),
     $('#pvimg').getAttribute('src') || '(无)');
+  check('再打开后按钮又是"关闭画面"', T('#pvbtn') === '关闭画面', T('#pvbtn'));
 
   console.log(out.join('\n'));
   console.log('\n运行期错误：' + (errors.length ? '\n  ' + errors.join('\n  ') : '无'));
