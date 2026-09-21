@@ -73,15 +73,31 @@
   .legend{font-size:12px;color:var(--dim);display:flex;gap:14px;margin-top:4px}
   .legend i{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:4px}
   /* ---- 实时画面（MJPEG，中栏第一张）----
-     固定 16:9 的框：流没起来时也要占住位置，否则卡片高度会跳，下面的按钮跟着上下移动
-     ——点动的时候按钮乱跑是很烦的事。object-fit:contain 保证画面不被拉变形。
-     max-height 是给导轨图腾位置（2026-09-17）：1080p 下画面卡 + 全宽导轨图要同屏可见，
-     画面让一点高度（约 44vh），换来"边挪边看 + 图上点目标"不翻页。 */
-  .pvwrap{position:relative;width:100%;aspect-ratio:16/9;max-height:44vh;
+     框必须与画面的**真实宽高比**一致（`--pv-k`）：源流 1280×718、抓拍 2880×1616，两者同比。
+     早先框写死 16:9，同时 `width:100%` 让它吃满整栏，`max-height:44vh` 再把它压矮 ——
+     框的**有效**宽高比被拉到 2.3~2.8，`object-fit:contain` 只能按高度把画面缩进框里，
+     左右各留一条黑边（2026-09-21 实测：1080p 每侧 211px，画面只占框的 63%；1366/1440 各
+     88~103px）。现场反馈的"图像左右两侧有较大黑边"就是这个。
+     现在改成**定高不定宽**：宽度由高度预算 `--pv-h` 算出来，框与画面恒同比例，黑边在数学上
+     不存在。`aspect-ratio`/`width` 全部由 CSS 定死、**与流起没起来无关**，所以"卡片高度会跳、
+     按钮跟着上下移动"这个老问题（原注释在意的）依然不会发生。
+     `object-fit:contain` 保留作兜底：以后换了别的比例的相机，宁可留边也不拉变形。 */
+  .pvbody{display:flex;gap:14px;align-items:flex-start}
+  /* 左列的**宽**由 flex-basis 给定（绝对长度），`.pvwrap` 再取 100% —— 这样百分比有确定的
+     解析基准，不会与 auto 宽互相依赖；flex-shrink:1 让窄屏时整列等比缩小（框跟着小、比例不变）。 */
+  .pvleft{flex:0 1 calc(var(--pv-h) * var(--pv-k));min-width:0;display:flex;flex-direction:column}
+  .pvwrap{position:relative;width:100%;aspect-ratio:var(--pv-k);
           border:1px solid var(--line);border-radius:6px;overflow:hidden;display:flex;
           align-items:center;justify-content:center}
   .pvwrap img{width:100%;height:100%;object-fit:contain;display:none}
   .pvwrap .empty{position:absolute;left:8px;right:8px;text-align:center;padding:0}
+  /* 画面右侧的读数栏：把"框不再吃满整栏"省出来的横向空间用掉，否则那一块只是空着。
+     宽屏时是一列（4 块竖排）；窄屏时整段落到画面下方（见文件末尾的媒体查询）。
+     `flex-basis/min-width:260px` 是**读数栏的地板宽**：读数最长的一条是"当前位置"的
+     `Y=4492.00 Z=190.80 · 巡检站位推定`（实测在 260px 宽、13px 等宽字体下正好占满一行），
+     再窄就必然折行。地板优先于画面——窄于地板时让 `.pvleft`（flex-shrink:1）先缩，
+     画面等比变小、比例不变，读数始终一行可读。 */
+  .pvside{flex:1 1 260px;min-width:260px}
   #pvnote{font-size:12px;margin-left:8px}
   #pverr{font-size:12px;flex:1}
 
@@ -89,7 +105,11 @@
   :root{--bg:#edf1f5;--panel:#fff;--line:#d8e0e8;--fg:#16212b;--dim:#6b7785;
         --ok:#18794e;--warn:#a35d00;--bad:#c73535;--accent:#1f6feb;
         --soft:#f7f9fb;--accent-soft:#e8f0fe;--ok-soft:#e8f5ee;--bad-soft:#fcecec;
-        --shadow:0 1px 2px rgba(24,38,52,.06),0 4px 14px rgba(24,38,52,.04)}
+        --shadow:0 1px 2px rgba(24,38,52,.06),0 4px 14px rgba(24,38,52,.04);
+        /* 实时画面：--pv-k = 画面的真实宽高比（源流 1280×718，抓拍 2880×1616，同比例），
+           --pv-h = 画面允许的最大高度。框宽 = --pv-h × --pv-k。改相机分辨率时**只改这里**，
+           否则黑边会回来（或改大了被 max-width 夹住、比例失真）。 */
+        --pv-k:1280/718;--pv-h:50vh}
   html,body{height:100%;overflow:hidden;margin:0}
   body{display:flex;flex-direction:column;background:var(--bg);color:var(--fg);
        font-family:"Aptos","Segoe UI","Microsoft YaHei",sans-serif;font-size:13px}
@@ -150,10 +170,18 @@
   .estopcard h2{color:#8e2424}
   #rtmain>.card:first-child{border-top:3px solid var(--accent)}
   .pvwrap{border-color:#c6d1dc;background:#16212b;box-shadow:inset 0 0 0 1px rgba(255,255,255,.04)}
-  .readouts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px}
+  /* 读数块：宽屏时贴在画面右侧、竖排一列（上方没有别的东西，margin-top 归零）；
+     窄屏时整段落到画面下方、排回一行（见文件末尾的媒体查询）。 */
+  .readouts{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;margin-top:0}
   .readout{min-width:0;padding:8px 9px;background:var(--soft);border:1px solid var(--line);border-radius:6px}
   .readout .k{display:block;color:var(--dim);font-size:11px}
-  .readout .v{display:block;margin-top:2px;font:600 13px ui-monospace,Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  /* 读数块的**值**允许折行，不能截。理由：最坏情况是"当前位置"的
+     `Y=4492.00 Z=190.80 · 巡检站位推定`（21 西文 + 6 汉字 ≈ 262px），而竖排时单元格只有
+     260px、横排 4 列时只有 ~166~222px —— nowrap+ellipsis 会截在坐标尾数或**来源**上，
+     而来源（控制器实时 / 巡检站位推定 / 最后成功目标）正是判断"这个数能不能信"的依据。
+     折行最多两行、代价 ~15px 高度，比丢掉信息来源划算。 */
+  .readout .v{display:block;margin-top:2px;font:600 13px ui-monospace,Consolas,monospace;
+              white-space:normal;overflow-wrap:anywhere}
   .readout .v.unknown{color:var(--dim);font-weight:400}
   .jogpad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:6px 0}
   .jogpad button{min-height:48px;font-size:16px}
@@ -195,21 +223,33 @@
               letter-spacing:0;text-transform:none}
   main.list-hidden{grid-template-columns:0 minmax(0,1fr) minmax(320px,360px)}
   main.list-hidden>section:first-child{display:none}
-  @media (max-width:1500px){
+  /* 分界 1800px 不是拍的：并排时画面宽 = 卡片内宽 − 14 − 260，堆叠时 = min(卡片内宽, 50vh×k)。
+     解这两个式子相等的位置约在 vw≈1800 —— 再窄，并排反而让**画面变小**（1664 上实测 637×357
+     对 802×450，小 19%），那不叫优化。窄于这条线就改堆叠：读数落到画面下方排成一行。 */
+  @media (max-width:1800px){
     main{grid-template-columns:280px minmax(0,1fr) 320px}
     main>section{padding:10px}
-    .readouts{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .pvbody{flex-direction:column;gap:0}
+    .pvleft{flex:0 0 auto;width:100%;align-items:center}
+    .pvwrap{width:min(100%, calc(var(--pv-h) * var(--pv-k)))}
+    /* ⚠️ 这里必须把 `.pvside` 的 flex-basis 与 min-width 一起清掉：主轴变成了纵向，
+       那条 `flex:1 1 260px` 会被当成**高度**基准，把读数栏拉成 260px 高、整张卡凭空长
+       200px（实测 1424×820 上 cardBottom 691→870）。`min-width:260px` 在横向上也不再需要。 */
+    .pvside{flex:0 0 auto;width:100%;min-width:0}
+    .readouts{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px}
     .readout .v{font-size:12px}
-  }
-  @media (max-height:820px){
-    .card{padding:10px 12px;margin-bottom:9px}
-    .pvwrap{aspect-ratio:16/8.5}
-    .readout{padding:6px 8px}
   }
   /* P2-4：1024~1280 的平板/小屏，三栏各让一步（左栏还能整列折叠） */
   @media (max-width:1280px){
     main{grid-template-columns:220px minmax(0,1fr) 300px}
     .readouts{grid-template-columns:repeat(2,minmax(0,1fr))}
+  }
+  /* 矮屏：--pv-h 是 vh 单位，自己就会跟着缩，所以这里只需收紧卡片内边距与读数行高。
+     ⚠️ **不要**在这里改画面比例（改前那版写的是 `aspect-ratio:16/8.5`）—— 比例一改，
+     框就和画面不一致，黑边立刻回来。 */
+  @media (max-height:820px){
+    .card{padding:10px 12px;margin-bottom:9px}
+    .readout{padding:6px 8px}
   }
   @media (prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
 </style>
@@ -247,26 +287,35 @@
     <div class="card">
       <h2>实时画面 <span id="pvstate" class="tag">未打开</span>
         <span id="pvnote" style="color:var(--dim);font-weight:400"></span></h2>
-      <div class="pvwrap">
-        <img id="pvimg" alt="实时画面">
-        <div class="empty" id="pvhint">接管后自动打开（相机实时画面，约 1 秒延迟）</div>
-      </div>
-      <!-- 抓拍与看画面同一张卡：拍的就是"此刻画面里的这个位置"（2026-09-17 从右栏点动区并入） -->
-      <div class="row" style="margin-top:8px">
-        <button id="pvbtn">看画面</button>
-        <button id="capbtn" disabled title="拍当前位置：不用先接管；选了站位就归到它名下，没选就归到最近的格点">抓拍</button>
-        <span id="pverr" class="empty" style="padding:0"></span>
-      </div>
-      <!-- P0-5：抓拍置灰的原因要说出来。只写 title 的话鼠标不悬停就看不到，
-           现场最常见的疑问就是"为什么抓拍点不动"。 -->
-      <div id="capnote" class="empty" style="padding:2px 0 0;font-size:12px"></div>
-      <!-- P1-1：容器上的 aria-live 已撤（每秒刷新会把读屏吵死）；"当前动作"改由
-           #stagelive 这个 sr-only 节点**只在文本变化时**播报。 -->
-      <div class="readouts">
-        <div class="readout"><span class="k">当前位置</span><span id="actualpos" class="v unknown">未知</span></div>
-        <div class="readout"><span class="k">目标站位</span><span id="targetpos" class="v unknown">未选择</span></div>
-        <div class="readout"><span class="k">直线距离</span><span id="distance" class="v unknown">不可计算</span></div>
-        <div class="readout"><span class="k">当前动作</span><span id="cmdstage" class="v unknown">空闲</span><span id="stagelive" class="sr-only" aria-live="polite"></span></div>
+      <!-- 画面在左、读数在右（2026-09-21）：画面框的**宽**由 --pv-h × --pv-k 定死（见 CSS），
+           不再吃满整栏、也就不会在框内留黑边；省出来的那块横向空间正好放读数栏。
+           顺带把"读数一整行"从画面下面挪走，画面因此能长高一点（--pv-h 由 44vh 提到 50vh）。 -->
+      <div class="pvbody">
+        <div class="pvleft">
+          <div class="pvwrap">
+            <img id="pvimg" alt="实时画面">
+            <div class="empty" id="pvhint">接管后自动打开（相机实时画面，约 1 秒延迟）</div>
+          </div>
+          <!-- 抓拍与看画面同一张卡：拍的就是"此刻画面里的这个位置"（2026-09-17 从右栏点动区并入） -->
+          <div class="row" style="margin-top:8px">
+            <button id="pvbtn">看画面</button>
+            <button id="capbtn" disabled title="拍当前位置：不用先接管；选了站位就归到它名下，没选就归到最近的格点">抓拍</button>
+            <span id="pverr" class="empty" style="padding:0"></span>
+          </div>
+          <!-- P0-5：抓拍置灰的原因要说出来。只写 title 的话鼠标不悬停就看不到，
+               现场最常见的疑问就是"为什么抓拍点不动"。 -->
+          <div id="capnote" class="empty" style="padding:2px 0 0;font-size:12px"></div>
+        </div>
+        <!-- P1-1：容器上的 aria-live 已撤（每秒刷新会把读屏吵死）；"当前动作"改由
+             #stagelive 这个 sr-only 节点**只在文本变化时**播报。 -->
+        <div class="pvside">
+          <div class="readouts">
+            <div class="readout"><span class="k">当前位置</span><span id="actualpos" class="v unknown">未知</span></div>
+            <div class="readout"><span class="k">目标站位</span><span id="targetpos" class="v unknown">未选择</span></div>
+            <div class="readout"><span class="k">直线距离</span><span id="distance" class="v unknown">不可计算</span></div>
+            <div class="readout"><span class="k">当前动作</span><span id="cmdstage" class="v unknown">空闲</span><span id="stagelive" class="sr-only" aria-live="polite"></span></div>
+          </div>
+        </div>
       </div>
     </div>
     <!-- 导轨图（2026-09-17 从左栏移入中栏并放大）：滑台在 Y/Z 两轴自由移动，图就是"往哪挪"
