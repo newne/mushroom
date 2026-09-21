@@ -59,6 +59,14 @@ PREVIEW_RECHECK_CHUNKS = 8
 #: 页面再显示"实时位置"就是把残值当现在——宁可没有，不要假的。
 PROGRESS_STALE_S = 5.0
 
+#: 站位摘要一次全量拉取的条数上限：60 站 × 多天 × 多角度，一次拉全本地聚合，
+#: 比"每站一次请求"省 59 次 prod 往返（prod 是菇房内网里的分析服务，能少打扰就少打扰）。
+SUMMARY_LIMIT = 2000
+#: 摘要缓存 TTL。页面进列表、切模式、抓拍后各取一次；TTL 内的重复取吃缓存——
+#: 万一以后有人把它接进轮询循环，prod 也不会被打疼。15 秒对"哪站看着不对"够新鲜了
+#: （一轮巡检约 11 分钟，摘要本来就是选站前的粗略参考，不是实时监控）。
+SUMMARY_TTL_S = 15.0
+
 #: 图像对象名的一段允许的字符（key 由站位表拼出来，不含空格与中文；放宽到"任意字符"
 #: 只是给路径穿越留门，没有别的好处）。
 _OBJECT_SEGMENT = re.compile(r"^[A-Za-z0-9_.\-]+$")
@@ -317,6 +325,8 @@ class Console:
     def __init__(self, deps: ConsoleDeps):
         self.deps = deps
         self.events: list[dict] = []
+        # 站位摘要缓存 (取数时刻, 摘要体)；TTL 见 SUMMARY_TTL_S
+        self._summary_cache: tuple[datetime, dict] | None = None
 
     # ---------- 组装 ----------
 
@@ -394,6 +404,49 @@ class Console:
         """对象名 → MinIO 的完整地址（**服务端**拼，不来自请求）。"""
         base = self.deps.minio_base.rstrip("/")
         return f"{base}/{self.deps.minio_bucket}/{object_name}"
+
+    def station_summary(self, *, refresh: bool = False) -> dict:
+        """每站一行的粗摘要：帧数、失败帧数、末帧时间、末帧成没成。
+
+        给左栏站位列表用的——选站之前就能看出"哪站好久没图/末帧是失败的"，
+        不用逐站点进去看历史。**故意做得粗**：这是选站参考，不是监控面板，
+        所以一次全量拉取 + 本地聚合 + 短 TTL 缓存，没有逐站实时性。
+
+        `refresh=True` 跳过缓存读（仍写缓存）：抓拍刚落地时页面用它刷一次——
+        那一帧的索引是同步进 outbox 的，但 202 时刻取的摘要可能已被旧值占住缓存，
+        不旁路的话新帧要等一个 TTL 才冒出来。
+
+        prod 查不到时**如实报错**（`ok:false` + `prod_error`），但本地 outbox 里
+        还没同步出去的帧仍然照常统计——"prod 暂时问不到"和"这一站真的没拍过"
+        在现场是两件事，页面必须分得开（与 /api/growth 同一个规矩）。
+        """
+        now = self.deps.now()
+        if not refresh and self._summary_cache is not None:
+            cached_at, body = self._summary_cache
+            if (now - cached_at).total_seconds() < SUMMARY_TTL_S:
+                return body
+        got = self.images(station_id=None, limit=SUMMARY_LIMIT)
+        summary: dict[str, dict] = {}
+        for r in got.get("rows", []):
+            sid = r.get("station_id")
+            if not sid:
+                continue
+            cur = summary.setdefault(sid, {"n": 0, "n_fail": 0,
+                                           "last_ts": None, "last_ok": None})
+            cur["n"] += 1
+            # prod 那边 ok 可能是 1/0（sqlite 整数），本地是 true/false；都当布尔看
+            ok = bool(r.get("ok", True))
+            if not ok:
+                cur["n_fail"] += 1
+            ts = str(r.get("ts") or "")
+            # 行集合已按 ts 倒序，但显式取 max 不依赖那个前提（谁改了排序都不会悄悄算错）
+            if cur["last_ts"] is None or ts > cur["last_ts"]:
+                cur["last_ts"] = ts or None
+                cur["last_ok"] = ok
+        body = {"ok": got.get("ok", True), "prod_error": got.get("prod_error"),
+                "summary": summary}
+        self._summary_cache = (now, body)
+        return body
 
     def fetch_image(self, object_name: str) -> bytes:
         """取回一张历史图的字节。地址不合法在这里已经被上游挡掉（`safe_object_name`）。"""
@@ -537,6 +590,16 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
     @app.get("/api/stations")
     def api_stations() -> dict:
         return stations_state(deps.stations_path)
+
+    @app.get("/api/station_summary")
+    def api_station_summary(refresh: bool = False) -> dict:
+        """每站粗摘要（左栏列表的"末帧时间/帧数/失败角标"）。
+
+        与 /api/stations 分开而不是塞进去：列表摘要在抓拍后要刷新，而站位表本身
+        是静态配置——混在一个响应里，刷新摘要就得把 60 行配置重拉一遍。
+        `refresh=1` 跳过 TTL 缓存（抓拍落地那一次刷新用，见 station_summary 注释）。
+        """
+        return console.station_summary(refresh=refresh)
 
     @app.get("/api/grid")
     def api_grid() -> dict:

@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 from deploy.console import (
     PREVIEW_RECHECK_CHUNKS,
+    SUMMARY_TTL_S,
     ConsoleDeps,
     create_app,
     eta_text,
@@ -277,6 +278,122 @@ def test_images_never_leak_the_control_network_url(tmp_path):
     assert rows and all("cloud_url" not in r for r in rows)
     # 页面要的是对象名（字节由 /api/image 给），所以它必须留着
     assert rows[0]["object_name"] == "20260913/B101_S101_top45_100000.jpg"
+
+
+# ---------- 站位摘要（P2-1：左栏"末帧时间/帧数/失败角标"） ----------
+
+
+def write_outbox(path: Path, rows: list[dict]) -> None:
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows),
+                    encoding="utf-8")
+
+
+def test_station_summary_aggregates_local_and_prod(tmp_path):
+    write_outbox(tmp_path / "outbox.jsonl",
+                 [{"kind": "image_index", "ts": "2026-09-14T09:30:00",
+                   "station_id": "S101", "ok": True,
+                   "object_name": "20260914/B101_S101_top45_093000"}])
+    calls = []
+
+    def transport(url, *, params=None, body=None):
+        calls.append(url)
+        # prod 的 ok 是 sqlite 整数（1/0），不是布尔——摘要必须两种都认
+        return [
+            {"ts": "2026-09-13T10:00:00", "station_id": "S101", "ok": 1,
+             "object_name": "20260913/B101_S101_top45_100000"},
+            {"ts": "2026-09-12T10:00:00", "station_id": "S101", "ok": 0,
+             "object_name": None},
+            {"ts": "2026-09-13T08:00:00", "station_id": "S102", "ok": 1,
+             "object_name": "20260913/B102_S102_top45_080000"},
+        ]
+
+    with make_client(tmp_path, transport=transport) as c:
+        got = c.get("/api/station_summary").json()
+    assert got["ok"] is True and got["prod_error"] is None
+    # 一次全量拉取（60 站一次问完），不是每站一次请求
+    assert len(calls) == 1 and "station_id" not in calls[0]
+    s101, s102 = got["summary"]["S101"], got["summary"]["S102"]
+    assert (s101["n"], s101["n_fail"]) == (3, 1)
+    assert s101["last_ts"] == "2026-09-14T09:30:00" and s101["last_ok"] is True
+    assert (s102["n"], s102["n_fail"]) == (1, 0)
+    assert s102["last_ts"] == "2026-09-13T08:00:00" and s102["last_ok"] is True
+
+
+def test_station_summary_marks_a_failed_latest_frame(tmp_path):
+    """末帧失败要和"中间失败过几帧"分开：左栏角标只认末帧，选站前看的是最新状态。"""
+
+    def transport(url, *, params=None, body=None):
+        return [
+            {"ts": "2026-09-13T10:00:00", "station_id": "S101", "ok": 0,
+             "object_name": None},
+            {"ts": "2026-09-12T10:00:00", "station_id": "S101", "ok": 1,
+             "object_name": "20260912/B101_S101_top45_100000"},
+        ]
+
+    with make_client(tmp_path, transport=transport) as c:
+        got = c.get("/api/station_summary").json()
+    s = got["summary"]["S101"]
+    assert s["n"] == 2 and s["n_fail"] == 1
+    assert s["last_ts"] == "2026-09-13T10:00:00" and s["last_ok"] is False
+
+
+def test_station_summary_survives_prod_failure(tmp_path):
+    """prod 问不到 ⇒ 本地帧照算，但 ok=false + prod_error。
+
+    页面据此**不显示**"暂无历史帧"：那会和"这一站真的没拍过"混淆——
+    "prod 暂时问不到"和"没拍过"在现场是两件事（与 /api/growth 同一个规矩）。
+    """
+    write_outbox(tmp_path / "outbox.jsonl",
+                 [{"kind": "image_index", "ts": "2026-09-14T09:30:00",
+                   "station_id": "S101", "ok": True,
+                   "object_name": "20260914/B101_S101_top45_093000"}])
+
+    def bad_transport(url, *, params=None, body=None):
+        raise ConnectionError("prod 不通")
+
+    with make_client(tmp_path, transport=bad_transport) as c:
+        got = c.get("/api/station_summary").json()
+    assert got["ok"] is False and "prod 不通" in got["prod_error"]
+    assert got["summary"]["S101"]["n"] == 1
+
+
+def test_station_summary_is_cached_within_ttl(tmp_path):
+    """TTL 内重复取不吃 prod；refresh=1 旁路（抓拍落地那一次刷新用）。"""
+    calls = []
+
+    def transport(url, *, params=None, body=None):
+        calls.append(url)
+        return []
+
+    with make_client(tmp_path, transport=transport) as c:
+        c.get("/api/station_summary")
+        c.get("/api/station_summary")
+        assert len(calls) == 1                       # 第二次吃缓存
+        c.get("/api/station_summary?refresh=true")
+        assert len(calls) == 2                       # 旁路后真的又打了一次
+
+
+def test_station_summary_cache_expires_after_ttl(tmp_path):
+    """TTL 过了就重新聚合——时钟是注入的，测试推着它走，不等真时间。"""
+    clock = {"t": NOW}
+    calls = []
+
+    def transport(url, *, params=None, body=None):
+        calls.append(url)
+        return []
+
+    deps = ConsoleDeps(room_path=str(tmp_path / "room.yaml"),
+                       stations_path=str(tmp_path / "none.yaml"),
+                       outbox_path=str(tmp_path / "outbox.jsonl"),
+                       runs_dir=str(tmp_path / "runs"),
+                       trigger_dir=str(tmp_path / "trigger"), cmd_dir=str(tmp_path / "cmd"),
+                       transport=transport, now=lambda: clock["t"])
+    with TestClient(create_app(deps)) as c:
+        c.get("/api/station_summary")
+        assert len(calls) == 1
+        clock["t"] = NOW + timedelta(seconds=SUMMARY_TTL_S + 1)
+        c.get("/api/station_summary")
+        assert len(calls) == 2
 
 
 def test_image_is_proxied_from_the_configured_minio(tmp_path):

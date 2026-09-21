@@ -20,7 +20,7 @@
   .kv b{color:var(--dim);font-weight:400}
   .mono{font-family:ui-monospace,Consolas,monospace}
   .stn{display:flex;justify-content:space-between;padding:5px 8px;border-radius:5px;cursor:pointer;
-       font-size:13px;border:1px solid transparent}
+       font-size:13px;border:1px solid transparent;flex-wrap:wrap}
   .stn .cur{color:var(--accent);font-weight:700}
   .imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
   .im{background:var(--soft);border:1px solid var(--line);border-radius:6px;overflow:hidden;font-size:12px}
@@ -120,6 +120,11 @@
   .mapcap .mono{white-space:nowrap}
   .stn{color:var(--fg);background:transparent;border-color:transparent;text-align:left;min-height:40px}
   .stn:hover{background:var(--soft)} .stn.sel{background:var(--accent-soft);border-color:#bcd4ff}
+  /* P2-1 站位摘要：第二行小字（末帧时间/帧数/失败角标）。flex-wrap 让它不挤主行，
+     没有摘要数据的站位不渲染这一行，行高保持原样。 */
+  .stn .stnsum{flex:1 0 100%;display:flex;gap:6px;align-items:center;margin-top:1px;
+               font-size:11px;color:var(--dim);font-weight:400}
+  .stn .stnbadge{color:var(--bad);font-weight:600;font-style:normal}
   .layer{font-weight:600;letter-spacing:.04em;color:var(--dim);padding-top:10px}
   button{color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:6px;box-shadow:0 1px 1px rgba(24,38,52,.03)}
   button:hover:not(:disabled){background:var(--soft);border-color:#b9c8d8}
@@ -217,6 +222,9 @@
         <button type="button" id="listtoggle" class="listtoggle" aria-expanded="true">收起</button>
       </h2>
       <div id="list" class="empty">读取中…</div>
+      <!-- P2-1：摘要取不到时的一句话。没有它，用户看着空白的摘要行分不清
+           "prod 暂时问不到"和"这一站真的没拍过"——现场这是两件事。 -->
+      <div id="listnote" class="empty" style="display:none;padding:2px 8px;font-size:11px"></div>
     </div>
   </section>
 
@@ -406,6 +414,10 @@ let growthRequestSeq = 0;
 let cmdRequestInFlight = false;
 let cmdRefreshTimer = null;
 let statusRequestInFlight = false;
+// P2-1 站位摘要（/api/station_summary）：{station_id: {n, n_fail, last_ts, last_ok}}。
+// stnSummaryOk 为 false 时**不渲染**"暂无历史帧"——那会和"prod 没问到"混淆，
+// 现场"这站没拍过"和"摘要暂时取不到"是两件事，不能靠猜。
+let stnSummary = {}, stnSummaryOk = false, stnSummaryError = '';
 const REQUEST_TIMEOUT_MS = 8000;
 
 function esc(value){
@@ -540,6 +552,9 @@ function observeCommandResult(result){
   if(result.ok && validPosition(data.position_yz)){
     lastCommandedPosition = [Number(data.position_yz[0]), Number(data.position_yz[1])];
   }
+  // P2-1：抓拍落地 ⇒ 左栏摘要刷新（旁路 TTL：这一帧的索引已同步写进 outbox，
+  // 但 202 时刻取过的摘要可能被旧值占住缓存）。别的指令不触发——它们不改图像索引。
+  if(result.ok && result.kind === 'capture') loadStationSummary({refresh:true});
 }
 
 function positionText(state){
@@ -783,6 +798,56 @@ function wireMap(){
   });
 }
 
+/* 2026-09-17T14:10:12 → "09-17 14:10"（站位摘要用；跨年不展开，一批菇 25 天内封顶） */
+function fmtTs(ts){
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/.exec(String(ts || ''));
+  return m ? `${m[2]}-${m[3]} ${m[4]}` : String(ts || '—');
+}
+
+/* P2-1：一行摘要（末帧时间/帧数/失败角标）。没有数据且摘要本身取到了 ⇒ "暂无历史帧"；
+   摘要没取到 ⇒ 整行不渲染（区分"没拍过"与"问不到"，见 stnSummaryOk 的注释）。 */
+function stnSummaryHtml(st){
+  if(!stnSummaryOk) return '';
+  const s = stnSummary[st.id];
+  if(!s) return '<span class="stnsum">暂无历史帧</span>';
+  let badge = '';
+  if(s.last_ok === false) badge = '<span class="stnbadge">⚠ 末帧失败</span>';
+  else if(s.n_fail > 0) badge = `<span class="stnbadge">⚠ ${esc(s.n_fail)} 帧失败</span>`;
+  return `<span class="stnsum">末帧 ${esc(fmtTs(s.last_ts))} · ${esc(s.n)} 帧${badge ? ' · ' + badge : ''}</span>`;
+}
+
+/* 同一行摘要的读屏版：列表行是 button，屏幕阅读器只念 aria-label，视觉小字它看不见 */
+function stnSummaryText(st){
+  if(!stnSummaryOk) return '';
+  const s = stnSummary[st.id];
+  if(!s) return '，暂无历史帧';
+  let tail = '';
+  if(s.last_ok === false) tail = '，末帧失败';
+  else if(s.n_fail > 0) tail = `，其中 ${s.n_fail} 帧失败`;
+  return `，末帧 ${fmtTs(s.last_ts)}，共 ${s.n} 帧${tail}`;
+}
+
+/* opts.refresh：跳过服务端 TTL 缓存。只用于"抓拍刚落地"那一次——202 时刻取过的摘要
+   可能已被旧值占住缓存，不旁路的话新帧要等一个 TTL（15s）才在左栏冒出来。 */
+async function loadStationSummary(opts){
+  try{
+    const q = opts && opts.refresh ? '?refresh=1' : '';
+    const data = await jget('/api/station_summary' + q);
+    stnSummary = data.summary || {};
+    stnSummaryOk = !!data.ok;
+    stnSummaryError = data.ok ? '' : (data.prod_error || '摘要不可用');
+  }catch(e){
+    stnSummary = {}; stnSummaryOk = false;
+    stnSummaryError = (e && e.message) || String(e);
+  }
+  drawList();
+  const note = $('#listnote');
+  if(note){
+    note.style.display = stnSummaryError ? '' : 'none';
+    if(stnSummaryError) note.textContent = '站点摘要不可用：' + stnSummaryError;
+  }
+}
+
 function drawList(){
   const byLayer = {};
   for(const st of stations) (byLayer[st.layer] ||= []).push(st);
@@ -791,10 +856,11 @@ function drawList(){
   $('#list').innerHTML = Object.keys(byLayer).sort().map(L => {
     const rows = byLayer[L].sort((a,b)=>a.col-b.col).map(st => `
       <button type="button" class="stn ${st.id===selected?'sel':''}" data-id="${esc(st.id)}"
-        aria-selected="${st.id===selected}" aria-label="${esc(st.id)}，第 ${esc(st.layer)} 层第 ${esc(st.col)} 框">
+        aria-selected="${st.id===selected}" aria-label="${esc(st.id)}，第 ${esc(st.layer)} 层第 ${esc(st.col)} 框${esc(stnSummaryText(st))}">
         <span>${st.id===cur?'<span class="cur">▶ </span>':''}${esc(st.id)}</span>
         <span class="mono" style="color:var(--dim)">${Number(st.target_y ?? st.y).toFixed(2)}, ${Number(st.target_z ?? st.z).toFixed(2)}
         ${(st.trim_y||st.trim_z)?'⇥':''}</span>
+        ${stnSummaryHtml(st)}
       </button>`).join('');
     return `<div class="layer" role="heading" aria-level="3">第 ${esc(L)} 层</div>${rows}`;
   }).join('');
@@ -1642,7 +1708,7 @@ function startPolling(){ if(!tickTimer) tickTimer = setInterval(tick, 1000); }
 function stopPolling(){ if(tickTimer){ clearInterval(tickTimer); tickTimer = null; } }
 document.addEventListener('visibilitychange', () => {
   if(document.hidden){ stopPolling(); }
-  else{ tick(); startPolling(); }        // 回来先补一拍，别让显示停在隐藏前的旧值
+  else{ tick(); startPolling(); loadStationSummary(); }  // 回来先补一拍，别让显示停在隐藏前的旧值
 });
 
 (async function init(){
@@ -1665,6 +1731,7 @@ document.addEventListener('visibilitychange', () => {
     }else{
       stations = data.stations; grid = data.grid;
       drawMap(); drawList(); renderEnvelopeLabel();
+      loadStationSummary();      // P2-1：左栏摘要（不阻塞 init，取完自己重绘列表）
     }
   }catch(e){
     $('#list').textContent = '';

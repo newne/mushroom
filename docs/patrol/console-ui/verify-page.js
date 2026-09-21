@@ -72,6 +72,10 @@ const state = {
   command_network_error: false,
   machine_position: [200.0, -20.0],
   machine_pos_source: 'controller',
+  // P2-1：抓拍落地时假后端同步补一条帧（真执行方是先写 outbox 再返回结果的），
+  // 用来断言"结果落地 → 左栏摘要刷新"这根线真的通。
+  extra_frames: [],
+  summary_error: false,                   // 让 /api/station_summary 回"prod 查不到"
   // 真执行方会在几百毫秒内领走并写回结果；默认照做，否则页面会一直停在"执行中"，
   // 后面的用例就全被上锁挡住了（那是假后端的锅，不是页面的）。
   auto_complete_ms: 150,
@@ -124,6 +128,22 @@ function route(method, url, body) {
     const delay = state.image_delay[stationId] || 0;
     return delay ? new Promise(resolve => setTimeout(() => resolve(response), delay)) : response;
   }
+  if (path === '/api/station_summary') {
+    // 与 deploy/console.py 的 station_summary 同形状：一次全量 + 本地聚合。
+    // prod 不可用时 ok:false + prod_error、summary 为空——页面据此不显示"暂无历史帧"。
+    if (state.summary_error) {
+      return json(200, { ok: false, prod_error: 'prod 查询失败：不通', summary: {} });
+    }
+    const summary = {};
+    for (const r of IMAGES.concat(state.extra_frames)) {
+      const cur = summary[r.station_id] = summary[r.station_id]
+        || { n: 0, n_fail: 0, last_ts: null, last_ok: null };
+      cur.n += 1;
+      if (!r.ok) cur.n_fail += 1;
+      if (!cur.last_ts || r.ts > cur.last_ts) { cur.last_ts = r.ts; cur.last_ok = !!r.ok; }
+    }
+    return json(200, { ok: true, prod_error: null, summary });
+  }
   if (path === '/api/growth') {
     if (state.growth_error) return json(200, { ok: false, error: 'prod 查询失败：不通', points: [] });
     return json(200, { ok: true, box_id: 'B102', points: GROWTH,
@@ -167,6 +187,14 @@ function route(method, url, body) {
     state.cmd = { id: 'c-' + (state.calls.length), kind: body.kind, args: body.args || {}, by: body.by,
                   session: state.session ? state.session.token : '', started_at: null };
     state.result = null;
+    // 真执行方是**先写 outbox 索引、再返回结果**的（manual_exec._capture），
+    // 所以帧要在 completeSoon 之前就落地——摘要刷新挂在结果落地那一刻。
+    if (body.kind === 'capture' && body.args && body.args.station_id) {
+      state.extra_frames.push({ ts: '2026-09-14T10:05:00', station_id: body.args.station_id,
+                                box_id: 'B102', angle_profile: 'top45', ok: true,
+                                object_name: '20260914/B102_' + body.args.station_id + '_top45_100500',
+                                source: 'local' });
+    }
     completeSoon();
     return json(202, { command: state.cmd, detail: '已提交',
                        session: state.session ? { ...state.session, expires_at: '2026-09-14T10:09:00' } : null });
@@ -250,6 +278,37 @@ const lastCmd = () => {
   check('站位列表坐标也是两位小数', T('.stn .mono').includes('187.10, 21.20'), T('.stn .mono'));
   check('有内联 favicon（P2-6：不再每次加载 404）',
     !!document.querySelector('link[rel="icon"]'), document.querySelector('link[rel="icon"]') ? '有' : '(无)');
+
+  // P2-1：站位摘要（末帧时间/帧数/失败角标）——选站前就看出哪站有问题
+  check('S102 摘要行给出末帧时间与帧数',
+    T('.stn[data-id="S102"] .stnsum').includes('末帧 09-14 09:30')
+      && T('.stn[data-id="S102"] .stnsum').includes('3 帧'),
+    T('.stn[data-id="S102"] .stnsum'));
+  check('S102 角标只认"有失败帧"，末帧是好的就不说末帧失败',
+    T('.stn[data-id="S102"] .stnsum').includes('⚠ 1 帧失败')
+      && !T('.stn[data-id="S102"] .stnsum').includes('末帧失败'),
+    T('.stn[data-id="S102"] .stnsum'));
+  check('S101 没有历史帧时明说"暂无历史帧"（不是留白）',
+    T('.stn[data-id="S101"] .stnsum') === '暂无历史帧', T('.stn[data-id="S101"] .stnsum'));
+  check('摘要写进 aria-label（读屏拿得到，视觉小字它看不见）',
+    ($('.stn[data-id="S102"]').getAttribute('aria-label') || '').includes('末帧 09-14 09:30')
+      && ($('.stn[data-id="S102"]').getAttribute('aria-label') || '').includes('共 3 帧'),
+    $('.stn[data-id="S102"]').getAttribute('aria-label'));
+  check('摘要正常时 #listnote 不占位', $('#listnote').style.display === 'none');
+
+  // 摘要取不到 ≠ 没拍过：此时**不渲染**"暂无历史帧"，只在列表下方给一句说明
+  state.summary_error = true;
+  document.dispatchEvent(new window.Event('visibilitychange'));   // 页面恢复可见 ⇒ 重取摘要
+  await sleep(300);
+  check('摘要取不到时不显示"暂无历史帧"（避免和"没拍过"混淆）',
+    document.querySelectorAll('.stnsum').length === 0,
+    document.querySelectorAll('.stnsum').length + ' 行还有摘要');
+  check('摘要取不到时 #listnote 说明原因',
+    $('#listnote').style.display !== 'none' && T('#listnote').includes('prod'), T('#listnote'));
+  state.summary_error = false;
+  document.dispatchEvent(new window.Event('visibilitychange'));
+  await sleep(300);
+  check('恢复后摘要行回来', !!$('.stn[data-id="S102"] .stnsum'));
 
   // P2-4：左栏可折叠（窄屏/平板让中栏全宽）
   // ⚠️ jsdom 不把样式表规则反映到 .style 上，所以这里只断言 DOM 层的 class/文案/aria，
@@ -405,6 +464,16 @@ const lastCmd = () => {
   await click('#capbtn');
   check('抓拍载荷带 station_id=S102',
     JSON.stringify(lastCmd()) === '{"kind":"capture","args":{"station_id":"S102"}}', JSON.stringify(lastCmd()));
+  // P2-1：结果落地 ⇒ 左栏摘要旁路 TTL 刷新。假后端在 202 时就同步补了那一条帧
+  // （真执行方先写 outbox 再返回结果），所以这里必须看得到"4 帧 + 新末帧时间"。
+  // 这根线断了现场的表现是：抓拍成功了，左栏末帧时间还停在几分钟前。
+  check('抓拍落地后左栏摘要刷新（帧数 +1、末帧时间更新）',
+    T('.stn[data-id="S102"] .stnsum').includes('4 帧')
+      && T('.stn[data-id="S102"] .stnsum').includes('末帧 09-14 10:05'),
+    T('.stn[data-id="S102"] .stnsum'));
+  check('刷新走的是 refresh=1（旁路服务端 TTL 缓存）',
+    [...state.calls].some(c => c.url === '/api/station_summary?refresh=1'),
+    [...state.calls].filter(c => c.url.includes('station_summary')).map(c => c.url).join(' | '));
 
   // 7. 后端拒绝要**原样显示**（403 需要接管 / 409 巡检中）
   state.reject_cmd = 403;
