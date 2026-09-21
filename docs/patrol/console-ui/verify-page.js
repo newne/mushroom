@@ -298,9 +298,13 @@ const lastCmd = () => {
   check('页面渲染出站位列表', document.querySelectorAll('.stn').length === STATIONS.length,
     document.querySelectorAll('.stn').length + ' 行');
   check('急停按钮存在且**未接管时也可用**', !!$('#estopbtn') && $('#estopbtn').disabled === false);
-  check('未接管时点动/定位/回零/抓拍都禁用',
-    ['#gotobtn', '#homebtn', '#capbtn'].every(s => $(s).disabled) &&
+  // 抓拍**不**在这份名单里：它不移动机构（ADR-0016 §6），后端（MOTION_KINDS 只有
+  // goto/jog/home）与执行方都不校验会话。2026-09-21 现场"打开画面点抓拍没反应"
+  // 就是它被误关进了这份名单——`disabled` 的按钮连 click 都不派发。
+  check('未接管时点动/定位/回零都禁用（会动机构的才要会话）',
+    ['#gotobtn', '#homebtn'].every(s => $(s).disabled) &&
     Array.from(document.querySelectorAll('[data-jog]')).every(b => b.disabled));
+  check('未接管时抓拍**可用**（不移动机构 ⇒ 不需要会话）', $('#capbtn').disabled === false);
   check('未接管时给出接管提示', T('#sessionline').includes('未接管'), T('#sessionline'));
 
   // 1a. 坐标框架（ADR-0018）：Z 的原点在**顶端**、向下为正。
@@ -520,6 +524,28 @@ const lastCmd = () => {
   state.machine_position = [200.0, -20.0];
   await sleep(1100);                          // 等一拍，让页面拿到这个位置
   check('未选站位时抓拍**可用**（非格点也要能拍）', $('#capbtn').disabled === false);
+
+  // 6a. 抓拍**不需要会话**（ADR-0016 §6「手动抓拍不移动机构」；后端 MOTION_KINDS 只有
+  //     goto/jog/home，执行方 `manual_exec` 里 `session` 出现 0 次）。
+  //     ⚠️ 2026-09-21 现场反馈"打开画面点抓拍没反应"就是这条被漏了：页面复用了运动按钮
+  //     那份 locked（含 !session_active），没接管时抓拍就 disabled；而 **disabled 的按钮
+  //     连 click 都不派发** ⇒ onclick 不执行、后端也收不到 ⇒ 操作者只看到"毫无反应"。
+  //     本地测不到，是因为前面的用例早就 takebtn 过、会话一直有效——**假件的默认状态比
+  //     现场"更好"**。所以这里必须显式撤掉会话再测（"打开画面"这一步本来也不需要会话）。
+  state.session = null;
+  await sleep(1200);
+  check('未接管时抓拍**仍可用**（抓拍不是运动指令 ⇒ 不要会话）',
+    $('#capbtn').disabled === false, 'disabled=' + $('#capbtn').disabled);
+  state.calls.length = 0;
+  await click('#capbtn');
+  check('未接管也能真把抓拍发出去（未选站位 ⇒ 载荷不带 station_id）',
+    JSON.stringify(lastCmd()) === '{"kind":"capture","args":{}}', JSON.stringify(lastCmd()));
+  await sleep(400);
+  state.session = { token: 't-1', opened_at: NOW, expires_at: '2026-09-14T10:05:00' };   // 复原
+  // 抓拍序号归零：这一枪已经吃掉一个序号，而后面两条断言钉的是它们自己的序号（05→06），
+  // 不归零会被这一条挤走。重复的 05 不影响断言（摘要只取最大 ts）。
+  state.capture_seq = 0;
+  await sleep(1200);
   check('未选站位时预告会归到最近的 S101', T('#capnote').includes('最近的 S101'), T('#capnote'));
 
   // 「位置读不到」是**现场常态**（console 按 ADR-0004/0013 不连控制器，real_pos 只在
@@ -573,6 +599,39 @@ const lastCmd = () => {
   check('刷新走的是 refresh=1（旁路服务端 TTL 缓存）',
     [...state.calls].some(c => c.url === '/api/station_summary?refresh=1'),
     [...state.calls].filter(c => c.url.includes('station_summary')).map(c => c.url).join(' | '));
+
+  // 6b. 置灰时必须说出原因（P0-5）——三种真被拒的情形与后端 409 逐条对应。
+  //     "点了没反应"的另一半就在这里：按钮禁用了却不说为什么，操作者只会反复点。
+  state.estop = true;
+  await sleep(1200);
+  check('急停置位时抓拍置灰并说明"先复位急停"',
+    $('#capbtn').disabled === true && T('#capnote').includes('复位急停'), T('#capnote'));
+  state.estop = false;
+  await sleep(1200);
+
+  state.patrol_active = true;
+  await sleep(1200);
+  check('巡检中抓拍置灰并说明"机构归本轮"',
+    $('#capbtn').disabled === true && T('#capnote').includes('巡检进行中')
+      && T('#capnote').includes('后再拍'), T('#capnote'));
+  state.patrol_active = false;
+  await sleep(1200);
+
+  // busy：让假件别自动完成，这条指令就停在"在飞"
+  state.auto_complete_ms = 0;
+  await click('#capbtn');
+  await sleep(300);
+  check('有指令在飞时抓拍置灰并说明"等它跑完"',
+    $('#capbtn').disabled === true && T('#capnote').includes('上一条指令还没结束'), T('#capnote'));
+  // 收场：手动放行这条指令，否则后面的用例会一直被 busy 锁住
+  state.auto_complete_ms = 150;
+  const inflight0 = state.cmd;
+  state.cmd = null;
+  state.result = { id: inflight0.id, kind: inflight0.kind, args: inflight0.args, data: {},
+                   ok: true, detail: '已执行（假后端）', ended_at: NOW };
+  state.progress = null;
+  await sleep(1200);
+  check('放行后抓拍恢复可用', $('#capbtn').disabled === false);
 
   // 7. 后端拒绝要**原样显示**（403 需要接管 / 409 巡检中）
   state.reject_cmd = 403;

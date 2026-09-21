@@ -254,7 +254,7 @@
       <!-- 抓拍与看画面同一张卡：拍的就是"此刻画面里的这个位置"（2026-09-17 从右栏点动区并入） -->
       <div class="row" style="margin-top:8px">
         <button id="pvbtn">看画面</button>
-        <button id="capbtn" disabled title="拍当前位置：选了站位就归到它名下，没选就归到最近的格点">抓拍</button>
+        <button id="capbtn" disabled title="拍当前位置：不用先接管；选了站位就归到它名下，没选就归到最近的格点">抓拍</button>
         <span id="pverr" class="empty" style="padding:0"></span>
       </div>
       <!-- P0-5：抓拍置灰的原因要说出来。只写 title 的话鼠标不悬停就看不到，
@@ -1056,19 +1056,29 @@ function renderOps(){
   $('#homebtn').disabled = locked;
   $('#gotobtn').disabled = locked || !targetsOk();
   document.querySelectorAll('[data-jog]').forEach(b => b.disabled = locked);
-  // 抓拍**不再要求先选站位**：拍的就是当前位置，没选站位时由后端归到**最近的格点**
-  // （2026-09-21 起）。非格点（站位表以外的位置）也要能拍——不然现场"挪过去看一眼"
-  // 这条最常用的路子就断在最后一步。归属规则要在按下之前就说清，不能拍完才知道归到哪。
-  $('#capbtn').disabled = locked;
+  // 抓拍**不是运动指令，不需要会话**（ADR-0016 §6「手动抓拍不移动机构」；后端的
+  // MOTION_KINDS 只有 goto/jog/home，capture 不在其中，执行方也不校验会话）。
+  // ⚠️ 2026-09-21 现场反馈"打开画面点抓拍没反应"就是这里：早先复用了运动按钮那份
+  // `locked`（它把 !session_active 也算进去），于是没接管时按钮是 disabled 的——
+  // 而 **disabled 的按钮连 click 都不派发**，`onclick` 不执行、后端也收不到，
+  // 操作者看到的是"点了没有任何反应"。所以这里单独算一份门槛。
+  const capLocked = est || busy() || inRound();
+  $('#capbtn').disabled = capLocked;
   const capNote = $('#capnote');
   if(capNote){
-    // 归属规则**每一次**都要说出来，不能只在"位置恰好读得到"时才说。
-    // ⚠️ 现场实测（2026-09-21）：/api/status 的 real_pos **常态是 null**——console 按
-    // ADR-0004/0013 不主动连控制器（那个位置只有巡检中才由站位推出来），所以
-    // "读不到位置"是常态而不是异常。早先的写法在这条常态下整句留空 = 预告是死的。
     const p = posNow();
     const near = p ? nearestStation(p[0], p[1]) : null;
-    if(selected){
+    // 先解释"现在为什么不能拍"（P0-5 的纪律：置灰的原因要写在脸上，不能只靠 title
+    // 悬停），没被锁时才说归属规则。三档与后端的 409 逐条对应：
+    // 急停闩锁 / 轮内机构归本轮（MANUAL_GATED_KINDS）/ 上一条还没结束。
+    if(est){
+      capNote.textContent = '急停已置位 → 先在右栏复位急停（复位是独立动作，不随指令自动清）';
+    }else if(inRound()){
+      capNote.textContent = '巡检进行中 → 机构归本轮，' +
+        etaText(lastStatus?.patrol) + '后再拍';
+    }else if(busy()){
+      capNote.textContent = '上一条指令还没结束 → 等它跑完再拍';
+    }else if(selected){
       capNote.textContent = '';
     }else if(near){
       capNote.textContent = `未选站位 → 按位置归到最近的 ${near.id}` +
@@ -1077,8 +1087,8 @@ function renderOps(){
       // 有位置但站位表还没到（/api/stations 未返回）：只能说规则
       capNote.textContent = '未选站位 → 按位置自动归到最近的站位';
     }else{
-      // 位置读不到：**不要**拿"最后成功目标"去猜站名——抓拍前机构可能已被别处挪过，
-      // 猜错比不猜更坏（告诉他归 S102，结果写成 S101）。说清规则与结果的去处即可。
+      // 位置读不到是现场常态（console 不连控制器，见 console.status 的注释）：
+      // **不要**拿"最后成功目标"去猜站名——抓拍前机构可能已被别处挪过，猜错比不猜更坏。
       capNote.textContent =
         '未选站位 → 拍照后按实际位置归到最近的格点（归到哪一站写在下方结果里）';
     }
