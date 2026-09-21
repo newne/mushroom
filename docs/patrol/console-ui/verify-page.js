@@ -521,6 +521,19 @@ const lastCmd = () => {
   await sleep(1100);                          // 等一拍，让页面拿到这个位置
   check('未选站位时抓拍**可用**（非格点也要能拍）', $('#capbtn').disabled === false);
   check('未选站位时预告会归到最近的 S101', T('#capnote').includes('最近的 S101'), T('#capnote'));
+
+  // 「位置读不到」是**现场常态**（console 按 ADR-0004/0013 不连控制器，real_pos 只在
+  // 巡检中由站位推出来）——2026-09-21 在真机上才发现：早先的写法在这条常态下整句留空，
+  // 预告等于死的。所以这条断言钉的是"读不到位置时也要说清规则"。
+  state.machine_position = null;
+  state.machine_pos_source = 'unknown';
+  await sleep(1100);
+  check('位置读不到时预告仍说清规则（不留空）',
+    T('#capnote').includes('按实际位置归到最近的格点') && T('#capnote').includes('写在下方结果里'),
+    T('#capnote'));
+  state.machine_position = [200.0, -20.0];
+  state.machine_pos_source = 'controller';
+  await sleep(1100);
   check('抓拍与「看画面」在同一张卡（实时画面卡）',
     !!$('#rtmain #capbtn') && $('#capbtn').closest('.card') === $('#pvbtn').closest('.card'));
 

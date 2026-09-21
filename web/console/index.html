@@ -1062,15 +1062,25 @@ function renderOps(){
   $('#capbtn').disabled = locked;
   const capNote = $('#capnote');
   if(capNote){
+    // 归属规则**每一次**都要说出来，不能只在"位置恰好读得到"时才说。
+    // ⚠️ 现场实测（2026-09-21）：/api/status 的 real_pos **常态是 null**——console 按
+    // ADR-0004/0013 不主动连控制器（那个位置只有巡检中才由站位推出来），所以
+    // "读不到位置"是常态而不是异常。早先的写法在这条常态下整句留空 = 预告是死的。
     const p = posNow();
     const near = p ? nearestStation(p[0], p[1]) : null;
-    if(!selected && near){
+    if(selected){
+      capNote.textContent = '';
+    }else if(near){
       capNote.textContent = `未选站位 → 按位置归到最近的 ${near.id}` +
         `（ΔY=${(p[0] - near.y).toFixed(1)} ΔZ=${(p[1] - near.z).toFixed(1)}）`;
-    }else if(!selected && p){
+    }else if(p){
+      // 有位置但站位表还没到（/api/stations 未返回）：只能说规则
       capNote.textContent = '未选站位 → 按位置自动归到最近的站位';
     }else{
-      capNote.textContent = '';
+      // 位置读不到：**不要**拿"最后成功目标"去猜站名——抓拍前机构可能已被别处挪过，
+      // 猜错比不猜更坏（告诉他归 S102，结果写成 S101）。说清规则与结果的去处即可。
+      capNote.textContent =
+        '未选站位 → 拍照后按实际位置归到最近的格点（归到哪一站写在下方结果里）';
     }
   }
 
