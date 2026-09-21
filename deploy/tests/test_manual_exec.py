@@ -343,14 +343,64 @@ def test_capture_index_keeps_the_key_and_url_the_service_returned(tmp_path):
     assert row["cloud_url"].endswith(row["object_name"])
 
 
-def test_capture_needs_a_known_station(tmp_path):
+def test_capture_without_station_id_falls_back_to_the_nearest(tmp_path):
+    """非格点抓拍：不给站位也能拍，归属由**当前位置**决定（离哪个格点近就算哪个）。
+
+    这是 2026-09-21 之前做不到的一条——那时没有 station_id 直接拒绝，于是"挪到
+    站位表以外的位置看一眼再拍"这条最常用的路子断在最后一步。
+    """
+    capture = FakeCapture()
+    channel, fmc, executor, rows, _logs = make(tmp_path, capture=capture)
+    fmc.pos = (505.0, -50.0)                 # 站在 S105 上，没在页面上选站位
+    _cmd, res = run(channel, executor, "capture", {})
+    assert res.ok is True
+    assert res.data["station_id"] == "S105"
+    assert res.data["auto_station"] is True
+    assert res.data["object_name"].endswith("B105_S105_top45_100000.jpg")
+    (row,) = rows
+    assert row["station_id"] == "S105" and row["yz"] == [505.0, -50.0]
+
+
+def test_capture_rejects_an_explicitly_unknown_station(tmp_path):
+    """显式点了一个表里没有的站位 ⇒ 报错，**不**退化成"最近的那个"。
+
+    "操作者点错了"和"操作者没点"是两回事：前者要他去改，后者才轮到系统替他判断。
+    """
     capture = FakeCapture()
     channel, _fmc, executor, rows, _logs = make(tmp_path, capture=capture)
     channel.open_session("t")
-    assert run(channel, executor, "capture", {})[1].ok is False
     res = run(channel, executor, "capture", {"station_id": "S999"})[1]
     assert res.ok is False and "不在站位表里" in res.detail
     assert rows == [] and capture.shots == []
+
+
+def test_capture_says_so_when_the_station_table_is_empty(tmp_path):
+    """站位表空 ⇒ 没有归属可言，明确拒绝而不是拍一张日后找不到的照片。"""
+    capture = FakeCapture()
+    channel, _fmc, executor, rows, _logs = make(tmp_path, capture=capture, stations=[])
+    channel.open_session("t")
+    res = run(channel, executor, "capture", {})[1]
+    assert res.ok is False and "站位表是空的" in res.detail
+    assert rows == [] and capture.shots == []
+
+
+def test_capture_reports_how_far_it_was_from_the_grid_point(tmp_path):
+    """离格点明显偏了就把两个轴的偏移写进结果。
+
+    只报"拍了哪"在 4492mm 的行程上读不出信息：操作者要判的是"这一枪是不是冲着
+    本站格点去的"。门槛取在构图微调包络（`framing` 的 40mm）之上，否则天天喊狼。
+    """
+    capture = FakeCapture()
+    channel, fmc, executor, _rows, _logs = make(tmp_path, capture=capture)
+    fmc.pos = (500.0, -50.0)                 # 正好在 S105 格点上 ⇒ 不报偏移
+    res = run(channel, executor, "capture", {})[1]
+    assert "偏离" not in res.detail
+
+    fmc.pos = (600.0, -50.0)                 # 偏出 100mm ⇒ 要报出来
+    res = run(channel, executor, "capture", {"station_id": "S105"})[1]
+    assert res.ok is True and res.data["station_id"] == "S105"
+    assert "偏离 S105 格点" in res.detail
+    assert "ΔY=+100.0" in res.detail and "ΔZ=+0.0" in res.detail
 
 
 def test_capture_without_service_says_so(tmp_path):

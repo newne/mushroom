@@ -14,6 +14,7 @@ from patrol.stations import (
     fill_camera_ip,
     grid_geometry,
     layer_z,
+    nearest_station,
 )
 
 
@@ -140,4 +141,59 @@ def test_fill_camera_ip_leaves_complete_table_untouched():
     filled, n = fill_camera_ip(stations)
     assert n == 0
     assert filled == stations
+
+
+
+# ---------- 最近站位（非格点抓拍的归属） ----------
+
+
+def test_nearest_is_the_station_itself_when_exactly_on_it():
+    st = build_grid()
+    assert nearest_station(st, col_y(1), layer_z(1)).id == "S101"
+    assert nearest_station(st, col_y(12), layer_z(5)).id == "S512"
+
+
+def test_nearest_is_none_on_an_empty_table():
+    """站位表空 ⇒ 没有归属可言。调用方要自己决定是拒绝还是报错，不能给个假的。"""
+    assert nearest_station([], 0.0, 0.0) is None
+
+
+def test_nearest_switches_layer_at_half_a_layer():
+    """层号边界落在半层处（±21.2mm）：这是"这个点属于哪一层"的那条线。
+
+    Z 的层距只有 42.4mm，而 Y 的框距有 374mm —— 判错一层的代价是拍到隔壁层的菇，
+    所以边界必须钉死，不能"大概往上靠"。
+    """
+    st = build_grid()
+    z1, z2 = layer_z(1), layer_z(2)
+    assert nearest_station(st, col_y(1), z1 + 0.4 * (z2 - z1)).id == "S101"   # 半层以内
+    assert nearest_station(st, col_y(1), z1 + 0.6 * (z2 - z1)).id == "S201"   # 过半即换层
+
+
+def test_nearest_compares_in_grid_units_not_raw_millimetres():
+    """两个轴的偏差要**各自按格距归一化**后再比，不能直接比毫米。
+
+    构造一对必然分歧的候选：A 同 Y、偏 Z 50mm；B 同 Z、偏 Y 60mm。
+    - 比毫米：A(50) < B(60) ⇒ 选 A
+    - 比格数：A 偏了 50/42.4 ≈ 1.18 层，B 只偏 60/374.3 ≈ 0.16 框 ⇒ 选 B
+
+    B 才对：偏了整整一层意味着镜头压根不在那一层，而 Y 上偏 60mm 连半个框都不到。
+    直接比毫米的话，Y 的 374mm 格距会把 Z 的 42mm 完全盖住（见 nearest_station 注释）。
+    """
+    py = grid_geometry()["y_pitch"]
+    pz = grid_geometry()["z_pitch"]
+    dy_b, dz_a = 60.0, 50.0
+    probe_y, probe_z = 1000.0, 100.0
+    same_y = Station(id="A", box_id="BA", y=probe_y, z=probe_z - dz_a)     # dy=0, dz=dz_a
+    same_z = Station(id="B", box_id="BB", y=probe_y - dy_b, z=probe_z)     # dy=dy_b, dz=0
+    assert dz_a < dy_b and dy_b / py < dz_a / pz        # 前提：两种口径确实分歧
+    assert nearest_station([same_y, same_z], probe_y, probe_z).id == "B"
+
+
+def test_nearest_covers_the_far_corner():
+    """整场任意合法位置都能找到归属：这是"非格点也能拍"的前提（没有"够不着"的点）。"""
+    st = build_grid()
+    assert nearest_station(st, col_y(12) + 100.0, layer_z(3)).id == "S312"
+    assert nearest_station(st, 0.0, 0.0).id == "S101"        # 原点角
+
 

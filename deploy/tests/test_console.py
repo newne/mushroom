@@ -288,7 +288,8 @@ def write_outbox(path: Path, rows: list[dict]) -> None:
                     encoding="utf-8")
 
 
-def test_station_summary_aggregates_local_and_prod(tmp_path):
+def test_station_summary_keeps_the_newest_frame_of_both_sources(tmp_path):
+    """本地 outbox 与 prod 两份合起来取**每站最新那帧**，并报它的成败。"""
     write_outbox(tmp_path / "outbox.jsonl",
                  [{"kind": "image_index", "ts": "2026-09-14T09:30:00",
                    "station_id": "S101", "ok": True,
@@ -313,14 +314,15 @@ def test_station_summary_aggregates_local_and_prod(tmp_path):
     # 一次全量拉取（60 站一次问完），不是每站一次请求
     assert len(calls) == 1 and "station_id" not in calls[0]
     s101, s102 = got["summary"]["S101"], got["summary"]["S102"]
-    assert (s101["n"], s101["n_fail"]) == (3, 1)
     assert s101["last_ts"] == "2026-09-14T09:30:00" and s101["last_ok"] is True
-    assert (s102["n"], s102["n_fail"]) == (1, 0)
     assert s102["last_ts"] == "2026-09-13T08:00:00" and s102["last_ok"] is True
+    # 只报末帧（2026-09-21 去掉计数）：窗口内的"数到几行"不是这一站的总量，
+    # 摆出去比不给更糟——见 console.station_summary 的说明。字段集合一起钉住。
+    assert set(s101) == {"last_ts", "last_ok"}
 
 
 def test_station_summary_marks_a_failed_latest_frame(tmp_path):
-    """末帧失败要和"中间失败过几帧"分开：左栏角标只认末帧，选站前看的是最新状态。"""
+    """末帧失败要和"更早那一帧是成的"分开：左栏角标只认末帧，看的是最新状态。"""
 
     def transport(url, *, params=None, body=None):
         return [
@@ -333,8 +335,7 @@ def test_station_summary_marks_a_failed_latest_frame(tmp_path):
     with make_client(tmp_path, transport=transport) as c:
         got = c.get("/api/station_summary").json()
     s = got["summary"]["S101"]
-    assert s["n"] == 2 and s["n_fail"] == 1
-    assert s["last_ts"] == "2026-09-13T10:00:00" and s["last_ok"] is False
+    assert s == {"last_ts": "2026-09-13T10:00:00", "last_ok": False}
 
 
 def test_station_summary_survives_prod_failure(tmp_path):
@@ -354,7 +355,7 @@ def test_station_summary_survives_prod_failure(tmp_path):
     with make_client(tmp_path, transport=bad_transport) as c:
         got = c.get("/api/station_summary").json()
     assert got["ok"] is False and "prod 不通" in got["prod_error"]
-    assert got["summary"]["S101"]["n"] == 1
+    assert got["summary"]["S101"] == {"last_ts": "2026-09-14T09:30:00", "last_ok": True}
 
 
 def test_station_summary_is_cached_within_ttl(tmp_path):

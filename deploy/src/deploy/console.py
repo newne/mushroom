@@ -61,6 +61,8 @@ PROGRESS_STALE_S = 5.0
 
 #: 站位摘要一次全量拉取的条数上限：60 站 × 多天 × 多角度，一次拉全本地聚合，
 #: 比"每站一次请求"省 59 次 prod 往返（prod 是菇房内网里的分析服务，能少打扰就少打扰）。
+#: 取到的是"最新若干行"，逐站取**首行**即该站末帧——所以要够一个完整周期（60 站各一轮
+#: ≈ 60 行）；只有某站比这个窗口还久没拍时才会漏，那种站本来就没图可看。
 SUMMARY_LIMIT = 2000
 #: 摘要缓存 TTL。页面进列表、切模式、抓拍后各取一次；TTL 内的重复取吃缓存——
 #: 万一以后有人把它接进轮询循环，prod 也不会被打疼。15 秒对"哪站看着不对"够新鲜了
@@ -406,11 +408,16 @@ class Console:
         return f"{base}/{self.deps.minio_bucket}/{object_name}"
 
     def station_summary(self, *, refresh: bool = False) -> dict:
-        """每站一行的粗摘要：帧数、失败帧数、末帧时间、末帧成没成。
+        """每站一行的粗摘要：**末帧时间 + 末帧成没成**。
 
-        给左栏站位列表用的——选站之前就能看出"哪站好久没图/末帧是失败的"，
+        给左栏站位列表用的——选站之前就能看出"哪站好久没图 / 末帧是失败的"，
         不用逐站点进去看历史。**故意做得粗**：这是选站参考，不是监控面板，
         所以一次全量拉取 + 本地聚合 + 短 TTL 缓存，没有逐站实时性。
+
+        **不报帧数**（2026-09-21 去掉）：这里的行集合是 `limit` 截断后的窗口，
+        逐站计数只是"窗口里数到几行"，不是这一站总共拍过多少——某站历史一多就会被
+        别的站挤出去，读出来比不给更糟。而且帧数本身在这条线上不需要累积（中间帧
+        不是要维护的量），操作上要判的只有"最近一次拍成了没有、是什么时候"。
 
         `refresh=True` 跳过缓存读（仍写缓存）：抓拍刚落地时页面用它刷一次——
         那一帧的索引是同步进 outbox 的，但 202 时刻取的摘要可能已被旧值占住缓存，
@@ -431,18 +438,12 @@ class Console:
             sid = r.get("station_id")
             if not sid:
                 continue
-            cur = summary.setdefault(sid, {"n": 0, "n_fail": 0,
-                                           "last_ts": None, "last_ok": None})
-            cur["n"] += 1
-            # prod 那边 ok 可能是 1/0（sqlite 整数），本地是 true/false；都当布尔看
-            ok = bool(r.get("ok", True))
-            if not ok:
-                cur["n_fail"] += 1
             ts = str(r.get("ts") or "")
-            # 行集合已按 ts 倒序，但显式取 max 不依赖那个前提（谁改了排序都不会悄悄算错）
-            if cur["last_ts"] is None or ts > cur["last_ts"]:
-                cur["last_ts"] = ts or None
-                cur["last_ok"] = ok
+            cur = summary.get(sid)
+            # 行集合已按 ts 倒序，但显式比 ts 不依赖那个前提（谁改了排序都不会悄悄算错）
+            if cur is None or ts > cur["last_ts"]:
+                # prod 那边 ok 可能是 1/0（sqlite 整数），本地是 true/false；都当布尔看
+                summary[sid] = {"last_ts": ts or None, "last_ok": bool(r.get("ok", True))}
         body = {"ok": got.get("ok", True), "prod_error": got.get("prod_error"),
                 "summary": summary}
         self._summary_cache = (now, body)
@@ -593,7 +594,7 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
 
     @app.get("/api/station_summary")
     def api_station_summary(refresh: bool = False) -> dict:
-        """每站粗摘要（左栏列表的"末帧时间/帧数/失败角标"）。
+        """每站粗摘要（左栏列表的"末帧时间 + 末帧失败角标"）。
 
         与 /api/stations 分开而不是塞进去：列表摘要在抓拍后要刷新，而站位表本身
         是静态配置——混在一个响应里，刷新摘要就得把 60 行配置重拉一遍。

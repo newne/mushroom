@@ -33,7 +33,11 @@ const STATIONS = [
   { id: 'S102', box_id: 'B102', y: 561.5, z: 21.2, layer: 1, col: 2, angle_profile: 'top45',
     camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 561.5, target_z: 21.2 },
 ];
-const GRID = { cols: 12, layers: 5, y_min: 0.0, y_max: 4492.0, z_min: 0.0, z_max: 212.0 };
+// 与 patrol.stations.grid_geometry() 同形状：**y_pitch/z_pitch 不能省**——页面的
+// nearestStation 按格距归一化后再比站距（见该函数注释），少了这两个字段它会退回
+// "直接比毫米"，与假后端的 fakeNearest 口径就不一样了：假件更松，真分歧测不出来。
+const GRID = { cols: 12, layers: 5, y_pitch: 4492.0 / 12, z_pitch: 212.0 / 5,
+               y_min: 0.0, y_max: 4492.0, z_min: 0.0, z_max: 212.0 };
 
 // 历史模式用：两天的帧 + 一帧失败 + 一条本地待同步；两条生长点（都要有数值才画得出线）
 //
@@ -67,6 +71,7 @@ const state = {
   growth_error: false,                        // 让 /api/growth 回"prod 查不到"
   preview_down: false,                        // 让 /api/preview/status 回"预览服务连不上"
   preview_frame_age: 0.4,                     // 上游"最新一帧多久之前"（>3 秒 = 卡住）
+  preview_frames: 42,                         // 上游累计帧计数（只增不减；页面只拿它算 fps 差值）
   images_error: false,
   image_delay: {},
   command_network_error: false,
@@ -76,6 +81,10 @@ const state = {
   // 用来断言"结果落地 → 左栏摘要刷新"这根线真的通。
   extra_frames: [],
   summary_error: false,                   // 让 /api/station_summary 回"prod 查不到"
+  summary_extra: {},                      // 直接往摘要里塞某站的 {last_ts,last_ok}（验角标分支）
+  next_detail: null,                      // 下一条结果的 detail（抓拍那几条要看得见归属）
+  cmd_seq: 0,                             // 指令序号：结果 id 必须**唯一**（见 /api/cmd 的注释）
+  capture_seq: 0,                         // 抓拍序号：让每次抓拍落地的帧依次更新（见 /api/cmd）
   // 真执行方会在几百毫秒内领走并写回结果；默认照做，否则页面会一直停在"执行中"，
   // 后面的用例就全被上锁挡住了（那是假后端的锅，不是页面的）。
   auto_complete_ms: 150,
@@ -84,16 +93,31 @@ const state = {
 function completeSoon() {
   if (!state.auto_complete_ms) return;
   const cmd = state.cmd;
+  const detail = state.next_detail || '已执行（假后端）';
+  state.next_detail = null;
   setTimeout(() => {
     if (state.cmd !== cmd) return;
     const data = {};
     if (cmd.kind === 'goto') data.position_yz = [cmd.args.y, cmd.args.z];
     if (cmd.kind === 'home') data.position_yz = [0, 0];
     state.result = { id: cmd.id, kind: cmd.kind, args: cmd.args, data,
-      ok: true, detail: '已执行（假后端）', ended_at: NOW };
+      ok: true, detail, ended_at: NOW };
     state.cmd = null;
     state.progress = null;                    // 结果落地，实时流收场（与执行方一致）
   }, state.auto_complete_ms);
+}
+
+// 假的"最近站位"：与 patrol.stations.nearest_station 同一口径（按格距归一化后再比），
+// 格距直接取 GRID 里那两个字段（= 后端 grid_geometry 的算法），不再另算一遍。
+// 抓拍不选站位时，归属由后端按当前位置判定 —— 页面只是把结果显示出来。
+function fakeNearest(y, z) {
+  const py = GRID.y_pitch, pz = GRID.z_pitch;
+  let best = null, bestD = Infinity;
+  for (const st of STATIONS) {
+    const d = ((y - st.y) / py) ** 2 + ((z - st.z) / pz) ** 2;
+    if (d < bestD) { bestD = d; best = st; }
+  }
+  return best;
 }
 
 function json(status, body) { return { status, ok: status < 400, json: async () => body }; }
@@ -129,20 +153,21 @@ function route(method, url, body) {
     return delay ? new Promise(resolve => setTimeout(() => resolve(response), delay)) : response;
   }
   if (path === '/api/station_summary') {
-    // 与 deploy/console.py 的 station_summary 同形状：一次全量 + 本地聚合。
+    // 与 deploy/console.py 的 station_summary 同形状：一次全量 + 取**每站末帧**。
     // prod 不可用时 ok:false + prod_error、summary 为空——页面据此不显示"暂无历史帧"。
+    // 只有 last_ts/last_ok 两个字段（2026-09-21 起不再报帧数）。
     if (state.summary_error) {
       return json(200, { ok: false, prod_error: 'prod 查询失败：不通', summary: {} });
     }
     const summary = {};
     for (const r of IMAGES.concat(state.extra_frames)) {
-      const cur = summary[r.station_id] = summary[r.station_id]
-        || { n: 0, n_fail: 0, last_ts: null, last_ok: null };
-      cur.n += 1;
-      if (!r.ok) cur.n_fail += 1;
-      if (!cur.last_ts || r.ts > cur.last_ts) { cur.last_ts = r.ts; cur.last_ok = !!r.ok; }
+      const cur = summary[r.station_id];
+      if (!cur || r.ts > cur.last_ts) {
+        summary[r.station_id] = { last_ts: r.ts, last_ok: !!r.ok };
+      }
     }
-    return json(200, { ok: true, prod_error: null, summary });
+    return json(200, { ok: true, prod_error: null,
+                       summary: { ...summary, ...state.summary_extra } });
   }
   if (path === '/api/growth') {
     if (state.growth_error) return json(200, { ok: false, error: 'prod 查询失败：不通', points: [] });
@@ -160,8 +185,12 @@ function route(method, url, body) {
       return json(200, { available: false, upstream: null, error: '预览服务连不上：preview 没起' });
     }
     // 键名与 deploy/preview.py 的 Broadcaster.status() 一致：last_frame_age_s
+    // frames 每轮 +15：真上游是个**只增不减**的累计计数，页面用它做 fps 差值。
+    // 假件要是给个常数，差值恒为 0 ⇒ fps 那一支永远测不到（顺带就让"不显示累计帧数"
+    // 这条断言变成了空转）。
+    state.preview_frames += 15;
     return json(200, { available: true, error: null,
-                       upstream: { ok: true, frames: 42, viewers: 1,
+                       upstream: { ok: true, frames: state.preview_frames, viewers: 1,
                                    last_frame_age_s: state.preview_frame_age } });
   }
   if (path === '/api/cmd' && method === 'GET') {
@@ -184,16 +213,36 @@ function route(method, url, body) {
     if (state.command_network_error) throw new Error('offline');
     if (state.reject_cmd) return json(state.reject_cmd, { error: state.reject_cmd === 409
       ? '巡检进行中：机构由这一轮占用，预计 7 分钟后可用' : '没有有效会话：手动移动需要先接管' });
-    state.cmd = { id: 'c-' + (state.calls.length), kind: body.kind, args: body.args || {}, by: body.by,
+    // id 用**单调序号**，不用 state.calls.length：用例里会清空 calls 来数"这一次
+    // 发了什么"，那样两条指令会撞成同一个 id，而页面按 id 去重（observeCommandResult），
+    // 第二条结果被静默忽略 —— 表现是"抓拍了但摘要不刷新"，查半天才想起是假件的锅。
+    state.cmd_seq += 1;
+    state.cmd = { id: 'c-' + state.cmd_seq, kind: body.kind, args: body.args || {}, by: body.by,
                   session: state.session ? state.session.token : '', started_at: null };
     state.result = null;
     // 真执行方是**先写 outbox 索引、再返回结果**的（manual_exec._capture），
     // 所以帧要在 completeSoon 之前就落地——摘要刷新挂在结果落地那一刻。
-    if (body.kind === 'capture' && body.args && body.args.station_id) {
-      state.extra_frames.push({ ts: '2026-09-14T10:05:00', station_id: body.args.station_id,
-                                box_id: 'B102', angle_profile: 'top45', ok: true,
-                                object_name: '20260914/B102_' + body.args.station_id + '_top45_100500',
-                                source: 'local' });
+    // 归属：给了 station_id 就按它；没给就按**当前位置最近的格点**（非格点抓拍走这条）。
+    if (body.kind === 'capture') {
+      const [py, pz] = state.machine_position;
+      const sid = (body.args && body.args.station_id) || (fakeNearest(py, pz) || {}).id;
+      const st = STATIONS.find(s => s.id === sid);
+      const off = st ? Math.max(Math.abs(py - st.y), Math.abs(pz - st.z)) : 0;
+      const auto = !(body.args && body.args.station_id);
+      state.next_detail = `已抓拍 ${sid}${auto ? '（自动归到最近站位）' : ''}`
+        + `（拍摄位置 Y=${py.toFixed(2)} Z=${pz.toFixed(2)}`
+        + (off > 50 ? `，偏离 ${sid} 格点 ΔY=${(py - st.y).toFixed(1)} ΔZ=${(pz - st.z).toFixed(1)}` : '')
+        + '）';
+      if (sid) {
+        // 每次抓拍给一个**更晚**的 ts：否则第二次抓拍产出的帧比第一次旧，
+        // "抓拍落地 ⇒ 摘要刷新"那条断言就会被前一次的结果顶住，变成空转。
+        const mm = String(5 + state.capture_seq).padStart(2, '0');
+        state.capture_seq += 1;
+        state.extra_frames.push({ ts: '2026-09-14T10:' + mm + ':00', station_id: sid,
+                                  box_id: st ? st.box_id : null, angle_profile: 'top45', ok: true,
+                                  object_name: '20260914/' + (st ? st.box_id : 'BX') + '_' + sid
+                                    + '_top45_10' + mm + '00', source: 'local' });
+      }
     }
     completeSoon();
     return json(202, { command: state.cmd, detail: '已提交',
@@ -279,22 +328,39 @@ const lastCmd = () => {
   check('有内联 favicon（P2-6：不再每次加载 404）',
     !!document.querySelector('link[rel="icon"]'), document.querySelector('link[rel="icon"]') ? '有' : '(无)');
 
-  // P2-1：站位摘要（末帧时间/帧数/失败角标）——选站前就看出哪站有问题
-  check('S102 摘要行给出末帧时间与帧数',
-    T('.stn[data-id="S102"] .stnsum').includes('末帧 09-14 09:30')
-      && T('.stn[data-id="S102"] .stnsum').includes('3 帧'),
+  // P2-1：站位摘要（**末帧时间 + 末帧失败角标**）——选站前就看出哪站有问题
+  check('S102 摘要行给出末帧时间',
+    T('.stn[data-id="S102"] .stnsum').includes('末帧 09-14 09:30'),
     T('.stn[data-id="S102"] .stnsum'));
-  check('S102 角标只认"有失败帧"，末帧是好的就不说末帧失败',
-    T('.stn[data-id="S102"] .stnsum').includes('⚠ 1 帧失败')
-      && !T('.stn[data-id="S102"] .stnsum').includes('末帧失败'),
+  check('摘要行**不报帧数**（窗口内计数不是总量，2026-09-21 去掉）',
+    !/\d+\s*帧/.test(T('.stn[data-id="S102"] .stnsum')) && !/共/.test(T('.stn[data-id="S102"] .stnsum')),
+    T('.stn[data-id="S102"] .stnsum'));
+  check('更早那一帧失败过，但末帧是好的 ⇒ 不打角标',
+    !T('.stn[data-id="S102"] .stnsum').includes('⚠'),
     T('.stn[data-id="S102"] .stnsum'));
   check('S101 没有历史帧时明说"暂无历史帧"（不是留白）',
     T('.stn[data-id="S101"] .stnsum') === '暂无历史帧', T('.stn[data-id="S101"] .stnsum'));
   check('摘要写进 aria-label（读屏拿得到，视觉小字它看不见）',
     ($('.stn[data-id="S102"]').getAttribute('aria-label') || '').includes('末帧 09-14 09:30')
-      && ($('.stn[data-id="S102"]').getAttribute('aria-label') || '').includes('共 3 帧'),
+      && !/共\s*\d+\s*帧/.test($('.stn[data-id="S102"]').getAttribute('aria-label') || ''),
     $('.stn[data-id="S102"]').getAttribute('aria-label'));
   check('摘要正常时 #listnote 不占位', $('#listnote').style.display === 'none');
+
+  // 末帧失败 ⇒ 角标要出现（"要不要补拍"就看这一条）。用后端直接报 last_ok=false 来验，
+  // 不去动历史那几条帧的时序（那边有一整套逐帧导航的断言挂着顺序）。
+  state.summary_extra = { S101: { last_ts: '2026-09-14T13:00:00', last_ok: false } };
+  document.dispatchEvent(new window.Event('visibilitychange'));
+  await sleep(300);
+  check('末帧失败时打"⚠ 末帧失败"角标',
+    T('.stn[data-id="S101"] .stnsum').includes('⚠ 末帧失败'), T('.stn[data-id="S101"] .stnsum'));
+  check('末帧失败的角标也进 aria-label',
+    ($('.stn[data-id="S101"]').getAttribute('aria-label') || '').includes('末帧失败'),
+    $('.stn[data-id="S101"]').getAttribute('aria-label'));
+  state.summary_extra = {};
+  document.dispatchEvent(new window.Event('visibilitychange'));
+  await sleep(300);
+  check('角标随末帧恢复而消失',
+    T('.stn[data-id="S101"] .stnsum') === '暂无历史帧', T('.stn[data-id="S101"] .stnsum'));
 
   // 摘要取不到 ≠ 没拍过：此时**不渲染**"暂无历史帧"，只在列表下方给一句说明
   state.summary_error = true;
@@ -388,8 +454,9 @@ const lastCmd = () => {
   // 补光灯开关已从页面删除（现场无实际作用）——连 DOM 都不该再有
   check('页面上没有补光灯开关（无实际作用，2026-09-17 删除）', !$('#lampbtn') && !html.includes('lampbtn'));
 
-  // 3b. 抓拍置灰原因要说出来（P0-5）：不写 title 也能看见
-  check('未选站位时抓拍下方给出原因', T('#capnote').includes('先选站位'), T('#capnote'));
+  // 3b. 抓拍不再要求先选站位（P0-5 的那句旧文案已随 2026-09-21 的改动换掉）：
+  //     没选站位也能拍，页面要把"会归到哪一站"提前说清，不能拍完才知道。
+  check('未选站位时抓拍下方说明归属规则', T('#capnote').includes('最近的 S101'), T('#capnote'));
   // 3c. 读屏不再被每秒刷新的读数区骚扰（P1-1）：容器无 aria-live，"当前动作"走独立节点
   check('读数区容器不带 aria-live（原先每秒播报一次）',
     !$('.readouts').hasAttribute('aria-live'), $('.readouts').getAttribute('aria-live') || '(无)');
@@ -448,28 +515,47 @@ const lastCmd = () => {
   $('#gtY').dispatchEvent(new window.Event('input'));
   check('回到范围内即恢复可提交', $('#gotobtn').disabled === false && $('#gtY').className === '');
 
-  // 6. 抓拍：没选站位不让点；选了就带上 station_id。
-  //    抓拍 2026-09-17 并入实时画面卡（拍的就是"此刻画面里的这个位置"），与「看画面」并列。
-  check('未选站位时抓拍禁用', $('#capbtn').disabled === true);
+  // 6. 抓拍：**不选站位也能拍**（按当前位置归到最近的格点 = 非格点抓拍这条路），
+  //    选了站位就按选的走。抓拍 2026-09-17 并入实时画面卡（拍的就是"此刻画面里的位置"）。
+  state.machine_position = [200.0, -20.0];
+  await sleep(1100);                          // 等一拍，让页面拿到这个位置
+  check('未选站位时抓拍**可用**（非格点也要能拍）', $('#capbtn').disabled === false);
+  check('未选站位时预告会归到最近的 S101', T('#capnote').includes('最近的 S101'), T('#capnote'));
   check('抓拍与「看画面」在同一张卡（实时画面卡）',
     !!$('#rtmain #capbtn') && $('#capbtn').closest('.card') === $('#pvbtn').closest('.card'));
-  // 这次从**地图**上点站位（S102 图心 ≈ 136,27，命中圈内）：地图也是选站入口
+
+  // 挪到站位表以外的位置（S102 右侧 138mm、层内偏 41mm）⇒ 归属改成 S102，且要报出偏移
+  state.machine_position = [700.0, -20.0];
+  await sleep(1100);
+  check('位置变了 ⇒ 预告改口到最近的 S102', T('#capnote').includes('最近的 S102'), T('#capnote'));
+  state.calls.length = 0;
+  await click('#capbtn');
+  check('未选站位时抓拍载荷**不带** station_id（归属交给后端按位置判）',
+    JSON.stringify(lastCmd()) === '{"kind":"capture","args":{}}', JSON.stringify(lastCmd()));
+  await sleep(400);
+  check('抓拍结果说清归到哪一站、离格点多远',
+    T('#cmdline').includes('自动归到最近站位') && T('#cmdline').includes('偏离 S102 格点'),
+    T('#cmdline'));
+  state.machine_position = [200.0, -20.0];    // 复原：后面的"控制器实读"断言依赖这个位置
+
+  // 再走"显式指定站位"这条老路：从**地图**上点站位（S102 图心 ≈ 136,27，命中圈内）
   mapsvg.dispatchEvent(new window.MouseEvent('click', { clientX: 136, clientY: 27, bubbles: true }));
   await sleep(400);
   check('点地图上的站点 = 选中站位', T('#imgtitle').includes('S102'), T('#imgtitle'));
   check('选中后坐标框填成该站目标（两位小数）', $('#gtY').value === '561.50' && $('#gtZ').value === '21.20',
     $('#gtY').value + ' / ' + $('#gtZ').value);
-  check('选中站位后抓拍可用', $('#capbtn').disabled === false);
+  check('选中站位后抓拍仍可用', $('#capbtn').disabled === false);
+  check('选中站位后不再预告归属（按选的走）', T('#capnote') === '', T('#capnote'));
   state.calls.length = 0;
   await click('#capbtn');
   check('抓拍载荷带 station_id=S102',
     JSON.stringify(lastCmd()) === '{"kind":"capture","args":{"station_id":"S102"}}', JSON.stringify(lastCmd()));
+  await sleep(1500);                          // 等结果落地（~150ms）再等一拍轮询把摘要刷回来
   // P2-1：结果落地 ⇒ 左栏摘要旁路 TTL 刷新。假后端在 202 时就同步补了那一条帧
-  // （真执行方先写 outbox 再返回结果），所以这里必须看得到"4 帧 + 新末帧时间"。
+  // （真执行方先写 outbox 再返回结果），所以这里必须看得到新的末帧时间。
   // 这根线断了现场的表现是：抓拍成功了，左栏末帧时间还停在几分钟前。
-  check('抓拍落地后左栏摘要刷新（帧数 +1、末帧时间更新）',
-    T('.stn[data-id="S102"] .stnsum').includes('4 帧')
-      && T('.stn[data-id="S102"] .stnsum').includes('末帧 09-14 10:05'),
+  check('抓拍落地后左栏摘要刷新（末帧时间更新）',
+    T('.stn[data-id="S102"] .stnsum').includes('末帧 09-14 10:06'),
     T('.stn[data-id="S102"] .stnsum'));
   check('刷新走的是 refresh=1（旁路服务端 TTL 缓存）',
     [...state.calls].some(c => c.url === '/api/station_summary?refresh=1'),
@@ -704,6 +790,13 @@ const lastCmd = () => {
   check('播放中提示文字让位', $('#pvhint').style.display === 'none',
     'hint display=' + ($('#pvhint').style.display || '(空)'));
   check('画面状态标为播放中', T('#pvstate').includes('播放中'), T('#pvstate'));
+  // 实时链路不保存中间帧（preview.Broadcaster 只留最后一帧），所以状态行只说
+  // **帧率**与**帧龄**这两件可行动的事；累计帧数只作 fps 的差值输入，不显示。
+  check('状态行给出帧率（帧率是 fps 差值算的）', T('#pvnote').includes('fps'), T('#pvnote'));
+  check('状态行给出帧龄与观众数',
+    T('#pvnote').includes('最新一帧') && T('#pvnote').includes('名观众'), T('#pvnote'));
+  check('状态行**不显示**上游累计帧数（"累积了 N 帧"是错觉）',
+    !/[0-9]+\s*帧(?!前)/.test(T('#pvnote')), T('#pvnote'));
   // P0-4：按钮文案必须跟着状态走（原版恒为"看画面"，现场把它当坏开关）
   check('画面打开后按钮变成"关闭画面"', T('#pvbtn') === '关闭画面', T('#pvbtn'));
   check('画面信息来自 console 的 /api/preview/status（不是直连相机）',

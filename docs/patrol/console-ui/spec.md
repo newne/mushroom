@@ -173,7 +173,7 @@ ADR-0008（控制器整定参数与软限位）
 | 单轴绝对 | `POST /api/abs`（轴选 Y 或 Z） | 无 |
 | 回零 | `POST /api/home` | **二次确认** |
 | 补光灯 | `POST /api/lamp` | 无（**2026-09-17 起页面不再提供**：现场无实际作用；后端指令保留，抓拍链路内部在用） |
-| 抓拍 | `POST /api/capture` | 无（按钮在实时画面卡，与「看画面」并列） |
+| 抓拍 | `POST /api/capture` | 无（按钮在实时画面卡，与「看画面」并列；**不要求先选站位**——照片归到哪见 §6.2） |
 | 急停 | `POST /api/stop` | **无（永远可点）** |
 
 - 坐标栏实时做**软限位校验**（包络来自 §2 的机械行程）；越界立即标红并禁用提交——
@@ -235,7 +235,7 @@ ADR-0008（控制器整定参数与软限位）
 | POST | `/api/abs` | `{"axis":"Z","pos":-190.8}` | `202` | 同上 |
 | POST | `/api/home` | `{"axes":["Y","Z"]}` | `202` | 同上 |
 | POST | `/api/lamp` | `{"on":true}` | `200` | 同上 |
-| POST | `/api/capture` | `{"station_id":"S105"}` | `202 {job}` | `503` 相机不可用 |
+| POST | `/api/capture` | `{"station_id":"S105"}`（**可省**：省略时服务端按当前位置归到最近的格点） | `202 {job}` | `503` 相机不可用 |
 | POST | `/api/stop` | — | `200`（幂等） | 无 |
 
 约定：**参数同步校验、执行异步**（ADR-0006）。`400` 只在参数非法时出现；机械时长不确定，
@@ -243,12 +243,25 @@ ADR-0008（控制器整定参数与软限位）
 （`status/home/jog/abs/goto/lamp/stop/para`），实时模式不新造控制协议。
 `para` 是只读的整定参数核对（ADR-0008），实时模式不暴露写入口——改软限位只能在控制器参数页。
 
+**抓拍的归属（2026-09-21）**：抓拍**不移动机构**，拍的就是当前位置。`station_id` 决定的是
+"这张照片以后挂在哪一站的历史下"，而拍照位置作为事实逐帧记在 `y`/`z` 两列里。
+
+- 给了 `station_id`：按它归属；给了**不认识的**站位仍报 `400`（明确点了名却拍到别处是两回事，不替他猜）。
+- 没给：服务端按**当前位置最近的格点**归属（`patrol.stations.nearest_station`），
+  结果 detail 里注明"自动归到最近站位"。
+- 距离按**格距归一化**后再比（Y 格距约 374mm、Z 约 42mm），不是直接比毫米——直接比欧氏距离的话
+  Y 上的一点点偏差会盖过 Z，把"上一层"的点判给同一层的站位。
+- 非格点抓拍（挪到站位表以外的位置再拍）走的就是第二条路：**必须有归属**，否则历史模式按站位取图
+  时它无处可寻；偏离格点超过 `manual_exec.OFF_GRID_NOTICE_MM`（50mm = 构图微调包络 40mm + 10mm）
+  时 detail 里把两个轴的偏移一起报出来。
+
 ### 6.3 查询端点
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/stations` | `[{id, box_id, layer, col, y, z, angle_profile, camera_ip, exposure_note, last_capture_ts, image_count}]`；`layer` 1…5 自顶向下、`col` 1…12 沿 Y 递增（§2.1） |
 | GET | `/api/grid` | `{cols, layers, y_pitch, z_pitch, y_min/y_max/z_min/z_max}` — 网格几何（`grid_geometry()`），供平面图绘制，避免前后端各推一套 |
+| GET | `/api/station_summary` | `?refresh=0\|1` → `{ok, prod_error, summary: {station_id: {last_ts, last_ok}}}`——左栏站位列表的一行摘要（**末帧时间 + 末帧失败角标**）。一次全量拉 `images(limit=2000)` 后按站取**首行**即末帧；15s TTL，`refresh=1` 旁路（抓拍落地那一次用）。**不报帧数**：窗口内计数不是这一站的总量，读出来比不给更糟 |
 | GET | `/api/images` | `?station_id=&angle=&date_from=&date_to=&limit=` → `[{ts, station_id, box_id, angle_profile, object_name, ok, source}]`，`source ∈ {local, prod}`。**不回 `cloud_url`**：那是控制网地址，浏览器够不着（§10.10） |
 | GET | `/api/image` | `?object_name=<对象名>` → 图像字节（`image/jpeg`）。对象名由**服务端**拼成 MinIO 地址，请求里给不了主机；后缀缺 `.jpg` 时自动补（手动抓拍落索引的就是不带后缀的名字）。`w=320` 缩略图**待做**——控制面镜像里没有 Pillow，为一个缩略图给巡检镜像加热解码不划算（§10.10）|
 | GET | `/api/measurements` | `?box_id=&ts_from=&ts_to=` → 生长曲线数据（`measurements` 表行） |

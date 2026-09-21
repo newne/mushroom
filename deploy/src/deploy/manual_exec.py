@@ -42,8 +42,9 @@ from patrol.fmc import (
     MotionTimeoutError,
 )
 from patrol.fmc.status import MachineStatus
+from patrol.framing import DEFAULT_MAX_TOTAL_MM
 from patrol.motion_profile import HOME_DIR_NEGATIVE, M1
-from patrol.stations import Station, image_object_name
+from patrol.stations import Station, image_object_name, nearest_station
 
 from deploy.manual import Command, ManualChannel, estop_allows
 
@@ -100,6 +101,25 @@ def axis_of(args: dict, *, where: str) -> int:
     if isinstance(raw, int) and not isinstance(raw, bool) and raw in M1.axis_indices:
         return raw
     raise CommandError(f"{where} 的 axis 需要 {'/'.join(AXIS_BY_NAME)} 之一，收到 {raw!r}")
+
+
+#: 报"偏离格点"的门槛（mm，单轴）。取在构图微调包络**之上**：`framing` 学到的
+#: `trim` 上限是 40mm，落在那个范围内的偏移本来就是"在这一站拍得挺好"，报出来只会
+#: 天天喊狼。越过它的才说明这一枪不是冲着本站格点去的（非格点抓拍）。
+OFF_GRID_NOTICE_MM = DEFAULT_MAX_TOTAL_MM + 10.0
+
+
+def _off_grid_note(station: Station, y: float, z: float) -> str:
+    """拍摄位置的说明；偏离格点超过 `OFF_GRID_NOTICE_MM` 时把两个轴的偏移一起说清。
+
+    只报"拍了哪"是不够的：非格点抓拍时操作者最想知道的是"这一枪离格点偏了多少"，
+    而单看绝对坐标（Y=187.10）在 4492mm 的行程上读不出这个信息。
+    """
+    note = f"拍摄位置 Y={y:.2f} Z={z:.2f}"
+    off_y, off_z = y - station.y, z - station.z
+    if max(abs(off_y), abs(off_z)) > OFF_GRID_NOTICE_MM:
+        note += f"，偏离 {station.id} 格点 ΔY={off_y:+.1f} ΔZ={off_z:+.1f}"
+    return note
 
 
 class ManualExecutor:
@@ -363,9 +383,9 @@ class ManualExecutor:
     def _capture(self, fmc: Fmc4030, cmd: Command) -> ExecOutcome:
         if self.capture is None or self.append_index is None:
             raise CommandError("手动抓拍未配置（缺采图服务或 outbox）——这一条不执行")
-        station = self._station_for(cmd)
         ts = self.now()
-        y, z = fmc.current_yz()      # **先读位置**：这是这张照片唯一可回溯的事实
+        y, z = fmc.current_yz()      # **先读位置**：这是这张照片唯一可回溯的事实，也是归属依据
+        station, auto = self._station_for(cmd, y=y, z=z)
         object_name = image_object_name(station, ts)
         shot = None
         try:
@@ -407,25 +427,39 @@ class ManualExecutor:
                 self.log(f"手动抓拍的索引同步失败（记录仍在 outbox，可补传）：{e}")
         return ExecOutcome(
             True,
-            f"已抓拍 {station.id} → {stored_name}（拍摄位置 Y={y:.2f} Z={z:.2f}）",
+            f"已抓拍 {station.id}{'（自动归到最近站位）' if auto else ''}"
+            f" → {stored_name}（{_off_grid_note(station, y, z)}）",
             {
                 "station_id": station.id,
                 "object_name": stored_name,
                 "cloud_url": cloud_url,
                 "position_yz": [round(y, 3), round(z, 3)],
+                "auto_station": auto,
                 "lamp_on": False,
             },
         )
 
-    def _station_for(self, cmd: Command) -> Station:
+    def _station_for(self, cmd: Command, *, y: float, z: float) -> tuple[Station, bool]:
+        """给这张照片定归属，返回 ``(站位, 是否自动判定)``。
+
+        显式给了站位就按它；没给就按**当前位置最近的站位**。
+
+        抓拍本身**不移动机构**（拍的就是当前位置），所以"归属"要解决的是"这张照片
+        以后怎么被找到"——历史模式按站位取图，没有站位的帧在页面上无处可寻。
+        非格点抓拍（挪到站位表以外的位置再拍）走的正是第二条路：位置作为事实逐帧
+        记在 `y`/`z` 里，"归到最近的格点"只决定它出现在哪一站的列表下。
+
+        显式给了**不认识的**站位仍然报错，不静默退化成"最近"——操作者明确点了一个
+        站位却拍到别处，是两回事，不能替他猜。
+        """
         sid = cmd.args.get("station_id")
-        if not isinstance(sid, str) or not sid.strip():
-            raise CommandError(
-                "手动抓拍需要 station_id：照片要归到某个站位才能在历史里找到"
-                "（名字按站位给，坐标记的是实际拍摄位置）"
-            )
-        want = sid.strip().upper()
-        for st in self.stations:
-            if st.id.upper() == want:
-                return st
-        raise CommandError(f"站位 {sid!r} 不在站位表里（共 {len(self.stations)} 个）")
+        if isinstance(sid, str) and sid.strip():
+            want = sid.strip().upper()
+            for st in self.stations:
+                if st.id.upper() == want:
+                    return st, False
+            raise CommandError(f"站位 {sid!r} 不在站位表里（共 {len(self.stations)} 个）")
+        nearest = nearest_station(self.stations, y, z)
+        if nearest is None:
+            raise CommandError("站位表是空的：无法给这张照片定归属")
+        return nearest, True

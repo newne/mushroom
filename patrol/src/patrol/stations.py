@@ -202,6 +202,32 @@ def image_object_name(station: Station, ts: datetime) -> str:
             f"_{station.angle_profile}_{ts.strftime('%H%M%S')}")
 
 
+def nearest_station(stations: list[Station], y: float, z: float,
+                    profile: MotionProfile = M1) -> Station | None:
+    """离 ``(y, z)`` **最近的站位**；表为空返回 ``None``。
+
+    给"非格点抓拍"定归属用：操作者可以把机构挪到站位表以外的位置再拍，但那帧照片
+    仍然要挂到一个站位上——否则历史模式按站位取图时它无处可寻（见
+    ``deploy.manual_exec`` 里 `_station_for` 的说明）。位置本身不会被丢掉，它逐帧
+    记在 ``y``/``z`` 两列里，所以"归属"只影响**怎么找得到**，不影响事实。
+
+    距离按**格距归一化**后再比，不是直接比毫米：
+    Y 的格距约 374mm、Z 只有约 42mm（``grid_geometry``），直接比欧氏距离的话 Y 方向上
+    的一点点偏差就完全盖过 Z —— 结果会把"上一层"的点判给同一层的站位。归一化之后两个
+    轴各自以"差了几格"参与比较，边界落在格心中间（Z 上即 ±21.2mm），与"这个点落在
+    哪个格子"是同一个答案。
+
+    站点表是**手写也可**的（``load_stations`` 不校验栅格），所以这里不假设站位严格
+    落在格心，逐站比较即可。
+    """
+    if not stations:
+        return None
+    g = grid_geometry(profile)
+    py = g["y_pitch"] or 1.0
+    pz = g["z_pitch"] or 1.0
+    return min(stations, key=lambda s: ((y - s.y) / py) ** 2 + ((z - s.z) / pz) ** 2)
+
+
 # ---------- Z 框架镜像的一次性迁移（ADR-0018） ----------
 
 #: 旧 Z 框架的下限（ADR-0018 之前写成 `-212…0`：顶端为 0、**向上**为正）。

@@ -254,7 +254,7 @@
       <!-- 抓拍与看画面同一张卡：拍的就是"此刻画面里的这个位置"（2026-09-17 从右栏点动区并入） -->
       <div class="row" style="margin-top:8px">
         <button id="pvbtn">看画面</button>
-        <button id="capbtn" disabled title="拍当前位置，照片归到左栏选中的站位">抓拍</button>
+        <button id="capbtn" disabled title="拍当前位置：选了站位就归到它名下，没选就归到最近的格点">抓拍</button>
         <span id="pverr" class="empty" style="padding:0"></span>
       </div>
       <!-- P0-5：抓拍置灰的原因要说出来。只写 title 的话鼠标不悬停就看不到，
@@ -816,16 +816,16 @@ function fmtTs(ts){
   return m ? `${m[2]}-${m[3]} ${m[4]}` : String(ts || '—');
 }
 
-/* P2-1：一行摘要（末帧时间/帧数/失败角标）。没有数据且摘要本身取到了 ⇒ "暂无历史帧"；
-   摘要没取到 ⇒ 整行不渲染（区分"没拍过"与"问不到"，见 stnSummaryOk 的注释）。 */
+/* P2-1：一行摘要（**末帧时间 + 末帧失败角标**）。没有数据且摘要本身取到了 ⇒ "暂无历史帧"；
+   摘要没取到 ⇒ 整行不渲染（区分"没拍过"与"问不到"，见 stnSummaryOk 的注释）。
+   **不报帧数**：后端给的窗口内计数不是这一站的总量（见 console.station_summary 的注释），
+   而"中间帧要攒着"这件事在这条线上本来就不需要——要判的只有"最近一次拍成了没有"。 */
 function stnSummaryHtml(st){
   if(!stnSummaryOk) return '';
   const s = stnSummary[st.id];
   if(!s) return '<span class="stnsum">暂无历史帧</span>';
-  let badge = '';
-  if(s.last_ok === false) badge = '<span class="stnbadge">⚠ 末帧失败</span>';
-  else if(s.n_fail > 0) badge = `<span class="stnbadge">⚠ ${esc(s.n_fail)} 帧失败</span>`;
-  return `<span class="stnsum">末帧 ${esc(fmtTs(s.last_ts))} · ${esc(s.n)} 帧${badge ? ' · ' + badge : ''}</span>`;
+  const badge = s.last_ok === false ? '<span class="stnbadge">⚠ 末帧失败</span>' : '';
+  return `<span class="stnsum">末帧 ${esc(fmtTs(s.last_ts))}${badge ? ' · ' + badge : ''}</span>`;
 }
 
 /* 同一行摘要的读屏版：列表行是 button，屏幕阅读器只念 aria-label，视觉小字它看不见 */
@@ -833,10 +833,7 @@ function stnSummaryText(st){
   if(!stnSummaryOk) return '';
   const s = stnSummary[st.id];
   if(!s) return '，暂无历史帧';
-  let tail = '';
-  if(s.last_ok === false) tail = '，末帧失败';
-  else if(s.n_fail > 0) tail = `，其中 ${s.n_fail} 帧失败`;
-  return `，末帧 ${fmtTs(s.last_ts)}，共 ${s.n} 帧${tail}`;
+  return `，末帧 ${fmtTs(s.last_ts)}${s.last_ok === false ? '，末帧失败' : ''}`;
 }
 
 /* opts.refresh：跳过服务端 TTL 缓存。只用于"抓拍刚落地"那一次——202 时刻取过的摘要
@@ -1059,10 +1056,23 @@ function renderOps(){
   $('#homebtn').disabled = locked;
   $('#gotobtn').disabled = locked || !targetsOk();
   document.querySelectorAll('[data-jog]').forEach(b => b.disabled = locked);
-  $('#capbtn').disabled = locked || !selected;        // 抓拍要有选中的站位（照片归到它名下）
-  // P0-5：置灰的原因要说出来（title 只有悬停才看得见，现场就卡在这一步）
+  // 抓拍**不再要求先选站位**：拍的就是当前位置，没选站位时由后端归到**最近的格点**
+  // （2026-09-21 起）。非格点（站位表以外的位置）也要能拍——不然现场"挪过去看一眼"
+  // 这条最常用的路子就断在最后一步。归属规则要在按下之前就说清，不能拍完才知道归到哪。
+  $('#capbtn').disabled = locked;
   const capNote = $('#capnote');
-  if(capNote) capNote.textContent = !selected ? '先选站位 → 抓拍可用（照片归到它名下）' : '';
+  if(capNote){
+    const p = posNow();
+    const near = p ? nearestStation(p[0], p[1]) : null;
+    if(!selected && near){
+      capNote.textContent = `未选站位 → 按位置归到最近的 ${near.id}` +
+        `（ΔY=${(p[0] - near.y).toFixed(1)} ΔZ=${(p[1] - near.z).toFixed(1)}）`;
+    }else if(!selected && p){
+      capNote.textContent = '未选站位 → 按位置自动归到最近的站位';
+    }else{
+      capNote.textContent = '';
+    }
+  }
 
   const el = $('#cmdline');
   if(busy()){
@@ -1258,8 +1268,9 @@ function wireOps(){
     await sendCmd('jog', {axis, mm: step});
   });
   $('#capbtn').onclick = async () => {
-    if(!selected){ opmsg('先在左栏选一个站位：照片要归到它名下', 'bad'); return; }
-    await sendCmd('capture', {station_id:selected});
+    // 选了站位就按它（照片归到它名下）；没选就让后端按当前位置取最近的格点——
+    // 非格点抓拍走的就是这一条，照片仍要挂到一个站位上，否则历史模式按站位取图找不到它。
+    await sendCmd('capture', selected ? {station_id:selected} : {});
   };
   // Esc = 中断**正在执行**的那一条。空闲时不响应：一次误按就把急停闩上、
   // 之后的巡检轮次会全部失败，代价太大（指令本身 60 秒内有效，中断来得及）。
@@ -1269,6 +1280,22 @@ function wireOps(){
 function posNow(){
   const p = lastStatus?.machine?.real_pos;
   return Array.isArray(p) ? p : null;
+}
+
+/* 离 (y,z) 最近的站位——**与后端 patrol.stations.nearest_station 同一口径**：
+   距离按格距归一化后再比，不是直接比毫米。Y 的格距约 374mm、Z 只有约 42mm，
+   直接比欧氏距离的话 Y 上的一点点偏差就盖过 Z，会把"上一层"的点判给同一层的站位。
+   两边都用 /api/stations 里那份 grid（同源于 patrol.stations.grid_geometry），
+   所以改格距不会两边各推一套——改口径要同时改这两处。 */
+function nearestStation(y, z){
+  if(!stations.length) return null;
+  const py = (grid && grid.y_pitch) || 1, pz = (grid && grid.z_pitch) || 1;
+  let best = null, bestD = Infinity;
+  for(const st of stations){
+    const d = ((y - st.y) / py) ** 2 + ((z - st.z) / pz) ** 2;
+    if(d < bestD){ bestD = d; best = st; }
+  }
+  return best;
 }
 
 /* ---------------- 实时画面：RTSP→MJPEG（ADR-0017） ----------------
@@ -1363,10 +1390,12 @@ async function pvTick(){
       return;
     }
     if(!pv.open) pvStartStream();
+    // 上游的 `frames` 只作 fps 的差值输入，**不显示**：实时链路不保存中间帧
+    // （见 preview.Broadcaster："不保存历史，只留最后一帧"），把一个只增不减的
+    // 累计数摆出来，等于暗示"累积了 N 帧"。判"流健不健康"看 fps 与帧龄就够了。
     const fps = pvFpsSample(up.frames);
     const parts = [];
     if(fps !== null) parts.push('~' + fps + ' fps');
-    parts.push(`${up.frames || 0} 帧`);
     if(typeof up.viewers === 'number') parts.push(`${up.viewers} 名观众`);
     if(typeof age === 'number') parts.push(`最新一帧 ${age.toFixed(1)} 秒前`);
     pvSetState('播放中', 'on', parts.join(' · '));
