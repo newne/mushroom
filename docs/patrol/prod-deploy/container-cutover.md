@@ -1008,6 +1008,22 @@ mushroom_console_web`，没有"启动预检可能碰机构"的路径，所以门
 修好后再取一次现场 DOM，`#capnote` 渲染为
 `未选站位 → 拍照后按实际位置归到最近的格点（归到哪一站写在下方结果里）`。
 
+### 15.5 回滚
+
+```bash
+# 后端（回到 P2-1 那一版镜像）
+cd /home/sysadmin/algorithm/mushroom_service
+cp .env.bak-20260921-152316 .env
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_patrol mushroom_console mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate \
+  mushroom_patrol mushroom_console mushroom_preview
+# 页面（只回页面，不碰容器镜像）
+cd /home/sysadmin/algorithm/mushroom_patrol/web
+cp -a index.html.bak-20260921-154051 index.html     # → 90610 B / b077b736…
+cp -a index.html.bak-20260921-113329 index.html     # → 88763 B / 0db2d591…（P2-1 原版）
+docker restart mushroom_console_web
+```
+
 ### 15.6 第三轮（`dec9e01`）：抓拍不再要求会话——现场"打开画面点抓拍没反应"
 
 **反馈**：在零点打开画面，点击抓拍，没有反应。
@@ -1046,18 +1062,87 @@ ADR-0016 §6 明写"手动抓拍不移动机构"。
 > `grep` 在无匹配下退出码是 1，**`set -e` 会把脚本就地中止**，后面的检查静默不跑。
 > 期望 0 的检查要写成 `grep -c ... || true`，或改用 `! grep -q ...`。
 
-### 15.5 回滚
+## 16. 2026-09-21 第四次发版：实时画面黑边清零（`565e236`）——页面-only
+
+**触发**：现场反馈"图像左右两侧有较大黑边，优化布局"。
+
+### 16.1 根因与判据
+
+`.pvwrap` 被 `width:100%` + `aspect-ratio:16/9` + `max-height:44vh` 三者夹住：前两条按
+**宽度**定形、第三条压**高度**；`max-height` 一生效 `aspect-ratio` 就被打破，框的**有效**
+宽高比变成 2.3~2.8。而画面是 **1280×718（≈1.7827）**，`object-fit:contain` 只能按高度缩进
+去，左右各留一条 `.pvwrap` 的深色底（`#16212b`）—— 那"黑边"就是框自己的背景色，
+**不是相机、不是取图链路**（这两条先排除，别去查曝光和 MinIO）。
+
+判据（探针量的，不是目视估的）：视口 1904×929 每侧 **211px、画面只占框 63%**；
+1664×900 / 1424×820 / 1366×768 各 123 / 88 / 103px。**四档都犯** ⇒ 固定 CSS 缺陷，
+不是"某档宽度才犯"，所以也不该靠调媒体查询断点去糊（改前矮屏那档
+`aspect-ratio:16/8.5` 反倒加重了它）。
+
+改法见 spec §10.11：框宽 = `--pv-h × --pv-k`（比例单一来源），读数栏移到画面右侧吃掉
+省出来的横向空间，画面从 44vh 提到 50vh；分界 1800px 是解方程得出来的。
+
+### 16.2 发版范围：页面-only
+
+只换 bind-mount 的 `index.html` + `docker restart mushroom_console_web`，**不重建任何镜像**，
+所以不触发启动预检、没有"可能碰机构"的路径 ⇒ 门禁 `allowed:false` 只作记录，不作中止条件
+（§5「只换页面的补发」）。
+
+### 16.3 上机
 
 ```bash
-# 后端（回到 P2-1 那一版镜像）
-cd /home/sysadmin/algorithm/mushroom_service
-cp .env.bak-20260921-152316 .env
-docker compose -f mushroom_solution.yml --profile patrol pull mushroom_patrol mushroom_console mushroom_preview
-docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate \
-  mushroom_patrol mushroom_console mushroom_preview
-# 页面（只回页面，不碰容器镜像）
+source .scratch/prodenv.sh
+bash docs/patrol/prod-deploy/rpush.sh .scratch/visual/index.new.html /root/index.new.html
+bash docs/patrol/prod-deploy/rpush.sh .scratch/visual/release-page.sh  /root/release-page.sh
+bash docs/patrol/prod-deploy/rexec.sh "sed -i 's/\r\$//' /root/release-page.sh; bash /root/release-page.sh"
+```
+
+- 待发字节：`git show 565e236:web/console/index.html` → **96607 B / 0 CRLF（纯 LF）/
+  `c5755476b2e68f31342ce6da582bee7dcecf2ed15cd42596c516917d932200c2`**
+  （工作区那份是 98470 B 的 CRLF，别发它 —— `core.autocrlf=true`）
+- 备份：`index.html.bak-20260921-190545`（92090 B = 上一版 `06602ca5…`）
+
+### 16.4 验收（逐条过）
+
+| 检查 | 结果 |
+| --- | --- |
+| 线上返回字节 sha256 | `c5755476…` == 待发值 ✓ |
+| 新写法在位（6 条） | `--pv-k:1280/718` / `.pvwrap{…aspect-ratio:var(--pv-k);` / `flex:0 1 calc(var(--pv-h) * var(--pv-k))` / `class="pvbody"` / `class="pvside"` / `overflow-wrap:anywhere` 各 **1** ✓ |
+| 旧写法消失 | `aspect-ratio:16/9` = **0** ✓ |
+| patrol 系三容器**未被重建** | `mushroom_patrol` / `mushroom_console` / `mushroom_preview` 各 **Up 4 hours** ✓ |
+| 页面容器已重启 | `mushroom_console_web` Up 6 seconds ✓ |
+| 机构零接触 | `docker exec mushroom_patrol ls /app/data/runs` → `No such file or directory` ✓ |
+| 门禁（仅记录） | `allowed:false`、day 51 ✓ |
+
+**端到端复核（最强的一条）**：写了个桩把**现场原样字节**代理到本机、只在**自己发出去的
+字节**里注入探针（prod 一个字节不动），用真页面 + 真 API 量渲染后的几何：
+
+| 视口 | 框宽高比 | 现场画面比例 | 每侧黑边 | 读数截断 |
+| --- | --- | --- | --- | --- |
+| 1904×1040 | **1.7827** | 1.78273 | **0** | 无 |
+| 1664×900 | **1.7828** | 1.78273 | **0** | 无 |
+| 1424×820 | **1.7828** | 1.78273 | **0** | 无 |
+
+`getComputedStyle(.pvwrap).aspectRatio` = `1280 / 718`，与 `--pv-k` 一致。框比例恒等于
+画面比例 ⇒ 黑边在数学上不存在（这一条比"我没看见黑边"强得多）。
+
+### 16.5 回滚
+
+```bash
 cd /home/sysadmin/algorithm/mushroom_patrol/web
-cp -a index.html.bak-20260921-154051 index.html     # → 90610 B / b077b736…
-cp -a index.html.bak-20260921-113329 index.html     # → 88763 B / 0db2d591…（P2-1 原版）
+cp -a index.html.bak-20260921-190545 index.html   # → 92090 B / 06602ca5…（dec9e01 那版）
 docker restart mushroom_console_web
 ```
+
+> 页面-only 的补发**不需要**动 `.env` / compose / 镜像，所以回滚也就一步。
+
+### 16.6 这一轮值得记的两条
+
+1. **`--pv-h` 是 vh 单位，量的时候要按"真实视口"量。** 无头 Chrome 的
+   `--window-size=W,H` 给出的 `innerHeight` 是 `H−151`（窗口边框+标签栏），拿它当现场
+   视口会把结论系统性地算悲观（差 130px 左右）。做法是先 `--dump-dom` 读出 `innerHeight`
+   再折算出对应的窗口高度 —— 目标是真实 vh 1000，就传 `--window-size=W,1151`。
+   本轮第一遍就是没折，差点以为 1080p 上导轨图进不了首屏。
+2. **比例这类"单一来源"必须只有一处。** 改前 `aspect-ratio` 同时出现在 `.pvwrap` 基线和
+   `@media (max-height:820px)` 覆盖里，两处不一致就是黑边的一半来源。现在只有 `--pv-k`
+   一处，并且在那条媒体查询旁写了"⚠️ 不要在这里改比例"。
