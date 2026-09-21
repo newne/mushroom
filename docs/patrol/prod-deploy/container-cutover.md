@@ -917,3 +917,108 @@ mv docker-compose.override.yml docker-compose.override.yml.off && docker compose
    值得将来试它能不能更快/更清。
 5. **历史图仍是"旧电平"**：MinIO 里 2026-09-18 之前的对象都没修过。要不要批量重刷是产品决定
    （重刷会把已入库的图再编码一代，不建议无差别做）。
+
+---
+
+## 15. 2026-09-21 第二次上机：console-ui 非格点抓拍 + 去掉帧数（`39aacfe` → `8e197d8`）
+
+上一节（§14）之后现场线上一共发过三版，本节只记最后两版（同一天内）；
+P2-1 那一版（`0.1.0-20260921112006-4fbf713`，页面 `88763 B / 0db2d591…`）的细节在
+`.workbuddy/memory/2026-09-21.md` 与 `docs/patrol/console-ui/review-20260918.md` 的
+"P2-1 实施记录"里，本节只把它作为"上一版"列在表内。
+
+### 15.1 产物
+
+| 产物 | tag | digest | 本地 image id |
+| --- | --- | --- | --- |
+| `mushroom_patrol` | `0.1.0-20260921151249-39aacfe`（＝`0.1.0`） | `sha256:589628e82eea3995b655b072b257c602f50d7a43bc6f54b0aebd35cfebb97ac6` | `sha256:2a6e7de9c7eccb038abf1a22bc4c7b3313e3b2b4b4471144be3e4ff10f5e0dbc` |
+
+`mushroom_console_web` **没重建**（页面是 bind-mount 的；`CONSOLE_WEB_IMAGE` 保持
+`0.1.0-20260917134707-d87486f`）。
+
+| 页面版本 | 字节 | LF sha256（= git blob） |
+| --- | --- | --- |
+| 主体发版（`39aacfe`） | 90610 | `b077b736b8653d0de80a4ce7c506d54bbe845c22321083c9a141ac3032d663c1` |
+| 页面补发（`8e197d8`，**当前线上**） | 91504 | `7de0d0696020ab1d6796aea0075a04c57a843272bc950621c0729c6dbb955246` |
+
+改动到的三个模块的 LF sha256（两处拷贝逐一比对用）：
+
+| 模块 | sha256 |
+| --- | --- |
+| `deploy/src/deploy/console.py` | `c32127b27d2f729ba6f86b8a527e68509332e1acd7db9a68888c27c06b95e884` |
+| `deploy/src/deploy/manual_exec.py` | `cf697543e25d68b6c5947d8861755d5a4f1ce67603d2c23bad6c1db8a7b4c533` |
+| `patrol/src/patrol/stations.py` | `fb0a0e292c0c2f6bc9f8898d06ddaad8f11f0b193c43d1e3f39f4e705e3a615e` |
+
+### 15.2 发版范围：三容器（重建）+ 页面（挂载）→ 之后又一次**只换页面**
+
+```bash
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_patrol mushroom_console mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate \
+  mushroom_patrol mushroom_console mushroom_preview
+docker restart mushroom_console_web
+```
+
+`manual_exec.py` 动了 ⇒ 必须重建 `mushroom_patrol`（§13.2 的同一条理由：
+`patrol_serve.py` 装配手动执行方用的就是它）。门禁 fail-closed 通过（第 51 天 > 25）。
+
+**页面补发那一轮不重建任何镜像**：只 `cp → mv` 换 `index.html` + `docker restart
+mushroom_console_web`，没有"启动预检可能碰机构"的路径，所以门禁只作记录、不作中止条件
+（fail-closed 是给**重建 `mushroom_patrol`** 准备的）。
+
+### 15.3 现场验收（2026-09-21 15:23–15:41）
+
+| 检查 | 结果 |
+| --- | --- |
+| 门禁 | `allowed:false`（第 51 天 > 25）⇒ 重建不影响机构 |
+| 四个容器 | 三个 patrol 系 `Recreated`→`Up (healthy)`，tag 全为 `…-39aacfe`；`console_web` 保持 `…-d87486f` |
+| **容器内代码 == 本版** | `/srv` 与 `site-packages` 两处 × 三个模块 **6/6 SAME** |
+| 镜像里确实换了话术 | `grep -c '手动抓拍需要 station_id'` = **0**；`grep -c 'def nearest_station'` = 1 |
+| 页面（主体） | `:8002` 发出来 **90610 B / `b077b736…`**，与 git blob 逐字节一致；补发后 **91504 B / `7de0d069…`** |
+| 归属逻辑（**不动机构**） | 在 `mushroom_console` 里跑 `nearest_station` 打 8 个点：S101 格点 / 层界下方 0.2mm→S101 / 层界上方 0.2mm→**S201** / 列界左→S101 / 列界右→S102 / S202 格点 / 原点角→S101 / 行程远端角→S512，**8/8 命中** |
+| `/api/station_summary` | 字段集合 `{last_ok, last_ts}`，**无 `n`/`n_fail` 残留**（帧数已按现场反馈去掉） |
+| `/api/stations` | `grid` 带 `y_pitch=374.3333` / `z_pitch=42.4`（页面 `nearestStation` 依赖它） |
+| 机构零接触 | `data/runs` 不存在 |
+
+备份：`index.html.bak-20260921-113329`（上一版）、`index.html.bak-20260921-154051`、
+`.env.bak-20260921-152316`。
+
+### 15.4 真机复核抓到的一处"死预告"（本节最值得记的一条）
+
+发版后用**无头浏览器直接打现场 URL** 取渲染后的 DOM（真页面 + 真 API，**不用桩**），
+发现抓拍下方的 `#capnote` 是**空的**：
+
+- **根因**：页面 `posNow()` 读 `lastStatus.machine.real_pos`，而 `console.status()` 里
+  `connected` 的定义就是 `source == "controller"`，`source` 只有 `station`（巡检中由当前
+  站位推出）或 `none` —— console 按 ADR-0004/0013 **从不主动连控制器**（单会话设备，
+  只有执行方碰它）。现场实测 `real_pos: null` / `pos_source: "none"`，所以
+  **"位置读不到"是常态**；早先的写法在这条常态下走到 `else` 留空。
+- **它为什么算缺陷**：这是同一毛病的第二次出现（第一次是"实时显示上游累计帧数"）——
+  **UI 上摆了一个在真实运行条件下不产生任何输出的元素**。单测与 jsdom 都测不出来，
+  因为**假后端总是给 `real_pos`**，假件的默认值比现场"更好"。
+- **修法**：分档说清规则，末档（现场常态）必须非空：选中站位→留空；位置+站位表都有→
+  具体站名 + ΔY/ΔZ；只有位置→只说规则；**位置未知→"拍照后按实际位置归到最近的格点
+  （归到哪一站写在下方结果里）"**。**不**拿"最后成功目标"去猜站名——抓拍前机构可能已被
+  别处挪过，猜错比不猜更坏（告诉他归 S102、结果写成 S101）。
+- **纪律**：① 页面类改动上线后，用 `chrome --headless --dump-dom <现场URL>` 抓**渲染值**
+  复核，这一步不需要桩、最省事；② 假件要能表达现场**真实的**取值（含 `null`/`"none"`），
+  否则兜底分支永远测不到；③ 判据不是"有 else 分支"，而是"这条分支在现场参数下真的会被
+  走到吗"。
+
+修好后再取一次现场 DOM，`#capnote` 渲染为
+`未选站位 → 拍照后按实际位置归到最近的格点（归到哪一站写在下方结果里）`。
+
+### 15.5 回滚
+
+```bash
+# 后端（回到 P2-1 那一版镜像）
+cd /home/sysadmin/algorithm/mushroom_service
+cp .env.bak-20260921-152316 .env
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_patrol mushroom_console mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate \
+  mushroom_patrol mushroom_console mushroom_preview
+# 页面（只回页面，不碰容器镜像）
+cd /home/sysadmin/algorithm/mushroom_patrol/web
+cp -a index.html.bak-20260921-154051 index.html     # → 90610 B / b077b736…
+cp -a index.html.bak-20260921-113329 index.html     # → 88763 B / 0db2d591…（P2-1 原版）
+docker restart mushroom_console_web
+```
