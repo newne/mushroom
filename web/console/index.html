@@ -90,12 +90,24 @@
         --ok:#18794e;--warn:#a35d00;--bad:#c73535;--accent:#1f6feb;
         --soft:#f7f9fb;--accent-soft:#e8f0fe;--ok-soft:#e8f5ee;--bad-soft:#fcecec;
         --shadow:0 1px 2px rgba(24,38,52,.06),0 4px 14px rgba(24,38,52,.04)}
-  html,body{height:100%;overflow:hidden}
+  html,body{height:100%;overflow:hidden;margin:0}
   body{display:flex;flex-direction:column;background:var(--bg);color:var(--fg);
        font-family:"Aptos","Segoe UI","Microsoft YaHei",sans-serif;font-size:13px}
-  header{height:52px;flex:0 0 52px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line);
+  /* 2026-09-21 修「实时/历史被信息遮挡」：页头原先**没有 display:flex** ——
+     `h1` 是块级元素独占一行，后面那串 inline 控件（模式切换/连接状态/位置/轮次）
+     必然换到第二行；而 header 是固定 52px、默认 `overflow:visible`，溢出的一行就画到
+     页头盒子**外面**，被紧随其后的 `#gate`（有底色）盖住。实测 `scrollHeight 85 >
+     clientHeight 51`、按钮底 93.4 > 页头底 60、按钮中心点命中的是 `DIV#gate`，
+     而且与窗口宽度无关（1920/1680/1440 一模一样）。
+     现在排成一行：`align-items:center` 竖直居中，两段**长度可变**的文字（位置/轮次）
+     自己收缩并省略，不去挤别人。 */
+  header{height:52px;flex:0 0 52px;display:flex;align-items:center;gap:12px;padding:0 16px;
+         background:var(--panel);border-bottom:1px solid var(--line);
          box-shadow:0 1px 5px rgba(24,38,52,.04)}
-  h1{font-size:16px;letter-spacing:.01em}
+  h1{font-size:16px;letter-spacing:.01em;margin:0;flex:0 0 auto;white-space:nowrap}
+  #modeSeg{flex:0 0 auto}
+  header #pill{flex:0 0 auto}
+  #posn,#roundinfo{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .pill{font-weight:600;background:var(--soft)}
   #gate{height:36px;flex:0 0 36px;display:flex;align-items:center;padding:0 16px;font-size:12px;border-bottom:1px solid var(--line)}
   #gate.allow{background:var(--ok-soft);color:#12613d} #gate.deny{background:var(--bad-soft);color:#8e2424}
