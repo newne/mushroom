@@ -73,7 +73,9 @@
   .legend{font-size:12px;color:var(--dim);display:flex;gap:14px;margin-top:4px}
   .legend i{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:4px}
   /* ---- 实时画面（MJPEG，中栏第一张）----
-     框必须与画面的**真实宽高比**一致（`--pv-k`）：源流 1280×718、抓拍 2880×1616，两者同比。
+     框必须与画面的**真实宽高比**一致（`--pv-k`）：取**相机原生 2880×1616**（抓拍就是它，
+     预览自 2026-09-21 起也按原生输出）。**不要写 1280×718**——那是降采样后的派生值，
+     会随 `PREVIEW_SCALE` 过期；相机原生比例才是与档位无关的那一个。
      早先框写死 16:9，同时 `width:100%` 让它吃满整栏，`max-height:44vh` 再把它压矮 ——
      框的**有效**宽高比被拉到 2.3~2.8，`object-fit:contain` 只能按高度把画面缩进框里，
      左右各留一条黑边（2026-09-21 实测：1080p 每侧 211px，画面只占框的 63%；1366/1440 各
@@ -106,10 +108,12 @@
         --ok:#18794e;--warn:#a35d00;--bad:#c73535;--accent:#1f6feb;
         --soft:#f7f9fb;--accent-soft:#e8f0fe;--ok-soft:#e8f5ee;--bad-soft:#fcecec;
         --shadow:0 1px 2px rgba(24,38,52,.06),0 4px 14px rgba(24,38,52,.04);
-        /* 实时画面：--pv-k = 画面的真实宽高比（源流 1280×718，抓拍 2880×1616，同比例），
-           --pv-h = 画面允许的最大高度。框宽 = --pv-h × --pv-k。改相机分辨率时**只改这里**，
-           否则黑边会回来（或改大了被 max-width 夹住、比例失真）。 */
-        --pv-k:1280/718;--pv-h:50vh}
+        /* 实时画面：--pv-k = **相机原生**宽高比 2880/1616（与预览的缩放档位解耦：
+           `PREVIEW_SCALE` 取 1280/1920/2880 时成像比例都还是这个传感器比例，
+           只在偶数取整上差 <0.1%）。--pv-h = 画面允许的最大高度。框宽 = --pv-h × --pv-k。
+           只有**换相机或改相机分辨率**时才改这里，否则黑边会回来
+           （或改大了被 max-width 夹住、比例失真）。 */
+        --pv-k:2880/1616;--pv-h:50vh}
   html,body{height:100%;overflow:hidden;margin:0}
   body{display:flex;flex-direction:column;background:var(--bg);color:var(--fg);
        font-family:"Aptos","Segoe UI","Microsoft YaHei",sans-serif;font-size:13px}
