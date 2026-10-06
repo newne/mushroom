@@ -12,8 +12,22 @@
   互不干扰；预览也**不留存任何图片**（照片只有「抓拍」会落索引与 MinIO）。
 * **一次转码、多人观看**：只有一个 ffmpeg 进程；观看者各自排队，慢客户端**丢帧**而不是
   把所有人拖住（队满即丢最旧的一帧）。
-* **ffmpeg 挂了要自愈**：RTSP 断流/相机重启都会让它退出，监督循环按退避重启，并把
-  最近一次错误与重启次数放进 `/healthz`，页面据此显示"画面断开"。
+* **ffmpeg 挂了要自愈**：**两种"挂了"都要接住**——
+  ① 进程退出（RTSP 断流、相机重启、鉴权被拒）：stdout 收到 EOF，监督循环按退避重启；
+  ② **进程还活着但再也不出帧**：靠 `FIRST_FRAME_GRACE_S`/`STALL_TIMEOUT_S` 的看门狗
+  主动换掉它。
+  只做 ① 是不够的，这是 2026-09-29 现场验证过的：`/healthz` 显示最后一帧是 09-29 03:09，
+  之后 **5 天零帧**，而 `restarts` 始终是 **0**——ffmpeg 既不写 stdout 也不退出，
+  `read_frames` 永远等不到 EOF，恢复逻辑一次都没跑。`docker logs` 里它留的最后一句是
+  `[vf#0:0] More than 100000 frames duplicated`。
+  ⚠️ **那句是 WARNING，不是死因**（一次性容器已实测：`-loglevel warning` 下照常打完
+  3000 帧、`EXIT=0`）。它只说明 `-r` 与源帧率错位、在复制帧多花带宽——是 §14/ADR「补记二」
+  记过的那个探针，**别把它当崩溃原因**。真正的死因在这条日志之外（读 RTSP 的 socket
+  停住、而 `-loglevel warning` 下没有任何一行错误）；能盖住这一类"静默卡死"的只有看门狗。
+  ⚠️ 顺带钉住一条：**别试图用 `-fps_mode passthrough` 去消掉那些重复帧**——它与 `-r`
+  同时出现会被 ffmpeg 7.1 直接拒绝（`One of -r/-fpsmax was specified together a non-CFR
+  -vsync/-fps_mode. This is contradictory.`），输出文件打不开、预览彻底没有画面。
+  最近一次错误与重启次数都放进 `/healthz`，页面据此显示"画面断开"。
 * **口令不外泄**：RTSP URL 里有相机口令，日志里一律打码。
 
 跑法（容器里的 `preview` 角色）：``python3 -m deploy.preview --rtsp rtsp://… --port 8090``
@@ -69,6 +83,21 @@ DEFAULT_FPS = 15
 #: ⚠️ 它是**硬编码在取命令行里**的，`.env` 改不动它——想调必须改这里并重建镜像。
 DEFAULT_QUALITY = 7
 RESTART_BACKOFF_S = (1.0, 2.0, 5.0, 10.0)
+
+# ---------- 看门狗：ffmpeg 活着但不出帧，也得有人管 ----------
+#
+# 2026-09-29 现场：ffmpeg 最后一帧之后既不写 stdout、也不退出，`restarts` 停在 0，
+# `/healthz` 一直 503，预览黑到 10-04 有人接管时才发现（5 天 6 小时）。
+# 监督循环唯一的恢复触发条件是 stdout EOF（= 进程退出），"进程还在但哑了"完全在它之外。
+# 这三个常量就是补那个洞的：**按"有没有新帧"判生死**，而不是按"进程还在不在"。
+#: 宽限：刚拉起 ffmpeg 时要连相机 + 出第一帧，给足时间（否则每次重启都自己把自己杀了）。
+FIRST_FRAME_GRACE_S = 25.0
+#: 稳态下超过这么久没有**新的一帧**就换进程。15 fps 下一帧是 67 ms，10 s ≈ 150 帧的
+#: 宽裕量：既能盖住 DVR 的偶发卡顿，又不会让画面停在旧帧上让人以为还活着。
+STALL_TIMEOUT_S = 10.0
+#: 看门狗的轮询间隔。它只读几个计数器，不必精确。
+WATCHDOG_POLL_S = 1.0
+
 SOI = b"\xff\xd8\xff"          # JPEG 起始
 EOI = b"\xff\xd9"              # JPEG 结束
 
@@ -242,19 +271,18 @@ class PreviewSupervisor:
                 continue
 
             stderr_task = asyncio.create_task(self._drain_stderr(self.proc))
+            # 看门狗与读流**并行**：它是"ffmpeg 活着但不出帧"这条路上唯一的救援。
+            # baseline 取此刻的帧数，这样重启后不会拿**上一路**留下的旧帧误判成"还在出帧"。
+            watchdog_task = asyncio.create_task(self._watchdog(self.proc, self.broadcaster.frames))
             try:
                 assert self.proc.stdout is not None
                 await read_frames(self.proc.stdout, self.broadcaster.publish)
             finally:
-                stderr_task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await stderr_task
-                if self.proc.returncode is None:
-                    self.proc.terminate()
-                    try:
-                        await asyncio.wait_for(self.proc.wait(), timeout=5)
-                    except TimeoutError:           # pragma: no cover - 不常见
-                        self.proc.kill()
+                for task in (stderr_task, watchdog_task):
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await task
+                await self._stop_proc(self.proc)
             if self._stop.is_set():
                 break
             self.restarts += 1
@@ -262,6 +290,47 @@ class PreviewSupervisor:
             self.log(f"转码退出（第 {self.restarts} 次），{delay:.0f} 秒后重试"
                      f"{'：' + self.last_error if self.last_error else ''}")
             await self._sleep(delay)
+
+    async def _stop_proc(self, proc: asyncio.subprocess.Process) -> None:
+        """把一个 ffmpeg 收掉：先礼后兵，5 秒不放手就杀。"""
+        if proc.returncode is None:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except TimeoutError:           # pragma: no cover - 不常见
+                proc.kill()
+
+    async def _watchdog(self, proc: asyncio.subprocess.Process, baseline: int) -> None:
+        """盯住"**这一路** ffmpeg 还有没有在出帧"，停了就把它换掉。
+
+        为什么不能只等 stdout EOF：ffmpeg 还活着却再也不写字节，是真的会发生的——读 RTSP
+        的 socket 停住（对端不再发包、TCP 又没断）是这一类里最典型的一种。那时
+        `read_frames` 挂着不返回，监督循环唯一的触发条件（进程退出）一次都不发生。
+        现场 2026-09-29 就是这样黑了 5 天多，而 `/healthz` 里的 `restarts` 始终是 0——
+        "ffmpeg 挂了要自愈"这句话当时是假的。
+
+        ⚠️ 判据用**帧数有没有在涨**，不用 `last_frame_at`：重启之后旧帧还挂在 broadcaster 上，
+        拿帧龄判会把刚拉起来、还没出第一帧的新进程立刻误杀。
+
+        两条时限：这一路**一帧都没出过**给 `FIRST_FRAME_GRACE_S`（连相机 + 首帧），
+        出过帧之后超过 `STALL_TIMEOUT_S` 没有新帧就换人。
+        """
+        frames = baseline
+        changed_at = time.monotonic()
+        while not self._stop.is_set():
+            await asyncio.sleep(WATCHDOG_POLL_S)
+            now_frames = self.broadcaster.frames
+            if now_frames != frames:
+                frames, changed_at = now_frames, time.monotonic()
+                continue
+            limit = STALL_TIMEOUT_S if now_frames > baseline else FIRST_FRAME_GRACE_S
+            waited = time.monotonic() - changed_at
+            if waited > limit:
+                self.last_error = (f"画面停滞 {waited:.0f} 秒"
+                                   f"（ffmpeg 进程还在、但没有新帧：{frames} 帧后就没有了）")
+                self.log(f"! {self.last_error}，换掉这个 ffmpeg")
+                await self._stop_proc(proc)
+                return
 
     async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
         assert proc.stderr is not None

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -210,6 +211,87 @@ async def test_supervisor_publishes_frames_then_restarts_with_backoff(monkeypatc
     # （上机第一版只打了末尾 6 个参数，日志成了"7 -f image2pipe …"，等于什么都没说。）
     started = next(m for m in logs if m.startswith("启动转码"))
     assert started == "启动转码：ffmpeg -i rtsp://admin:***@h/x", "整条命令都要在，口令要打码"
+
+
+# ---------- 看门狗：ffmpeg 活着但不出帧（2026-09-29 现场黑了 5 天的那一种） ----------
+
+
+@pytest.mark.anyio
+async def test_watchdog_replaces_an_ffmpeg_that_is_alive_but_silent(monkeypatch):
+    """**现场 2026-09-29 黑了一周的那一种**：ffmpeg 进程还在、stdout 也还开着，但再也不
+    写字节（读 RTSP 的 socket 停住是最典型的一种）。这时 `read_frames` 永远等不到 EOF，
+    监督循环唯一那条"进程退出 → 重启"的路一次都不走，`/healthz` 就一直 503 而 `restarts`
+    停在 0——现场那次是 5 天零帧、`restarts: 0`。
+
+    所以判据必须是"有没有新帧"，而且得由看门狗**主动**把进程换掉。
+
+    `baseline=0` 表示"这一路 ffmpeg 起来时 broadcaster 还是空的"——它已经出过 1 帧，
+    然后就哑了，正是现场那个形状。
+    """
+    monkeypatch.setattr("deploy.preview.WATCHDOG_POLL_S", 0.02)
+    monkeypatch.setattr("deploy.preview.STALL_TIMEOUT_S", 0.2)
+    b = Broadcaster()
+    b.publish(JPEG_A)                     # 这一路出过的唯一一帧，之后就停了
+    logs: list[str] = []
+    sup = PreviewSupervisor(["ffmpeg"], b, log=logs.append)
+    proc = FakeProc([], returncode=None)  # 一帧都不给，却也不退出
+
+    await asyncio.wait_for(sup._watchdog(proc, baseline=0), timeout=5)
+
+    assert proc.terminated, "活着但不出帧的 ffmpeg 必须被换掉"
+    assert sup.last_error and "停滞" in sup.last_error, \
+        "换掉它的理由要留下来：/healthz 的 last_error 是现场唯一的线索"
+    assert any("停滞" in m for m in logs)
+
+
+@pytest.mark.anyio
+async def test_watchdog_leaves_a_streaming_ffmpeg_alone(monkeypatch):
+    """反证：还在正常出帧的 ffmpeg 不能被误杀（否则每次重启都会自己把自己杀了）。"""
+    monkeypatch.setattr("deploy.preview.WATCHDOG_POLL_S", 0.02)
+    monkeypatch.setattr("deploy.preview.STALL_TIMEOUT_S", 0.2)
+    b = Broadcaster()
+    b.publish(JPEG_A)
+    sup = PreviewSupervisor(["ffmpeg"], b, log=lambda _m: None)
+    proc = FakeProc([], returncode=None)
+
+    task = asyncio.create_task(sup._watchdog(proc, baseline=0))
+    for _ in range(10):                   # 每 50 ms 一帧，10 轮都远小于 200 ms 的上限
+        await asyncio.sleep(0.05)
+        b.publish(JPEG_B)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert not proc.terminated, "还在出帧就被杀掉 = 误杀"
+    assert sup.last_error is None
+
+
+@pytest.mark.anyio
+async def test_watchdog_graces_a_fresh_ffmpeg_that_has_not_produced_its_first_frame(monkeypatch):
+    """刚拉起的 ffmpeg 要有宽限去连相机（首帧可能几秒才来）。
+
+    `STALL_TIMEOUT_S` 故意设得比 `FIRST_FRAME_GRACE_S` 小：这样"空窗超过 stall 时限"这件事
+    本身就发生了，唯一能救它的是宽限。判据也只能是"**这一路**出没出过一帧"——刚重启时
+    broadcaster 上还挂着上一路的旧帧，拿全局帧龄判会把新进程立刻误杀。
+    """
+    monkeypatch.setattr("deploy.preview.WATCHDOG_POLL_S", 0.02)
+    monkeypatch.setattr("deploy.preview.STALL_TIMEOUT_S", 0.1)
+    monkeypatch.setattr("deploy.preview.FIRST_FRAME_GRACE_S", 5.0)
+    b = Broadcaster()
+    b.publish(JPEG_A)                     # 旧帧，它是上一路出的
+    sup = PreviewSupervisor(["ffmpeg"], b, log=lambda _m: None)
+    proc = FakeProc([], returncode=None)
+
+    task = asyncio.create_task(sup._watchdog(proc, baseline=b.frames))
+    await asyncio.sleep(0.5)              # 空窗 0.5 s：超过 stall、不超过 grace
+    assert not proc.terminated, "还没出首帧就被杀，重启会变成自杀循环"
+    b.publish(JPEG_B)                     # 首帧到了
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert sup.last_error is None
 
 
 # ---------- HTTP 面 ----------
