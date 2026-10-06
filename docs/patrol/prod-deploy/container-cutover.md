@@ -1146,3 +1146,145 @@ docker restart mushroom_console_web
 2. **比例这类"单一来源"必须只有一处。** 改前 `aspect-ratio` 同时出现在 `.pvwrap` 基线和
    `@media (max-height:820px)` 覆盖里，两处不一致就是黑边的一半来源。现在只有 `--pv-k`
    一处，并且在那条媒体查询旁写了"⚠️ 不要在这里改比例"。
+
+---
+
+## 17. 2026-10-04：实时预览黑了 5 天——监督循环只认"进程退出"
+
+**现场报告**：接管后「实时画面」显示 `预览服务暂时没有画面（上游 HTTP 503）`。
+
+那句话是 `console.py` 的 `/api/preview/status` 在转述上游状态码（ADR-0017 落地形态第 1 条
+的既定形状），不是预览服务自己的判断。**"暂时"两个字是错的**，读一次状态就能拆掉。
+
+### 17.1 现象与现场证据（只读，不需要进容器）
+
+```bash
+curl -s 'http://10.77.77.39:8001/api/preview/status'
+# {"available":false,
+#  "upstream":{"ok":false,"frames":8642060,"viewers":0,"last_frame_age_s":453587.16,
+#              "uptime_s":1029736.8,"restarts":0,
+#              "last_error":"[vf#0:0 @ 0x579af8f63640] More than 100000 frames duplicated"},
+#  "error":"预览服务暂时没有画面（上游 HTTP 503）"}
+```
+
+| 读数 | 换算 | 结论 |
+| --- | --- | --- |
+| `uptime_s` 1029736.8 | ≈11.92 天 | 容器 2026-09-22 11:03 起没重启过 |
+| `last_frame_age_s` 453587 | ≈5.25 天 | **最后一帧 2026-09-29 03:09** |
+| `frames` 8642060 | ÷ 6.67 天 = **15.0 fps** | 死之前一路满帧 ⇒ 相机侧没问题 |
+| `restarts` **0** | — | **恢复逻辑一次都没跑**，这才是缺陷 |
+
+同一时刻 `/api/status` 里 patrol/console 一切正常（`machine.state: IDLE`、
+`room.allowed:false` 第 66 天）、采图服务 `ready:true` ⇒ 只有预览这一路死了，
+`data/runs` 不存在（机构零接触）。
+
+### 17.2 死因不是那句 `duplicated`，也不是 ffmpeg
+
+`last_error` 是 ffmpeg **最后一句 stderr**，极易被当成死因。用部署镜像里的同一版 ffmpeg
+（7.1.5）做一次性判定——人为制造海量重复帧，看它是警告还是致命：
+
+```bash
+IMG=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:<现役 tag>
+docker run --rm --entrypoint sh "$IMG" -c \
+  'ffmpeg -hide_banner -loglevel warning -f lavfi -i testsrc=size=64x64:rate=1 -t 3 \
+     -r 1000 -q:v 7 -f image2pipe -c:v mjpeg - > /dev/null; echo EXIT=$?'
+# [vf#0:0 @ 0x…] More than 1000 frames duplicated
+# EXIT=0                    ← 警告：照常跑完（管道口径实测写出 3000 帧）
+```
+
+⇒ 那句是**警告**（ADR-0017 补记二 §2 把它当"源帧率探针"是**对的**），**不是**死因；它只说明
+`-r` 与源帧率错位、在复制帧多花带宽。真正的死因在那条日志**之外**：ffmpeg 既不写 stdout、
+也不退出，而 `-loglevel warning` 下一次卡死**不留任何一行错误**——`last_error` 于是永远
+停在那句旧警告上。
+
+**缺陷在监督循环**：`run_forever` 只等 stdout EOF（= 进程退出）这一种"挂了"，
+「进程还在但哑了」完全在它之外（读 RTSP 的 socket 停住是最典型的一种）。所以它一边
+**忠实地**报 503（这是它对的地方），一边**没有任何东西去救它**。
+
+### 17.3 修法（`8d01f90`）：看门狗，按"有没有新帧"判生死
+
+```python
+FIRST_FRAME_GRACE_S = 25.0   # 这一路一帧都没出过：够连相机 + 出首帧
+STALL_TIMEOUT_S     = 10.0   # 出过帧之后：10 s（≈150 帧）没有新帧就换人
+```
+
+`_watchdog` 与 `read_frames` **并行**跑；超时即 `terminate()`（5 s 不放手升级 `kill()`），
+进程一死 stdout 即 EOF，**原有的退避重启路径原样接管**（不改动它）。两条细节都有单测钉住：
+
+- 判据是"**这一路**的帧数有没有在涨"，不是全局帧龄——重启后 broadcaster 上还挂着上一路的
+  旧帧，拿帧龄判会把刚拉起、还没出首帧的新进程立刻误杀（自杀循环）；
+- 换掉它的理由写进 `last_error`（`画面停滞 N 秒（ffmpeg 进程还在、但没有新帧…）`），
+  下一次同类故障在 `/api/preview/status` 里直接可读。
+
+### 17.4 发版范围：**必须重建 `mushroom_patrol` 镜像**（preview 的代码在镜像里）
+
+不是"只改取值"那一档，也不是页面-only。`PATROL_IMAGE` 一把影响 patrol / console / preview
+三个，但本次只需要**重建 preview 这一个容器**（`--no-deps`，与 ADR-0017 补记二同一条路）。
+
+```bash
+# 开发机（WSL）：worktree 内容 = main@8d01f90
+cd /mnt/c/Users/niucg1/WorkBuddy/Worktrees/mushroom/feat-patrol-merge-17681f41
+REG=registry.cn-beijing.aliyuncs.com/ncgnewne
+TAG=0.1.0-$(date +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD)
+docker build -f docker/Dockerfile.patrol -t $REG/mushroom_patrol:$TAG .
+docker push  $REG/mushroom_patrol:$TAG
+```
+
+```bash
+# 库房主机：钉 tag + 只重建 preview
+cd /home/sysadmin/algorithm/mushroom_service
+cp -a .env .env.bak-$(date +%Y%m%d-%H%M%S)
+sed -i "s|^PATROL_IMAGE=.*|PATROL_IMAGE=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:$TAG|" .env
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_preview
+```
+
+### 17.5 现场验收（含一条**不用等一周**的演练）
+
+```bash
+# A) 十分钟内：画面应当直接回来
+curl -s 'http://10.77.77.39:8001/api/preview/status'      # available:true、restarts:0、last_frame_age_s<1
+docker logs mushroom_preview 2>&1 | grep '启动转码'        # 那行会打出真实的 -vf/-r/fps
+
+# B) 确认容器里真是这一版（部署镜像的常规判据）
+docker exec mushroom_preview grep -c '_watchdog' /srv/deploy/src/deploy/preview.py   # 期望 ≥1
+
+# C) **看门狗演练**：把 ffmpeg 冻住（SIGSTOP = 进程还在、一个字节都不再写）
+docker exec mushroom_preview sh -c \
+  'for p in /proc/[0-9]*; do [ "$(cat $p/comm 2>/dev/null)" = ffmpeg ] && kill -STOP ${p#/proc/}; done'
+```
+
+期望（C 之后累计 ≈15 s，然后画面自己回来）：
+
+| 时刻 | 现象 | 说明 |
+| --- | --- | --- |
+| ~+10 s | 日志出现 `! 画面停滞 N 秒（ffmpeg 进程还在、但没有新帧…），换掉这个 ffmpeg` | `STALL_TIMEOUT_S` 到点 |
+| ~+15 s | 进程被 **SIGKILL** 收掉（日志接着出现 `转码退出（第 1 次），1 秒后重试`） | SIGSTOP 中的进程**不理会 SIGTERM**，所以必然走 `_stop_proc` 的 5 s 超时升级路径——这正是单测里标了 `pragma: no cover` 的那一段，本演练顺手覆盖它 |
+| ~+16 s | `/api/preview/status` → `restarts:1`、`last_frame_age_s<1`、`available:true`，画面恢复 | 退避 1 s 后重启 |
+
+> 演练用的是 SIGSTOP，**不会**碰相机、控制器与采图服务；`restarts` 会从 0 变 1，
+> 演练完在页面下方事件里留个记录即可（它本来就是"恢复过"的账）。
+
+### 17.6 回滚
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_service
+cp .env.bak-<STAMP> .env                    # 回到 0.1.0-20260921151249-39aacfe
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_preview
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_preview
+```
+
+> 回滚只影响预览：看门狗是新加的旁路逻辑，**不改变任何既有行为**（`-r`/`-vf`/`-q:v` 与
+> 退避序列一个字节没动），所以回滚的动机基本只可能是"演练不满意"。
+
+### 17.7 这一轮留下的两条结论（别再踩）
+
+1. **`-loglevel warning` 让"静默卡死"没有任何痕迹**——这正是本次能黑 5 天的原因。看门狗把
+   恢复做成了自动的，但**排障面**仍是一条欠账：真要弄清 ffmpeg 当时卡在哪，需要把
+   `-loglevel` 提到 `info`（或给 RTSP 加 `-timeout`，见第 2 条）——两者都改变行为，
+   本次**没做**（ADR-0017 补记三记了取舍）。
+2. **RTSP 读超时只有 demuxer 那一个名字有效**：`-rw_timeout` 对 RTSP **不生效**（实测挂死），
+   得用 `-timeout <微秒>`（实测 `Connection timed out`，EXIT=146）。本次未采用——它只覆盖
+   "socket 读超时"一类，而看门狗覆盖全部静默类；现场链路抖动大，加短超时反而可能频繁换流。
+   哪天要做，先按 ADR-0017 补记三的那条一次性容器命令验一遍再上。
+

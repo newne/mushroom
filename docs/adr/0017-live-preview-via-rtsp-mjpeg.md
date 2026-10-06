@@ -225,3 +225,82 @@ patrol/console 未碰；用户在场选定）。
    `mushroom_preview` 日志里喊 `More than 10000 frames duplicated`（`-loglevel warning`
    也进日志）——源帧率什么时候又变了，`docker logs mushroom_preview | grep -i duplicat`
    一眼便知。当前（15 对齐）这条探针应当是**永远沉默**的；哪天它响了，就是 DVR 又被改了。
+
+---
+
+## 补记三（2026-10-04）：预览黑了 5 天而 `restarts: 0`——监督循环只认"进程退出"
+
+**现象**（现场 2026-10-04 08:42 接管时报告）：页面「实时画面」显示
+`预览服务暂时没有画面（上游 HTTP 503）`。这个话术来自 `console.py` 的
+`/api/preview/status`（`上游 HTTP {status}`），**不是预览服务自己的话**——它只是把上游
+`/healthz` 的 503 照实转述（ADR-0017 §落地形态 第 1 条设计的形态）。读一次现场状态就能把
+"暂时"拆掉：
+
+```bash
+curl -s 'http://10.77.77.39:8001/api/preview/status'
+# {"available":false,
+#  "upstream":{"ok":false,"frames":8642060,"viewers":0,
+#              "last_frame_age_s":453587.16,"uptime_s":1029736.8,"restarts":0,
+#              "last_error":"[vf#0:0 @ 0x…] More than 100000 frames duplicated"},
+#  "error":"预览服务暂时没有画面（上游 HTTP 503）"}
+```
+
+| 读数 | 含义 |
+| --- | --- |
+| `uptime_s` ≈ 11.9 天 | 容器 2026-09-22 11:03 起没重启过 |
+| `last_frame_age_s` ≈ 5.25 天 | **最后一帧是 2026-09-29 03:09**，之后 5 天 6 小时零帧 |
+| `frames` = 8 642 060 | ÷ 6.67 天 = **15.0 fps**——死之前一路满帧 |
+| `restarts: 0` | **监督循环一次都没触发** |
+
+### 死因不是那句 `duplicated`
+
+`last_error` 是 ffmpeg **最后一句 stderr**，容易被当成死因。用部署镜像里的同一版 ffmpeg
+（7.1.5）做过一次性判定——人为制造海量重复帧，看它是警告还是致命：
+
+```bash
+IMG=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:<tag>
+docker run --rm --entrypoint sh "$IMG" -c \
+  'ffmpeg -hide_banner -loglevel warning -f lavfi -i testsrc=size=64x64:rate=1 -t 3 \
+     -r 1000 -q:v 7 -f image2pipe -c:v mjpeg - > /dev/null; echo EXIT=$?'
+# [vf#0:0 @ 0x…] More than 1000 frames duplicated
+# EXIT=0                       ← 警告：照常跑完
+```
+
+⇒ 那句 `More than N frames duplicated` 是**警告**（补记二 §2 的"探针"定位是对的），
+**不是**崩溃原因。它只说明 `-r` 与源帧率错位、在复制帧多花带宽。
+
+**真正的死因在这条日志之外**：ffmpeg 既不写 stdout、也不退出，而 `-loglevel warning` 下
+一次卡死**不会留下任何一行错误**——`last_error` 于是永远停在那句旧警告上，看着像"警告致
+死"。最典型的一类是读 RTSP 的 socket 停住（对端不再发包、TCP 又没断）：无超时、无输出、
+无退出。
+
+### 缺陷在监督循环，不在 ffmpeg
+
+`PreviewSupervisor.run_forever`（以及它的文档字符串"ffmpeg 挂了要自愈"）只覆盖**进程退出**
+这一种"挂了"：`read_frames` 读到 EOF 才返回，才走退避重启。**"进程还活着但哑了"完全在它
+之外**——于是 `/healthz` 一直诚实地报 503（这是它对的地方），却没有任何东西去救它。
+`last_frame_age_s` 一路涨到 4.5×10⁵ 秒而 `restarts` 还是 0，就是这条洞的指纹。
+
+修法（`FIRST_FRAME_GRACE_S` / `STALL_TIMEOUT_S` / `_watchdog`）：**按"有没有新帧"判生死**，
+而不是按"进程还在不在"。看门狗与 `read_frames` 并行跑，超时即 `terminate()`（5 s 不放手
+升级 `kill()`），进程一死 stdout 即 EOF，原有的退避重启路径自然接管。两条时限：这一路
+**一帧都没出过**给 25 s（连相机 + 首帧），出过帧之后 10 s（≈150 帧）没有新帧就换人。
+理由记进 `last_error`，下一次同类故障在 `/api/preview/status` 里直接可读。
+
+判据必须是"**这一路**出没出过一帧"，不能看全局 `last_frame_at`：重启后 broadcaster 上还挂着
+上一路的旧帧，拿帧龄判会把刚拉起来、还没出首帧的新进程立刻误杀（会造成重启自杀循环）。
+
+### 两条被证伪/收紧的旁路，别再踩
+
+| 想法 | 一次性容器实测（ffmpeg 7.1.5，部署镜像） | 结论 |
+| --- | --- | --- |
+| 加 `-fps_mode passthrough` 消掉重复帧 | `One of -r/-fpsmax was specified together a non-CFR -vsync/-fps_mode. This is contradictory.` → `Error opening output file -`，写出 0 帧 | **与 `-r` 不能共存**：直接用会让预览彻底没有画面。要 passthrough 必须同时去掉 `-r`（那就丢掉帧率上限），本 ADR 决定不动 `-r`——它是 §14/补记二 两次现场标定的结果 |
+| 加 `-rw_timeout 5000000` 给 RTSP 读加超时 | 连不可达主机时**照旧挂死**（20 s 外框超时才结束） | `-rw_timeout` 对 RTSP 路径**不生效**（7.1 已弃用） |
+| 改用 RTSP demuxer 的 `-timeout 5000000`（微秒） | `Connection to tcp://…:554?timeout=5000000 failed: Connection timed out`（EXIT=146） | **有效**。本次**未采用**：它只能覆盖"socket 读超时"这一类，而看门狗覆盖全部静默类；且现场链路抖动大，加短超时反而可能频繁换流。留作下次可选加固 |
+
+### 验收判据
+
+`restarts` 不再是"永远 0"：卡死被看门狗接住时会 +1，`last_error` 出现
+`画面停滞 N 秒（ffmpeg 进程还在、但没有新帧…）`。现场可以**不用等一周**直接演练——
+把 ffmpeg 冻住（`kill -STOP`），期望 ≤10 s 触发看门狗、再 5 s 升级为 SIGKILL、
+随后 `frames` 继续增长、画面恢复；详见 `container-cutover.md` §17.5。
