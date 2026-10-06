@@ -35,7 +35,7 @@ def test_next_run_delay_rejects_out_of_range():
 def test_station_list_is_generated_then_reloaded(tmp_path):
     path = tmp_path / "stations.yaml"
     first = load_station_list(str(path), camera_ip="192.168.1.238")
-    assert len(first) == GRID_COLS * GRID_LAYERS == 60
+    assert len(first) == GRID_COLS * GRID_LAYERS == 48
     assert path.exists(), "首次应落盘，避免每轮重算"
     assert all(s.camera_ip == "192.168.1.238" for s in first)
 

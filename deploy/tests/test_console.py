@@ -197,7 +197,7 @@ def test_stations_endpoint_carries_grid_and_targets(tmp_path):
     with make_client(tmp_path) as c:
         got = c.get("/api/stations").json()
     assert got["ok"] is True
-    assert got["grid"]["cols"] == 12 and got["grid"]["layers"] == 5
+    assert got["grid"]["cols"] == 12 and got["grid"]["layers"] == 4
     assert len(got["stations"]) == 2
     assert got["stations"][0]["target_y"] == got["stations"][0]["y"]
 

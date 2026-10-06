@@ -46,8 +46,8 @@ def test_migrated_table_matches_the_new_grid(tmp_path):
     """迁移后的坐标必须与**新网格推导出来的坐标逐点相同**。
 
     这条是整件事的验收判据：代码（`layer_z`）与数据（`stations.yaml`）在迁移后必须说
-    同一件事——第 1 层在最上（z 最小）、第 5 层在最下。用"加 212"而不是"取反"就会把
-    第 1 层送到第 5 层的位置，而这条测试会当场发现。
+    同一件事——第 1 层在最上（z 最小）、第 4 层在最下。用"加 212"而不是"取反"就会把
+    第 1 层送到第 4 层的位置，而这条测试会当场发现。
     """
     from patrol.stations import GRID_LAYERS, build_grid, layer_z
 
@@ -57,18 +57,18 @@ def test_migrated_table_matches_the_new_grid(tmp_path):
                 z=old_layer_z(1))
         for c in range(1, 3)
     ] + [
-        Station(id=f"S5{c:02d}", box_id=f"B5{c:02d}", y=100.0 * c, layer=5, col=c,
+        Station(id=f"S4{c:02d}", box_id=f"B4{c:02d}", y=100.0 * c, layer=4, col=c,
                 z=old_layer_z(GRID_LAYERS))
         for c in range(1, 3)
     ]
-    assert old_grid[0].z == pytest.approx(-21.2) and old_grid[2].z == pytest.approx(-190.8)
+    assert old_grid[0].z == pytest.approx(-26.5) and old_grid[2].z == pytest.approx(-185.5)
 
     path = write(tmp_path / "stations.yaml", old_grid)
     mirror_z_in_file(path, log=lambda _m: None)
 
     got = {s.id: s.z for s in load_stations(path)}
     assert got["S101"] == pytest.approx(layer_z(1))
-    assert got["S501"] == pytest.approx(layer_z(GRID_LAYERS))
+    assert got["S401"] == pytest.approx(layer_z(GRID_LAYERS))
     new = {s.id: s.z for s in build_grid() if s.id in got}
     assert got == pytest.approx(new)
 

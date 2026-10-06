@@ -286,7 +286,8 @@ async def test_watchdog_graces_a_fresh_ffmpeg_that_has_not_produced_its_first_fr
     await asyncio.sleep(0.5)              # 空窗 0.5 s：超过 stall、不超过 grace
     assert not proc.terminated, "还没出首帧就被杀，重启会变成自杀循环"
     b.publish(JPEG_B)                     # 首帧到了
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0.02)             # 只等一小会儿：STALL_TIMEOUT_S=0.1，
+    #                                       再久就会在"已出首帧"之后触发停滞（那是另一条用例的事）
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task

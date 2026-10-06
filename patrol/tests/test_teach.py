@@ -98,7 +98,8 @@ def test_motion_verbs_are_delegated_to_m0_parser():
 
 def test_cell_of_decodes_grid_encoded_ids():
     assert cell_of("S105") == (1, 5)
-    assert cell_of("S512") == (5, 12)
+    assert cell_of("S412") == (4, 12)
+    assert cell_of("S512") is None             # 第 5 层已不存在（2026-10-07 由 5 层改为 4 层）
     assert cell_of("s101") == (1, 1)          # 大小写不敏感
     assert cell_of("S105-top45") == (1, 5)    # 双角度档后缀
 

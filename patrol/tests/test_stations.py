@@ -1,4 +1,4 @@
-"""站位网格（12 框 × 5 层）的几何与遍历序。"""
+"""站位网格（12 框 × 4 层）的几何与遍历序。"""
 
 from __future__ import annotations
 
@@ -20,23 +20,23 @@ from patrol.stations import (
 
 def test_grid_size_is_cols_times_layers_times_angles():
     st = build_grid()
-    assert len(st) == GRID_COLS * GRID_LAYERS == 60
-    assert len({s.id for s in st}) == 60
-    assert len({s.box_id for s in st}) == 60      # 每框 1 个站位
+    assert len(st) == GRID_COLS * GRID_LAYERS == 48
+    assert len({s.id for s in st}) == 48
+    assert len({s.box_id for s in st}) == 48      # 每框 1 个站位
     assert {s.angle_profile for s in st} == {"top45"}
 
 
 def test_station_ids_read_as_layer_and_col():
     st = {(s.layer, s.col): s for s in build_grid()}
     assert st[(1, 1)].id == "S101" and st[(1, 1)].box_id == "B101"
-    assert st[(5, 12)].id == "S512" and st[(5, 12)].box_id == "B512"
-    assert st[(5, 12)].cell == "5-12"
+    assert st[(4, 12)].id == "S412" and st[(4, 12)].box_id == "B412"
+    assert st[(4, 12)].cell == "4-12"
 
 
-def test_layer_one_is_at_the_top_and_layer_five_at_the_bottom():
+def test_layer_one_is_at_the_top_and_layer_four_at_the_bottom():
     """Z 原点在顶端、Z **向下为正**（ADR-0018）：第 1 层最靠近 0，层号越大 z 越大。"""
-    assert layer_z(1) == pytest.approx(42.4 / 2)
-    assert layer_z(GRID_LAYERS) == pytest.approx(212 - 42.4 / 2)
+    assert layer_z(1) == pytest.approx(53.0 / 2)
+    assert layer_z(GRID_LAYERS) == pytest.approx(212 - 53.0 / 2)
     assert layer_z(1) < layer_z(2) < layer_z(GRID_LAYERS)
 
 
@@ -87,7 +87,7 @@ def test_visit_order_is_serpentine_so_the_return_trip_is_free():
     layer2 = [s for s in st if s.layer == 2]
     assert [s.col for s in layer1] == list(range(1, GRID_COLS + 1))
     assert [s.col for s in layer2] == list(range(GRID_COLS, 0, -1))
-    # 换层处 Y 几乎不动（只有 Z 的 42.4mm），而不是从最右折回最左
+    # 换层处 Y 几乎不动（只有 Z 的 53mm），而不是从最右折回最左
     assert layer2[0].y == pytest.approx(layer1[-1].y)
     assert max(ys) - min(ys) == pytest.approx(4492 * (GRID_COLS - 1) / GRID_COLS)
 
@@ -111,7 +111,7 @@ def test_angles_dimension_can_be_reopened_without_touching_coordinates():
     """把双档加回来只是多一个角度档，坐标与框号不变。"""
     two = build_grid(angles=("top0", "top45"))
     assert len(two) == GRID_COLS * GRID_LAYERS * 2
-    assert len({s.box_id for s in two}) == 60
+    assert len({s.box_id for s in two}) == 48
     assert {s.id for s in two if s.layer == 1 and s.col == 1} == {"S101-top0", "S101-top45"}
 
 
@@ -150,7 +150,7 @@ def test_fill_camera_ip_leaves_complete_table_untouched():
 def test_nearest_is_the_station_itself_when_exactly_on_it():
     st = build_grid()
     assert nearest_station(st, col_y(1), layer_z(1)).id == "S101"
-    assert nearest_station(st, col_y(12), layer_z(5)).id == "S512"
+    assert nearest_station(st, col_y(12), layer_z(4)).id == "S412"
 
 
 def test_nearest_is_none_on_an_empty_table():
@@ -159,9 +159,9 @@ def test_nearest_is_none_on_an_empty_table():
 
 
 def test_nearest_switches_layer_at_half_a_layer():
-    """层号边界落在半层处（±21.2mm）：这是"这个点属于哪一层"的那条线。
+    """层号边界落在半层处（±26.5mm）：这是"这个点属于哪一层"的那条线。
 
-    Z 的层距只有 42.4mm，而 Y 的框距有 374mm —— 判错一层的代价是拍到隔壁层的菇，
+    Z 的层距只有 53mm，而 Y 的框距有 374mm —— 判错一层的代价是拍到隔壁层的菇，
     所以边界必须钉死，不能"大概往上靠"。
     """
     st = build_grid()
@@ -175,10 +175,10 @@ def test_nearest_compares_in_grid_units_not_raw_millimetres():
 
     构造一对必然分歧的候选：A 同 Y、偏 Z 50mm；B 同 Z、偏 Y 60mm。
     - 比毫米：A(50) < B(60) ⇒ 选 A
-    - 比格数：A 偏了 50/42.4 ≈ 1.18 层，B 只偏 60/374.3 ≈ 0.16 框 ⇒ 选 B
+    - 比格数：A 偏了 50/53 ≈ 0.94 层，B 只偏 60/374.3 ≈ 0.16 框 ⇒ 选 B
 
     B 才对：偏了整整一层意味着镜头压根不在那一层，而 Y 上偏 60mm 连半个框都不到。
-    直接比毫米的话，Y 的 374mm 格距会把 Z 的 42mm 完全盖住（见 nearest_station 注释）。
+    直接比毫米的话，Y 的 374mm 格距会把 Z 的 53mm 完全盖住（见 nearest_station 注释）。
     """
     py = grid_geometry()["y_pitch"]
     pz = grid_geometry()["z_pitch"]
