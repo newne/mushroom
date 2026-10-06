@@ -1316,3 +1316,78 @@ docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate 
 > 静默 5 天——那时才可能拿它去对 DVR 侧的事件（为什么对端不关连接）。
 > 在那之前，`docs/patrol/prod-deploy/probe-rtsp.py` 这类只读探测是查 DVR 的唯一手段。
 
+---
+
+## 18. 2026-10-06：换批次（mogu-107）+ 首轮巡检成功 + 触发链路欠账
+
+### 18.1 换批次：从生产系统取真值，不是手填
+
+现场"已有蘑菇入库"，而门禁还停在旧批次（`mogu-103 / 2026-08-01`，第 66 天 ⇒ 不放行）。
+按 §10/§14 的既定做法取真值：
+
+```bash
+# 1) 取数（口令只在 tools_mysql 容器内用，不过宿主命令行）
+docker exec tools_mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" mogu -N -B -e "select id, code_num, in_time, in_day_num, in_num, info_code, update_time from mo_gu_batch where del_flag = 0 and code_num = 611 order by in_time desc"'
+# 2) 先 --print 看判定，判成"本轮会巡检"才落盘（脚本自守卫）
+docker exec -i mushroom_patrol python3 -m deploy.fetch_room --room 611 --from - --print  < /tmp/batch611.tsv
+docker exec -i mushroom_patrol python3 -m deploy.fetch_room --room 611 --from - --out /app/data/room.yaml < /tmp/batch611.tsv
+# 3) 宿主同盘原子替换（install 会先 unlink，daemon 可能撞到"文件不存在"）
+cd /home/sysadmin/algorithm/mushroom_patrol/configs
+cp -a room.yaml room.yaml.bak-20261006 && cp ../data/room.yaml room.yaml.new && mv room.yaml.new room.yaml
+```
+
+结果：611 库现行批次 **`mogu-107`，`in_time=2026-09-30`**（生产口径第 7 天 ⇒ 我们口径第 **6** 天，
+落在 2–25 窗口内）；`/api/room` 立刻 `allowed:true`。
+**不需要重启任何容器**——`patrol_serve` 的 `room_fields()` 与 daemon 都是每轮现读 `room.yaml`
+（`m1.py` 传的是**路径**不是读好的对象，见其注释）。
+
+### 18.2 首轮巡检：60/60，全成功（生产上第一次跑成）
+
+手动投一次：`POST :8001/api/patrol/run?reason=batch-mogu-107-day6-first-round&by=agent`
+
+| 项 | 结果 |
+| --- | --- |
+| 轮次 | 21:03:05 → 21:12:49（9 分 44 秒） |
+| 站点 | `n_stations_seen: 60`、`n_results: 60`、**`n_failures: 0`**、`aborted: false`、`status: ok` |
+| 节奏 | 稳定 9.2 s/站 |
+| 落库 | prod 索引 60 行全 `ok=1`，每行带 `room_id=611 / entry_date=2026-09-30 / batch_no=mogu-107`，S101→S512 |
+| 机构 | 收尾回零，`state: IDLE` |
+| outbox | 0 条滞留（同步正常） |
+
+**顺带实测掉一个悬念**：全程**没有**停 `mushroom_preview`（它的 ffmpeg 一直占着一路 RTSP），
+60 站抓图 0 失败、节奏不变 ⇒ ADR-0017 §4 担心的"预览 + 抓拍并发"有了**整轮**实测证据
+（此前只有协商层探测）。
+
+### 18.3 ⚠️ 触发链路欠账：算法侧的 registrar **从未部署**
+
+"每 3 小时自动巡检"是 ADR-0012 §6，但现场从未发生（最后一次触发是 2026-09-17 的**手动**验收）：
+
+| 检查 | 证据 |
+| --- | --- |
+| 算法侧代码 | `mushroom_solution` 容器里 `PATROL_RUN_URL` 出现 **0 次**；环境变量里也没有 |
+| 算法侧镜像 | `0.1.0-20260320172444-a615909`（**2026-03-20**）——早于 ADR-0012（09-14） |
+| 它自己的调度 | `hourly_text_quality_inference`（`minute=25`）自 **2026-09-13 01:25** 起被连续跳过 **285 次**（`maximum number of running instances reached`）⇒ 一个实例卡了 3 周半（日志里对应 `mushroom_image_encoder._call_llama_api` 270 s 超时） |
+| 宿主 | 无 crontab、无 systemd timer |
+
+**代码其实早就写好了**：`src/scheduling/tasks/register_patrol_jobs.py`（`hour=*/3, minute=20`，
+只 POST 一次就走；409 视为正常）。问题在**发布**。
+
+**为什么不能"直接部署 main"**：main 的 `src/` 含一份**在建重构快照**（`cba6a40` 自述
+"非本次合并所写"；`a615909..main` 共 80 文件 +3618/−1209：新 `segmentation/` 包、
+`storage/models` 落库层、`vision/mushroom_image_encoder.py` 重写）。那是算法侧的独立发版决定。
+
+**已做的**：分支 **`alg/patrol-trigger` @ `6bedc5c`**，从现役基线 `a615909` 只摘两处
+（新增 `register_patrol_jobs.py` + `tasks/__init__.py` 注册），其余与现役镜像**逐字节一致**。
+在有 `codeenigma` 的机器上跑 `bash docker/build.sh` 即可（⚠️ `build.sh` 在缺 codeenigma 时
+**静默退回不加密构建**，不加密产物不符合 ADR-0012 §3——构建日志里必须看到
+`Building encrypted version` 与 `✓ CodeEnigma runtime file found`）。
+
+**同期已清掉卡死的 job**：`docker compose -f mushroom_solution.yml restart mushroom_solution`
+（只动这一个容器；10 s 内 healthy）。启动日志确认 `每小时文本/质量任务已添加 (每小时第25分钟执行)`，
+无新 skip。⚠️ 根因（一个实例挂住 + APScheduler 默认 `max_instances=1`）未修，**可能复发**；
+main 上重写过的 `mushroom_image_encoder.py` 也许已经处理了那次超时，属算法侧的判断。
+
+> 在算法镜像重建之前，**没有任何东西会触发巡检**。要么等 `alg/patrol-trigger` 构建上线，
+> 要么先用宿主 cron 顶上（`POST :8001/api/patrol/run`；端点本身有 fail-closed 门禁与
+> "同一时刻只认一条待处理请求"的 409 兜底）。
+
