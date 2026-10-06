@@ -1391,3 +1391,64 @@ main 上重写过的 `mushroom_image_encoder.py` 也许已经处理了那次超�
 > 要么先用宿主 cron 顶上（`POST :8001/api/patrol/run`；端点本身有 fail-closed 门禁与
 > "同一时刻只认一条待处理请求"的 409 兜底）。
 
+### 18.4 2026-10-06 深夜：算法侧 registrar 发版完成（`121f1b9`）
+
+**产物**：`registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:0.1.0-20261006222420-121f1b9`
+（digest `sha256:1f93321c…`，1.78GB，`encrypted: true`，`obfuscation_tool: codeenigma`）。
+分支 `alg/patrol-trigger` = `a615909` + 两处（registrar + 下面那个缩进修复）。
+
+**构建环境（本机，WSL）**——三条都是踩出来的：
+
+| 坑 | 症状 | 解法 |
+| --- | --- | --- |
+| codeenigma 直连 PyPI 太慢 | `uv tool install` 16MB 依赖下载卡 10 分钟超时 | `UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple`，**3 秒**装完 |
+| 缺 `poetry` | 混淆第 [2/3] 步 `Creating runtime package` 报 `No such file or directory: 'poetry'` → **出不了 runtime .so** | `uv tool install poetry` |
+| runtime ABI 必须对上目标镜像 | 默认 Python 3.14 装出来的 `.so` 是 `cpython-314`，进 3.12 的镜像必炸 | `uv tool install --python 3.12 codeenigma` → `codeenigma_runtime.cpython-312-x86_64-linux-gnu.so` |
+
+**基线里本来就有的两个缺陷（都在本分支里补掉了）**：
+
+1. `src/vision/get_env_status.py` **第 205 行缩进错误**——`python -m py_compile` 都过不去，
+   `codeenigma` 直接中止（`find src -name '*.py' | xargs py_compile` 全量扫过：179 个文件里
+   只此一个）。而**线上那份镜像里这个模块是混淆成功的** ⇒ 当时构建机的工作区是脏的
+   （本地改好没提交，tag 记的是 HEAD）。不补这一处，加密构建必失败。
+2. Dockerfile 的 `ARG ENCRYPTED=false` **声明在用它那个 `RUN` 的后面**，所以那个判断恒走
+   else 分支、日志永远打 `Note: runtime present in unencrypted build`。**只是账目显示**
+   （混淆在 docker 之前完成），别被它误导。
+
+**发版与踩坑**：
+
+```bash
+# 本机（WSL）：构建 + 只推版本 tag（**没动 :latest**）
+cd ~/alg-build && PUSH_IMAGE=false bash docker/build.sh
+docker push registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:0.1.0-20261006222420-121f1b9
+```
+
+⚠️ **现场 compose 的 tag 是硬编码在第 73 行、而且比线上跑的还旧**
+（compose `e4d3a2f`/2026-02-24 vs 实际 `a615909`/2026-03-20）⇒ 发版必须改这一行。
+⚠️ 改的时候**必须带行地址**：
+```bash
+sed -i '/^[[:space:]]*image:.*mushroom_solution:/ s|mushroom_solution:[^"]*|mushroom_solution:'"$TAG"'|' "$COMPOSE"
+```
+不带行地址的 `s|\(mushroom_solution:\)[^"]*|\1TAG|` 会把**服务名那一行**
+（`  mushroom_solution:`）一起改成 `  mushroom_solution:0.1.0-…` —— YAML 立刻
+`could not find expected ':'`。本次就踩了（`up -d` 因 `&&` 链中止**没执行**，容器没被换，
+从 `.bak-20261006-223010` 恢复后重做）。
+⚠️ 还有一个与本任务无关但会咬人的：**`| head -N` 截断管道会把远端命令一起带走**（SIGPIPE），
+本次第一次 `up -d` 就是这样"拉完镜像但没重建"。远端命令的输出用**文件重定向**，别接 `head`。
+
+**验收（逐条过）**：
+
+| 检查 | 结果 |
+| --- | --- |
+| 容器 | `mushroom_solution` 换到新 tag、`healthy`（15 s） |
+| **调度器注册了巡检任务** | 启动日志 `[SCHEDULER] 巡检任务已添加：每 3 小时第 20 分触发一次（只投请求，不等它跑完）` |
+| 触发地址可达（registrar 吞异常，这一步必须单独验） | 容器内 `GET http://172.17.0.1:8001/api/room` → **200**（`allowed:true / mogu-107 / 第 6 天`）；`GET /api/patrol/run` → 200 |
+| 巡检侧未受影响 | `mushroom_patrol/console/console_web/preview` 保持 `Up 2 weeks / 2 hours` |
+| 下一次自动触发 | 22:34 完成部署 ⇒ 最近一档 **00:20**（`hour=*/3` ⇒ 00/03/06/09/12/15/18/21 时） |
+
+**遗留（算法侧既有问题，非本次引入）**：日志里 `vision.mushroom_image_encoder._call_llama_api`
+**270 s 超时**（`Request timed out`）与 MLflow `403 Invalid Host header - possible DNS rebinding`
+反复出现——这正是 18.3 那个 `hourly_text_quality_inference` 卡死 3 周半的成因家族。
+main 上重写过的 `mushroom_image_encoder.py`（`cba6a40` 那张 WIP 快照里）也许已处理，
+需算法侧判断。
+
