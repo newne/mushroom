@@ -1200,6 +1200,7 @@ docker run --rm --entrypoint sh "$IMG" -c \
 **缺陷在监督循环**：`run_forever` 只等 stdout EOF（= 进程退出）这一种"挂了"，
 「进程还在但哑了」完全在它之外（读 RTSP 的 socket 停住是最典型的一种）。所以它一边
 **忠实地**报 503（这是它对的地方），一边**没有任何东西去救它**。
+（2026-10-06 上机取证把"读 RTSP 的 socket 停住"这一类钉成了实证，见 §17.8。）
 
 ### 17.3 修法（`8d01f90`）：看门狗，按"有没有新帧"判生死
 
@@ -1287,4 +1288,31 @@ docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate 
    得用 `-timeout <微秒>`（实测 `Connection timed out`，EXIT=146）。本次未采用——它只覆盖
    "socket 读超时"一类，而看门狗覆盖全部静默类；现场链路抖动大，加短超时反而可能频繁换流。
    哪天要做，先按 ADR-0017 补记三的那条一次性容器命令验一遍再上。
+
+### 17.8 补记（2026-10-06）：重启前的现场取证——socket 还 ESTABLISHED，ffmpeg 0 CPU
+
+上机重启**之前**先进容器取了一次证（只读），把 §17.2 的"死因在日志之外"钉成实证：
+
+| 取证 | 命令 | 结果 |
+| --- | --- | --- |
+| 进程还在 | `docker top mushroom_preview` | `ffmpeg … TIME 1-21:50:10`、`STIME Sep22` |
+| **它没在忙等** | 隔 3 s 采两次 `TIME` | **两次完全相同** ⇒ 这 3 秒消耗 0 CPU。⚠️ 那一列 `13` 是**生涯平均** %CPU，别当"当前在烧 CPU"读（`docker stats` 的当前值只有 0.14%） |
+| **但 socket 还连着** | 容器 netns 的 `/proc/net/tcp` | `080015AC:C85C → EE01A8C0:022A` ⇒ 本容器 → **192.168.1.238:554**，状态 `01` = **ESTABLISHED** |
+| 相机最后一眼 | `GET /api/preview/frame.jpg` | 真图，OSD `2026-09-29 03:05:07` / `CAM01` ⇒ 卡死前相机完全正常 |
+| 资源 | `docker stats --no-stream` | 293.7 MiB / 512 MiB、CPU 0.14% ⇒ 不是内存或算力问题 |
+| 只重启了 preview | `docker ps` | `preview Up 34 s (healthy)`；patrol / console / console_web 全部 `Up 2 weeks`；`/app/data/runs` 不存在 |
+
+**结论**：对端（DVR）停止发数据、但**没有关连接**；ffmpeg 没有读超时，于是挂在一次读上
+（0 CPU、无输出、无错误）。这正是 §17.2 说的那一类——**任何"看进程还在不在"的判据都救不了
+它**，只有看门狗（或读超时）能。顺带一句：这个容器在毫无产出地占着一路 ESTABLISHED 会话
+空了 2 周，重启本身也该做。
+
+**复发间隔**：容器 2026-09-22 11:03 起、最后一帧 2026-09-29 03:05 ⇒ **约 6 天 16 小时**。
+2026-10-06 20:56 已现场重启（`docker compose … restart mushroom_preview`，只动这一个容器），
+画面当即回来（`available:true`、`last_frame_age_s 0.05`、`frames` 重新计数）；但
+**只要看门狗没上机，大约一周后必然复现**。
+
+> 上机后有一条额外收益：下一次卡死会被看门狗**记下时刻与 `last_error`**，而不是像这次
+> 静默 5 天——那时才可能拿它去对 DVR 侧的事件（为什么对端不关连接）。
+> 在那之前，`docs/patrol/prod-deploy/probe-rtsp.py` 这类只读探测是查 DVR 的唯一手段。
 
