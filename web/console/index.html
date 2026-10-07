@@ -209,6 +209,18 @@
   .jogpad button[disabled][aria-hidden="true"]{opacity:1;background:var(--soft);color:var(--dim);cursor:default}
   /* 键盘提示里的按键（点动那行的 <kbd>） */
   kbd{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:4px;padding:0 4px;background:var(--soft)}
+  /* ---- 相机 OSD 遮罩：**它是被翻转带倒的**，盖掉别让它误导人 ---------------------
+     相机 OSD（时间戳 / 信道名）是**在翻转之前**烧进画面的：2026-10-07 用原始帧验证——
+     原始流里 `2026-10-07 17:37:30` 与 `CAM01` 都是正的、可读，而场景上下颠倒。
+     ⇒ **任何下游翻转都不可能同时纠正两者**：翻好画面，OSD 必倒（用户看到的就是这个）。
+     正解在上游：把相机转 180°（或 DVR 里作用在 OSD 之前的"旋转/镜像"开关）；修好后
+     连同上面那条 `rotate(180deg)` 一起删掉。
+     位置按 180° 旋转后的镜像算：原始**左上**（时间戳）→ 右下；原始**左下**（CAM01）→ 右上。
+     百分比定位成立的前提是 `.pvwrap` 的比例与画面一致——正是 `--pv-k` 保证的。 */
+  .osdmask{position:absolute;background:var(--soft);opacity:.94;pointer-events:none;display:none}
+  .pvwrap.osd-mask .osdmask{display:block}
+  #osdtime{right:0;bottom:0;width:30%;height:12%}
+  #osdname{right:0;top:0;width:16%;height:12%}
   .seg{background:var(--soft);border-color:var(--line);padding:2px}
   .seg button{color:var(--dim);min-height:34px}
   .seg button.on{background:var(--panel);color:var(--fg);font-weight:600;box-shadow:var(--shadow)}
@@ -317,6 +329,10 @@
         <div class="pvleft">
           <div class="pvwrap">
             <img id="pvimg" alt="实时画面">
+            <!-- OSD 遮罩（两个小方块）：盖住"被翻转带倒的时间戳/信道名"。原理与撤销条件
+                 见上面 .osdmask 的注释——**这是下游补救，正解是把相机转 180°**。 -->
+            <div class="osdmask" id="osdname" aria-hidden="true"></div>
+            <div class="osdmask" id="osdtime" aria-hidden="true"></div>
             <div class="empty" id="pvhint">接管后自动打开（相机实时画面，约 1 秒延迟）</div>
           </div>
           <!-- 抓拍与看画面同一张卡：拍的就是"此刻画面里的这个位置"（2026-09-17 从右栏点动区并入） -->
@@ -1484,6 +1500,8 @@ function pvSetState(state, cls, note){
 function pvStartStream(){
   const img = $('#pvimg');
   img.style.display = 'block';
+  const wrap = img.closest('.pvwrap');
+  if(wrap) wrap.classList.add('osd-mask');    // 开始播 = 那两个 OSD 遮罩也该显示（见 .osdmask 注释）
   $('#pvhint').style.display = 'none';
   // 每次换 URL：浏览器对同一个 <img> 的 MJPEG 只在 src **变化**时才重新建立连接
   img.src = '/api/preview?t=' + Date.now();
@@ -1495,7 +1513,11 @@ function pvStartStream(){
 
 function pvStopStream(keepWanted){
   const img = $('#pvimg');
-  if(img){ img.onerror = null; img.removeAttribute('src'); img.style.display = 'none'; }
+  if(img){
+    const wrap = img.closest('.pvwrap');
+    if(wrap) wrap.classList.remove('osd-mask');   // 停播就别留着遮罩
+    img.onerror = null; img.removeAttribute('src'); img.style.display = 'none';
+  }
   $('#pvhint').style.display = '';
   pv.open = false;
   if(!keepWanted){
