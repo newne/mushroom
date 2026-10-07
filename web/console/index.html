@@ -201,8 +201,22 @@
               white-space:normal;overflow-wrap:anywhere}
   .readout .v.unknown{color:var(--dim);font-weight:400}
   .jogpad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:6px 0}
-  .jogpad button{min-height:48px;font-size:16px}
+  .jogpad button{min-height:52px;font-size:18px;line-height:1;display:flex;flex-direction:column;
+                 align-items:center;justify-content:center;gap:2px}
   .jogpad button[disabled][aria-hidden="true"]{opacity:1;background:var(--soft);color:var(--dim);cursor:default}
+  /* 方向控制盘（2026-10-08 优化）：
+     ① 按钮上**同时给"轴+方向"的文字**（`Z−`/`Z+`/`Y−`/`Y+`）——只画箭头的话，操作者得记住
+        "↑ 到底是 Z 还是 Y"，而这里两轴都在，记错就是往错的方向动机构；
+     ② 中心格从静态的 "Y/Z" 换成**当前位置**（与页头 `#posn` 同一个 positionState()），
+        挪的时候不用来回找读数；位置未知时显式写 `—`，不编数字；
+     ③ `.held` = **按下反馈**：键盘长按或鼠标按住时点亮，让人一眼看出"机器正在被指挥"
+        （长按会连续发点动，没有反馈的话，操作者不知道有没有生效）。 */
+  .jogpad .jd{font-size:11px;color:var(--dim);font-weight:400}
+  .jogpad button.held{outline:2px solid var(--accent);outline-offset:-2px;background:var(--panel)}
+  .jogmid{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
+          background:var(--soft);border-radius:6px;min-height:52px;padding:2px;
+          font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:var(--dim)}
+  .jogmid b{color:var(--fg);font-weight:600;font-size:12px}
   /* 键盘提示里的按键（点动那行的 <kbd>） */
   kbd{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:4px;padding:0 4px;background:var(--soft)}
   .seg{background:var(--soft);border-color:var(--line);padding:2px}
@@ -435,13 +449,13 @@
            四个方向各一个按钮。键盘方向键走的是**同一组动作**（见下面的 keydown 处理）。 -->
       <div class="jogpad" aria-label="空间方向点动（↑↓ Z 轴，←→ Y 轴）">
         <button type="button" disabled aria-hidden="true"></button>
-        <button data-jog="Z-" aria-label="Z 负方向，上">↑<span class="sr-only"> Z −（上）</span></button>
+        <button data-jog="Z-" aria-label="Z 负方向，上（朝回零端）" title="Z−（上，朝回零端）">↑<span class="jd">Z−</span><span class="sr-only"> Z −（上）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
-        <button data-jog="Y-" aria-label="Y 负方向，左">←<span class="sr-only"> Y −（左）</span></button>
-        <button type="button" disabled aria-hidden="true">Y/Z</button>
-        <button data-jog="Y+" aria-label="Y 正方向，右">→<span class="sr-only"> Y +（右）</span></button>
+        <button data-jog="Y-" aria-label="Y 负方向，左" title="Y−（左）">←<span class="jd">Y−</span><span class="sr-only"> Y −（左）</span></button>
+        <div class="jogmid" id="jogmid" title="当前位置（与页头同一个读数）"><b id="jogy">Y —</b><span id="jogz">Z —</span></div>
+        <button data-jog="Y+" aria-label="Y 正方向，右" title="Y+（右）">→<span class="jd">Y+</span><span class="sr-only"> Y +（右）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
-        <button data-jog="Z+" aria-label="Z 正方向，下">↓<span class="sr-only"> Z +（下）</span></button>
+        <button data-jog="Z+" aria-label="Z 正方向，下" title="Z+（下）">↓<span class="jd">Z+</span><span class="sr-only"> Z +（下）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
       </div>
 
@@ -669,6 +683,20 @@ function renderPositionReadouts(){
       ? `约 ${Math.hypot(target[0] - state.value[0], target[1] - state.value[1]).toFixed(0)} mm`
       : '不可计算';
     distance.className = 'v' + (state.value && target ? '' : ' unknown');
+  }
+  // 方向控制盘中心：与页头 `#posn` **同一个** positionState() 的结果——别在两处各推一套口径，
+  // 否则"页头说 Y=2058.8、控制盘说 Y=2058.9"这种事迟早发生。未知就写 `—`，不编数字。
+  const jy = $('#jogy'), jz = $('#jogz');
+  if(jy && jz){
+    if(state.value){
+      jy.textContent = 'Y ' + state.value[0].toFixed(1);
+      jz.textContent = 'Z ' + state.value[1].toFixed(1);
+    }else{
+      jy.textContent = 'Y —';
+      jz.textContent = 'Z —';
+    }
+    const mid = $('#jogmid');
+    if(mid) mid.title = '当前位置：' + positionText(state);
   }
   const stage = $('#cmdstage');
   if(stage){
@@ -1360,11 +1388,22 @@ function wireOps(){
     if(await confirmAction(`移动到 Y=${y.toFixed(2)} Z=${z.toFixed(2)}（${detail}）？`))
       await sendCmd('goto', {y, z});
   };
-  document.querySelectorAll('[data-jog]').forEach(b => b.onclick = async () => {
-    const [axis, sign] = [b.dataset.jog[0], b.dataset.jog[1]];
-    const step = parseFloat($('#step').value) * (sign === '+' ? 1 : -1);
-    await sendCmd('jog', {axis, mm: step});
+  /* `.held`：按下就点亮。键盘长按（下面）与鼠标按住走的是同一组 class。
+     注意：鼠标按住**只做视觉反馈、不做连续点动**——连续那条路只在键盘上（现场要的就是键盘长按）。 */
+  document.querySelectorAll('[data-jog]').forEach(b => {
+    b.onclick = async () => {
+      const [axis, sign] = [b.dataset.jog[0], b.dataset.jog[1]];
+      const step = parseFloat($('#step').value) * (sign === '+' ? 1 : -1);
+      await sendCmd('jog', {axis, mm: step});
+    };
+    b.addEventListener('pointerdown', () => b.classList.add('held'));
+    for(const ev of ['pointerup', 'pointerleave', 'pointercancel'])
+      b.addEventListener(ev, () => b.classList.remove('held'));
   });
+  function jogHeld(dir){         // dir=null 表示全灭
+    document.querySelectorAll('[data-jog]').forEach(b =>
+      b.classList.toggle('held', !!dir && b.dataset.jog === dir));
+  }
 
   /* 键盘方向键 = 与上面那排按钮**同一组动作**（2026-10-07 现场要求：接管后可用键盘、
      长按持续移动）。三条边界，缺一不可：
@@ -1381,6 +1420,7 @@ function wireOps(){
   function releaseHeldKey(){
     if(heldTimer){ clearInterval(heldTimer); heldTimer = null; }
     heldKey = null;
+    jogHeld(null);                                 // 抬手：把按下反馈一起灭掉
   }
   function jogByDir(dir){
     const step = parseFloat($('#step').value) * (dir[1] === '+' ? 1 : -1);
@@ -1396,6 +1436,7 @@ function wireOps(){
     e.preventDefault();                            // 别让方向键把页面滚走
     if(heldKey) return;                            // 长按中（含系统重复）不重复起拍
     heldKey = e.key;
+    jogHeld(dir);                                  // 点亮对应的方向按钮（长按全程亮着）
     jogByDir(dir);
     const period = Math.max(200, Math.round(parseFloat($('#step').value) / JOG_SPEED_MM_S * 1000));
     heldTimer = setInterval(() => { motionLocked() ? releaseHeldKey() : jogByDir(dir); }, period);
