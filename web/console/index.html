@@ -32,6 +32,16 @@
   .im .noimg{display:none;height:110px;align-items:center;justify-content:center;color:var(--dim)}
   .im.noimg img{display:none}
   .im.noimg .noimg{display:flex}
+  /* ---- 相机画面朝向：**显示侧纠正** ----------------------------------------
+     现场相机是**装反的**（实时画面与抓拍照片都是上下翻转，2026-10-07 现场确认；
+     与 ADR-0017 记的"左右镜像"合起来 = 180°）。这一条把三处相机画面一起转正：
+     实时画面（`.pvwrap img`）、历史/抓拍缩略图（`.im img`）、放大图（`#bigimg`）。
+     ⚠️ 这是**下游纠正**，不动上游（DVR 的镜像设置 / 相机朝向）：
+       · 修好上游之后，这里必须改回 `none`，否则会翻两次；
+       · 用户口径是"上下也反了" ⇒ 这里取 `rotate(180deg)`（连 ADR-0017 的左右镜像一起纠）。
+         若现场复核后确认**只需上下翻**，把下面改成 `scaleY(-1)`。
+     一个开关管三处，别在别处再写 transform，否则会打架。 */
+  .pvwrap img, .im img, #bigimg{transform:rotate(180deg)}
   #log{max-height:220px;overflow:auto;font-size:12.5px}
   #log div{padding:2px 0;border-bottom:1px solid var(--line);color:var(--dim)}
   .empty{color:var(--dim);font-size:13px;padding:8px 0}
