@@ -207,6 +207,8 @@
   .jogpad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:6px 0}
   .jogpad button{min-height:48px;font-size:16px}
   .jogpad button[disabled][aria-hidden="true"]{opacity:1;background:var(--soft);color:var(--dim);cursor:default}
+  /* 键盘提示里的按键（点动那行的 <kbd>） */
+  kbd{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:4px;padding:0 4px;background:var(--soft)}
   .seg{background:var(--soft);border-color:var(--line);padding:2px}
   .seg button{color:var(--dim);min-height:34px}
   .seg button.on{background:var(--panel);color:var(--fg);font-weight:600;box-shadow:var(--shadow)}
@@ -426,20 +428,25 @@
         <button id="homebtn">回零</button>
       </div>
 
-      <div class="lbl">点动（步长 mm）</div>
+      <div class="lbl">点动（步长 mm）· 键盘 <kbd>↑</kbd><kbd>↓</kbd><kbd>←</kbd><kbd>→</kbd> 同效，长按连续</div>
       <div class="row">
         <select id="step">
           <option value="0.5">0.5</option><option value="1">1</option>
           <option value="5" selected>5</option><option value="10">10</option>
         </select>
       </div>
-      <div class="jogpad" aria-label="空间方向点动">
+      <!-- 十字 D-pad（2026-10-07 现场要求"上下左右集成到一处"）：四角留空、中心只放轴标，
+           四个方向各一个按钮。键盘方向键走的是**同一组动作**（见下面的 keydown 处理）。 -->
+      <div class="jogpad" aria-label="空间方向点动（↑↓ Z 轴，←→ Y 轴）">
+        <button type="button" disabled aria-hidden="true"></button>
         <button data-jog="Z-" aria-label="Z 负方向，上">↑<span class="sr-only"> Z −（上）</span></button>
-        <button type="button" disabled aria-hidden="true">·</button>
-        <button data-jog="Z+" aria-label="Z 正方向，下">↓<span class="sr-only"> Z +（下）</span></button>
+        <button type="button" disabled aria-hidden="true"></button>
         <button data-jog="Y-" aria-label="Y 负方向，左">←<span class="sr-only"> Y −（左）</span></button>
         <button type="button" disabled aria-hidden="true">Y/Z</button>
         <button data-jog="Y+" aria-label="Y 正方向，右">→<span class="sr-only"> Y +（右）</span></button>
+        <button type="button" disabled aria-hidden="true"></button>
+        <button data-jog="Z+" aria-label="Z 正方向，下">↓<span class="sr-only"> Z +（下）</span></button>
+        <button type="button" disabled aria-hidden="true"></button>
       </div>
 
       <div id="cmdline" class="empty" role="status" aria-live="polite" style="padding:6px 0 0">最近指令 —</div>
@@ -1097,6 +1104,11 @@ async function tick(){
 
 function busy(){ return !!(cmd.inflight && !cmd.result); }
 function inRound(){ return !!(lastStatus?.patrol?.active); }
+/* 能不能动机构：**唯一的判据**，按钮 disabled 与键盘方向键共用（两处各写一遍迟早会飘）。
+   未接管 / 急停闩锁 / 上一條没结束 / 巡检轮内 —— 任一成立就不许动。 */
+function motionLocked(){
+  return !!cmd.estop || !cmd.session_active || busy() || inRound();
+}
 
 function renderOps(){
   observeCommandResult(cmd.result);
@@ -1122,7 +1134,7 @@ function renderOps(){
     ? '巡检进行中：机构由这一轮占用，' + etaText(lastStatus.patrol) + '（急停仍可用）'
     : '';
 
-  const locked = est || !active || busy() || inRound();
+  const locked = motionLocked();
   $('#homebtn').disabled = locked;
   $('#gotobtn').disabled = locked || !targetsOk();
   document.querySelectorAll('[data-jog]').forEach(b => b.disabled = locked);
@@ -1357,6 +1369,43 @@ function wireOps(){
     const step = parseFloat($('#step').value) * (sign === '+' ? 1 : -1);
     await sendCmd('jog', {axis, mm: step});
   });
+
+  /* 键盘方向键 = 与上面那排按钮**同一组动作**（2026-10-07 现场要求：接管后可用键盘、
+     长按持续移动）。三条边界，缺一不可：
+       · 只在**实时模式**抢方向键——历史模式的 ←/→ 归"逐帧导航"（见 P2-3 那段）；
+       · 输入框/下拉聚焦时不抢（与逐帧导航同一规矩）；
+       · `motionLocked()` 与按钮的 disabled **同源**：未接管 / 急停 / 轮内 / 忙，一律不动机构。
+     长按的实现在下面：**不用浏览器自带的按键重复**（节拍由系统键盘设置决定，不可控），
+     按住期间用定时器按固定节拍重复发点动；抬手、切走窗口、或条件变成不允许，立刻停。
+     ⚠️ 节拍 = 步长 ÷ 点动速度（10 mm/s，patrol.motion_profile 的点动档）：5mm ⇒ 500ms。
+        发得比这快，指令会在执行方排队，抬手之后机器还要多走一段。 */
+  const JOG_SPEED_MM_S = 10;                       // 与 motion_profile 点动档一致：改那边要改这里
+  const KEY_DIR = {ArrowUp:'Z-', ArrowDown:'Z+', ArrowLeft:'Y-', ArrowRight:'Y+'};
+  let heldKey = null, heldTimer = null;
+  function releaseHeldKey(){
+    if(heldTimer){ clearInterval(heldTimer); heldTimer = null; }
+    heldKey = null;
+  }
+  function jogByDir(dir){
+    const step = parseFloat($('#step').value) * (dir[1] === '+' ? 1 : -1);
+    return sendCmd('jog', {axis: dir[0], mm: step});
+  }
+  document.addEventListener('keydown', e => {
+    const dir = KEY_DIR[e.key];
+    if(!dir || e.ctrlKey || e.metaKey || e.altKey) return;
+    if(typeof mode === 'undefined' || mode !== 'realtime') return;   // 历史模式：方向键归逐帧
+    const t = e.target;
+    if(t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    if(motionLocked()) return;                     // 不允许动时连 preventDefault 都不做
+    e.preventDefault();                            // 别让方向键把页面滚走
+    if(heldKey) return;                            // 长按中（含系统重复）不重复起拍
+    heldKey = e.key;
+    jogByDir(dir);
+    const period = Math.max(200, Math.round(parseFloat($('#step').value) / JOG_SPEED_MM_S * 1000));
+    heldTimer = setInterval(() => { motionLocked() ? releaseHeldKey() : jogByDir(dir); }, period);
+  });
+  document.addEventListener('keyup', e => { if(e.key === heldKey) releaseHeldKey(); });
+  window.addEventListener('blur', releaseHeldKey);  // 切走窗口/最小化：立刻停，别让机器一直走
   $('#capbtn').onclick = async () => {
     // 选了站位就按它（照片归到它名下）；没选就让后端按当前位置取最近的格点——
     // 非格点抓拍走的就是这一条，照片仍要挂到一个站位上，否则历史模式按站位取图找不到它。
