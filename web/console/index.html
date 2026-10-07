@@ -32,16 +32,12 @@
   .im .noimg{display:none;height:110px;align-items:center;justify-content:center;color:var(--dim)}
   .im.noimg img{display:none}
   .im.noimg .noimg{display:flex}
-  /* ---- 相机画面朝向：**显示侧纠正** ----------------------------------------
-     现场相机是**装反的**（实时画面与抓拍照片都是上下翻转，2026-10-07 现场确认；
-     与 ADR-0017 记的"左右镜像"合起来 = 180°）。这一条把三处相机画面一起转正：
-     实时画面（`.pvwrap img`）、历史/抓拍缩略图（`.im img`）、放大图（`#bigimg`）。
-     ⚠️ 这是**下游纠正**，不动上游（DVR 的镜像设置 / 相机朝向）：
-       · 修好上游之后，这里必须改回 `none`，否则会翻两次；
-       · 用户口径是"上下也反了" ⇒ 这里取 `rotate(180deg)`（连 ADR-0017 的左右镜像一起纠）。
-         若现场复核后确认**只需上下翻**，把下面改成 `scaleY(-1)`。
-     一个开关管三处，别在别处再写 transform，否则会打架。 */
-  .pvwrap img, .im img, #bigimg{transform:rotate(180deg)}
+  /* ⚠️ 这里**故意没有**给相机画面加任何翻转/旋转。
+     2026-10-07 曾加过 `rotate(180deg)` 想把画面翻正，结果**时间戳跟着倒了**——因为相机 OSD 是
+     **上游在翻好的画面上正着烧进去的**（原始流实测：时间戳正立、场景上下颠倒），任何下游翻转
+     都不可能同时纠正两者。当天按现场要求撤掉，改按 ADR-0017 §10 的 A 路线走：**修上游**
+     （DVR Web Viewer 的图像/旋转设置，或相机装反了就转回来）。
+     历史结论同向：`--flip` 默认 `none` 是刻意的，"上游修好后必须保持 none，否则会翻两次"。 */
   #log{max-height:220px;overflow:auto;font-size:12.5px}
   #log div{padding:2px 0;border-bottom:1px solid var(--line);color:var(--dim)}
   .empty{color:var(--dim);font-size:13px;padding:8px 0}
@@ -209,18 +205,6 @@
   .jogpad button[disabled][aria-hidden="true"]{opacity:1;background:var(--soft);color:var(--dim);cursor:default}
   /* 键盘提示里的按键（点动那行的 <kbd>） */
   kbd{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:4px;padding:0 4px;background:var(--soft)}
-  /* ---- 相机 OSD 遮罩：**它是被翻转带倒的**，盖掉别让它误导人 ---------------------
-     相机 OSD（时间戳 / 信道名）是**在翻转之前**烧进画面的：2026-10-07 用原始帧验证——
-     原始流里 `2026-10-07 17:37:30` 与 `CAM01` 都是正的、可读，而场景上下颠倒。
-     ⇒ **任何下游翻转都不可能同时纠正两者**：翻好画面，OSD 必倒（用户看到的就是这个）。
-     正解在上游：把相机转 180°（或 DVR 里作用在 OSD 之前的"旋转/镜像"开关）；修好后
-     连同上面那条 `rotate(180deg)` 一起删掉。
-     位置按 180° 旋转后的镜像算：原始**左上**（时间戳）→ 右下；原始**左下**（CAM01）→ 右上。
-     百分比定位成立的前提是 `.pvwrap` 的比例与画面一致——正是 `--pv-k` 保证的。 */
-  .osdmask{position:absolute;background:var(--soft);opacity:.94;pointer-events:none;display:none}
-  .pvwrap.osd-mask .osdmask{display:block}
-  #osdtime{right:0;bottom:0;width:30%;height:12%}
-  #osdname{right:0;top:0;width:16%;height:12%}
   .seg{background:var(--soft);border-color:var(--line);padding:2px}
   .seg button{color:var(--dim);min-height:34px}
   .seg button.on{background:var(--panel);color:var(--fg);font-weight:600;box-shadow:var(--shadow)}
@@ -329,10 +313,6 @@
         <div class="pvleft">
           <div class="pvwrap">
             <img id="pvimg" alt="实时画面">
-            <!-- OSD 遮罩（两个小方块）：盖住"被翻转带倒的时间戳/信道名"。原理与撤销条件
-                 见上面 .osdmask 的注释——**这是下游补救，正解是把相机转 180°**。 -->
-            <div class="osdmask" id="osdname" aria-hidden="true"></div>
-            <div class="osdmask" id="osdtime" aria-hidden="true"></div>
             <div class="empty" id="pvhint">接管后自动打开（相机实时画面，约 1 秒延迟）</div>
           </div>
           <!-- 抓拍与看画面同一张卡：拍的就是"此刻画面里的这个位置"（2026-09-17 从右栏点动区并入） -->
@@ -1500,8 +1480,6 @@ function pvSetState(state, cls, note){
 function pvStartStream(){
   const img = $('#pvimg');
   img.style.display = 'block';
-  const wrap = img.closest('.pvwrap');
-  if(wrap) wrap.classList.add('osd-mask');    // 开始播 = 那两个 OSD 遮罩也该显示（见 .osdmask 注释）
   $('#pvhint').style.display = 'none';
   // 每次换 URL：浏览器对同一个 <img> 的 MJPEG 只在 src **变化**时才重新建立连接
   img.src = '/api/preview?t=' + Date.now();
@@ -1513,11 +1491,7 @@ function pvStartStream(){
 
 function pvStopStream(keepWanted){
   const img = $('#pvimg');
-  if(img){
-    const wrap = img.closest('.pvwrap');
-    if(wrap) wrap.classList.remove('osd-mask');   // 停播就别留着遮罩
-    img.onerror = null; img.removeAttribute('src'); img.style.display = 'none';
-  }
+  if(img){ img.onerror = null; img.removeAttribute('src'); img.style.display = 'none'; }
   $('#pvhint').style.display = '';
   pv.open = false;
   if(!keepWanted){
