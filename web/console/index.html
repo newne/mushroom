@@ -19,8 +19,8 @@
   .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px}
   .kv b{color:var(--dim);font-weight:400}
   .mono{font-family:ui-monospace,Consolas,monospace}
-  .stn{display:flex;justify-content:space-between;padding:5px 8px;border-radius:5px;cursor:pointer;
-       font-size:13px;border:1px solid transparent;flex-wrap:wrap}
+    .stn{display:grid;grid-template-columns:minmax(0,1fr);gap:3px;padding:7px 8px;border-radius:5px;cursor:pointer;
+      font-size:13px;border:1px solid transparent;text-align:left}
   .stn .cur{color:var(--accent);font-weight:700}
   .imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
   .im{background:var(--soft);border:1px solid var(--line);border-radius:6px;overflow:hidden;font-size:12px}
@@ -111,28 +111,26 @@
      框的**有效**宽高比被拉到 2.3~2.8，`object-fit:contain` 只能按高度把画面缩进框里，
      左右各留一条黑边（2026-09-21 实测：1080p 每侧 211px，画面只占框的 63%；1366/1440 各
      88~103px）。现场反馈的"图像左右两侧有较大黑边"就是这个。
-     现在改成**定高不定宽**：宽度由高度预算 `--pv-h` 算出来，框与画面恒同比例，黑边在数学上
-     不存在。`aspect-ratio`/`width` 全部由 CSS 定死、**与流起没起来无关**，所以"卡片高度会跳、
-     按钮跟着上下移动"这个老问题（原注释在意的）依然不会发生。
+         现在改成**按比例限宽**：宽度受栏目可用宽度与视口高度预算共同约束，再由宽高比确定高度；
+         框与画面恒同比例，黑边在数学上不存在。尺寸始终由 CSS 决定、**与流起没起来无关**，
+         所以"卡片高度会跳、按钮跟着上下移动"这个老问题依然不会发生。
      `object-fit:contain` 保留作兜底：以后换了别的比例的相机，宁可留边也不拉变形。 */
-  .pvbody{display:flex;gap:14px;align-items:flex-start}
-  /* 左列的**宽**由 flex-basis 给定（绝对长度），`.pvwrap` 再取 100% —— 这样百分比有确定的
-     解析基准，不会与 auto 宽互相依赖；flex-shrink:1 让窄屏时整列等比缩小（框跟着小、比例不变）。 */
-  .pvleft{flex:0 1 calc(var(--pv-h) * var(--pv-k));min-width:0;display:flex;flex-direction:column}
-  .pvwrap{position:relative;width:100%;aspect-ratio:var(--pv-k);
+      .pvbody{display:flex;flex-direction:column;align-items:center;gap:0}
+      .pvleft{flex:0 0 auto;min-width:0;width:100%;display:flex;flex-direction:column;align-items:center}
+      .pvwrap{position:relative;width:min(100%, var(--pv-max-w));aspect-ratio:var(--pv-k);
           border:1px solid var(--line);border-radius:6px;overflow:hidden;display:flex;
           align-items:center;justify-content:center}
   .pvwrap img{width:100%;height:100%;object-fit:contain;display:none}
-  .pvwrap .empty{position:absolute;left:8px;right:8px;text-align:center;padding:0}
-  /* 画面右侧的读数栏：把"框不再吃满整栏"省出来的横向空间用掉，否则那一块只是空着。
-     宽屏时是一列（4 块竖排）；窄屏时整段落到画面下方（见文件末尾的媒体查询）。
-     `flex-basis/min-width:260px` 是**读数栏的地板宽**：读数最长的一条是"当前位置"的
-     `Y=4492.00 Z=190.80 · 巡检站位推定`（实测在 260px 宽、13px 等宽字体下正好占满一行），
-     再窄就必然折行。地板优先于画面——窄于地板时让 `.pvleft`（flex-shrink:1）先缩，
-     画面等比变小、比例不变，读数始终一行可读。 */
-  .pvside{flex:1 1 260px;min-width:260px}
+      .pvhint-slot{width:min(100%, var(--pv-max-w));min-height:18px;display:flex;
+             align-items:center;justify-content:center;margin-top:6px}
+      #pvhint{text-align:center;padding:0}
+        .preview-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;
+                 width:min(100%, var(--pv-max-w));margin-top:8px}
+        .preview-actions button{min-width:0;min-height:44px;white-space:nowrap}
+        #pverr{display:block;width:min(100%, var(--pv-max-w));margin-top:5px;font-size:12px}
+        #pverr:empty{display:none}
+      .pvside{flex:0 0 auto;width:100%;min-width:0}
   #pvnote{font-size:12px;margin-left:8px}
-  #pverr{font-size:12px;flex:1}
 
   /* ---- 浅色固定工作台：顶栏、门禁和日志常驻，各栏自己滚动 ---- */
   :root{--bg:#edf1f5;--panel:#fff;--line:#d8e0e8;--fg:#16212b;--dim:#6b7785;
@@ -144,10 +142,10 @@
            2026-09-21 试过"与档位解耦、恒写相机原生 2880/1616"——三档只差 <0.1% 不假，
            但黑边为 0 的判据是**框与帧精确相等**：0.03% 在 4K 满屏（框宽 1925px）上
            就是一条 1px 的边。所以恒等于**当前输出帧**，改 `PREVIEW_SCALE` 必须同步改
-           （1280→718 / 1920→1078 / 2880→1616）。--pv-h = 画面允许的最大高度。
-           框宽 = --pv-h × --pv-k。只有**换相机或改相机分辨率**时才动这两个值的语义，
-           否则黑边会回来（或改大了被 max-width 夹住、比例失真）。 */
-        --pv-k:1280/718;--pv-h:50vh}
+            （1280→718 / 1920→1078 / 2880→1616）。画面最大高度为 50vh，宽度上限按此比例
+            折算为 89.13649vh（CSS calc 不支持乘法）。切换预览分辨率时，需同步调整该宽度上限，
+            否则尺寸预算不再对应画面比例。 */
+          --pv-k:1280/718;--pv-max-w:89.13649vh}
   html,body{height:100%;overflow:hidden;margin:0}
   body{display:flex;flex-direction:column;background:var(--bg);color:var(--fg);
        font-family:"Aptos","Segoe UI","Microsoft YaHei",sans-serif;font-size:13px}
@@ -180,7 +178,24 @@
   .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)}
   /* 左栏只剩站位列表一张卡（导轨图 2026-09-17 移去中栏放大）：它吃满整列、#list 自己滚 */
   main>section:first-child>.card{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column}
-  #list{min-height:0;overflow-y:auto;padding-right:2px}
+  #list{flex:1 1 auto;min-height:0;overflow-y:auto;padding-right:2px}
+  .station-tools{flex:0 0 auto;display:grid;gap:8px;padding:8px 0}
+  .station-tools input{min-height:44px;padding:7px 9px}
+  .station-filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
+  .station-filters button{min-height:44px;padding:4px 2px;font-size:11px;white-space:nowrap}
+  .station-filters button[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);
+                                                   color:#14538f;font-weight:600}
+  .station-filters button:disabled{opacity:.5}
+  .station-layer+.station-layer{margin-top:8px}
+  .layer-toggle{width:100%;min-height:44px;display:flex;align-items:center;gap:8px;padding:5px 8px;
+                text-align:left;background:transparent;border-color:transparent;box-shadow:none;font-size:12px}
+  .layer-toggle>span:first-child{font-weight:600}
+  .layer-count{margin-left:auto;color:var(--dim);font:11px ui-monospace,Consolas,monospace}
+  .layer-chevron{color:var(--accent);transition:transform .15s ease}
+  .layer-toggle[aria-expanded="true"] .layer-chevron{transform:rotate(180deg)}
+  .station-layer-items{display:grid;gap:3px;padding-top:3px}
+  .station-layer-items[hidden]{display:none}
+  .station-empty{padding:12px 8px;font-size:12px}
   /* 导轨图：中栏全宽，viewBox 与 aspect-ratio 同比例 ⇒ 像素坐标与图内坐标是线性映射，
      点击/悬停换算不需要处理 letterbox（preserveAspectRatio 的留白）。crosshair 提示可点。
      170 的图高是压扁过的：1080p 下与 44vh 的实时画面同屏，不挤成滚动才见得着的第二页。 */
@@ -188,12 +203,11 @@
        border-radius:6px;cursor:crosshair;touch-action:manipulation;display:block}
   .mapcap{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--dim);margin-top:6px}
   .mapcap .mono{white-space:nowrap}
-  .stn{color:var(--fg);background:transparent;border-color:transparent;text-align:left;min-height:40px}
+    .stn{color:var(--fg);background:transparent;border-color:transparent;min-height:44px}
   .stn:hover{background:var(--soft)} .stn.sel{background:var(--accent-soft);border-color:#bcd4ff}
-  /* P2-1 站位摘要：第二行小字（末帧时间/帧数/失败角标）。flex-wrap 让它不挤主行，
-     没有摘要数据的站位不渲染这一行，行高保持原样。 */
-  .stn .stnsum{flex:1 0 100%;display:flex;gap:6px;align-items:center;margin-top:1px;
-               font-size:11px;color:var(--dim);font-weight:400}
+    .stn-id{font-weight:600}
+    /* 站位摘要只显示最近帧时间与失败状态，不在客户列表暴露设备坐标。 */
+    .stn .stnsum{display:block;margin-top:1px;font-size:11px;color:var(--dim);font-weight:400}
   .stn .stnbadge{color:var(--bad);font-weight:600;font-style:normal}
   .layer{font-weight:600;letter-spacing:.04em;color:var(--dim);padding-top:10px}
   button{color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:6px;box-shadow:0 1px 1px rgba(24,38,52,.03)}
@@ -208,36 +222,42 @@
   .estopcard h2{color:#8e2424}
   #rtmain>.card:first-child{border-top:3px solid var(--accent)}
   .pvwrap{border-color:#c6d1dc;background:#16212b;box-shadow:inset 0 0 0 1px rgba(255,255,255,.04)}
-  /* 读数块：宽屏时贴在画面右侧、竖排一列（上方没有别的东西，margin-top 归零）；
-     窄屏时整段落到画面下方、排回一行（见文件末尾的媒体查询）。 */
-  .readouts{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;margin-top:0}
+    /* 读数始终在画框外；宽屏四列，窄屏在响应断点减为两列。 */
+    .readouts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px}
   .readout{min-width:0;padding:8px 9px;background:var(--soft);border:1px solid var(--line);border-radius:6px}
   .readout .k{display:block;color:var(--dim);font-size:11px}
   /* 读数块的**值**允许折行，不能截。理由：最坏情况是"当前位置"的
-     `Y=4492.00 Z=190.80 · 巡检站位推定`（21 西文 + 6 汉字 ≈ 262px），而竖排时单元格只有
-     260px、横排 4 列时只有 ~166~222px —— nowrap+ellipsis 会截在坐标尾数或**来源**上，
+    `Y=4492.00 Z=190.80 · 巡检站位推定`（21 西文 + 6 汉字 ≈ 262px），四列时单元格常只有
+    ~166~222px —— nowrap+ellipsis 会截在坐标尾数或**来源**上，
      而来源（控制器实时 / 巡检站位推定 / 最后成功目标）正是判断"这个数能不能信"的依据。
      折行最多两行、代价 ~15px 高度，比丢掉信息来源划算。 */
   .readout .v{display:block;margin-top:2px;font:600 13px ui-monospace,Consolas,monospace;
               white-space:normal;overflow-wrap:anywhere}
   .readout .v.unknown{color:var(--dim);font-weight:400}
-  .jogpad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:6px 0}
-  .jogpad button{min-height:52px;font-size:18px;line-height:1;display:flex;flex-direction:column;
-                 align-items:center;justify-content:center;gap:2px}
-  .jogpad button[disabled][aria-hidden="true"]{opacity:1;background:var(--soft);color:var(--dim);cursor:default}
-  /* 方向控制盘（2026-10-08 优化）：
-     ① 按钮上**同时给"轴+方向"的文字**（`Z−`/`Z+`/`Y−`/`Y+`）——只画箭头的话，操作者得记住
-        "↑ 到底是 Z 还是 Y"，而这里两轴都在，记错就是往错的方向动机构；
-     ② 中心格从静态的 "Y/Z" 换成**当前位置**（与页头 `#posn` 同一个 positionState()），
-        挪的时候不用来回找读数；位置未知时显式写 `—`，不编数字；
-     ③ `.held` = **按下反馈**：键盘长按或鼠标按住时点亮，让人一眼看出"机器正在被指挥"
-        （长按会连续发点动，没有反馈的话，操作者不知道有没有生效）。 */
+    .jogpad{position:relative;display:grid;grid-template-columns:repeat(3,72px);grid-template-rows:repeat(3,64px);
+      justify-content:center;gap:8px;margin:12px 0}
+    .jogpad::before,.jogpad::after{content:"";position:absolute;z-index:0;pointer-events:none;
+            background:rgba(31,111,235,.22)}
+    .jogpad::before{top:4px;bottom:4px;left:50%;width:1px}
+    .jogpad::after{left:4px;right:4px;top:50%;height:1px}
+    .jogpad button{position:relative;z-index:1;min-height:64px;font-size:19px;line-height:1;display:flex;
+       flex-direction:column;align-items:center;justify-content:center;gap:3px}
+    .jogpad button[data-jog]{width:64px;height:64px;justify-self:center;border-radius:14px;
+           border-color:#bfd1e7;background:linear-gradient(145deg,#fff,#edf4fc);
+           color:var(--accent);box-shadow:0 2px 6px rgba(24,50,82,.09)}
+    .jogpad button[data-jog]:hover:not(:disabled){background:var(--accent-soft);border-color:var(--accent)}
+     .jogpad button[data-jog]:disabled{opacity:.5;background:var(--soft);border-color:var(--line);
+                            color:var(--dim);box-shadow:none;cursor:not-allowed}
+    .jogpad button[disabled][aria-hidden="true"]{opacity:1;background:transparent;color:var(--dim);
+                border-color:transparent;box-shadow:none;cursor:default}
+    /* 轴向标签、中心轴心与按住反馈让点动方向和执行状态更易辨认。 */
   .jogpad .jd{font-size:11px;color:var(--dim);font-weight:400}
-  .jogpad button.held{outline:2px solid var(--accent);outline-offset:-2px;background:var(--panel)}
-  .jogmid{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;
-          background:var(--soft);border-radius:6px;min-height:52px;padding:2px;
-          font-family:ui-monospace,Consolas,monospace;font-size:11.5px;color:var(--dim)}
-  .jogmid b{color:var(--fg);font-weight:600;font-size:12px}
+    .jogpad button.held{outline:3px solid rgba(31,111,235,.25);outline-offset:1px;background:var(--accent-soft);
+             box-shadow:0 0 0 1px var(--accent),0 3px 10px rgba(31,111,235,.2)}
+    .jogmid{position:relative;z-index:1;display:flex;align-items:center;justify-content:center;width:50px;height:50px;
+      min-height:50px;justify-self:center;border:1px solid #a8c4e7;border-radius:50%;
+      background:radial-gradient(circle,var(--accent) 0 3px,transparent 4px),var(--soft);
+      color:var(--accent);font:600 9px ui-monospace,Consolas,monospace}
   /* 键盘提示里的按键（点动那行的 <kbd>） */
   kbd{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:4px;padding:0 4px;background:var(--soft)}
   .seg{background:var(--soft);border-color:var(--line);padding:2px}
@@ -272,25 +292,16 @@
   .framenav{display:flex;gap:6px;align-items:center;margin-top:8px}
   .framenav button{min-height:36px;padding:6px 10px;font-size:13px}
   .framenav #frameinfo{flex:1;font-size:12px;color:var(--dim);text-align:center}
-  /* P2-4 左栏（站位列表）可折叠：窄屏/平板让中栏全宽 */
-  .listtoggle{float:right;min-height:22px;padding:1px 8px;font-size:11px;font-weight:400;
+  /* 站位内容可折叠；工具按钮留在标题栏，随时可恢复。 */
+  .listtoggle{float:right;min-height:44px;padding:6px 10px;font-size:11px;font-weight:400;
               letter-spacing:0;text-transform:none}
-  main.list-hidden{grid-template-columns:0 minmax(0,1fr) minmax(320px,360px)}
-  main.list-hidden>section:first-child{display:none}
-  /* 分界 1800px 不是拍的：并排时画面宽 = 卡片内宽 − 14 − 260，堆叠时 = min(卡片内宽, 50vh×k)。
-     解这两个式子相等的位置约在 vw≈1800 —— 再窄，并排反而让**画面变小**（1664 上实测 637×357
-     对 802×450，小 19%），那不叫优化。窄于这条线就改堆叠：读数落到画面下方排成一行。 */
+  .station-panel-collapsed .station-tools,
+  .station-panel-collapsed #list,
+  .station-panel-collapsed #listnote{display:none}
+    /* 三栏在较窄桌面收紧；预览始终居中，状态与读数始终留在画框外。 */
   @media (max-width:1800px){
     main{grid-template-columns:280px minmax(0,1fr) 320px}
     main>section{padding:10px}
-    .pvbody{flex-direction:column;gap:0}
-    .pvleft{flex:0 0 auto;width:100%;align-items:center}
-    .pvwrap{width:min(100%, calc(var(--pv-h) * var(--pv-k)))}
-    /* ⚠️ 这里必须把 `.pvside` 的 flex-basis 与 min-width 一起清掉：主轴变成了纵向，
-       那条 `flex:1 1 260px` 会被当成**高度**基准，把读数栏拉成 260px 高、整张卡凭空长
-       200px（实测 1424×820 上 cardBottom 691→870）。`min-width:260px` 在横向上也不再需要。 */
-    .pvside{flex:0 0 auto;width:100%;min-width:0}
-    .readouts{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px}
     .readout .v{font-size:12px}
   }
   /* P2-4：1024~1280 的平板/小屏，三栏各让一步（左栏还能整列折叠） */
@@ -298,7 +309,16 @@
     main{grid-template-columns:220px minmax(0,1fr) 300px}
     .readouts{grid-template-columns:repeat(2,minmax(0,1fr))}
   }
-  /* 矮屏：--pv-h 是 vh 单位，自己就会跟着缩，所以这里只需收紧卡片内边距与读数行高。
+  @media (max-width:760px){
+    main{grid-template-columns:minmax(0,1fr);grid-auto-rows:max-content;overflow-y:auto}
+    main>section{overflow:visible;padding:10px}
+    main>section:first-child{order:3;height:320px;overflow:hidden}
+    main>section:first-child.station-section-collapsed{height:auto;overflow:visible}
+    .estopcard{position:static}
+    #rtmain,#hmain{order:1}
+    #rtcol{order:2}
+  }
+  /* 矮屏：预览宽度上限随视口高度缩小，所以这里只需收紧卡片内边距与读数行高。
      ⚠️ **不要**在这里改画面比例（改前那版写的是 `aspect-ratio:16/8.5`）—— 比例一改，
      框就和画面不一致，黑边立刻回来。 */
   @media (max-height:820px){
@@ -327,6 +347,16 @@
       <h2>站位（按层）
         <button type="button" id="listtoggle" class="listtoggle" aria-expanded="true">收起</button>
       </h2>
+      <div class="station-tools">
+        <label class="sr-only" for="stationSearch">搜索站位编号</label>
+        <input id="stationSearch" type="search" placeholder="搜索站位编号" autocomplete="off">
+        <div class="station-filters" role="group" aria-label="站位筛选">
+          <button type="button" data-station-filter="all" aria-pressed="true">全部</button>
+          <button type="button" data-station-filter="current" aria-pressed="false">当前</button>
+          <button type="button" data-station-filter="issue" aria-pressed="false" disabled>异常</button>
+          <button type="button" data-station-filter="no-frame" aria-pressed="false" disabled>无历史</button>
+        </div>
+      </div>
       <div id="list" class="empty">读取中…</div>
       <!-- P2-1：摘要取不到时的一句话。没有它，用户看着空白的摘要行分不清
            "prod 暂时问不到"和"这一站真的没拍过"——现场这是两件事。 -->
@@ -341,21 +371,19 @@
     <div class="card">
       <h2>实时画面 <span id="pvstate" class="tag">未打开</span>
         <span id="pvnote" style="color:var(--dim);font-weight:400"></span></h2>
-      <!-- 画面在左、读数在右（2026-09-21）：画面框的**宽**由 --pv-h × --pv-k 定死（见 CSS），
-           不再吃满整栏、也就不会在框内留黑边；省出来的那块横向空间正好放读数栏。
-           顺带把"读数一整行"从画面下面挪走，画面因此能长高一点（--pv-h 由 44vh 提到 50vh）。 -->
+      <!-- 画面在中栏居中；状态提示与读数都在画框外，不遮挡图像。 -->
       <div class="pvbody">
         <div class="pvleft">
           <div class="pvwrap">
             <img id="pvimg" alt="实时画面">
-            <div class="empty" id="pvhint">接管后自动打开（相机实时画面，约 1 秒延迟）</div>
           </div>
+          <div class="pvhint-slot"><div class="empty" id="pvhint">接管后自动打开（相机实时画面，约 1 秒延迟）</div></div>
           <!-- 抓拍与看画面同一张卡：拍的就是"此刻画面里的这个位置"（2026-09-17 从右栏点动区并入） -->
-          <div class="row" style="margin-top:8px">
+          <div class="preview-actions">
             <button id="pvbtn">看画面</button>
             <button id="capbtn" disabled title="拍当前位置：不用先接管；选了站位就归到它名下，没选就归到最近的格点">抓拍</button>
-            <span id="pverr" class="empty" style="padding:0"></span>
           </div>
+          <div id="pverr" class="empty" role="status" aria-live="polite"></div>
           <!-- P0-5：抓拍置灰的原因要说出来。只写 title 的话鼠标不悬停就看不到，
                现场最常见的疑问就是"为什么抓拍点不动"。 -->
           <div id="capnote" class="empty" style="padding:2px 0 0;font-size:12px"></div>
@@ -469,14 +497,13 @@
           <option value="5" selected>5</option><option value="10">10</option>
         </select>
       </div>
-      <!-- 十字 D-pad（2026-10-07 现场要求"上下左右集成到一处"）：四角留空、中心只放轴标，
-           四个方向各一个按钮。键盘方向键走的是**同一组动作**（见下面的 keydown 处理）。 -->
-      <div class="jogpad" aria-label="空间方向点动（↑↓ Z 轴，←→ Y 轴）">
+      <!-- 十字方向盘：轴向标签与键盘方向映射保持一致。 -->
+      <div class="jogpad" role="group" aria-label="空间方向点动（↑↓ Z 轴，←→ Y 轴）">
         <button type="button" disabled aria-hidden="true"></button>
         <button data-jog="Z-" aria-label="Z 负方向，上（朝回零端）" title="Z−（上，朝回零端）">↑<span class="jd">Z−</span><span class="sr-only"> Z −（上）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
         <button data-jog="Y-" aria-label="Y 负方向，左" title="Y−（左）">←<span class="jd">Y−</span><span class="sr-only"> Y −（左）</span></button>
-        <div class="jogmid" id="jogmid" title="当前位置（与页头同一个读数）"><b id="jogy">Y —</b><span id="jogz">Z —</span></div>
+        <div class="jogmid" id="jogmid" title="方向轴中心">AXIS</div>
         <button data-jog="Y+" aria-label="Y 正方向，右" title="Y+（右）">→<span class="jd">Y+</span><span class="sr-only"> Y +（右）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
         <button data-jog="Z+" aria-label="Z 正方向，下" title="Z+（下）">↓<span class="jd">Z+</span><span class="sr-only"> Z +（下）</span></button>
@@ -500,6 +527,10 @@
   <section id="hcol" style="display:none">
     <div class="card">
       <h2>筛选</h2>
+      <div class="lbl">生产批次</div>
+      <div class="row"><select id="batchSel"><option value="">读取中…</option></select></div>
+      <div class="lbl">巡检轮次</div>
+      <div class="row"><select id="roundSel"><option value="">读取中…</option></select></div>
       <div class="lbl">日期范围</div>
       <div class="row">
         <input id="fromDate" type="date"><input id="toDate" type="date">
@@ -526,11 +557,12 @@
 <script>
 const $ = s => document.querySelector(s);
 let stations = [], grid = null, selected = null, lastStatus = null;
+let stationSearch = '', stationFilter = 'all', stationListInitialized = false;
+const expandedStationLayers = new Set();
+let stationFilterExpansion = null;
+let stationFilterSeenLayers = null;
+let confirmationOpen = false;
 let cmd = {inflight:null, result:null, estop:false, session_active:false};
-      <div class="lbl">生产批次</div>
-      <div class="row"><select id="batchSel"><option value="">读取中…</option></select></div>
-      <div class="lbl">巡检轮次</div>
-      <div class="row"><select id="roundSel"><option value="">读取中…</option></select></div>
 let session = null;              // {token, expires_at}；本地只用来显示倒计时
 let clockSkewMs = 0;             // 服务器时间 − 浏览器时间：倒计时用服务器口径算
 let lastCommandedPosition = null;
@@ -719,20 +751,6 @@ function renderPositionReadouts(){
       ? `约 ${Math.hypot(target[0] - state.value[0], target[1] - state.value[1]).toFixed(0)} mm`
       : '不可计算';
     distance.className = 'v' + (state.value && target ? '' : ' unknown');
-  }
-  // 方向控制盘中心：与页头 `#posn` **同一个** positionState() 的结果——别在两处各推一套口径，
-  // 否则"页头说 Y=2058.8、控制盘说 Y=2058.9"这种事迟早发生。未知就写 `—`，不编数字。
-  const jy = $('#jogy'), jz = $('#jogz');
-  if(jy && jz){
-    if(state.value){
-      jy.textContent = 'Y ' + state.value[0].toFixed(1);
-      jz.textContent = 'Z ' + state.value[1].toFixed(1);
-    }else{
-      jy.textContent = 'Y —';
-      jz.textContent = 'Z —';
-    }
-    const mid = $('#jogmid');
-    if(mid) mid.title = '当前位置：' + positionText(state);
   }
   const stage = $('#cmdstage');
   if(stage){
@@ -994,23 +1012,113 @@ async function loadStationSummary(opts){
   }
 }
 
-function drawList(){
-  const byLayer = {};
-  for(const st of stations) (byLayer[st.layer] ||= []).push(st);
+function setStationListView(update){
+  const wasFiltered = !!stationSearch.trim() || stationFilter !== 'all';
+  update();
+  const isFiltered = !!stationSearch.trim() || stationFilter !== 'all';
+  if(!wasFiltered && isFiltered){
+    stationFilterExpansion = new Set(expandedStationLayers);
+    stationFilterSeenLayers = new Set();
+  }else if(wasFiltered && !isFiltered && stationFilterExpansion){
+    expandedStationLayers.clear();
+    stationFilterExpansion.forEach(layer => expandedStationLayers.add(layer));
+    stationFilterExpansion = null;
+    stationFilterSeenLayers = null;
+  }
+  drawList({expandMatches:isFiltered, resetScroll:true});
+}
+
+function drawList(options = {}){
+  const list = $('#list');
+  if(!list) return;
+  const previousScrollTop = list.scrollTop;
+  const activeElement = document.activeElement;
+  const focusedStationId = activeElement && activeElement.classList.contains('stn')
+    ? activeElement.dataset.id : null;
+  const focusedLayer = activeElement && activeElement.classList.contains('layer-toggle')
+    ? activeElement.dataset.layer : null;
   const cur = lastStatus?.patrol?.current_station;
-  $('#list').className = '';
-  $('#list').innerHTML = Object.keys(byLayer).sort().map(L => {
+  const query = stationSearch.trim().toLowerCase();
+  const currentId = selected || cur;
+  if(!stationListInitialized && stations.length){
+    const active = stations.find(st => st.id === currentId) || stations[0];
+    expandedStationLayers.add(String(active.layer));
+    stationListInitialized = true;
+  }
+  if(!stnSummaryOk && (stationFilter === 'issue' || stationFilter === 'no-frame')){
+    stationFilter = 'all';
+    if(stationFilterExpansion){
+      expandedStationLayers.clear();
+      stationFilterExpansion.forEach(layer => expandedStationLayers.add(layer));
+      stationFilterExpansion = null;
+      stationFilterSeenLayers = null;
+    }
+  }
+  const visibleStations = stations.filter(st => {
+    if(query && !String(st.id).toLowerCase().includes(query)) return false;
+    if(stationFilter === 'current' && (!currentId || st.id !== currentId)) return false;
+    if(stationFilter === 'issue' && !(stnSummaryOk && stnSummary[st.id]?.last_ok === false)) return false;
+    if(stationFilter === 'no-frame' && !(stnSummaryOk && !stnSummary[st.id])) return false;
+    return true;
+  });
+  const byLayer = {};
+  for(const st of visibleStations) (byLayer[st.layer] ||= []).push(st);
+  if(options.expandMatches && stationFilterSeenLayers){
+    Object.keys(byLayer).forEach(layer => {
+      const layerKey = String(layer);
+      if(!stationFilterSeenLayers.has(layerKey)) expandedStationLayers.add(layerKey);
+      stationFilterSeenLayers.add(layerKey);
+    });
+  }
+  const layerMarkup = Object.keys(byLayer).sort((a,b) => Number(a) - Number(b)).map(L => {
+    const layerKey = String(L);
+    const isOpen = expandedStationLayers.has(layerKey);
+    const total = stations.filter(st => String(st.layer) === layerKey).length;
     const rows = byLayer[L].sort((a,b)=>a.col-b.col).map(st => `
       <button type="button" class="stn ${st.id===selected?'sel':''}" data-id="${esc(st.id)}"
-        aria-selected="${st.id===selected}" aria-label="${esc(st.id)}，第 ${esc(st.layer)} 层第 ${esc(st.col)} 框${esc(stnSummaryText(st))}">
-        <span>${st.id===cur?'<span class="cur">▶ </span>':''}${esc(st.id)}</span>
-        <span class="mono" style="color:var(--dim)">${Number(st.target_y ?? st.y).toFixed(2)}, ${Number(st.target_z ?? st.z).toFixed(2)}
-        ${(st.trim_y||st.trim_z)?'⇥':''}</span>
+        aria-pressed="${st.id===selected}" aria-current="${st.id===cur?'true':'false'}"
+        aria-label="${esc(st.id)}，第 ${esc(st.layer)} 层第 ${esc(st.col)} 框${st.id===selected?'，已选择':''}${st.id===cur?'，当前执行':''}${esc(stnSummaryText(st))}">
+        <span class="stn-id">${st.id===cur?'<span class="cur">▶ </span>':''}${esc(st.id)}</span>
         ${stnSummaryHtml(st)}
       </button>`).join('');
-    return `<div class="layer" role="heading" aria-level="3">第 ${esc(L)} 层</div>${rows}`;
+    return `<section class="station-layer">
+      <button type="button" class="layer-toggle" data-layer="${esc(layerKey)}" aria-expanded="${isOpen}">
+        <span>第 ${esc(L)} 层</span><span class="layer-count">${byLayer[L].length}/${total}</span>
+        <span class="layer-chevron" aria-hidden="true">⌄</span>
+      </button>
+      <div class="station-layer-items"${isOpen?'':' hidden'}>${rows}</div>
+    </section>`;
   }).join('');
-  $('#list').querySelectorAll('.stn').forEach(el => el.onclick = () => selectStation(el.dataset.id));
+  list.innerHTML = layerMarkup || '<div class="empty station-empty">没有符合条件的站位</div>';
+  list.dataset.currentStation = cur || '';
+  list.scrollTop = options.resetScroll ? 0 : previousScrollTop;
+  const searchInput = $('#stationSearch');
+  if(searchInput){
+    if(document.activeElement !== searchInput && searchInput.value !== stationSearch) searchInput.value = stationSearch;
+    searchInput.oninput = () => setStationListView(() => { stationSearch = searchInput.value; });
+  }
+  document.querySelectorAll('[data-station-filter]').forEach(button => {
+    const needsSummary = button.dataset.stationFilter === 'issue' || button.dataset.stationFilter === 'no-frame';
+    button.disabled = needsSummary && !stnSummaryOk;
+    button.setAttribute('aria-pressed', String(button.dataset.stationFilter === stationFilter));
+    button.onclick = () => setStationListView(() => { stationFilter = button.dataset.stationFilter; });
+  });
+  list.querySelectorAll('.layer-toggle').forEach(button => button.onclick = () => {
+    const layer = button.dataset.layer;
+    const isOpen = button.getAttribute('aria-expanded') !== 'true';
+    if(isOpen) expandedStationLayers.add(layer); else expandedStationLayers.delete(layer);
+    button.setAttribute('aria-expanded', String(isOpen));
+    button.nextElementSibling.hidden = !isOpen;
+  });
+  list.querySelectorAll('.stn').forEach(el => el.onclick = () => selectStation(el.dataset.id));
+  if(focusedStationId){
+    const focusedRow = Array.from(list.querySelectorAll('.stn')).find(row => row.dataset.id === focusedStationId);
+    if(focusedRow) focusedRow.focus({preventScroll:true});
+  }else if(focusedLayer){
+    const focusedToggle = Array.from(list.querySelectorAll('.layer-toggle'))
+      .find(button => button.dataset.layer === focusedLayer);
+    if(focusedToggle) focusedToggle.focus({preventScroll:true});
+  }
 }
 
 /* 实时模式的"历史图像"网格与历史模式的时间轴喝的是同一口井（2026-09-20 review P1-4）：
@@ -1022,15 +1130,24 @@ async function fetchStationImages(stationId){
 }
 
 async function selectStation(id){
+  if(mode === 'history'){
+    const changed = hist.focusedStationId !== id;
+    const row = filtered().find(item => item.station_id === id);
+    history_pick(String(row?.object_name ?? row?.ts ?? id), row ? imageUrlFor(row) : '', id);
+    if(changed || !hist.growth) await loadGrowth();
+    return;
+  }
   const requestId = ++stationRequestSeq;
   historyRequestSeq++;
   growthRequestSeq++;
-  selected = id; drawList(); drawMap();
+  const station = stations.find(st => st.id === id);
+  selected = id;
+  if(station) expandedStationLayers.add(String(station.layer));
+  drawList(); drawMap();
   hist.rows = [];
   hist.loadedFor = null;
   hist.growth = null;
   hist.picked = null;
-  const station = stations.find(st => st.id === id);
   const target = stationTarget(station);
   if(target){ $('#gtY').value = target[0].toFixed(2); $('#gtZ').value = target[1].toFixed(2); }
   renderPositionReadouts();
@@ -1130,13 +1247,6 @@ function renderStatus(s){
   for(const [logSel, machSel] of [['#log', '#machine'], ['#log2', '#machine2']]){
     const lg = $(logSel), mc = $(machSel);
     if(!lg || !mc) continue;
-  if(mode === 'history'){
-    const changed = hist.focusedStationId !== id;
-    const row = filtered().find(item => item.station_id === id);
-    history_pick(String(row?.object_name ?? row?.ts ?? id), row ? imageUrlFor(row) : '', id);
-    if(changed || !hist.growth) await loadGrowth();
-    return;
-  }
     lg.className = ev.length ? '' : 'empty';
     lg.innerHTML = evHtml;
     mc.innerHTML = mHtml;
@@ -1150,12 +1260,10 @@ async function tick(){
   try{
     const s = await jget('/api/status');
     renderStatus(s); drawMap();
-    if(document.querySelector('#list .stn')) {
+    const stationList = $('#list');
+    if(stationList?.querySelector('.stn')) {
       const cur = s.patrol?.current_station;
-      document.querySelectorAll('#list .stn').forEach(el => {
-        const on = el.dataset.id === cur;
-        if(on !== el.dataset.wascur){ el.dataset.wascur = on; drawList(); }
-      });
+      if(stationList.dataset.currentStation !== (cur || '')) drawList();
     }
   }catch(e){ pill('接口不通', 'bad'); }
   finally{ statusRequestInFlight = false; }
@@ -1174,7 +1282,7 @@ function inRound(){ return !!(lastStatus?.patrol?.active); }
 /* 能不能动机构：**唯一的判据**，按钮 disabled 与键盘方向键共用（两处各写一遍迟早会飘）。
    未接管 / 急停闩锁 / 上一條没结束 / 巡检轮内 —— 任一成立就不许动。 */
 function motionLocked(){
-  return !!cmd.estop || !cmd.session_active || busy() || inRound();
+  return confirmationOpen || !!cmd.estop || !cmd.session_active || busy() || inRound();
 }
 
 function renderOps(){
@@ -1297,7 +1405,7 @@ function validateTargets(){
     const bad = el.value !== '' && (!Number.isFinite(v) || (rng && (v < rng[0] || v > rng[1])));
     el.className = bad ? 'bad' : '';
   }
-  if(!busy()) $('#gotobtn').disabled = !!cmd.estop || !cmd.session_active || inRound() || !targetsOk();
+  $('#gotobtn').disabled = motionLocked() || !targetsOk();
 }
 
 async function sendCmd(kind, args){
@@ -1387,6 +1495,8 @@ async function clearEstop(){
    弹窗开着的时候按 Esc = 取消，不是急停。 */
 function confirmAction(message){
   return new Promise(resolve => {
+    confirmationOpen = true;
+    const returnFocus = document.activeElement;
     const pop = document.createElement('div');
     pop.className = 'confirm-pop';
     pop.setAttribute('role', 'dialog');
@@ -1397,17 +1507,37 @@ function confirmAction(message){
     document.body.appendChild(pop);
     const done = value => {
       pop.remove();
+      confirmationOpen = false;
       document.removeEventListener('keydown', onKey, true);
+      document.removeEventListener('focusin', keepFocus, true);
+      renderOps();
+      if(returnFocus?.isConnected) returnFocus.focus();
       resolve(value);
     };
     const onKey = e => {
       if(e.key === 'Escape'){ e.preventDefault(); e.stopPropagation(); done(false); }
       else if(e.key === 'Enter'){ e.preventDefault(); e.stopPropagation(); done(true); }
+      else if(e.key === 'Tab'){
+        e.preventDefault(); e.stopPropagation();
+        const buttons = pop.querySelectorAll('button:not(:disabled)');
+        const activeIndex = Array.from(buttons).indexOf(document.activeElement);
+        const nextIndex = e.shiftKey
+          ? (activeIndex <= 0 ? buttons.length - 1 : activeIndex - 1)
+          : (activeIndex < 0 || activeIndex === buttons.length - 1 ? 0 : activeIndex + 1);
+        buttons[nextIndex]?.focus();
+      }
+      else{
+        e.stopPropagation();
+        if(e.key.startsWith('Arrow')) e.preventDefault();
+      }
     };
+    const keepFocus = e => { if(!pop.contains(e.target)) pop.querySelector('[data-yes]').focus(); };
     document.addEventListener('keydown', onKey, true);
+    document.addEventListener('focusin', keepFocus, true);
     pop.querySelector('[data-yes]').onclick = () => done(true);
     pop.querySelector('[data-no]').onclick = () => done(false);
     pop.querySelector('[data-yes]').focus();
+    renderOps();
   });
 }
 
@@ -1663,12 +1793,15 @@ function setMode(m){
   // 历史模式下右栏整列是隐藏的：画面留着也看不见，纯属白占相机一路
   if(m === 'history') closePreview('切到历史模式时已关闭');
   if(m === 'history'){
+    if(!hist.focusedStationId) hist.focusedStationId = selected;
+    stationRequestSeq++;
     renderHistory();
     loadHistory(false);
   }else{
     historyRequestSeq++;
     if(cmd.session_active){
     openPreview('已回到实时模式');
+    }
   }
 }
 
@@ -1694,6 +1827,10 @@ function renderHistory(){
   $('#tltitle').textContent = round
     ? '· ' + String(round.ts || '').replace('T', ' ') + (round.batch_no ? ' · ' + round.batch_no : '')
     : '';
+  $('#curvetitle').textContent = st ? '· ' + st.box_id : '';
+  $('#filterinfo').textContent = round
+    ? `本轮 ${hist.rows.length} 帧，筛出 ${rows.length} 帧`
+    : `${hist.rounds.length} 条巡检记录`;
 
   const tl = $('#timeline');
   const notes = [];
@@ -1728,6 +1865,48 @@ function renderHistory(){
     const key = `${layer}:${col}`;
     if(!stationByCell.has(key)) stationByCell.set(key, station);
   }
+  const rowByStation = new Map();
+  for(const row of rows){
+    if(row.station_id && !rowByStation.has(row.station_id)) rowByStation.set(row.station_id, row);
+  }
+  const cells = ['<div class="mosaic-axis">Y →</div>'];
+  for(let col = 1; col <= cols; col++) cells.push(`<div class="mosaic-col">${String(col).padStart(2, '0')}</div>`);
+  for(let layer = 1; layer <= layers; layer++){
+    cells.push(`<div class="mosaic-layer">第 ${layer} 层</div>`);
+    for(let col = 1; col <= cols; col++){
+      const station = stationByCell.get(`${layer}:${col}`);
+      if(!station){
+        cells.push(`<div class="mosaic-cell vacant" aria-label="第 ${layer} 层第 ${col} 框未配置">—</div>`);
+        continue;
+      }
+      const row = rowByStation.get(station.id);
+      const url = row ? imageUrlFor(row) : '';
+      const id = String(row?.object_name ?? row?.ts ?? station.id);
+      const time = String(row?.ts || '').slice(11, 16);
+      const status = !row ? '本轮无帧' : !rowOk(row) ? '采图失败' : url ? time || '可查看' : '图取不到';
+      const classes = ['mosaic-cell'];
+      if(row && !rowOk(row)) classes.push('fail');
+      if(row?.source === 'local') classes.push('local');
+        if(station.id === hist.focusedStationId) classes.push('sel');
+      cells.push(`<button type="button" class="${classes.join(' ')}"
+          data-pick="${esc(encodeURIComponent(id))}" data-url="${esc(url)}"
+          data-station-id="${esc(station.id)}" data-ts="${esc(row?.ts || '')}"
+          aria-pressed="${station.id === hist.focusedStationId}"
+          aria-label="第 ${layer} 层第 ${col} 框，${esc(station.id)}，${esc(status)}">
+        <span class="mosaic-thumb">${url
+          ? `<img loading="lazy" decoding="async" src="${esc(url)}" alt="">`
+          : `<span class="mosaic-empty">${esc(status)}</span>`}</span>
+        <span class="mosaic-meta"><b>${esc(station.id)}</b>
+          <small>${esc(row?.source === 'local' ? '本地待同步' : status)}</small></span>
+      </button>`);
+    }
+  }
+  tl.className = 'mosaic-scroll';
+  tl.innerHTML = `<div class="mosaic" style="grid-template-columns:64px repeat(${cols},64px);min-width:${64 * (cols + 1)}px">${cells.join('')}</div>`;
+  wireShotFallbacks(tl);
+  tl.querySelectorAll('[data-pick]').forEach(el => el.onclick = () => {
+    pickHistoryCell(el);
+  });
   drawCurve();
   updateFrameInfo();
 }
@@ -1755,6 +1934,7 @@ function history_pick(id, url, stationId){
   applyZoom();
   renderHistory();
   updateFrameInfo();
+  if(stationChanged) loadGrowth();
 }
 
 function applyZoom(){
@@ -1784,6 +1964,13 @@ function pickRelative(delta){
   if(el.scrollIntoView) el.scrollIntoView({block:'nearest', inline:'nearest'});
 }
 
+function pickHistoryCell(el){
+  if(!el) return;
+  const stationChanged = hist.focusedStationId !== el.dataset.stationId;
+  history_pick(decodeURIComponent(el.dataset.pick), el.dataset.url, el.dataset.stationId);
+  if(stationChanged || !hist.growth) loadGrowth();
+}
+
 function drawCurve(){
   const box = $('#curve'), note = $('#growthnote');
   const g = hist.growth;
@@ -1804,13 +1991,10 @@ function drawCurve(){
   }
   const W = 640, H = 170, padL = 46, padR = 12, padT = 12, padB = 24;
   const vals = [];
-    if(!hist.focusedStationId) hist.focusedStationId = selected;
-    stationRequestSeq++;
   for(const p of pts){
     for(const k of ['mean_len_mm', 'mean_cap_mm']) if(typeof p[k] === 'number') vals.push(p[k]);
   }
   const lo = vals.length ? Math.min(...vals) : 0, hi = vals.length ? Math.max(...vals) : 1;
-    }
   const span = (hi - lo) || 1;
   const X = i => padL + (pts.length === 1 ? (W - padL - padR) / 2
                                           : i * (W - padL - padR) / (pts.length - 1));
@@ -1837,10 +2021,6 @@ function drawCurve(){
   <div class="legend"><span><i style="background:#1f6feb"></i>平均长度 mm</span>
     <span><i style="background:#18794e"></i>平均伞盖 mm</span>
     <span>最新判词：${esc((g.latest && g.latest.verdict_text) || (g.latest && g.latest.verdict) || '—')}</span></div>`;
-  $('#curvetitle').textContent = st ? '· ' + st.box_id : '';
-  $('#filterinfo').textContent = round
-    ? `本轮 ${hist.rows.length} 帧，筛出 ${rows.length} 帧`
-    : `${hist.rounds.length} 条巡检记录`;
   const recent = pts.slice(-8).reverse();
   note.innerHTML = `<table class="meas"><tr><th>时间</th><th>长度 mm</th><th>伞盖 mm</th><th>判词</th></tr>
     ${recent.map(p => `<tr><td>${esc(String(p.ts).replace('T',' '))}</td>
@@ -1951,48 +2131,6 @@ async function loadRoundImages(roundId){
     if(requestId !== historyRequestSeq || hist.selectedRoundId !== roundId) return;
     hist.imageError = e.message;
   }
-  const rowByStation = new Map();
-  for(const row of rows){
-    if(row.station_id && !rowByStation.has(row.station_id)) rowByStation.set(row.station_id, row);
-  }
-  const cells = ['<div class="mosaic-axis">Y →</div>'];
-  for(let col = 1; col <= cols; col++) cells.push(`<div class="mosaic-col">${String(col).padStart(2, '0')}</div>`);
-  for(let layer = 1; layer <= layers; layer++){
-    cells.push(`<div class="mosaic-layer">第 ${layer} 层</div>`);
-    for(let col = 1; col <= cols; col++){
-      const station = stationByCell.get(`${layer}:${col}`);
-      if(!station){
-        cells.push(`<div class="mosaic-cell vacant" aria-label="第 ${layer} 层第 ${col} 框未配置">—</div>`);
-        continue;
-      }
-      const row = rowByStation.get(station.id);
-      const url = row ? imageUrlFor(row) : '';
-      const id = String(row?.object_name ?? row?.ts ?? station.id);
-      const time = String(row?.ts || '').slice(11, 16);
-      const status = !row ? '本轮无帧' : !rowOk(row) ? '采图失败' : url ? time || '可查看' : '图取不到';
-      const classes = ['mosaic-cell'];
-      if(row && !rowOk(row)) classes.push('fail');
-      if(row?.source === 'local') classes.push('local');
-        if(station.id === hist.focusedStationId) classes.push('sel');
-      cells.push(`<button type="button" class="${classes.join(' ')}"
-          data-pick="${esc(encodeURIComponent(id))}" data-url="${esc(url)}"
-          data-station-id="${esc(station.id)}" data-ts="${esc(row?.ts || '')}"
-          aria-pressed="${station.id === hist.focusedStationId}"
-          aria-label="第 ${layer} 层第 ${col} 框，${esc(station.id)}，${esc(status)}">
-        <span class="mosaic-thumb">${url
-          ? `<img loading="lazy" decoding="async" src="${esc(url)}" alt="">`
-          : `<span class="mosaic-empty">${esc(status)}</span>`}</span>
-        <span class="mosaic-meta"><b>${esc(station.id)}</b>
-          <small>${esc(row?.source === 'local' ? '本地待同步' : status)}</small></span>
-      </button>`);
-    }
-  }
-  tl.className = 'mosaic-scroll';
-  tl.innerHTML = `<div class="mosaic" style="grid-template-columns:64px repeat(${cols},64px);min-width:${64 * (cols + 1)}px">${cells.join('')}</div>`;
-  wireShotFallbacks(tl);
-  tl.querySelectorAll('[data-pick]').forEach(el => el.onclick = () => {
-    pickHistoryCell(el);
-  });
   if(requestId !== historyRequestSeq || hist.selectedRoundId !== roundId) return;
   syncAngleOptions();
   renderHistory();
@@ -2026,7 +2164,6 @@ async function loadGrowth(){
   const st = stationId ? stations.find(s => s.id === stationId) : null;
   if(!st){ hist.growth = null; drawCurve(); return; }
   let growth;
-  if(stationChanged) loadGrowth();
   try{
     growth = await jget('/api/growth?box_id=' + encodeURIComponent(st.box_id));
   }catch(e){
@@ -2066,13 +2203,6 @@ function wireHistory(){
     if(!els.length) return;
     const el = els.reduce((latest, item) => item.dataset.ts > latest.dataset.ts ? item : latest);
     pickHistoryCell(el);
-function pickHistoryCell(el){
-  if(!el) return;
-  const stationChanged = hist.focusedStationId !== el.dataset.stationId;
-  history_pick(decodeURIComponent(el.dataset.pick), el.dataset.url, el.dataset.stationId);
-  if(stationChanged || !hist.growth) loadGrowth();
-}
-
     if(el.scrollIntoView) el.scrollIntoView({block:'nearest', inline:'nearest'});
   };
   document.addEventListener('keydown', e => {
@@ -2145,12 +2275,13 @@ document.addEventListener('visibilitychange', () => {
 (async function init(){
   // P2-4：左栏折叠（窄屏/平板让中栏全宽）
   const listToggle = $('#listtoggle');
-  if(listToggle) listToggle.onclick = () => {
-    const main = document.querySelector('main');
-    main.classList.toggle('list-hidden');
-    const hidden = main.classList.contains('list-hidden');
-    listToggle.textContent = hidden ? '展开' : '收起';
-    listToggle.setAttribute('aria-expanded', String(!hidden));
+  const stationCard = listToggle?.closest('.card');
+  if(listToggle && stationCard) listToggle.onclick = () => {
+    const collapsed = stationCard.classList.toggle('station-panel-collapsed');
+    stationCard.parentElement?.classList.toggle('station-section-collapsed', collapsed);
+    listToggle.textContent = collapsed ? '展开' : '收起';
+    listToggle.setAttribute('aria-expanded', String(!collapsed));
+    if(collapsed) listToggle.focus();
   };
   try{
     const data = await jget('/api/stations');
