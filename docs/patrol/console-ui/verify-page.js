@@ -154,12 +154,11 @@ function route(method, url, body) {
         : { active: false, known: true, status: 'ok', n_results: 60, reason: '上一轮已结束（ok）' },
       room: { ok: true, allowed: true, room_id: '611', entry_date: '2026-09-04', batch_no: 'BATCH-10', day: 10,
               text: '第 10 天：巡检' },
-      envelope: { y: [0, 4492], z: [-212, 0] },
       events: [{ ts: NOW, level: 'info', text: '页面已连接' }],
     });
+  }
   if (path === '/api/rounds') {
     return json(200, { ok: true, rounds: ROUNDS, prod_error: null });
-  }
   }
   if (path === '/api/images') {
     if (state.images_error) return json(500, { error: 'boom' });
@@ -339,9 +338,17 @@ const lastCmd = () => {
   const dots = Array.from(document.querySelectorAll('#map circle'));
   const yOf = id => Number(dots.find(c => c.dataset.id === id)?.getAttribute('cy'));
   check('第 1 层的点画在图的上半部（Z 原点在顶端）', yOf('S101') < 100, 'cy=' + yOf('S101'));
-  check('点动按钮标出物理方向（Z + 是向下）',
-    T('[data-jog="Z+"]').includes('下') && T('[data-jog="Z-"]').includes('上'),
+  check('点动按钮标出物理方向（Z + 是向上）',
+    T('[data-jog="Z+"]').includes('上') && T('[data-jog="Z-"]').includes('下'),
     T('[data-jog="Z+"]') + ' / ' + T('[data-jog="Z-"]'));
+  check('点动按钮标出物理方向（Y− 在右、Y+ 在左）',
+    T('[data-jog="Y+"]').includes('左') && T('[data-jog="Y-"]').includes('右'),
+    T('[data-jog="Y+"]') + ' / ' + T('[data-jog="Y-"]'));
+  check('方向盘轴心不重复显示位置坐标',
+    $('#jogmid').textContent.trim() === 'AXIS' && !$('#jogy') && !$('#jogz'),
+    $('#jogmid').textContent.trim());
+  check('方向盘轴向说明对读屏公开', $('.jogpad').getAttribute('role') === 'group' &&
+    $('.jogpad').getAttribute('aria-label').includes('Z 轴'), $('.jogpad').getAttribute('aria-label'));
 
   // 1c. 导轨图（2026-09-17 改版）：放大移到**中栏**，滑台两轴自由移动 ⇒ 点击任意位置设目标
   check('导轨图在中栏（左栏只留站位列表）',
@@ -351,7 +358,49 @@ const lastCmd = () => {
     (dots.find(c => c.dataset.id === 'S101')?.querySelector('title')?.textContent || '')
       .includes('Y=187.10 Z=21.20 mm'),
     dots.find(c => c.dataset.id === 'S101')?.querySelector('title')?.textContent || '(无 title)');
-  check('站位列表坐标也是两位小数', T('.stn .mono').includes('187.10, 21.20'), T('.stn .mono'));
+  check('站位列表不暴露设备坐标',
+    !T('#list').includes('187.10') && !T('#list').includes('21.20'), T('#list'));
+  check('站位行触控高度至少 44px', window.getComputedStyle($('.stn')).minHeight === '44px',
+    window.getComputedStyle($('.stn')).minHeight);
+  const stationSearchInput = $('#stationSearch');
+  stationSearchInput.value = 'S102';
+  stationSearchInput.dispatchEvent(new window.Event('input', {bubbles:true}));
+  check('站位搜索按编号过滤', document.querySelectorAll('.stn').length === 1 &&
+    $('.stn').dataset.id === 'S102', T('#list'));
+  stationSearchInput.value = '';
+  stationSearchInput.dispatchEvent(new window.Event('input', {bubbles:true}));
+  await click('[data-station-filter="no-frame"]');
+  check('无历史筛选只显示无帧站位', document.querySelectorAll('.stn').length === 1 &&
+    $('.stn').dataset.id === 'S412', T('#list'));
+  await click('.layer-toggle[data-layer="4"]');
+  check('筛选结果层可折叠且状态同步', $('.layer-toggle[data-layer="4"]').getAttribute('aria-expanded') === 'false' &&
+    $('.layer-toggle[data-layer="4"]').nextElementSibling.hidden);
+  await click('.layer-toggle[data-layer="4"]');
+  check('筛选结果层可重新展开', $('.layer-toggle[data-layer="4"]').getAttribute('aria-expanded') === 'true' &&
+    !$('.layer-toggle[data-layer="4"]').nextElementSibling.hidden);
+  await click('.layer-toggle[data-layer="4"]');
+  stationSearchInput.value = 'S412';
+  stationSearchInput.dispatchEvent(new window.Event('input', {bubbles:true}));
+  check('筛选改词不覆盖用户手动折叠', $('.layer-toggle[data-layer="4"]').getAttribute('aria-expanded') === 'false' &&
+    $('.layer-toggle[data-layer="4"]').nextElementSibling.hidden);
+  stationSearchInput.value = '';
+  stationSearchInput.dispatchEvent(new window.Event('input', {bubbles:true}));
+  await click('[data-station-filter="all"]');
+  $('#list').scrollTop = 37;
+  $('.stn[data-id="S101"]').focus();
+  window.drawList();
+  check('列表重绘保留滚动位置与焦点', $('#list').scrollTop === 37 &&
+    document.activeElement.dataset.id === 'S101', `${$('#list').scrollTop} / ${document.activeElement.dataset.id}`);
+  $('.layer-toggle[data-layer="1"]').focus();
+  window.drawList();
+  check('列表重绘保留层按钮焦点', document.activeElement.classList.contains('layer-toggle') &&
+    document.activeElement.dataset.layer === '1', document.activeElement.outerHTML);
+  await click('.layer-toggle[data-layer="1"]');
+  check('站位层可以折叠', $('.layer-toggle[data-layer="1"]').getAttribute('aria-expanded') === 'false' &&
+    $('.layer-toggle[data-layer="1"]').nextElementSibling.hidden);
+  await click('.layer-toggle[data-layer="1"]');
+  check('折叠站位层可以重新展开', $('.layer-toggle[data-layer="1"]').getAttribute('aria-expanded') === 'true' &&
+    !$('.layer-toggle[data-layer="1"]').nextElementSibling.hidden);
   check('有内联 favicon（P2-6：不再每次加载 404）',
     !!document.querySelector('link[rel="icon"]'), document.querySelector('link[rel="icon"]') ? '有' : '(无)');
 
@@ -365,8 +414,9 @@ const lastCmd = () => {
   check('更早那一帧失败过，但末帧是好的 ⇒ 不打角标',
     !T('.stn[data-id="S102"] .stnsum').includes('⚠'),
     T('.stn[data-id="S102"] .stnsum'));
-  check('S101 没有历史帧时明说"暂无历史帧"（不是留白）',
-    T('.stn[data-id="S101"] .stnsum') === '暂无历史帧', T('.stn[data-id="S101"] .stnsum'));
+  check('S101 的失败末帧在摘要中明确标出',
+    T('.stn[data-id="S101"] .stnsum').includes('末帧 09-14 06:30') &&
+      T('.stn[data-id="S101"] .stnsum').includes('末帧失败'), T('.stn[data-id="S101"] .stnsum'));
   check('摘要写进 aria-label（读屏拿得到，视觉小字它看不见）',
     ($('.stn[data-id="S102"]').getAttribute('aria-label') || '').includes('末帧 09-14 09:30')
       && !/共\s*\d+\s*帧/.test($('.stn[data-id="S102"]').getAttribute('aria-label') || ''),
@@ -386,8 +436,9 @@ const lastCmd = () => {
   state.summary_extra = {};
   document.dispatchEvent(new window.Event('visibilitychange'));
   await sleep(300);
-  check('角标随末帧恢复而消失',
-    T('.stn[data-id="S101"] .stnsum') === '暂无历史帧', T('.stn[data-id="S101"] .stnsum'));
+  check('摘要刷新后仍反映本地真实的失败末帧',
+    T('.stn[data-id="S101"] .stnsum').includes('末帧 09-14 06:30') &&
+      T('.stn[data-id="S101"] .stnsum').includes('末帧失败'), T('.stn[data-id="S101"] .stnsum'));
 
   // 摘要取不到 ≠ 没拍过：此时**不渲染**"暂无历史帧"，只在列表下方给一句说明
   state.summary_error = true;
@@ -405,16 +456,21 @@ const lastCmd = () => {
 
   // P2-4：左栏可折叠（窄屏/平板让中栏全宽）
   // ⚠️ jsdom 不把样式表规则反映到 .style 上，所以这里只断言 DOM 层的 class/文案/aria，
-  //    "整列真的隐藏了"由 CSS 规则 main.list-hidden>section:first-child 负责（浏览器里生效）。
+  //    栏本身保持可见，CSS 只收起站位工具与列表。
   await click('#listtoggle');
-  check('收起后 main 打上 list-hidden（左栏由 CSS 收起）',
-    document.querySelector('main').classList.contains('list-hidden'),
-    document.querySelector('main').className);
+  check('收起后站位内容隐藏且恢复按钮留在卡片标题',
+    $('#listtoggle').closest('.card').classList.contains('station-panel-collapsed') &&
+      !!$('#listtoggle').closest('.card').querySelector('#listtoggle'),
+    'station panel remains reachable');
+  check('收起站位内容后焦点仍在恢复按钮', document.activeElement === $('#listtoggle'));
+  check('窄屏折叠规则释放固定列表高度', html.includes('station-section-collapsed{height:auto'));
+  check('窄屏急停卡不覆盖单栏操作区', html.includes('@media (max-width:760px)') &&
+    html.includes('.estopcard{position:static}'));
   check('折叠按钮文案与 aria-expanded 同步',
     T('#listtoggle') === '展开' && $('#listtoggle').getAttribute('aria-expanded') === 'false',
     T('#listtoggle') + ' / ' + $('#listtoggle').getAttribute('aria-expanded'));
   await click('#listtoggle');
-  check('再点一次恢复', !document.querySelector('main').classList.contains('list-hidden')
+  check('再点一次恢复', !$('#listtoggle').closest('.card').classList.contains('station-panel-collapsed')
     && T('#listtoggle') === '收起', T('#listtoggle'));
 
   // 点击空白处 = 填坐标（不发指令！移动永远走「移动到该点」+二次确认）；
@@ -448,6 +504,7 @@ const lastCmd = () => {
 
   // 1b. 历史模式：无实时站位焦点时仍显示最新一轮的拓扑拼图。
   await click('#modeSeg [data-mode="history"]');
+  await sleep(120);
   check('历史模式：操作区让位给筛选', $('#rtcol').style.display === 'none' && $('#hcol').style.display === '');
   check('历史模式：中栏换成拼图/大图/曲线',
     $('#hmain').style.display === '' && $('#rtmain').style.display === 'none');
@@ -476,6 +533,35 @@ const lastCmd = () => {
   await click('[data-jog="Z-"]');
   check('Z− 点动载荷 = {axis:Z, mm:−5}',
     JSON.stringify(lastCmd()) === '{"kind":"jog","args":{"axis":"Z","mm":-5}}', JSON.stringify(lastCmd()));
+  await click('[data-jog="Z+"]');
+  check('Z+ 点动载荷 = {axis:Z, mm:+5}',
+    JSON.stringify(lastCmd()) === '{"kind":"jog","args":{"axis":"Z","mm":5}}', JSON.stringify(lastCmd()));
+  await click('[data-jog="Z-"]');
+  check('Z− 点动载荷 = {axis:Z, mm:−5}',
+    JSON.stringify(lastCmd()) === '{"kind":"jog","args":{"axis":"Z","mm":-5}}', JSON.stringify(lastCmd()));
+  state.calls.length = 0;
+  document.dispatchEvent(new window.KeyboardEvent('keydown',
+    {key:'ArrowUp', bubbles:true, cancelable:true}));
+  await sleep(50);
+  document.dispatchEvent(new window.KeyboardEvent('keyup', {key:'ArrowUp', bubbles:true}));
+  await sleep(1200);
+  check('键盘↑ = Z+（物理向上）',
+    JSON.stringify(lastCmd()) === '{"kind":"jog","args":{"axis":"Z","mm":5}}', JSON.stringify(lastCmd()));
+  state.calls.length = 0;
+  document.dispatchEvent(new window.KeyboardEvent('keydown',
+    {key:'ArrowUp', bubbles:true, cancelable:true}));
+  await sleep(50);
+  const repeatedJogKey = new window.KeyboardEvent('keydown',
+    {key:'ArrowUp', bubbles:true, cancelable:true, repeat:true});
+  document.dispatchEvent(repeatedJogKey);
+  const jogRequestsDuringRepeat = state.calls.filter(call =>
+    call.method === 'POST' && call.url === '/api/cmd' && call.body?.kind === 'jog').length;
+  check('接管后指令在飞时方向键重复不会滚动页面',
+    repeatedJogKey.defaultPrevented && jogRequestsDuringRepeat === 1,
+    `defaultPrevented=${repeatedJogKey.defaultPrevented}; jogs=${jogRequestsDuringRepeat}`);
+  document.dispatchEvent(new window.KeyboardEvent('keyup', {key:'ArrowUp', bubbles:true}));
+  await sleep(1200);
+  state.calls.length = 0;
   $('#step').value = '0.5';
   await click('[data-jog="Y-"]');
   check('步长切到 0.5 生效', JSON.stringify(lastCmd()) === '{"kind":"jog","args":{"axis":"Y","mm":-0.5}}',
@@ -506,10 +592,20 @@ const lastCmd = () => {
   await sleep(1100);
   $('#gtY').value = '1200'; $('#gtZ').value = '100';
   $('#gtY').dispatchEvent(new window.Event('input'));
-  await sleep(120);
   await click('#gotobtn');
   check('定位前弹出页内确认（.confirm-pop，不是原生 confirm）',
     !!document.querySelector('.confirm-pop'), document.querySelector('.confirm-pop') ? '有弹窗' : '(无弹窗)');
+  check('确认弹窗期间点动按钮上锁', $('[data-jog="Z+"]').disabled);
+  document.dispatchEvent(new window.KeyboardEvent('keydown', {key:'Tab', bubbles:true, cancelable:true}));
+  check('确认弹窗 Tab 焦点留在对话框内', document.activeElement === $('.confirm-pop [data-no]'));
+  document.dispatchEvent(new window.KeyboardEvent('keydown', {key:'Tab', shiftKey:true, bubbles:true, cancelable:true}));
+  check('确认弹窗 Shift+Tab 焦点环可反向切换', document.activeElement === $('.confirm-pop [data-yes]'));
+  state.calls.length = 0;
+  document.dispatchEvent(new window.KeyboardEvent('keydown', {key:'ArrowUp', bubbles:true, cancelable:true}));
+  await sleep(50);
+  check('确认弹窗期间方向键不能触发点动',
+    !state.calls.some(call => call.method === 'POST' && call.url.startsWith('/api/cmd') && call.body?.kind === 'jog'),
+    JSON.stringify(state.calls.filter(call => call.method === 'POST')));
   check('当前位置未知时不伪造 0 mm 距离',
     T('.confirm-pop p').includes('无法计算距离') && !T('.confirm-pop p').includes('0 mm'),
     T('.confirm-pop p'));
@@ -608,6 +704,9 @@ const lastCmd = () => {
   mapsvg.dispatchEvent(new window.MouseEvent('click', { clientX: 136, clientY: 27, bubbles: true }));
   await sleep(400);
   check('点地图上的站点 = 选中站位', T('#imgtitle').includes('S102'), T('#imgtitle'));
+  check('站位选择状态可被辅助技术识别', $('.stn[data-id="S102"]').getAttribute('aria-pressed') === 'true' &&
+    $('.stn[data-id="S102"]').getAttribute('aria-current') === 'false',
+    $('.stn[data-id="S102"]').getAttribute('aria-label'));
   check('选中后坐标框填成该站目标（两位小数）', $('#gtY').value === '561.50' && $('#gtZ').value === '21.20',
     $('#gtY').value + ' / ' + $('#gtZ').value);
   check('选中站位后抓拍仍可用', $('#capbtn').disabled === false);
@@ -870,10 +969,13 @@ const lastCmd = () => {
   check('上一站切到 S101', T('#frameinfo').includes('第 1 / 3 站位'), T('#frameinfo'));
   check('失败帧说明"没有可用的图"（不是一块黑）', T('#viewhint').includes('没有可用的图'),
     T('#viewhint').slice(0, 40));
+  await click('#nextframe');
+  check('下一站切回 S102', T('#frameinfo').includes('第 2 / 3 站位'), T('#frameinfo'));
   await click('#latestframe');
   check('跳到最新图像所在站位', T('#frameinfo').includes('第 2 / 3 站位'), T('#frameinfo'));
   // 方向键也能翻帧（输入框聚焦时不抢键——真实浏览器里 keydown 的 target 是聚焦元素，
   // 所以这里要从输入框上派发，而不是从 document 上派发）
+  await click('#prevframe');
   document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
   await sleep(150);
   check('右方向键也能翻到下一站', T('#frameinfo').includes('第 2 / 3 站位'), T('#frameinfo'));
@@ -910,6 +1012,13 @@ const lastCmd = () => {
   check('实时画面卡在**中栏**（点动按钮在右栏，两者要同屏）',
     !!$('#rtmain #pvimg') && !$('#rtcol #pvimg'),
     $('#rtmain #pvimg') ? '中栏 ✓' : '不在中栏');
+  check('看画面与抓拍按钮同排，错误提示不挤占按钮宽度',
+    !!$('.preview-actions') && $('.preview-actions').contains($('#pvbtn')) &&
+      $('.preview-actions').contains($('#capbtn')) && !$('.preview-actions').contains($('#pverr')),
+    'buttons share a row; error status is outside');
+  check('预览提示与位置读数在图像框外',
+    !!$('.pvwrap') && !$('.pvwrap').contains($('#pvhint')) && !$('.pvwrap').contains($('#actualpos')),
+    'hint/readout do not overlap the image frame');
 
   state.preview_down = false;
   await click('#takebtn');
@@ -954,13 +1063,10 @@ const lastCmd = () => {
   await sleep(2600);
   check('恢复后重新播放', T('#pvstate').includes('播放中'), T('#pvstate'));
 
-  await click('#nextframe');
-  check('下一站切回 S102', T('#frameinfo').includes('第 2 / 3 站位'), T('#frameinfo'));
   await click('#dropbtn');
   await sleep(400);
   check('放开接管后画面自动关闭',
     !$('#pvimg').getAttribute('src'), $('#pvimg').getAttribute('src') || '(已清空)');
-  await click('#prevframe');
   check('关掉后 <img> 隐藏、提示文字回来',
     $('#pvimg').style.display === 'none' && $('#pvhint').style.display !== 'none',
     'img display=' + ($('#pvimg').style.display || '(空)'));
@@ -997,13 +1103,6 @@ const lastCmd = () => {
   await click('#pvbtn');
   await sleep(200);
   check('手动"停画面"生效', !$('#pvimg').getAttribute('src') && T('#pvstate').includes('未打开'),
-  check('看画面与抓拍按钮同排，错误提示不挤占按钮宽度',
-    !!$('.preview-actions') && $('.preview-actions').contains($('#pvbtn')) &&
-      $('.preview-actions').contains($('#capbtn')) && !$('.preview-actions').contains($('#pverr')),
-    'buttons share a row; error status is outside');
-  check('预览提示与位置读数在图像框外',
-    !!$('.pvwrap') && !$('.pvwrap').contains($('#pvhint')) && !$('.pvwrap').contains($('#actualpos')),
-    'hint/readout do not overlap the image frame');
     T('#pvstate'));
   check('关掉后按钮回到"看画面"', T('#pvbtn') === '看画面', T('#pvbtn'));
   await click('#pvbtn');

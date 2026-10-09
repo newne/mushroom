@@ -497,16 +497,21 @@
           <option value="5" selected>5</option><option value="10">10</option>
         </select>
       </div>
-      <!-- 十字方向盘：轴向标签与键盘方向映射保持一致。 -->
+      <!-- 十字方向盘：轴向标签与键盘方向映射保持一致。
+           2026-10-09 现场**直接看机器**复核（不看屏幕）：Z 的电机在**底部**、回零往下走并停在
+           底部，即 Z=0 在底部、Z+ **向上**。页面点动方向按实测对齐：↑=Z+（上）、↓=Z−（下）、
+           ←=Y+（左）、→=Y−（右）。
+           ⚠️ 这与 ADR-0018「Z 原点在顶端、向下为正」相反：平面图/分层/envlbl 文案、以及
+           patrol.framing 的 sign_z 尚未同步，见本次提交说明里的后续项。 -->
       <div class="jogpad" role="group" aria-label="空间方向点动（↑↓ Z 轴，←→ Y 轴）">
         <button type="button" disabled aria-hidden="true"></button>
-        <button data-jog="Z-" aria-label="Z 负方向，上（朝回零端）" title="Z−（上，朝回零端）">↑<span class="jd">Z−</span><span class="sr-only"> Z −（上）</span></button>
+        <button data-jog="Z+" aria-label="Z 正方向，上" title="Z+（上）">↑<span class="jd">Z+</span><span class="sr-only"> Z +（上）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
-        <button data-jog="Y-" aria-label="Y 负方向，左" title="Y−（左）">←<span class="jd">Y−</span><span class="sr-only"> Y −（左）</span></button>
+        <button data-jog="Y+" aria-label="Y 正方向，左" title="Y+（左）">←<span class="jd">Y+</span><span class="sr-only"> Y +（左）</span></button>
         <div class="jogmid" id="jogmid" title="方向轴中心">AXIS</div>
-        <button data-jog="Y+" aria-label="Y 正方向，右" title="Y+（右）">→<span class="jd">Y+</span><span class="sr-only"> Y +（右）</span></button>
+        <button data-jog="Y-" aria-label="Y 负方向，右" title="Y−（右）">→<span class="jd">Y−</span><span class="sr-only"> Y −（右）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
-        <button data-jog="Z+" aria-label="Z 正方向，下" title="Z+（下）">↓<span class="jd">Z+</span><span class="sr-only"> Z +（下）</span></button>
+        <button data-jog="Z-" aria-label="Z 负方向，下" title="Z−（下）">↓<span class="jd">Z−</span><span class="sr-only"> Z −（下）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
       </div>
 
@@ -1588,7 +1593,7 @@ function wireOps(){
      ⚠️ 节拍 = 步长 ÷ 点动速度（10 mm/s，patrol.motion_profile 的点动档）：5mm ⇒ 500ms。
         发得比这快，指令会在执行方排队，抬手之后机器还要多走一段。 */
   const JOG_SPEED_MM_S = 10;                       // 与 motion_profile 点动档一致：改那边要改这里
-  const KEY_DIR = {ArrowUp:'Z-', ArrowDown:'Z+', ArrowLeft:'Y-', ArrowRight:'Y+'};
+  const KEY_DIR = {ArrowUp:'Z+', ArrowDown:'Z-', ArrowLeft:'Y+', ArrowRight:'Y-'};
   let heldKey = null, heldTimer = null;
   function releaseHeldKey(){
     if(heldTimer){ clearInterval(heldTimer); heldTimer = null; }
@@ -1605,8 +1610,8 @@ function wireOps(){
     if(typeof mode === 'undefined' || mode !== 'realtime') return;   // 历史模式：方向键归逐帧
     const t = e.target;
     if(t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.isContentEditable)) return;
-    if(motionLocked()) return;                     // 不允许动时连 preventDefault 都不做
-    e.preventDefault();                            // 别让方向键把页面滚走
+    if(cmd.session_active) e.preventDefault();     // 已接管后，忙/急停等锁定状态也不能滚动页面
+    if(motionLocked()) return;
     if(heldKey) return;                            // 长按中（含系统重复）不重复起拍
     heldKey = e.key;
     jogHeld(dir);                                  // 点亮对应的方向按钮（长按全程亮着）
