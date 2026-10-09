@@ -12,24 +12,28 @@
      深色补丁（缩略图底板、日志分隔线、进度条底槽、曲线图、时间轴失败标记）。
      现在只保留"浅色块没有重新定义、且自身不带颜色"的规则；两遍定义并存的维护陷阱解除。 */
   *{box-sizing:border-box}
-  .pill{padding:3px 12px;border-radius:999px;font-size:13px;border:1px solid var(--line)}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 12px;border-radius:999px;font-size:13px;border:1px solid var(--line);font-weight:600;background:var(--soft);transition:all .2s ease}
+  .pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block;opacity:.85}
   .pill.idle{color:var(--dim)} .pill.run{color:var(--accent);border-color:var(--accent)}
+  .pill.run::before{animation:pill-pulse 1.4s infinite}
+  @keyframes pill-pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.3;transform:scale(1.35)}}
   .pill.ok{color:var(--ok);border-color:var(--ok)} .pill.bad{color:var(--bad);border-color:var(--bad)}
   .pill.warn{color:var(--warn);border-color:var(--warn)}
-  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 12px;font-size:14px}
-  .kv b{color:var(--dim);font-weight:400}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;font-size:13.5px}
+  .kv b{color:var(--dim);font-weight:500}
   .mono{font-family:ui-monospace,Consolas,monospace}
-    .stn{display:grid;grid-template-columns:minmax(0,1fr);gap:3px;padding:7px 8px;border-radius:5px;cursor:pointer;
-      font-size:13px;border:1px solid transparent;text-align:left}
+  .stn{position:relative;display:grid;grid-template-columns:minmax(0,1fr);gap:3px;padding:8px 10px;border-radius:6px;cursor:pointer;
+      font-size:13px;border:1px solid transparent;text-align:left;transition:all .15s ease}
   .stn .cur{color:var(--accent);font-weight:700}
   .imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
-  .im{background:var(--soft);border:1px solid var(--line);border-radius:6px;overflow:hidden;font-size:12px}
+  .im{background:var(--soft);border:1px solid var(--line);border-radius:6px;overflow:hidden;font-size:12px;box-shadow:0 1px 2px rgba(15,23,42,.03);transition:border-color .15s}
+  .im:hover{border-color:#b5ccdf}
   .im img{width:100%;height:110px;object-fit:cover;display:block;background:var(--soft)}
-  .im .m{padding:5px 7px;color:var(--dim)} .im .m b{color:var(--fg);font-weight:500}
+  .im .m{padding:6px 8px;color:var(--dim);line-height:1.4} .im .m b{color:var(--fg);font-weight:600}
   .im.fail{outline:1px solid var(--bad)} .im.local .m::after{content:" · 本地待同步";color:var(--warn)}
   /* 取不到图时**说清楚**，而不是留一块深色方块——那和"拍出来是黑的"看起来一模一样，
      现场排障会先去怀疑相机。img 一旦 error 就藏掉它，换成这行字。 */
-  .im .noimg{display:none;height:110px;align-items:center;justify-content:center;color:var(--dim)}
+  .im .noimg{display:none;height:110px;align-items:center;justify-content:center;color:var(--dim);background:#f1f5f9;font-weight:500}
   .im.noimg img{display:none}
   .im.noimg .noimg{display:flex}
   /* ⚠️ 这里**故意没有**给相机画面加任何翻转/旋转。
@@ -38,32 +42,36 @@
      都不可能同时纠正两者。当天按现场要求撤掉，改按 ADR-0017 §10 的 A 路线走：**修上游**
      （DVR Web Viewer 的图像/旋转设置，或相机装反了就转回来）。
      历史结论同向：`--flip` 默认 `none` 是刻意的，"上游修好后必须保持 none，否则会翻两次"。 */
-  #log{max-height:220px;overflow:auto;font-size:12.5px}
-  #log div{padding:2px 0;border-bottom:1px solid var(--line);color:var(--dim)}
+  #log{max-height:220px;overflow:auto;font-size:12px;line-height:1.55}
+  #log div,#log2 div{padding:3px 0;border-bottom:1px solid var(--line);color:var(--dim)}
+  #log div.log-bad,#log2 div.log-bad{color:var(--bad);font-weight:500}
+  #log div.log-ok,#log2 div.log-ok{color:var(--ok)}
+  .log-ts{color:var(--dim);opacity:.85;margin-right:4px}
   .empty{color:var(--dim);font-size:13px;padding:8px 0}
   .bar{height:8px;background:var(--soft);border-radius:4px;overflow:hidden;margin-top:6px}
-  .bar i{display:block;height:100%;background:var(--accent)}
+  .bar i{display:block;height:100%;background:var(--accent);transition:width .3s ease}
   /* ---- 操作区（手动控制）：急停常驻右栏顶部，不随滚动隐藏（ADR-0004/0016）---- */
   .estopcard{position:sticky;z-index:4}
   /* 44px 最小点击高度是现场要求：只写在基础块里，浅色块不重复（重复两遍必漂移） */
-  button{font:inherit;padding:9px 10px;min-height:44px;cursor:pointer}
-  input,select{font:inherit;padding:9px 8px;min-height:44px;width:100%}
-  input.bad{border-color:var(--bad);color:var(--bad)}
-  .row{display:flex;gap:6px;align-items:center;margin:6px 0}
+  button{font:inherit;padding:9px 12px;min-height:44px;cursor:pointer;border-radius:6px;transition:background .15s ease,border-color .15s ease,box-shadow .15s ease,transform .06s ease}
+  button:active:not(:disabled){transform:translateY(1px)}
+  input,select{font:inherit;padding:9px 10px;min-height:44px;width:100%;border-radius:6px;transition:border-color .15s ease,box-shadow .15s ease}
+  input.bad{border-color:var(--bad)!important;color:var(--bad)!important;background:#fff5f5}
+  .row{display:flex;gap:8px;align-items:center;margin:6px 0}
   .row>*{flex:1}
   .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:6px 0}
-  .grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:6px;margin:6px 0}
-  .lbl{color:var(--dim);font-size:12px;margin:8px 0 2px;clear:both}
-  #opmsg{font-size:13px;padding:8px 10px;border-radius:6px;margin-top:8px;display:none}
-  #sessionline{font-size:13px;color:var(--dim)}
+  .grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:6px 0}
+  .lbl{color:var(--dim);font-size:12px;font-weight:500;margin:10px 0 3px;clear:both}
+  #opmsg{font-size:13px;padding:9px 12px;border-radius:6px;margin-top:8px;display:none;font-weight:500;line-height:1.45}
+  #sessionline{font-size:13px;color:var(--dim);line-height:1.45}
   .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;
        border:1px solid var(--line);color:var(--dim)}
-  .tag.on{color:var(--ok);border-color:var(--ok)}
-  .tag.bad{color:var(--bad);border-color:var(--bad)}
-  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .tag.on{color:var(--ok);border-color:var(--ok);background:var(--ok-soft)}
+  .tag.bad{color:var(--bad);border-color:var(--bad);background:var(--bad-soft)}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--soft);padding:2px;gap:2px}
   .tlhead{padding:6px 0 2px;color:var(--dim);font-size:12px;border-bottom:1px solid var(--line)}
   .tl .im{cursor:pointer}
-  .tl .im.sel{outline:2px solid var(--accent)}
+  .tl .im.sel{outline:2px solid var(--accent);outline-offset:1px}
   .tl .im.gone{opacity:.55}
   .mosaic-scroll{overflow-x:auto;padding:4px 0 8px}
   .mosaic{display:grid;gap:3px;align-items:stretch}
@@ -73,7 +81,8 @@
   .mosaic-layer{min-height:76px;border-right:1px solid var(--line)}
   .mosaic-cell{width:64px;min-width:64px;min-height:76px;padding:3px;display:grid;
     grid-template-rows:42px minmax(0,1fr);gap:2px;overflow:hidden;border:1px solid var(--line);
-    border-radius:4px;background:var(--soft);color:var(--fg);text-align:center}
+    border-radius:5px;background:var(--soft);color:var(--fg);text-align:center;transition:border-color .15s,box-shadow .15s}
+  .mosaic-cell:hover:not(.vacant){border-color:#b5ccdf;box-shadow:0 1px 4px rgba(15,23,42,.08)}
   .mosaic-cell .mosaic-thumb{display:flex;align-items:center;justify-content:center;min-width:0;
     width:100%;height:42px;overflow:hidden;background:var(--panel);color:var(--dim);font-size:10px}
   .mosaic-cell .mosaic-thumb img{display:block;width:100%;height:100%;object-fit:contain;background:var(--panel)}
@@ -87,18 +96,18 @@
   .mosaic-cell.local .mosaic-meta small{color:var(--warn)}
   .mosaic-cell.vacant{cursor:default;background:transparent;border-style:dashed;color:var(--dim)}
   /* ---- 大图查看器 ---- */
-  .viewer{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:6px;
+  .viewer{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:8px;
           display:flex;align-items:center;justify-content:center;cursor:grab}
   .viewer.dragging{cursor:grabbing}
   .viewer img{max-width:100%;max-height:100%;transition:transform .08s linear;
               transform-origin:center center;user-select:none;-webkit-user-drag:none}
-  .viewer .hint{position:absolute;left:8px;bottom:6px;font-size:12px;color:var(--dim)}
+  .viewer .hint{position:absolute;left:10px;bottom:8px;font-size:12px;color:rgba(255,255,255,.8);background:rgba(15,23,42,.7);padding:2px 8px;border-radius:4px;backdrop-filter:blur(4px)}
   table.meas{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px}
-  table.meas th,table.meas td{border-bottom:1px solid var(--line);padding:4px 6px;text-align:left}
-  table.meas th{color:var(--dim);font-weight:500}
+  table.meas th,table.meas td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left}
+  table.meas th{color:var(--dim);font-weight:600;background:var(--soft)}
   #curve svg{width:100%;height:170px;display:block}
-  .legend{font-size:12px;color:var(--dim);display:flex;gap:14px;margin-top:4px}
-  .legend i{display:inline-block;width:10px;height:3px;vertical-align:middle;margin-right:4px}
+  .legend{font-size:12px;color:var(--dim);display:flex;gap:14px;margin-top:6px;align-items:center}
+  .legend i{display:inline-block;width:12px;height:3px;vertical-align:middle;margin-right:4px;border-radius:2px}
   /* ---- 实时画面（MJPEG，中栏第一张）----
      框必须与画面的**真实宽高比**一致（`--pv-k`）：取**预览流当前档位实际输出的 1280×718**
      （`PREVIEW_SCALE=1280`）。相机原生是 2880×1616，2026-09-21 上过原生档，但经 VPN
@@ -118,25 +127,34 @@
       .pvbody{display:flex;flex-direction:column;align-items:center;gap:0}
       .pvleft{flex:0 0 auto;min-width:0;width:100%;display:flex;flex-direction:column;align-items:center}
       .pvwrap{position:relative;width:min(100%, var(--pv-max-w));aspect-ratio:var(--pv-k);
-          border:1px solid var(--line);border-radius:6px;overflow:hidden;display:flex;
-          align-items:center;justify-content:center}
+          border:1px solid #c6d1dc;border-radius:8px;overflow:hidden;display:flex;
+          align-items:center;justify-content:center;background:#141c26;box-shadow:inset 0 0 0 1px rgba(255,255,255,.05),0 2px 8px rgba(15,23,42,.06)}
   .pvwrap img{width:100%;height:100%;object-fit:contain;display:none}
-      .pvhint-slot{width:min(100%, var(--pv-max-w));min-height:18px;display:flex;
+  .pvwrap.shutter-flash::after{content:"";position:absolute;inset:0;background:#ffffff;opacity:.7;animation:shutter-flash-anim .25s ease-out forwards;pointer-events:none}
+  @keyframes shutter-flash-anim{0%{opacity:.7}100%{opacity:0}}
+      .pvhint-slot{width:min(100%, var(--pv-max-w));min-height:20px;display:flex;
              align-items:center;justify-content:center;margin-top:6px}
-      #pvhint{text-align:center;padding:0}
+      #pvhint{text-align:center;padding:0;color:var(--dim);font-size:12.5px}
         .preview-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;
                  width:min(100%, var(--pv-max-w));margin-top:8px}
-        .preview-actions button{min-width:0;min-height:44px;white-space:nowrap}
-        #pverr{display:block;width:min(100%, var(--pv-max-w));margin-top:5px;font-size:12px}
+        .preview-actions button{min-width:0;min-height:44px;white-space:nowrap;font-weight:500}
+        #capbtn:not(:disabled){background:linear-gradient(180deg,#ffffff,#f1f6fb);border-color:#1f6feb;color:#14538f;font-weight:600;box-shadow:0 1px 3px rgba(31,111,235,.15)}
+        #capbtn:not(:disabled):hover{background:var(--accent-soft);border-color:#185fc7}
+        #pverr{display:block;width:min(100%, var(--pv-max-w));margin-top:5px;font-size:12px;color:var(--bad)}
         #pverr:empty{display:none}
       .pvside{flex:0 0 auto;width:100%;min-width:0}
   #pvnote{font-size:12px;margin-left:8px}
+  .coord-row{display:flex;gap:8px;align-items:center;margin:6px 0}
+  .coord-field{position:relative;display:flex;align-items:center;flex:1}
+  .coord-badge{position:absolute;left:8px;z-index:2;pointer-events:none;font:700 11px ui-monospace,Consolas,monospace;color:var(--dim);background:var(--soft);padding:2px 5px;border-radius:3px;border:1px solid var(--line)}
+  .coord-field input{padding-left:42px!important;font-family:ui-monospace,Consolas,monospace;font-weight:600}
+  .opcard-active{border-color:#93c5fd!important;box-shadow:0 0 0 2px rgba(31,111,235,.15),var(--shadow)!important}
 
   /* ---- 浅色固定工作台：顶栏、门禁和日志常驻，各栏自己滚动 ---- */
   :root{--bg:#edf1f5;--panel:#fff;--line:#d8e0e8;--fg:#16212b;--dim:#6b7785;
         --ok:#18794e;--warn:#a35d00;--bad:#c73535;--accent:#1f6feb;
         --soft:#f7f9fb;--accent-soft:#e8f0fe;--ok-soft:#e8f5ee;--bad-soft:#fcecec;
-        --shadow:0 1px 2px rgba(24,38,52,.06),0 4px 14px rgba(24,38,52,.04);
+        --shadow:0 1px 3px rgba(24,38,52,.06),0 4px 14px rgba(24,38,52,.04);
         /* 实时画面：--pv-k = **预览流当前档位实际输出帧**的宽高比 1280/718
            （`PREVIEW_SCALE=1280`；`scale=1280:-2` 从相机原生 2880×1616 偶数取整得 718）。
            2026-09-21 试过"与档位解耦、恒写相机原生 2880/1616"——三档只差 <0.1% 不假，
@@ -160,13 +178,13 @@
   header{height:52px;flex:0 0 52px;display:flex;align-items:center;gap:12px;padding:0 16px;
          background:var(--panel);border-bottom:1px solid var(--line);
          box-shadow:0 1px 5px rgba(24,38,52,.04)}
-  h1{font-size:16px;letter-spacing:.01em;margin:0;flex:0 0 auto;white-space:nowrap}
+  h1{font-size:16px;letter-spacing:.01em;margin:0;flex:0 0 auto;white-space:nowrap;display:flex;align-items:center;gap:6px}
   #modeSeg{flex:0 0 auto}
   header #pill{flex:0 0 auto}
-  #posn,#roundinfo{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #posn,#roundinfo{flex:0 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:3px 8px;border-radius:5px;background:var(--soft);border:1px solid rgba(216,224,232,.5)}
   .pill{font-weight:600;background:var(--soft)}
-  #gate{height:36px;flex:0 0 36px;display:flex;align-items:center;padding:0 16px;font-size:12px;border-bottom:1px solid var(--line)}
-  #gate.allow{background:var(--ok-soft);color:#12613d} #gate.deny{background:var(--bad-soft);color:#8e2424}
+  #gate{height:36px;flex:0 0 36px;display:flex;align-items:center;padding:0 16px;font-size:12.5px;font-weight:500;border-bottom:1px solid var(--line);border-left:4px solid transparent;transition:background .2s,border-left-color .2s}
+  #gate.allow{background:var(--ok-soft);color:#12613d;border-left-color:var(--ok)} #gate.deny{background:var(--bad-soft);color:#8e2424;border-left-color:var(--bad)}
   main{height:calc(100vh - 88px);flex:1;min-height:0;display:grid;
        grid-template-columns:minmax(280px,320px) minmax(0,1fr) minmax(320px,360px);
        gap:0;padding:0;align-items:stretch;background:var(--bg)}
@@ -174,21 +192,22 @@
   main>section:first-child{display:flex;flex-direction:column;overflow:hidden;padding:14px 12px;background:var(--panel);border-right:1px solid var(--line)}
   #rtmain,#hmain{scrollbar-gutter:stable}
   #rtcol,#hcol{background:var(--soft);border-left:1px solid var(--line)}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:12px;box-shadow:var(--shadow)}
-  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:12px 14px;margin-bottom:12px;box-shadow:var(--shadow);transition:border-color .15s}
+  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);display:flex;align-items:center;justify-content:space-between;gap:8px}
   /* 左栏只剩站位列表一张卡（导轨图 2026-09-17 移去中栏放大）：它吃满整列、#list 自己滚 */
   main>section:first-child>.card{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column}
   #list{flex:1 1 auto;min-height:0;overflow-y:auto;padding-right:2px}
   .station-tools{flex:0 0 auto;display:grid;gap:8px;padding:8px 0}
-  .station-tools input{min-height:44px;padding:7px 9px}
+  .station-tools input{min-height:44px;padding:7px 10px;border-radius:6px}
   .station-filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
-  .station-filters button{min-height:44px;padding:4px 2px;font-size:11px;white-space:nowrap}
+  .station-filters button{min-height:44px;padding:4px 2px;font-size:11px;white-space:nowrap;border-radius:5px}
   .station-filters button[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);
                                                    color:#14538f;font-weight:600}
   .station-filters button:disabled{opacity:.5}
   .station-layer+.station-layer{margin-top:8px}
-  .layer-toggle{width:100%;min-height:44px;display:flex;align-items:center;gap:8px;padding:5px 8px;
+  .layer-toggle{width:100%;min-height:44px;display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:5px;
                 text-align:left;background:transparent;border-color:transparent;box-shadow:none;font-size:12px}
+  .layer-toggle:hover{background:var(--soft)}
   .layer-toggle>span:first-child{font-weight:600}
   .layer-count{margin-left:auto;color:var(--dim);font:11px ui-monospace,Consolas,monospace}
   .layer-chevron{color:var(--accent);transition:transform .15s ease}
@@ -199,16 +218,17 @@
   /* 导轨图：中栏全宽，viewBox 与 aspect-ratio 同比例 ⇒ 像素坐标与图内坐标是线性映射，
      点击/悬停换算不需要处理 letterbox（preserveAspectRatio 的留白）。crosshair 提示可点。
      170 的图高是压扁过的：1080p 下与 44vh 的实时画面同屏，不挤成滚动才见得着的第二页。 */
-  #map{width:100%;height:auto;aspect-ratio:92/17;background:#fbfcfd;border:1px solid var(--line);
-       border-radius:6px;cursor:crosshair;touch-action:manipulation;display:block}
-  .mapcap{display:flex;justify-content:space-between;gap:12px;font-size:12px;color:var(--dim);margin-top:6px}
-  .mapcap .mono{white-space:nowrap}
-    .stn{color:var(--fg);background:transparent;border-color:transparent;min-height:44px}
-  .stn:hover{background:var(--soft)} .stn.sel{background:var(--accent-soft);border-color:#bcd4ff}
-    .stn-id{font-weight:600}
-    /* 站位摘要只显示最近帧时间与失败状态，不在客户列表暴露设备坐标。 */
-    .stn .stnsum{display:block;margin-top:1px;font-size:11px;color:var(--dim);font-weight:400}
-  .stn .stnbadge{color:var(--bad);font-weight:600;font-style:normal}
+  #map{width:100%;height:auto;aspect-ratio:92/17;background:linear-gradient(180deg,#ffffff,#f9fbfd);border:1px solid var(--line);
+       border-radius:8px;cursor:crosshair;touch-action:manipulation;display:block;box-shadow:inset 0 1px 2px rgba(0,0,0,.02);transition:border-color .15s}
+  #map:hover{border-color:#b5ccdf}
+  .mapcap{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:12px;color:var(--dim);margin-top:8px}
+  .mapcap .mono{white-space:nowrap;padding:2px 8px;background:var(--soft);border-radius:4px;border:1px solid var(--line)}
+  .stn{color:var(--fg);background:transparent;border-color:transparent;min-height:44px}
+  .stn:hover{background:var(--soft)} .stn.sel{background:var(--accent-soft);border-color:#bcd4ff;border-left:3px solid var(--accent);padding-left:7px}
+  .stn-id{font-weight:600}
+  /* 站位摘要只显示最近帧时间与失败状态，不在客户列表暴露设备坐标。 */
+  .stn .stnsum{display:block;margin-top:1px;font-size:11px;color:var(--dim);font-weight:400}
+  .stn .stnbadge{display:inline-block;padding:1px 5px;background:#fee2e2;border-radius:3px;color:var(--bad);font-weight:600;font-style:normal}
   .layer{font-weight:600;letter-spacing:.04em;color:var(--dim);padding-top:10px}
   button{color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:6px;box-shadow:0 1px 1px rgba(24,38,52,.03)}
   button:hover:not(:disabled){background:var(--soft);border-color:#b9c8d8}
@@ -218,21 +238,25 @@
   button.danger:hover:not(:disabled){background:#ad2e2e}
   button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #bcd4ff;outline-offset:1px}
   input,select{color:var(--fg);background:var(--panel);border-color:var(--line)}
-  .estopcard{top:0;background:var(--bad-soft);border-color:#efc2c2;box-shadow:var(--shadow)}
+  .estopcard{top:0;background:var(--bad-soft);border-color:#efc2c2;box-shadow:var(--shadow);transition:all .2s ease}
+  .estopcard.is-stopped{background:#fee2e2;border-color:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.25)}
   .estopcard h2{color:#8e2424}
+  #estopclear:not(:disabled){background:#fff;border-color:var(--bad);color:var(--bad);font-weight:600;box-shadow:0 0 0 2px rgba(199,53,53,.2)}
+  #estopclear:not(:disabled):hover{background:var(--bad);color:#fff}
   #rtmain>.card:first-child{border-top:3px solid var(--accent)}
   .pvwrap{border-color:#c6d1dc;background:#16212b;box-shadow:inset 0 0 0 1px rgba(255,255,255,.04)}
     /* 读数始终在画框外；宽屏四列，窄屏在响应断点减为两列。 */
-    .readouts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px}
-  .readout{min-width:0;padding:8px 9px;background:var(--soft);border:1px solid var(--line);border-radius:6px}
-  .readout .k{display:block;color:var(--dim);font-size:11px}
+  .readouts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:10px}
+  .readout{min-width:0;padding:8px 10px;background:var(--soft);border:1px solid var(--line);border-radius:7px;position:relative;box-shadow:0 1px 2px rgba(15,23,42,.03);transition:border-color .15s}
+  .readout:hover{border-color:#b9c8d8}
+  .readout .k{display:block;color:var(--dim);font-size:11px;font-weight:500}
   /* 读数块的**值**允许折行，不能截。理由：最坏情况是"当前位置"的
     `Y=4492.00 Z=190.80 · 巡检站位推定`（21 西文 + 6 汉字 ≈ 262px），四列时单元格常只有
     ~166~222px —— nowrap+ellipsis 会截在坐标尾数或**来源**上，
      而来源（控制器实时 / 巡检站位推定 / 最后成功目标）正是判断"这个数能不能信"的依据。
      折行最多两行、代价 ~15px 高度，比丢掉信息来源划算。 */
   .readout .v{display:block;margin-top:2px;font:600 13px ui-monospace,Consolas,monospace;
-              white-space:normal;overflow-wrap:anywhere}
+              white-space:normal;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
   .readout .v.unknown{color:var(--dim);font-weight:400}
     .jogpad{position:relative;display:grid;grid-template-columns:repeat(3,72px);grid-template-rows:repeat(3,64px);
       justify-content:center;gap:8px;margin:12px 0}
@@ -244,9 +268,9 @@
        flex-direction:column;align-items:center;justify-content:center;gap:3px}
     .jogpad button[data-jog]{width:64px;height:64px;justify-self:center;border-radius:14px;
            border-color:#bfd1e7;background:linear-gradient(145deg,#fff,#edf4fc);
-           color:var(--accent);box-shadow:0 2px 6px rgba(24,50,82,.09)}
-    .jogpad button[data-jog]:hover:not(:disabled){background:var(--accent-soft);border-color:var(--accent)}
-     .jogpad button[data-jog]:disabled{opacity:.5;background:var(--soft);border-color:var(--line);
+           color:var(--accent);box-shadow:0 2px 6px rgba(24,50,82,.09);transition:all .08s ease}
+    .jogpad button[data-jog]:hover:not(:disabled){background:var(--accent-soft);border-color:var(--accent);box-shadow:0 3px 8px rgba(31,111,235,.15)}
+    .jogpad button[data-jog]:disabled{opacity:.5;background:var(--soft);border-color:var(--line);
                             color:var(--dim);box-shadow:none;cursor:not-allowed}
     .jogpad button[disabled][aria-hidden="true"]{opacity:1;background:transparent;color:var(--dim);
                 border-color:transparent;box-shadow:none;cursor:default}
@@ -257,11 +281,11 @@
     .jogmid{position:relative;z-index:1;display:flex;align-items:center;justify-content:center;width:50px;height:50px;
       min-height:50px;justify-self:center;border:1px solid #a8c4e7;border-radius:50%;
       background:radial-gradient(circle,var(--accent) 0 3px,transparent 4px),var(--soft);
-      color:var(--accent);font:600 9px ui-monospace,Consolas,monospace}
+      color:var(--accent);font:600 9px ui-monospace,Consolas,monospace;box-shadow:0 1px 3px rgba(0,0,0,.06)}
   /* 键盘提示里的按键（点动那行的 <kbd>） */
-  kbd{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:4px;padding:0 4px;background:var(--soft)}
+  kbd{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:4px;padding:1px 5px;background:var(--soft);font-weight:500;box-shadow:0 1px 1px rgba(0,0,0,.05)}
   .seg{background:var(--soft);border-color:var(--line);padding:2px}
-  .seg button{color:var(--dim);min-height:34px}
+  .seg button{color:var(--dim);min-height:34px;border-radius:6px}
   .seg button.on{background:var(--panel);color:var(--fg);font-weight:600;box-shadow:var(--shadow)}
   /* 历史模式三张卡按 DOM 顺序排（2026-09-20 review P1-2）：原先靠 grid-row 把"大图"提到
      第一行，于是 Tab 焦点先经过时间轴、读屏大纲顺序也和眼睛看到的相反。现在 DOM 顺序
@@ -276,17 +300,17 @@
   .tl .im .noimg{height:96px}
   .tlhead{margin-top:8px;border-bottom-color:var(--line);font-weight:600}
   #log,#log2{font-family:ui-monospace,Consolas,monospace}
-  #opmsg.info{background:var(--accent-soft);color:#14538f}
-  #opmsg.ok{background:var(--ok-soft);color:#12613d}
-  #opmsg.bad{background:var(--bad-soft);color:#8e2424}
+  #opmsg.info{background:var(--accent-soft);color:#14538f;border:1px solid #bfdbfe}
+  #opmsg.ok{background:var(--ok-soft);color:#12613d;border:1px solid #bbf7d0}
+  #opmsg.bad{background:var(--bad-soft);color:#8e2424;border:1px solid #fecaca}
   .empty{color:var(--dim)}
   .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
   /* ---- 2026-09-20 review 新增组件 ---- */
   /* P2-5 页内确认（取代原生 confirm()：同样的二次确认语义，样式不割裂、不阻塞主线程） */
   .confirm-pop{position:fixed;left:50%;top:16%;transform:translateX(-50%);z-index:30;max-width:440px;
                background:var(--panel);border:1px solid var(--line);border-radius:10px;
-               box-shadow:0 12px 40px rgba(24,38,52,.22);padding:14px 16px}
-  .confirm-pop p{margin:0 0 12px;font-size:14px;line-height:1.55;white-space:pre-line}
+               box-shadow:0 12px 40px rgba(24,38,52,.22);padding:16px 18px}
+  .confirm-pop p{margin:0 0 14px;font-size:14px;line-height:1.55;white-space:pre-line;font-weight:500}
   .confirm-pop .row{margin:0}
   /* P2-3 大图逐帧导航 */
   .framenav{display:flex;gap:6px;align-items:center;margin-top:8px}
@@ -330,7 +354,7 @@
 </head>
 <body>
 <header>
-  <h1>蘑菇房巡检台</h1>
+  <h1><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent);flex:0 0 auto" aria-hidden="true"><path d="M12 2a8 8 0 0 0-8 8c0 3.5 2.5 6.5 6 7.5V20a2 2 0 0 0 4 0v-2.5c3.5-1 6-4 6-7.5a8 8 0 0 0-8-8z"/><circle cx="12" cy="10" r="2"/></svg>蘑菇房巡检台</h1>
   <span id="modeSeg" class="seg" role="group" aria-label="页面模式">
     <button type="button" data-mode="realtime" class="on" aria-pressed="true">实时</button>
     <button type="button" data-mode="history" aria-pressed="false">历史</button>
@@ -481,9 +505,9 @@
       <div id="opnotice" class="empty" style="padding:6px 0"></div>
 
       <div class="lbl" id="envlbl">坐标（读取中…）</div>
-      <div class="row">
-        <input id="gtY" type="number" step="0.5" inputmode="decimal" placeholder="Y">
-        <input id="gtZ" type="number" step="0.5" inputmode="decimal" placeholder="Z">
+      <div class="row coord-row">
+        <div class="coord-field"><span class="coord-badge">Y</span><input id="gtY" type="number" step="0.5" inputmode="decimal" placeholder="Y 坐标"></div>
+        <div class="coord-field"><span class="coord-badge">Z</span><input id="gtZ" type="number" step="0.5" inputmode="decimal" placeholder="Z 坐标"></div>
       </div>
       <div class="grid2">
         <button id="gotobtn" class="primary">移动到该点</button>
@@ -498,18 +522,20 @@
         </select>
       </div>
       <!-- 十字方向盘：轴向标签与键盘方向映射保持一致。
-           2026-10-09 现场**直接看机器**复核（不看屏幕）：Z 的电机在**底部**、回零往下走并停在
-           底部，即 Z=0 在底部、Z+ **向上**。页面点动方向按实测对齐：↑=Z+（上）、↓=Z−（下）、
-           ←=Y+（左）、→=Y−（右）。
-           ⚠️ 这与 ADR-0018「Z 原点在顶端、向下为正」相反：平面图/分层/envlbl 文案、以及
-           patrol.framing 的 sign_z 尚未同步，见本次提交说明里的后续项。 -->
+           2026-10-09 现场**直接看机器**复核（不看屏幕）：回零后 **Z=0 在底部、Y=0 在左端**。
+           按"原点在靠近电机端、坐标朝离开电机方向增长"（说明书 §三.2：负限位=靠近电机端 ⇒ homeDir=2）：
+             · Z 的电机在**底部** ⇒ Z+ **向上**（与 ADR-0018 相反，页面点动已按此对齐）；
+             · Y 的电机在**左端** ⇒ Y+ **向右**（与原约定一致，未改）。
+           ⚠️ Z 只有页面点动映射改了；机器坐标框架（motion_profile 的 Z 行程/home_dir/
+           positive_towards、平面图与 envlbl 的"Z 向下"文案、patrol.framing 的 sign_z）
+           仍按 ADR-0018，需一次单独的框架更正，见提交说明。 -->
       <div class="jogpad" role="group" aria-label="空间方向点动（↑↓ Z 轴，←→ Y 轴）">
         <button type="button" disabled aria-hidden="true"></button>
         <button data-jog="Z+" aria-label="Z 正方向，上" title="Z+（上）">↑<span class="jd">Z+</span><span class="sr-only"> Z +（上）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
-        <button data-jog="Y+" aria-label="Y 正方向，左" title="Y+（左）">←<span class="jd">Y+</span><span class="sr-only"> Y +（左）</span></button>
+        <button data-jog="Y-" aria-label="Y 负方向，左" title="Y−（左）">←<span class="jd">Y−</span><span class="sr-only"> Y −（左）</span></button>
         <div class="jogmid" id="jogmid" title="方向轴中心">AXIS</div>
-        <button data-jog="Y-" aria-label="Y 负方向，右" title="Y−（右）">→<span class="jd">Y−</span><span class="sr-only"> Y −（右）</span></button>
+        <button data-jog="Y+" aria-label="Y 正方向，右" title="Y+（右）">→<span class="jd">Y+</span><span class="sr-only"> Y +（右）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
         <button data-jog="Z-" aria-label="Z 负方向，下" title="Z−（下）">↓<span class="jd">Z−</span><span class="sr-only"> Z −（下）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
@@ -1244,7 +1270,13 @@ function renderStatus(s){
     ['位置来源', m.pos_source], ['相机服务', m.host],
   ].map(([k,v]) => `<b>${esc(k)}</b><span>${esc(v ?? '—')}</span>`).join('');
   const ev = (s.events||[]).slice().reverse();
-  const evHtml = ev.length ? ev.map(e => `<div>${esc(e.ts)} ${esc(e.text)}</div>`).join('') : '—';
+  const evHtml = ev.length ? ev.map(e => {
+    const txt = String(e.text || '');
+    const isBad = /失败|错误|急停|abort|fail|error/i.test(txt);
+    const isOk = /成功|完成|已连|ok/i.test(txt);
+    const cls = isBad ? ' class="log-bad"' : (isOk ? ' class="log-ok"' : '');
+    return `<div${cls}><span class="log-ts">${esc(e.ts)}</span> ${esc(e.text)}</div>`;
+  }).join('') : '—';
   const mHtml = [
     ['页面状态', m.state], ['控制器连接', m.connected ? '已连' : '未连（巡检进行中时刻意不连）'],
     ['位置来源', m.pos_source], ['相机服务', m.host],
@@ -1296,10 +1328,12 @@ function renderOps(){
   $('#estopstate').className = 'tag ' + (est ? 'bad' : 'on');
   $('#estopstate').textContent = est ? '已置位（闩锁）' : '未置位';
   $('#estopclear').disabled = !est;
+  $('.estopcard')?.classList.toggle('is-stopped', est);
 
   const active = !!cmd.session_active;
   $('#takebtn').disabled = active;
   $('#dropbtn').disabled = !active;
+  $('#takebtn')?.closest('.card')?.classList.toggle('opcard-active', active);
   if(active && session){
     const left = Math.max(0, Math.round((Date.parse(session.expires_at) - (Date.now() + clockSkewMs)) / 1000));
     $('#sessionline').textContent = left > 0
@@ -1593,7 +1627,7 @@ function wireOps(){
      ⚠️ 节拍 = 步长 ÷ 点动速度（10 mm/s，patrol.motion_profile 的点动档）：5mm ⇒ 500ms。
         发得比这快，指令会在执行方排队，抬手之后机器还要多走一段。 */
   const JOG_SPEED_MM_S = 10;                       // 与 motion_profile 点动档一致：改那边要改这里
-  const KEY_DIR = {ArrowUp:'Z+', ArrowDown:'Z-', ArrowLeft:'Y+', ArrowRight:'Y-'};
+  const KEY_DIR = {ArrowUp:'Z+', ArrowDown:'Z-', ArrowLeft:'Y-', ArrowRight:'Y+'};
   let heldKey = null, heldTimer = null;
   function releaseHeldKey(){
     if(heldTimer){ clearInterval(heldTimer); heldTimer = null; }
@@ -1622,6 +1656,13 @@ function wireOps(){
   document.addEventListener('keyup', e => { if(e.key === heldKey) releaseHeldKey(); });
   window.addEventListener('blur', releaseHeldKey);  // 切走窗口/最小化：立刻停，别让机器一直走
   $('#capbtn').onclick = async () => {
+    const wrap = $('.pvwrap');
+    if(wrap){
+      wrap.classList.remove('shutter-flash');
+      void wrap.offsetWidth;
+      wrap.classList.add('shutter-flash');
+      setTimeout(() => wrap.classList.remove('shutter-flash'), 260);
+    }
     // 选了站位就按它（照片归到它名下）；没选就让后端按当前位置取最近的格点——
     // 非格点抓拍走的就是这一条，照片仍要挂到一个站位上，否则历史模式按站位取图找不到它。
     await sendCmd('capture', selected ? {station_id:selected} : {});

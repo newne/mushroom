@@ -341,8 +341,8 @@ const lastCmd = () => {
   check('点动按钮标出物理方向（Z + 是向上）',
     T('[data-jog="Z+"]').includes('上') && T('[data-jog="Z-"]').includes('下'),
     T('[data-jog="Z+"]') + ' / ' + T('[data-jog="Z-"]'));
-  check('点动按钮标出物理方向（Y− 在右、Y+ 在左）',
-    T('[data-jog="Y+"]').includes('左') && T('[data-jog="Y-"]').includes('右'),
+  check('点动按钮标出物理方向（Y+ 在右、Y− 在左）',
+    T('[data-jog="Y+"]').includes('右') && T('[data-jog="Y-"]').includes('左'),
     T('[data-jog="Y+"]') + ' / ' + T('[data-jog="Y-"]'));
   check('方向盘轴心不重复显示位置坐标',
     $('#jogmid').textContent.trim() === 'AXIS' && !$('#jogy') && !$('#jogz'),
