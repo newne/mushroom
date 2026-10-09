@@ -262,6 +262,71 @@ def test_images_filter_by_station(tmp_path):
     assert [r["station_id"] for r in got["rows"]] == ["S102"]
 
 
+def test_images_filter_by_round_id_across_local_and_prod(tmp_path):
+    write_outbox(
+        tmp_path / "outbox.jsonl",
+        [
+            {
+                "kind": "image_index",
+                "round_id": "run-1",
+                "ts": "2026-09-14T08:00:00",
+                "station_id": "S101",
+                "ok": True,
+            },
+            {
+                "kind": "image_index",
+                "round_id": "run-2",
+                "ts": "2026-09-14T09:00:00",
+                "station_id": "S101",
+                "ok": True,
+            },
+        ],
+    )
+
+    def transport(url, *, params=None, body=None):
+        assert "round_id=run-2" in url
+        return [
+            {"round_id": "run-1", "ts": "2026-09-14T08:00:00", "station_id": "S101"},
+            {"round_id": "run-2", "ts": "2026-09-14T09:00:00", "station_id": "S101"},
+        ]
+
+    with make_client(tmp_path, transport=transport) as c:
+        rows = c.get("/api/images?round_id=run-2").json()["rows"]
+    assert len(rows) == 2
+    assert {row["round_id"] for row in rows} == {"run-2"}
+    assert {row["source"] for row in rows} == {"local", "prod"}
+
+
+def test_rounds_merge_local_and_prod_and_filter_by_batch(tmp_path):
+    write_outbox(
+        tmp_path / "outbox.jsonl",
+        [
+            {
+                "kind": "round",
+                "round_id": "run-2",
+                "ts": "2026-09-14T09:00:00",
+                "room_id": "611",
+                "entry_date": "2026-09-04",
+                "batch_no": "mogu-100",
+            }
+        ],
+    )
+
+    def transport(url, *, params=None, body=None):
+        assert "/rounds?" in url and "batch_no=mogu-100" in url
+        return [
+            {"round_id": "run-2", "ts": "2026-09-14T09:00:00", "batch_no": "mogu-100"},
+            {"round_id": "run-1", "ts": "2026-09-14T08:00:00", "batch_no": "mogu-100"},
+            {"round_id": "other", "ts": "2026-09-14T07:00:00", "batch_no": "mogu-101"},
+        ]
+
+    with make_client(tmp_path, transport=transport) as c:
+        result = c.get("/api/rounds?batch_no=mogu-100").json()
+    assert result["ok"] is True
+    assert [row["round_id"] for row in result["rounds"]] == ["run-2", "run-1"]
+    assert result["rounds"][0]["source"] == "local"
+
+
 def test_images_never_leak_the_control_network_url(tmp_path):
     """`cloud_url` 是控制网地址，上位机够不着——回给页面就是把"黑图"这个坑重挖一遍。
 

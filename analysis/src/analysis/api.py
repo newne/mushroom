@@ -12,10 +12,12 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from analysis.db import (
+    ROUND_FIELDS,
     connect,
     fetch_images,
     fetch_measurements,
     fetch_ranges,
+    fetch_rounds,
     insert_images,
     insert_measurements,
 )
@@ -26,12 +28,6 @@ class IngestBody(BaseModel):
     """POST /ingest 请求体：outbox 记录批次。"""
 
     rows: list[dict]
-
-
-#: rounds 表的列（含库房维度——patrol 的 round 行一直带着它们，
-#: 表里没有的话会在这一跳被静默丢掉，见 db.SCHEMA 的注释）。
-ROUND_FIELDS = ("ts", "ok", "n_results", "n_failures", "aborted",
-                "room_id", "entry_date", "batch_no")
 
 
 def create_app(db_path: str = "mushrooms.db") -> FastAPI:
@@ -85,24 +81,38 @@ def create_app(db_path: str = "mushrooms.db") -> FastAPI:
         return [r for r in rows if not box_id or r.get("box_id") == box_id]
 
     @app.get("/rounds")
-    def rounds(limit: int = 0) -> list[dict]:
-        sql = f"SELECT {', '.join(ROUND_FIELDS)} FROM rounds ORDER BY ts"
-        if limit:
-            sql += " LIMIT ?"
-        cur = conn.execute(sql, (int(limit),) if limit else ())
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    def rounds(
+        limit: int = 0, room_id: str = "", entry_date: str = "", batch_no: str = ""
+    ) -> list[dict]:
+        return fetch_rounds(
+            conn,
+            room_id=room_id or None,
+            entry_date=entry_date or None,
+            batch_no=batch_no or None,
+            limit=limit or None,
+        )
 
     @app.get("/images")
-    def images(station_id: str = "", box_id: str = "", room_id: str = "",
-               limit: int = 0) -> list[dict]:
+    def images(
+        station_id: str = "",
+        box_id: str = "",
+        room_id: str = "",
+        round_id: str = "",
+        limit: int = 0,
+    ) -> list[dict]:
         """图像索引（ADR-0005）：按站位/框/库房倒序，供巡检台历史模式使用。
 
         每行带 `room_id`/`entry_date`/`batch_no`——回溯照片时"这属于哪间库房、
         哪批蘑菇"必须能从索引本身读出来（见 db.SCHEMA 里 images 的注释）。
         """
-        return fetch_images(conn, station_id=station_id or None, box_id=box_id or None,
-                            room_id=room_id or None, limit=limit or None)
+        return fetch_images(
+            conn,
+            station_id=station_id or None,
+            box_id=box_id or None,
+            room_id=room_id or None,
+            round_id=round_id or None,
+            limit=limit or None,
+        )
 
     @app.get("/growth")
     def growth(box_id: str, limit: int = 50) -> dict:

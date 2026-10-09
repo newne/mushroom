@@ -138,12 +138,20 @@ def test_migrate_adds_missing_room_columns(tmp_path):
     conn = sqlite3.connect(path)
 
     added = migrate(conn)
-    assert set(added) == {"images.room_id", "images.entry_date", "images.batch_no",
-                          "rounds.room_id", "rounds.entry_date", "rounds.batch_no"}
+    assert set(added) == {
+        "images.round_id",
+        "images.room_id",
+        "images.entry_date",
+        "images.batch_no",
+        "rounds.round_id",
+        "rounds.room_id",
+        "rounds.entry_date",
+        "rounds.batch_no",
+    }
     cols = {r[1] for r in conn.execute("PRAGMA table_info(images)")}
-    assert {"room_id", "entry_date", "batch_no"} <= cols
+    assert {"round_id", "room_id", "entry_date", "batch_no"} <= cols
     rounds_cols = {r[1] for r in conn.execute("PRAGMA table_info(rounds)")}
-    assert {"room_id", "entry_date", "batch_no"} <= rounds_cols
+    assert {"round_id", "room_id", "entry_date", "batch_no"} <= rounds_cols
 
 
 def test_migration_keeps_old_rows_and_leaves_room_unknown(tmp_path):
@@ -156,6 +164,7 @@ def test_migration_keeps_old_rows_and_leaves_room_unknown(tmp_path):
     assert rows[0]["station_id"] == "S101"
     assert rows[0]["room_id"] is None
     assert rows[0]["entry_date"] is None
+    assert rows[0]["round_id"] is None
 
 
 def test_migrate_is_idempotent(tmp_path):

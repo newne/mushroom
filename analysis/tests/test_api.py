@@ -19,18 +19,44 @@ def test_healthz(client):
 
 
 def test_ingest_measurements_and_rounds(client):
-    body = {"rows": [
-        {"kind": "measurement", "ts": "2026-08-30T08:00:00", "box_id": "B01",
-         "n": 3, "mean_len_mm": 52.0, "mean_cap_mm": 31.0,
-         "p10_len": 48.0, "p90_len": 56.0, "quality": ""},
-        {"kind": "round", "ts": "2026-08-30T08:00:00", "ok": True,
-         "n_results": 4, "n_failures": 0, "aborted": False},
-        {"kind": "image_index", "ts": "2026-08-30T08:00:05", "station_id": "S101",
-         "box_id": "B101", "angle_profile": "top45", "camera_ip": "192.168.1.238",
-         "yz": [187.17, -21.2], "object_name": "20260830/B101_S101_top45_080005.jpg",
-         "cloud_url": "http://minio/mogu/x.jpg", "ok": True},
-        {"kind": "junk", "ts": "x"},  # 未知类型忽略
-    ]}
+    body = {
+        "rows": [
+            {
+                "kind": "measurement",
+                "ts": "2026-08-30T08:00:00",
+                "box_id": "B01",
+                "n": 3,
+                "mean_len_mm": 52.0,
+                "mean_cap_mm": 31.0,
+                "p10_len": 48.0,
+                "p90_len": 56.0,
+                "quality": "",
+            },
+            {
+                "kind": "round",
+                "ts": "2026-08-30T08:00:00",
+                "round_id": "run-1",
+                "ok": True,
+                "n_results": 4,
+                "n_failures": 0,
+                "aborted": False,
+            },
+            {
+                "kind": "image_index",
+                "ts": "2026-08-30T08:00:05",
+                "round_id": "run-1",
+                "station_id": "S101",
+                "box_id": "B101",
+                "angle_profile": "top45",
+                "camera_ip": "192.168.1.238",
+                "yz": [187.17, -21.2],
+                "object_name": "20260830/B101_S101_top45_080005.jpg",
+                "cloud_url": "http://minio/mogu/x.jpg",
+                "ok": True,
+            },
+            {"kind": "junk", "ts": "x"},  # 未知类型忽略
+        ]
+    }
     resp = client.post("/ingest", json=body)
     assert resp.status_code == 200
     assert resp.json() == {
@@ -42,6 +68,7 @@ def test_ingest_measurements_and_rounds(client):
     assert ms[0]["box_id"] == "B01"
     rounds = client.get("/rounds").json()
     assert rounds[0]["ok"] in (True, 1)
+    assert rounds[0]["round_id"] == "run-1"
 
     # ADR-0005：图像索引一帧一行，且 patrol 的 yz 列表被摊平成 y / z 两列
     imgs = client.get("/images").json()
@@ -49,6 +76,46 @@ def test_ingest_measurements_and_rounds(client):
     assert imgs[0]["station_id"] == "S101"
     assert (imgs[0]["y"], imgs[0]["z"]) == (187.17, -21.2)
     assert imgs[0]["object_name"].endswith(".jpg")
+    assert imgs[0]["round_id"] == "run-1"
+
+
+def test_round_endpoints_filter_images_by_round_id(client):
+    rows = [
+        {
+            "kind": "round",
+            "ts": "2026-08-30T08:00:00",
+            "round_id": "run-1",
+            "batch_no": "mogu-100",
+            "ok": True,
+        },
+        {
+            "kind": "round",
+            "ts": "2026-08-30T11:00:00",
+            "round_id": "run-2",
+            "batch_no": "mogu-100",
+            "ok": True,
+        },
+        {
+            "kind": "image_index",
+            "ts": "2026-08-30T08:00:05",
+            "round_id": "run-1",
+            "station_id": "S101",
+            "ok": True,
+        },
+        {
+            "kind": "image_index",
+            "ts": "2026-08-30T11:00:05",
+            "round_id": "run-2",
+            "station_id": "S101",
+            "ok": True,
+        },
+    ]
+    client.post("/ingest", json={"rows": rows})
+
+    rounds = client.get("/rounds", params={"batch_no": "mogu-100"}).json()
+    images = client.get("/images", params={"round_id": "run-2"}).json()
+    assert [row["round_id"] for row in rounds] == ["run-2", "run-1"]
+    assert [row["round_id"] for row in images] == ["run-2"]
 
 
 def test_ingest_failed_station_index_keeps_null_object_name(client):

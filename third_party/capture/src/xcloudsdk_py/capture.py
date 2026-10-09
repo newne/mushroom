@@ -414,14 +414,21 @@ class CaptureService:
                     response["cloud_uploaded"] = False
                     response["cloud_error"] = "Failed to upload to MinIO"
 
-            # 与 C++ 版本保持一致：cloud 模式上传后删除本地文件（不论上传是否成功）
-            if file_path.exists():
-                try:
-                    file_path.unlink(missing_ok=True)
-                    response["local_file_deleted"] = True
-                except Exception as e:
-                    response["local_file_deleted"] = False
-                    response["delete_error"] = str(e)
+            if response["cloud_uploaded"]:
+                if file_path.exists():
+                    try:
+                        file_path.unlink(missing_ok=True)
+                        response["local_file_deleted"] = True
+                    except Exception as e:
+                        response["local_file_deleted"] = False
+                        response["delete_error"] = str(e)
+            else:
+                response["success"] = False
+                response["message"] = (
+                    "Screenshot captured but failed to upload to MinIO"
+                )
+                response["file_exists"] = file_path.exists()
+                response["local_file_deleted"] = False
 
         return response
 
@@ -527,6 +534,13 @@ class CaptureService:
                         response["delete_error"] = str(e)
                 except Exception:
                     response["cloud_uploaded"] = False
+            if not response["cloud_uploaded"]:
+                response["success"] = False
+                response["message"] = (
+                    "Screenshot captured but failed to upload to MinIO"
+                )
+                response["file_exists"] = file_path.exists()
+                response["local_file_deleted"] = False
                     response["cloud_error"] = "Failed to upload to MinIO"
 
         return response

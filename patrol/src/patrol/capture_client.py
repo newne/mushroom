@@ -76,6 +76,13 @@ class CaptureClient:
 
     @staticmethod
     def _interpret(payload: dict, filename: str) -> CaptureResult:
+        if payload.get("cloud_uploaded") is False:
+            message = str(
+                payload.get("cloud_error")
+                or payload.get("message")
+                or "Cloud upload failed"
+            )
+            raise CaptureError(f"采图失败: {message}")
         if payload.get("success"):
             return CaptureResult(
                 object_name=payload.get("filename") or filename,

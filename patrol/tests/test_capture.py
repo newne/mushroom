@@ -94,6 +94,20 @@ def test_capture_success():
     assert res.cloud_url.endswith(".jpg")
 
 
+def test_capture_cloud_upload_failure_is_not_success():
+    def transport(url, *, params=None, body=None) -> dict:
+        return {
+            "success": True,
+            "cloud_uploaded": False,
+            "cloud_error": "Failed to upload to MinIO",
+        }
+
+    with pytest.raises(CaptureError, match="MinIO"):
+        CaptureClient(transport=transport).capture(
+            ip="1.2.3.4", filename="failed-upload"
+        )
+
+
 def test_capture_without_transport_raises_not_implemented():
     with pytest.raises(NotImplementedError):
         CaptureClient().capture(ip="1.2.3.4", filename="f")

@@ -15,6 +15,7 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from patrol.capture_client import CaptureClient
 from patrol.fmc import Fmc4030, FmcError, MotionAborted, MotionTimeoutError
@@ -161,6 +162,7 @@ class PatrolDaemon:
 
     def _run_cycle_body(self, fmc, journal: RoundJournal | None) -> str:
         """真正跑一轮。异常在这里被归类、记进 journal，并转成 "failed"。"""
+        round_id = uuid4().hex
 
         def note(msg: str) -> None:
             self.log(msg)
@@ -205,15 +207,18 @@ class PatrolDaemon:
                 aborted=report.aborted,
             )
 
-        self.store.append({
-            "kind": "round",
-            "ts": self.now().isoformat(timespec="seconds"),
-            "ok": report.ok,
-            "n_results": len(report.results),
-            "n_failures": len(report.failures),
-            "aborted": report.aborted,
-            **self._room_fields(),
-        })
+        self.store.append(
+            {
+                "kind": "round",
+                "round_id": round_id,
+                "ts": self.now().isoformat(timespec="seconds"),
+                "ok": report.ok,
+                "n_results": len(report.results),
+                "n_failures": len(report.failures),
+                "aborted": report.aborted,
+                **self._room_fields(),
+            }
+        )
         # ADR-0005：图像索引**一帧一行**，随 outbox → /ingest 同步到 prod。
         # 此前 StationCapture 返回的 object_name/cloud_url 在这里被直接丢弃，
         # 于是"图落在 MinIO 里，却没有任何记录能把它关联到站位与时间"。
@@ -222,15 +227,20 @@ class PatrolDaemon:
         # 少了库房这一维，多库房部署时无法区分这些照片属于哪一间。
         room = self._room_fields()
         for meta in report.results:
-            self.store.append({"kind": "image_index", **room, **meta})
+            self.store.append(
+                {"kind": "image_index", "round_id": round_id, **room, **meta}
+            )
         for fail in report.failures:
-            self.store.append({
-                "kind": "image_index",
-                "ts": self.now().isoformat(timespec="seconds"),
-                "ok": False,
-                **room,
-                **fail,
-            })
+            self.store.append(
+                {
+                    "kind": "image_index",
+                    "round_id": round_id,
+                    "ts": self.now().isoformat(timespec="seconds"),
+                    "ok": False,
+                    **room,
+                    **fail,
+                }
+            )
         if self.measure_fn is not None:
             for rec in self.measure_fn(report):
                 row = rec.to_row()
@@ -244,7 +254,7 @@ class PatrolDaemon:
         """把本轮微调学到的偏移交给调用方落盘（下一轮从好位置起步）。
 
         为什么在**轮末**统一写、而不是每站写完就落盘：写站位表是"改配置"，
-        60 个站位各写一次等于把文件反复截断重写 60 次；一轮写完一次，代价可忽略，
+        48 个站位各写一次等于把文件反复截断重写 48 次；一轮写完一次，代价可忽略，
         而且失败时（本轮没跑完）不会留下半套新 trim。
         """
         if self.apply_trim is None:

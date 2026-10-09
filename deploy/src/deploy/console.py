@@ -321,6 +321,12 @@ def local_index(outbox_path: str) -> list[dict]:
     return [r for r in rows if r.get("kind") == "image_index"]
 
 
+def local_round_index(outbox_path: str) -> list[dict]:
+    """还没同步出去的巡检轮次（历史模式的"本地待同步"那一半）。"""
+    rows = JsonlStore(outbox_path).pending()
+    return [r for r in rows if r.get("kind") == "round"]
+
+
 class Console:
     """把上面那些读函数组装成一个可测对象（HTTP 层只做转发与合并）。"""
 
@@ -373,21 +379,93 @@ class Console:
             "events": self.events[-EVENT_BUFFER:],
         }
 
-    def images(self, *, station_id: str | None = None, limit: int = 200) -> dict:
+    def rounds(
+        self,
+        *,
+        room_id: str | None = None,
+        entry_date: str | None = None,
+        batch_no: str | None = None,
+        limit: int = 200,
+    ) -> dict:
+        filters = {"room_id": room_id, "entry_date": entry_date, "batch_no": batch_no}
+
+        def matches(row: dict) -> bool:
+            return all(
+                not value or row.get(field) == value for field, value in filters.items()
+            )
+
+        rows = [
+            {**r, "source": "local"}
+            for r in local_round_index(self.deps.outbox_path)
+            if matches(r)
+        ]
+        prod_error = None
+        if self.deps.transport is not None:
+            params = {
+                "limit": limit,
+                **{key: value for key, value in filters.items() if value},
+            }
+            try:
+                got = self.deps.transport(
+                    f"{self.deps.analysis_url}/rounds?{urlencode(params)}"
+                )
+                prod_rows = (
+                    got.get("rows", []) if isinstance(got, dict) else (got or [])
+                )
+                rows.extend({**r, "source": "prod"} for r in prod_rows if matches(r))
+            except Exception as e:  # noqa: BLE001 - prod 不通不该让历史轮次列表打不开
+                prod_error = str(e)
+
+        unique: dict[str, dict] = {}
+        for row in rows:
+            key = str(
+                row.get("round_id")
+                or "|".join(
+                    str(row.get(field) or "")
+                    for field in ("room_id", "entry_date", "batch_no", "ts")
+                )
+            )
+            unique.setdefault(key, row)
+        ordered = sorted(
+            unique.values(), key=lambda r: str(r.get("ts") or ""), reverse=True
+        )
+        return {
+            "ok": prod_error is None,
+            "prod_error": prod_error,
+            "rounds": ordered[:limit],
+        }
+
+    def images(
+        self,
+        *,
+        station_id: str | None = None,
+        round_id: str | None = None,
+        limit: int = 200,
+    ) -> dict:
         """历史图像：合并"本地待同步"与"prod 已同步"两份，每行带 source。"""
         rows = []
         for r in local_index(self.deps.outbox_path):
             if station_id and r.get("station_id") != station_id:
                 continue
+            if round_id and r.get("round_id") != round_id:
+                continue
             rows.append({**r, "source": "local"})
         prod_error = None
         if self.deps.transport is not None:
-            q = f"/images?limit={limit}"
+            params = {"limit": limit}
             if station_id:
-                q += f"&station_id={station_id}"
+                params["station_id"] = station_id
+            if round_id:
+                params["round_id"] = round_id
+            q = f"/images?{urlencode(params)}"
             try:
                 got = self.deps.transport(f"{self.deps.analysis_url}{q}")
-                for r in (got or {}).get("rows", []) if isinstance(got, dict) else (got or []):
+                prod_rows = (
+                    got.get("rows", []) if isinstance(got, dict) else (got or [])
+                )
+                for r in prod_rows:
+                    if round_id and r.get("round_id") != round_id:
+                        continue
                     rows.append({**r, "source": "prod"})
             except Exception as e:  # noqa: BLE001 - prod 不通不该让历史页整页打不开
                 prod_error = str(e)
@@ -606,9 +684,27 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
     def api_grid() -> dict:
         return grid_geometry()
 
+    @app.get("/api/rounds")
+    def api_rounds(
+        room_id: str = "",
+        entry_date: str = "",
+        batch_no: str = "",
+        limit: int = Query(200, ge=1, le=2000),
+    ) -> dict:
+        return console.rounds(
+            room_id=room_id or None,
+            entry_date=entry_date or None,
+            batch_no=batch_no or None,
+            limit=limit,
+        )
+
     @app.get("/api/images")
-    def api_images(station_id: str = "", limit: int = Query(200, ge=1, le=2000)) -> dict:
-        return console.images(station_id=station_id or None, limit=limit)
+    def api_images(
+        station_id: str = "", round_id: str = "", limit: int = Query(200, ge=1, le=2000)
+    ) -> dict:
+        return console.images(
+            station_id=station_id or None, round_id=round_id or None, limit=limit
+        )
 
     @app.get("/api/image")
     def api_image(object_name: str = "") -> Response:

@@ -117,6 +117,11 @@ def test_daemon_cycle_ok_and_sync(tmp_path):
     # 同步成功后 outbox 清空，记录应出现在 transport 收到的批次里
     flat = [r for batch in sent for r in batch]
     assert "round" in [r["kind"] for r in flat]
+    rounds = [row for row in flat if row["kind"] == "round"]
+    images = [row for row in flat if row["kind"] == "image_index"]
+    assert len(rounds) == 1 and images
+    assert rounds[0]["round_id"]
+    assert {row["round_id"] for row in images} == {rounds[0]["round_id"]}
     assert opens == [1]
     assert len(store) == 0
 

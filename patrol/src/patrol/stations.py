@@ -4,10 +4,9 @@
 Y 为水平长行程（0…4492，向右为正），Z 为竖直短行程（0…212，**向下为正**）。
 两轴的原点都在**靠近电机**的那一端（Y 左端、Z 顶端），坐标从原点单侧增长（ADR-0018）。
 
-现场布局（2026-09-12 确认）：**横向 12 框 × 竖向 5 层 = 60 个站位，每框 1 个站位**。
-两轴的机械行程刚好整除这个网格，因此站位坐标由 ``build_grid`` 从行程**推导**而不是
-逐点手写——侧重点在于现场"框数"随时会调（用户：后面根据实际框数再调整），
-调 ``GRID_COLS`` / ``GRID_LAYERS`` 即可，不用重标 60 行 YAML。
+现场布局：**横向 12 框 × 竖向 4 层 = 48 个站位，每框 1 个站位**。
+Y 框心按行程间距推导，Z 层心和 C08 横向位置叠加现场抓图标定偏移；
+``build_grid`` 为缺少站位表的新环境生成同一套坐标。
 """
 
 from __future__ import annotations
@@ -31,8 +30,11 @@ GRID_LAYERS = 4         # 竖向层数（沿 Z 短行程 0…212mm，**第 1 层
 #   · **z=0 与 z=210 两帧 MSE≈0.99（几乎逐像素相同）** ⇒ 212mm 行程正好 **4 个整周期**
 #   · 旧值 5 层 ⇒ 均分 42.4mm，与实测 52mm 不齐，偏离逐层累积到第 5 层达 30.4mm（半个周期）
 #     ⇒ 那些站位多数落在"袋身侧面/失焦近景"的相位上，照片对判长势无效。
-#   改成 4 后推导格点 = 26.5 / 79.5 / 132.5 / 185.5，与实测"信息量最大相位"（25/77/129/181）
-#   相差 ≤4.5mm。完整证据见 docs/patrol/prod-deploy/station-retarget.md §6/§7。
+#   2026-10-08 按层实拍微调后，层心为 10 / 60 / 132 / 155mm。
+#   完整证据见 docs/patrol/prod-deploy/station-retarget.md §6/§7。
+GRID_LAYER_Z_OFFSETS = (-16.5, -19.5, -0.5, -30.5)
+GRID_COL_Y_OFFSETS = {8: -80.0}
+GRID_CELL_Y_OFFSETS = {(2, 8): -40.0}
 # 全场**唯一**相机：老系统与 M1 共用同一台（spec §2；现场 2026-09-12 确认 238 无密码）。
 # 收敛成全局常量而不是每站位一个字段——"每框一个 IP"是改造前的假想，实际只有一台。
 CAMERA_IP = "192.168.1.238"
@@ -65,7 +67,7 @@ class Station:
 
     @property
     def cell(self) -> str:
-        """网格单元标识，如 ``5-12``（第 5 层第 12 框）；未标定返回 ``-``。"""
+        """网格单元标识，如 ``4-12``（第 4 层第 12 框）；未标定返回 ``-``。"""
         return f"{self.layer}-{self.col}" if self.layer and self.col else "-"
 
     @property
@@ -81,8 +83,7 @@ class Station:
 def layer_z(layer: int, profile: MotionProfile = M1) -> float:
     """层号 → 该层中心的 Z 坐标（第 1 层在最上，即最靠近 Z 原点 = 顶端）。
 
-    5 层均分 Z 的竖直行程：层距 = 212 / 5 = 42.4mm，层心落在各段中点，于是第 1 层
-    z = 21.2、第 5 层 z = 190.8，两端各留半个层距的余量。
+    以均分格心为基准叠加逐层实拍标定偏移；实际层间距不要求相等。
 
     ⚠️ 从**原点那一侧**起算（ADR-0018）：Z 的原点在顶端、坐标往下增长，所以层号越大
     z 越大。写成 `travel_max - …` 就会整体镜像（第 1 层跑到最下面）。
@@ -90,7 +91,11 @@ def layer_z(layer: int, profile: MotionProfile = M1) -> float:
     if not 1 <= layer <= GRID_LAYERS:
         raise ValueError(f"层号越界 {layer}（1…{GRID_LAYERS}）")
     pitch = profile.z.travel_span / GRID_LAYERS
-    z = profile.z.home_position + (layer - 0.5) * pitch
+    z = (
+        profile.z.home_position
+        + (layer - 0.5) * pitch
+        + GRID_LAYER_Z_OFFSETS[layer - 1]
+    )
     if not profile.z.contains(z):
         raise ValueError(
             f"第 {layer} 层的 z={z} 不在行程 {profile.z.travel_min}…{profile.z.travel_max} 内："
@@ -99,21 +104,32 @@ def layer_z(layer: int, profile: MotionProfile = M1) -> float:
     return z
 
 
-def col_y(col: int, profile: MotionProfile = M1) -> float:
-    """横向框序号 → 该框中心的 Y 坐标（12 框均分 Y 的 4492mm 行程）。"""
+def col_y(
+    col: int,
+    profile: MotionProfile = M1,
+    *,
+    layer: int | None = None,
+) -> float:
+    """横向框序号 → 该框中心的 Y 坐标；有层号时优先使用格点偏移。"""
     if not 1 <= col <= GRID_COLS:
         raise ValueError(f"框序号越界 {col}（1…{GRID_COLS}）")
+    if layer is not None and not 1 <= layer <= GRID_LAYERS:
+        raise ValueError(f"层号越界 {layer}（1…{GRID_LAYERS}）")
     pitch = profile.y.travel_span / GRID_COLS
-    return profile.y.travel_min + (col - 0.5) * pitch
+    offset = GRID_CELL_Y_OFFSETS.get((layer, col)) if layer is not None else None
+    if offset is None:
+        offset = GRID_COL_Y_OFFSETS.get(col, 0.0)
+    return profile.y.travel_min + (col - 0.5) * pitch + offset
 
 
 def grid_geometry(profile: MotionProfile = M1) -> dict[str, float]:
     """网格几何（供 console / 前端画平面图，避免两处各推一套）。"""
+    z_centers = [layer_z(layer, profile) for layer in range(1, GRID_LAYERS + 1)]
     return {
         "cols": GRID_COLS,
         "layers": GRID_LAYERS,
         "y_pitch": profile.y.travel_span / GRID_COLS,
-        "z_pitch": profile.z.travel_span / GRID_LAYERS,
+        "z_pitch": (z_centers[-1] - z_centers[0]) / (GRID_LAYERS - 1),
         "y_min": profile.y.travel_min,
         "y_max": profile.y.travel_max,
         "z_min": profile.z.travel_min,
@@ -129,11 +145,10 @@ def build_grid(
 ) -> list[Station]:
     """按布局生成站位表，顺序为**蛇形遍历序**（层内走完一列再折返）。
 
-    蛇形不是美观问题：按层号顺序直走的话，每换一层都要从轨道最右端折回最左端
-    （11 × 374 ≈ 4.1m 空程），5 层要多跑约 16m；折返走法把这段空程降到 0
-    （换层只动 Z 的 42mm）。60 个站位、每轮省 16m，是每轮都省。
+    蛇形不是美观问题：按层号顺序直走的话，换层时要从轨道最右端折回最左端
+    （11 × 374 ≈ 4.1m 空程）；4 层的折返走法可省约 12.3m 横向空程。
 
-    站位 id / 框 id 都用 ``{层}{框:02d}`` 编码（如 ``S512`` = 第 5 层第 12 框），
+    站位 id / 框 id 都用 ``{层}{框:02d}`` 编码（如 ``S412`` = 第 4 层第 12 框），
     一眼能读出网格位置——列表、平面图、图像对象名三处看到的都是同一个编号。
     """
     if not angles:
@@ -149,10 +164,12 @@ def build_grid(
                     Station(
                         id=f"S{layer}{col:02d}{suffix}",
                         box_id=box_id,
-                        y=col_y(col, profile),
+                        y=col_y(col, profile, layer=layer),
                         z=layer_z(layer, profile),
                         angle_profile=angle,
-                        camera_ip=camera_ip_of(layer, col) if camera_ip_of else CAMERA_IP,
+                        camera_ip=camera_ip_of(layer, col)
+                        if camera_ip_of
+                        else CAMERA_IP,
                         layer=layer,
                         col=col,
                     )
@@ -163,8 +180,9 @@ def build_grid(
 def retarget(stations: list[Station], profile: MotionProfile = M1) -> list[Station]:
     """按新 profile 重算坐标，保留 id/标定字段（现场整定后批量刷新用）。"""
     return [
-        replace(s, y=col_y(s.col, profile), z=layer_z(s.layer, profile))
-        if s.layer and s.col else s
+        replace(s, y=col_y(s.col, profile, layer=s.layer), z=layer_z(s.layer, profile))
+        if s.layer and s.col
+        else s
         for s in stations
     ]
 
@@ -172,7 +190,7 @@ def retarget(stations: list[Station], profile: MotionProfile = M1) -> list[Stati
 def fill_camera_ip(stations: list[Station], camera_ip: str = CAMERA_IP) -> tuple[list[Station], int]:
     """给 ``camera_ip`` 为空的站位补上全场默认相机，返回 ``(新表, 补了几个)``。
 
-    本机**只有一台相机**（装在滑块上，60 个站位共用），所以 ``camera_ip`` 本质上是
+    本机**只有一台相机**（装在滑块上，48 个站位共用），所以 ``camera_ip`` 本质上是
     全局配置而不是逐站参数。手写的或早期的站位表常把它留空——那种表在巡检侧会因为
     "相机 IP 为空"被拒，而现场其实只需要一个默认值。补全只在**空**的时候发生，
     显式写了的 IP 一律保留（将来万一要分机位，站位表仍然说了算）。
@@ -220,10 +238,10 @@ def nearest_station(stations: list[Station], y: float, z: float,
     记在 ``y``/``z`` 两列里，所以"归属"只影响**怎么找得到**，不影响事实。
 
     距离按**格距归一化**后再比，不是直接比毫米：
-    Y 的格距约 374mm、Z 只有约 42mm（``grid_geometry``），直接比欧氏距离的话 Y 方向上
+    Y 的格距约 374mm、Z 的平均格距约 50mm（``grid_geometry``），直接比欧氏距离的话 Y 方向上
     的一点点偏差就完全盖过 Z —— 结果会把"上一层"的点判给同一层的站位。归一化之后两个
-    轴各自以"差了几格"参与比较，边界落在格心中间（Z 上即 ±21.2mm），与"这个点落在
-    哪个格子"是同一个答案。
+    轴各自以"差了几格"参与比较，边界落在相邻实测格心中间，与"这个点落在哪个格子"
+    是同一个答案。
 
     站点表是**手写也可**的（``load_stations`` 不校验栅格），所以这里不假设站位严格
     落在格心，逐站比较即可。

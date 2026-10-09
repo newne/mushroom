@@ -32,25 +32,39 @@ const STATIONS = [
     camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 187.1, target_z: 21.2 },
   { id: 'S102', box_id: 'B102', y: 561.5, z: 21.2, layer: 1, col: 2, angle_profile: 'top45',
     camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 561.5, target_z: 21.2 },
+  { id: 'S412', box_id: 'B412', y: 4300.0, z: 190.0, layer: 4, col: 12, angle_profile: 'top45',
+    camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 4300.0, target_z: 190.0 },
 ];
 // 与 patrol.stations.grid_geometry() 同形状：**y_pitch/z_pitch 不能省**——页面的
 // nearestStation 按格距归一化后再比站距（见该函数注释），少了这两个字段它会退回
 // "直接比毫米"，与假后端的 fakeNearest 口径就不一样了：假件更松，真分歧测不出来。
-const GRID = { cols: 12, layers: 5, y_pitch: 4492.0 / 12, z_pitch: 212.0 / 5,
+const GRID = { cols: 12, layers: 4, y_pitch: 4492.0 / 12, z_pitch: 212.0 / 4,
                y_min: 0.0, y_max: 4492.0, z_min: 0.0, z_max: 212.0 };
 
-// 历史模式用：两天的帧 + 一帧失败 + 一条本地待同步；两条生长点（都要有数值才画得出线）
+// 历史模式用：同一批次的两轮、失败帧、本地待同步帧和无 round_id 的旧轮次。
 //
 // ⚠️ 这里**故意不写 `cloud_url`**：console 的 `/api/images` 已经不再回这个字段
 // （它是控制网地址，浏览器够不着）。谁要是又改回"页面直接用 cloud_url 当 <img src>"，
 // 这个假件不会喂给它任何地址 → 用例当场红。
 const IMAGES = [
-  { ts: '2026-09-14T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
+  { round_id: 'round-20260914', ts: '2026-09-14T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
     ok: true, object_name: '20260914/B102_S102_top45_093000', source: 'prod' },
-  { ts: '2026-09-14T06:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
+  { round_id: 'round-20260914', ts: '2026-09-14T06:30:00', station_id: 'S101', box_id: 'B101', angle_profile: 'top0',
     ok: false, object_name: null, source: 'prod' },
-  { ts: '2026-09-13T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top0',
+  { round_id: 'round-20260913', ts: '2026-09-13T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top0',
     ok: true, object_name: '20260913/B102_S102_top0_093000', source: 'local' },
+  { round_id: 'round-20260913', ts: '2026-09-13T06:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
+    ok: false, object_name: null, source: 'prod' },
+];
+const ROUNDS = [
+  { round_id: 'round-20260914', ts: '2026-09-14T10:00:00', room_id: '611', entry_date: '2026-09-04',
+    batch_no: 'BATCH-10', ok: false },
+  { round_id: 'round-20260913', ts: '2026-09-13T10:00:00', room_id: '611', entry_date: '2026-09-04',
+    batch_no: 'BATCH-10', ok: false },
+  { round_id: null, ts: '2026-09-12T10:00:00', room_id: '611', entry_date: '2026-09-04',
+    batch_no: 'BATCH-10', ok: true },
+  { round_id: 'round-20260911', ts: '2026-09-11T10:00:00', room_id: '611', entry_date: '2026-09-04',
+    batch_no: 'BATCH-09', ok: true },
 ];
 const GROWTH = [
   { ts: '2026-09-13T09:30:00', mean_len_mm: 28.4, mean_cap_mm: 12.1, verdict: 'no_prev',
@@ -138,17 +152,26 @@ function route(method, url, body) {
         ? { active: true, known: true, started_at: '2026-09-14T09:58:00', station_index: 12,
             station_total: 60, current_station: 'S105', reason: '正在巡检（守护占着控制器）' }
         : { active: false, known: true, status: 'ok', n_results: 60, reason: '上一轮已结束（ok）' },
-      room: { ok: true, allowed: true, room_id: '611', entry_date: '2026-09-04', day: 10,
+      room: { ok: true, allowed: true, room_id: '611', entry_date: '2026-09-04', batch_no: 'BATCH-10', day: 10,
               text: '第 10 天：巡检' },
       envelope: { y: [0, 4492], z: [-212, 0] },
       events: [{ ts: NOW, level: 'info', text: '页面已连接' }],
     });
+  if (path === '/api/rounds') {
+    return json(200, { ok: true, rounds: ROUNDS, prod_error: null });
+  }
   }
   if (path === '/api/images') {
     if (state.images_error) return json(500, { error: 'boom' });
-    const stationId = new URL('http://console.local' + url).searchParams.get('station_id');
-    const rows = IMAGES.map(r => ({ ...r, station_id: stationId || r.station_id }));
-    const response = json(200, { ok: true, rows, n_local: 1, n_prod: IMAGES.length - 1 });
+    const params = new URL('http://console.local' + url).searchParams;
+    const stationId = params.get('station_id');
+    const roundId = params.get('round_id');
+    const rows = roundId
+      ? IMAGES.filter(r => r.round_id === roundId)
+      : IMAGES.map(r => ({ ...r, station_id: stationId || r.station_id }));
+    const response = json(200, { ok: true, rows,
+      n_local: rows.filter(r => r.source === 'local').length,
+      n_prod: rows.filter(r => r.source !== 'local').length });
     const delay = state.image_delay[stationId] || 0;
     return delay ? new Promise(resolve => setTimeout(() => resolve(response), delay)) : response;
   }
@@ -423,12 +446,15 @@ const lastCmd = () => {
   $('#gtY').dispatchEvent(new window.Event('input'));
   mapsvg.dispatchEvent(new window.MouseEvent('mouseleave', { bubbles: true }));
 
-  // 1b. 历史模式：**还没选站位**时该给提示而不是空白表格
+  // 1b. 历史模式：无实时站位焦点时仍显示最新一轮的拓扑拼图。
   await click('#modeSeg [data-mode="history"]');
   check('历史模式：操作区让位给筛选', $('#rtcol').style.display === 'none' && $('#hcol').style.display === '');
-  check('历史模式：中栏换成时间轴/大图/曲线',
+  check('历史模式：中栏换成拼图/大图/曲线',
     $('#hmain').style.display === '' && $('#rtmain').style.display === 'none');
-  check('未选站位时时间轴给的是提示', T('#timeline').includes('点左侧'), T('#timeline'));
+  check('默认选择最新巡检轮次', $('#roundSel').value === 'round-20260914', $('#roundSel').value);
+  check('最新轮次仍展示完整的 12 列 × 4 层网格',
+    document.querySelectorAll('#timeline .mosaic-cell').length === 48,
+    document.querySelectorAll('#timeline .mosaic-cell').length + ' 格');
   check('未选站位时不画曲线', T('#curve').includes('选一个站位'), T('#curve'));
   await click('#modeSeg [data-mode="realtime"]');
   check('切回实时模式：操作区回来', $('#rtcol').style.display === '' && $('#rtmain').style.display === '');
@@ -480,6 +506,7 @@ const lastCmd = () => {
   await sleep(1100);
   $('#gtY').value = '1200'; $('#gtZ').value = '100';
   $('#gtY').dispatchEvent(new window.Event('input'));
+  await sleep(120);
   await click('#gotobtn');
   check('定位前弹出页内确认（.confirm-pop，不是原生 confirm）',
     !!document.querySelector('.confirm-pop'), document.querySelector('.confirm-pop') ? '有弹窗' : '(无弹窗)');
@@ -729,28 +756,44 @@ const lastCmd = () => {
     state.calls.some(c => c.url.split('?')[0] === '/api/session' && c.method === 'DELETE'));
   check('放开时说明"已排回零"', T('#opmsg').includes('回零'), T('#opmsg'));
 
-  // 12. 历史模式：时间轴 / 大图 / 生长曲线 / 筛选 / 与 prod 不通的区别
+  // 12. 历史模式：按批次/轮次拼图 / 原图 / 生长曲线 / 筛选 / 与 prod 不通的区别
   await click('#modeSeg [data-mode="history"]');
-  await click('.stn[data-id="S102"]');
   await sleep(400);
-  check('时间轴按日期分组（2 天 → 2 个日期头）',
-    document.querySelectorAll('.tlhead').length === 2, document.querySelectorAll('.tlhead').length + ' 个');
-  check('时间轴帧数 = 3', document.querySelectorAll('.tl .im').length === 3,
-    document.querySelectorAll('.tl .im').length + ' 帧');
-  check('失败帧被标出来', T('#timeline').includes('采图失败'));
-  check('本地待同步那一帧有标记', !!document.querySelector('.tl .im.local'));
+  const slots = Array.from(document.querySelectorAll('#timeline .mosaic-cell'));
+  const stationCells = Array.from(document.querySelectorAll('#timeline .mosaic-cell[data-station-id]'));
+  check('拼图固定为 48 个拓扑槽位', slots.length === 48, slots.length + ' 格');
+  check('配置站位各占唯一 layer/col 槽位',
+    stationCells.length === STATIONS.length &&
+      new Set(stationCells.map(cell => cell.dataset.stationId)).size === STATIONS.length &&
+      stationCells[0].getAttribute('aria-label').includes('第 1 层第 1 框') &&
+      stationCells[1].getAttribute('aria-label').includes('第 1 层第 2 框') &&
+      stationCells[2].getAttribute('aria-label').includes('第 4 层第 12 框'),
+    stationCells.map(cell => cell.getAttribute('aria-label')).join(' | '));
+  check('未配置的 45 个位置保持独立空格',
+    document.querySelectorAll('#timeline .mosaic-cell.vacant').length === 45);
+  check('无 round_id 的旧轮次未被猜测归组', T('#roundnote').includes('没有唯一关联 ID'), T('#roundnote'));
+  check('失败帧在自己的站位格中标出',
+    T('#timeline .mosaic-cell[data-station-id="S101"]').includes('采图失败'));
+
+  const liveTargetBefore = [$('#gtY').value, $('#gtZ').value].join(',');
+  await click('#timeline .mosaic-cell[data-station-id="S101"]');
+  check('点击历史站位不改动实时控制目标',
+    [$('#gtY').value, $('#gtZ').value].join(',') === liveTargetBefore, liveTargetBefore);
+  check('点击历史站位不改变实时选站', $('.stn[data-id="S102"]').getAttribute('aria-pressed') === 'true');
+  await click('#timeline .mosaic-cell[data-station-id="S102"]');
+  await sleep(150);
 
   // 历史图的地址**必须**走 console（ADR-0003）：页面不直连 MinIO。
   // 2026-09-17 现场："历史图全是黑的"、抓拍完不显示——页面把 MinIO 的**控制网地址**
   // 当 `<img src>`，而上位机走 VPN 只到 10.77.77.x，那个地址对它是黑洞：每格等一次
   // 超时，最后留一块深色方块。看着像"相机拍黑了"，其实是一张都没取到。
-  const shotSrc = Array.from(document.querySelectorAll('.tl .im img'))
+  const shotSrc = Array.from(document.querySelectorAll('#timeline .mosaic-cell img'))
     .map(img => img.getAttribute('src') || '');
   // 用 pathname 比：`safeImageUrl` 会把地址规范化成绝对 URL，别去赌字符串前缀
   const shotPath = shotSrc.map(s => { try { return new URL(s, 'http://console.local').pathname; }
                                       catch (e) { return '(非法)'; } });
   check('缩略图走 /api/image（同源代理），不是 MinIO 直连地址',
-    shotPath.length === 2 && shotPath.every(p => p === '/api/image'), shotSrc.join(' | ') || '(没有 img)');
+    shotPath.length === 1 && shotPath.every(p => p === '/api/image'), shotSrc.join(' | ') || '(没有 img)');
   check('缩略图地址里没有控制网地址',
     !shotSrc.some(s => s.includes('192.168') || s.includes(':9000')), shotSrc.join(' | '));
   check('地址带的是对象名（端口/主机由后端拼）',
@@ -758,16 +801,17 @@ const lastCmd = () => {
     shotSrc.join(' | '));
 
   // 取不到图时要说"取不到"，而不是留一块黑方块（两者现场看着一模一样）
-  document.querySelectorAll('.tl .im img')
+  document.querySelectorAll('#timeline .mosaic-cell img')
     .forEach(img => img.dispatchEvent(new window.Event('error')));
   check('取不到图的格子标成 noimg（不是一块黑方块）',
-    document.querySelectorAll('.tl .im.noimg').length === 2,
-    document.querySelectorAll('.tl .im.noimg').length + ' 格');
+    document.querySelectorAll('#timeline .mosaic-cell.noimg').length === 1 &&
+      T('#timeline .mosaic-cell.noimg .mosaic-thumb').includes('图取不到'),
+    document.querySelectorAll('#timeline .mosaic-cell.noimg').length + ' 格');
   check('角度档只列数据里有的（全部 + top0 + top45）',
     document.querySelectorAll('#angleSel option').length === 3,
     document.querySelectorAll('#angleSel option').length + ' 项');
 
-  await click('.tl .im[data-pick]');
+  await click('#timeline .mosaic-cell[data-station-id="S102"]');
   check('点缩略图 → 大图有 src', !!$('#bigimg').getAttribute('src'), $('#bigimg').getAttribute('src') || '');
   check('大图默认 1×', T('#zoomlabel').includes('1×'), T('#zoomlabel'));
   await click('[data-zoom="4"]');
@@ -784,34 +828,58 @@ const lastCmd = () => {
     T('#growthnote').slice(0, 60));
   check('曲线标题带框号', T('#curvetitle').includes('B102'), T('#curvetitle'));
 
-  // 筛选：日期只留 09-14 → 2 帧；角度只留 top0 → 1 帧
-  $('#fromDate').value = '2026-09-14'; $('#fromDate').dispatchEvent(new window.Event('change'));
+  // 日期与角度筛选作用于所选巡检轮次。
+  $('#fromDate').value = '2026-09-15'; $('#fromDate').dispatchEvent(new window.Event('change'));
   await sleep(150);
-  check('日期筛选生效（09-14 → 2 帧）', document.querySelectorAll('.tl .im').length === 2,
-    document.querySelectorAll('.tl .im').length + ' 帧');
+  check('日期筛选没有轮次时明确提示', T('#timeline').includes('所选批次/日期没有'), T('#timeline'));
+  await click('#clearfilter');
+  await sleep(150);
+  check('清空日期筛选后回到最新轮次', $('#roundSel').value === 'round-20260914', $('#roundSel').value);
   $('#angleSel').value = 'top0'; $('#angleSel').dispatchEvent(new window.Event('change'));
   await sleep(150);
-  check('筛选后可筛出 0 帧并说明原因', T('#timeline').includes('放宽日期'), T('#timeline').slice(0, 60));
+  check('角度筛选隐藏其他帧并保留失败帧状态',
+    T('#filterinfo').includes('筛出 1 帧') &&
+      T('#timeline .mosaic-cell[data-station-id="S101"]').includes('采图失败'));
   await click('#clearfilter');
-  check('清空筛选后回到 3 帧', document.querySelectorAll('.tl .im').length === 3,
-    document.querySelectorAll('.tl .im').length + ' 帧');
+  await sleep(150);
+  check('清空角度筛选后保留 48 个格位', document.querySelectorAll('#timeline .mosaic-cell').length === 48);
 
-  // P2-3：逐帧导航（按钮 + 帧计数）。DOM 顺序 = 日期倒序、日内正序 ⇒ 第 1 帧就是最近
-  check('帧计数指出当前位置', T('#frameinfo').includes('第 1 / 3 帧'), T('#frameinfo'));
-  await click('#nextframe');
-  check('下一帧切到第 2 帧', T('#frameinfo').includes('第 2 / 3 帧'), T('#frameinfo'));
+  $('#roundSel').value = 'round-20260913'; $('#roundSel').dispatchEvent(new window.Event('change'));
+  await sleep(150);
+  check('同一批次可切换到前一轮', $('#roundSel').value === 'round-20260913', $('#roundSel').value);
+  check('前一輪本地原图有待同步标记', !!document.querySelector('#timeline .mosaic-cell.local'));
+  check('前一轮缺帧的站位保留为空',
+    T('#timeline .mosaic-cell[data-station-id="S412"]').includes('本轮无帧'));
+  check('图片请求按 round_id 精确筛选',
+    state.calls.some(call => call.url.includes('round_id=round-20260913')));
+
+  $('#batchSel').value = encodeURIComponent(JSON.stringify(['611', '2026-09-04', 'BATCH-09']));
+  $('#batchSel').dispatchEvent(new window.Event('change'));
+  await sleep(150);
+  check('批次筛选切换到该批次最新轮次', $('#roundSel').value === 'round-20260911', $('#roundSel').value);
+  check('空轮次中已配置站位仍留在原槽位',
+    T('#timeline .mosaic-cell[data-station-id="S102"]').includes('本轮无帧'));
+  $('#batchSel').value = encodeURIComponent(JSON.stringify(['611', '2026-09-04', 'BATCH-10']));
+  $('#batchSel').dispatchEvent(new window.Event('change'));
+  await sleep(150);
+  check('切回当前批次后默认最新轮次', $('#roundSel').value === 'round-20260914', $('#roundSel').value);
+
+  // 拓扑导航按 layer/col 顺序经过已配置站位，不会把空白格算成帧。
+  check('帧计数指出当前配置站位', T('#frameinfo').includes('第 2 / 3 站位'), T('#frameinfo'));
+  await click('#prevframe');
+  check('上一站切到 S101', T('#frameinfo').includes('第 1 / 3 站位'), T('#frameinfo'));
   check('失败帧说明"没有可用的图"（不是一块黑）', T('#viewhint').includes('没有可用的图'),
     T('#viewhint').slice(0, 40));
   await click('#latestframe');
-  check('跳到最近回到第 1 帧', T('#frameinfo').includes('第 1 / 3 帧'), T('#frameinfo'));
+  check('跳到最新图像所在站位', T('#frameinfo').includes('第 2 / 3 站位'), T('#frameinfo'));
   // 方向键也能翻帧（输入框聚焦时不抢键——真实浏览器里 keydown 的 target 是聚焦元素，
   // 所以这里要从输入框上派发，而不是从 document 上派发）
   document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }));
   await sleep(150);
-  check('右方向键也能翻到下一帧', T('#frameinfo').includes('第 2 / 3 帧'), T('#frameinfo'));
+  check('右方向键也能翻到下一站', T('#frameinfo').includes('第 2 / 3 站位'), T('#frameinfo'));
   $('#fromDate').dispatchEvent(new window.KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }));
   await sleep(150);
-  check('输入框聚焦时方向键不抢（不翻帧）', T('#frameinfo').includes('第 2 / 3 帧'), T('#frameinfo'));
+  check('输入框聚焦时方向键不抢（不切站）', T('#frameinfo').includes('第 2 / 3 站位'), T('#frameinfo'));
   await click('#latestframe');
 
   // prod 查不到 vs 还没有测量值：两件事，必须分开说
@@ -886,10 +954,13 @@ const lastCmd = () => {
   await sleep(2600);
   check('恢复后重新播放', T('#pvstate').includes('播放中'), T('#pvstate'));
 
+  await click('#nextframe');
+  check('下一站切回 S102', T('#frameinfo').includes('第 2 / 3 站位'), T('#frameinfo'));
   await click('#dropbtn');
   await sleep(400);
   check('放开接管后画面自动关闭',
     !$('#pvimg').getAttribute('src'), $('#pvimg').getAttribute('src') || '(已清空)');
+  await click('#prevframe');
   check('关掉后 <img> 隐藏、提示文字回来',
     $('#pvimg').style.display === 'none' && $('#pvhint').style.display !== 'none',
     'img display=' + ($('#pvimg').style.display || '(空)'));
@@ -926,6 +997,13 @@ const lastCmd = () => {
   await click('#pvbtn');
   await sleep(200);
   check('手动"停画面"生效', !$('#pvimg').getAttribute('src') && T('#pvstate').includes('未打开'),
+  check('看画面与抓拍按钮同排，错误提示不挤占按钮宽度',
+    !!$('.preview-actions') && $('.preview-actions').contains($('#pvbtn')) &&
+      $('.preview-actions').contains($('#capbtn')) && !$('.preview-actions').contains($('#pverr')),
+    'buttons share a row; error status is outside');
+  check('预览提示与位置读数在图像框外',
+    !!$('.pvwrap') && !$('.pvwrap').contains($('#pvhint')) && !$('.pvwrap').contains($('#actualpos')),
+    'hint/readout do not overlap the image frame');
     T('#pvstate'));
   check('关掉后按钮回到"看画面"', T('#pvbtn') === '看画面', T('#pvbtn'));
   await click('#pvbtn');

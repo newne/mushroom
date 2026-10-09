@@ -65,6 +65,27 @@
   .tl .im{cursor:pointer}
   .tl .im.sel{outline:2px solid var(--accent)}
   .tl .im.gone{opacity:.55}
+  .mosaic-scroll{overflow-x:auto;padding:4px 0 8px}
+  .mosaic{display:grid;gap:3px;align-items:stretch}
+  .mosaic-axis,.mosaic-col,.mosaic-layer{display:flex;align-items:center;justify-content:center;
+    min-width:0;color:var(--dim);font-size:11px;text-align:center}
+  .mosaic-axis,.mosaic-col{height:28px;font-weight:600}
+  .mosaic-layer{min-height:76px;border-right:1px solid var(--line)}
+  .mosaic-cell{width:64px;min-width:64px;min-height:76px;padding:3px;display:grid;
+    grid-template-rows:42px minmax(0,1fr);gap:2px;overflow:hidden;border:1px solid var(--line);
+    border-radius:4px;background:var(--soft);color:var(--fg);text-align:center}
+  .mosaic-cell .mosaic-thumb{display:flex;align-items:center;justify-content:center;min-width:0;
+    width:100%;height:42px;overflow:hidden;background:var(--panel);color:var(--dim);font-size:10px}
+  .mosaic-cell .mosaic-thumb img{display:block;width:100%;height:100%;object-fit:contain;background:var(--panel)}
+  .mosaic-cell .mosaic-empty{display:flex;align-items:center;justify-content:center;width:100%;height:100%}
+  .mosaic-cell .mosaic-meta{display:grid;min-width:0;align-content:center;line-height:1.15}
+  .mosaic-cell .mosaic-meta b,.mosaic-cell .mosaic-meta small{overflow:hidden;white-space:nowrap;text-overflow:clip}
+  .mosaic-cell .mosaic-meta b{font-size:10px;font-weight:600}
+  .mosaic-cell .mosaic-meta small{font-size:9px;color:var(--dim)}
+  .mosaic-cell.sel{outline:2px solid var(--accent);outline-offset:-2px}
+  .mosaic-cell.fail{border-color:var(--bad)}
+  .mosaic-cell.local .mosaic-meta small{color:var(--warn)}
+  .mosaic-cell.vacant{cursor:default;background:transparent;border-style:dashed;color:var(--dim)}
   /* ---- 大图查看器 ---- */
   .viewer{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:6px;
           display:flex;align-items:center;justify-content:center;cursor:grab}
@@ -384,17 +405,20 @@
         <button data-zoom="1">1×</button><button data-zoom="2">2×</button>
         <button data-zoom="4">4×</button><button id="fitbtn">适应</button>
       </div>
-      <!-- P2-3：逐帧导航（多天长条时间轴里，翻最近一帧以前只能靠滚） -->
+      <!-- 在拓扑网格中逐站选择；方向键也沿网格顺序移动。 -->
       <div class="framenav">
-        <button type="button" id="prevframe">‹ 上一帧</button>
-        <span id="frameinfo">未选帧</span>
-        <button type="button" id="nextframe">下一帧 ›</button>
-        <button type="button" id="latestframe">跳到最近</button>
+        <button type="button" id="prevframe">‹ 上一站</button>
+        <span id="frameinfo">未选站位</span>
+        <button type="button" id="nextframe">下一站 ›</button>
+        <button type="button" id="latestframe">选最新帧</button>
       </div>
     </div>
     <div class="card">
-      <h2>时间轴 <span id="tltitle" style="color:var(--dim);font-weight:400"></span></h2>
-      <div id="timeline" class="empty">点左侧任一站位，看它的历史帧</div>
+      <h2>巡检拼图 <span id="tltitle" style="color:var(--dim);font-weight:400"></span></h2>
+      <div id="roundnote" class="empty" style="padding:2px 0"></div>
+      <div id="timeline" class="empty" role="group" aria-label="巡检拓扑拼图，Y 向右，层从上到下">
+        读取巡检轮次…
+      </div>
     </div>
     <div class="card">
       <h2>生长曲线 <span id="curvetitle" style="color:var(--dim);font-weight:400"></span></h2>
@@ -503,6 +527,10 @@
 const $ = s => document.querySelector(s);
 let stations = [], grid = null, selected = null, lastStatus = null;
 let cmd = {inflight:null, result:null, estop:false, session_active:false};
+      <div class="lbl">生产批次</div>
+      <div class="row"><select id="batchSel"><option value="">读取中…</option></select></div>
+      <div class="lbl">巡检轮次</div>
+      <div class="row"><select id="roundSel"><option value="">读取中…</option></select></div>
 let session = null;              // {token, expires_at}；本地只用来显示倒计时
 let clockSkewMs = 0;             // 服务器时间 − 浏览器时间：倒计时用服务器口径算
 let lastCommandedPosition = null;
@@ -549,8 +577,16 @@ function imageUrlFor(row){
 // <img> 加载失败时把那一格标成"图取不到"：默认的 `.im img{background:...}` 会留一块
 // 深色方块，看上去和"拍出来是黑的"一模一样——排障时这两件事必须分得开。
 function wireShotFallbacks(root){
-  (root || document).querySelectorAll('.im img').forEach(img => {
-    img.onerror = () => { const tile = img.closest('.im'); if(tile) tile.classList.add('noimg'); };
+  (root || document).querySelectorAll('.im img, .mosaic-cell img').forEach(img => {
+    img.onerror = () => {
+      const tile = img.closest('.im, .mosaic-cell');
+      if(!tile) return;
+      tile.classList.add('noimg');
+      if(tile.classList.contains('mosaic-cell')){
+        const thumb = tile.querySelector('.mosaic-thumb');
+        if(thumb) thumb.textContent = '图取不到';
+      }
+    };
   });
 }
 
@@ -1094,6 +1130,13 @@ function renderStatus(s){
   for(const [logSel, machSel] of [['#log', '#machine'], ['#log2', '#machine2']]){
     const lg = $(logSel), mc = $(machSel);
     if(!lg || !mc) continue;
+  if(mode === 'history'){
+    const changed = hist.focusedStationId !== id;
+    const row = filtered().find(item => item.station_id === id);
+    history_pick(String(row?.object_name ?? row?.ts ?? id), row ? imageUrlFor(row) : '', id);
+    if(changed || !hist.growth) await loadGrowth();
+    return;
+  }
     lg.className = ev.length ? '' : 'empty';
     lg.innerHTML = evHtml;
     mc.innerHTML = mHtml;
@@ -1606,7 +1649,9 @@ function wirePreview(){
 /* ---------------- 历史模式：时间轴 / 大图 / 生长曲线 ---------------- */
 
 let mode = 'realtime';
-const hist = { rows: [], growth: null, picked: null, zoom: 1, px: 0, py: 0 };
+const hist = { rows: [], rounds: [], growth: null, picked: null, zoom: 1, px: 0, py: 0,
+               selectedRoundId: '', selectedBatchKey: '', focusedStationId: '',
+               roundsLoading: false, roundsLoaded: false };
 
 function setMode(m){
   mode = m;
@@ -1619,8 +1664,10 @@ function setMode(m){
   if(m === 'history') closePreview('切到历史模式时已关闭');
   if(m === 'history'){
     renderHistory();
-    if(selected) loadHistory(false);
-  }else if(cmd.session_active){
+    loadHistory(false);
+  }else{
+    historyRequestSeq++;
+    if(cmd.session_active){
     openPreview('已回到实时模式');
   }
 }
@@ -1642,48 +1689,53 @@ function filtered(){
 function renderHistory(){
   if(mode !== 'history') return;
   const rows = filtered();
-  const st = selected ? stations.find(s => s.id === selected) : null;
-  $('#tltitle').textContent = selected ? '· ' + selected + (st ? '（' + st.box_id + '）' : '') : '';
-  $('#curvetitle').textContent = st ? '· ' + st.box_id : '';
-  $('#filterinfo').textContent = hist.rows.length
-    ? `共 ${hist.rows.length} 帧，筛出 ${rows.length} 帧`
+  const st = hist.focusedStationId ? stations.find(s => s.id === hist.focusedStationId) : null;
+  const round = hist.rounds.find(item => item.round_id === hist.selectedRoundId);
+  $('#tltitle').textContent = round
+    ? '· ' + String(round.ts || '').replace('T', ' ') + (round.batch_no ? ' · ' + round.batch_no : '')
     : '';
 
   const tl = $('#timeline');
-  if(!selected){ tl.className = 'empty'; tl.textContent = '点左侧任一站位，看它的历史帧'; }
-  else if(!rows.length){
+  const notes = [];
+  if(hist.roundsProdError) notes.push('prod 轮次查询失败：' + hist.roundsProdError);
+  if(hist.imagesProdError) notes.push('prod 图像查询失败：' + hist.imagesProdError);
+  if(hist.imageError) notes.push('本轮图像查询失败：' + hist.imageError);
+  if(hist.legacyRounds) notes.push(`${hist.legacyRounds} 条旧轮次没有唯一关联 ID，未拼入本轮`);
+  if(hist.rows.length && !rows.length) notes.push('当前日期/角度筛选没有匹配帧');
+  $('#roundnote').textContent = notes.join(' · ');
+
+  if(!round){
     tl.className = 'empty';
-    tl.textContent = hist.rows.length ? '当前筛选下没有帧（放宽日期/角度试试）'
-                                      : '这个站位还没有图像索引';
-  }else{
-    tl.className = '';
-    const byDate = {};
-    for(const r of rows) (byDate[rowDate(r)] ||= []).push(r);
-    tl.innerHTML = Object.keys(byDate).sort().reverse().map(d => `
-      <div class="tlhead">${esc(d)} · ${byDate[d].length} 帧</div>
-      <div class="tl">${byDate[d].map(r => {
-        const url = imageUrlFor(r);
-        const id = String(r.object_name ?? r.ts ?? '');
-        const on = hist.picked === id;
-        return `<div class="im ${rowOk(r)?'':'fail'} ${r.source==='local'?'local':''} ${on?'sel':''} ${url?'':'gone'}"
-                     data-pick="${esc(encodeURIComponent(id))}" data-url="${esc(url)}">
-          ${url ? `<img loading="lazy" src="${esc(url)}" alt="${esc(id)}">` : '<div style="height:96px"></div>'}
-          <div class="noimg">${rowOk(r) ? '图取不到' : '采图失败'}</div>
-          <div class="m"><b>${esc(String(r.ts||'').slice(11,19) || '—')}</b><br>
-            ${esc(r.angle_profile || '—')} · ${r.source === 'local' ? '本地' : 'prod'}
-            ${rowOk(r) ? '' : '<br><span style="color:var(--bad)">采图失败</span>'}</div>
-        </div>`;
-      }).join('')}</div>`).join('');
-    wireShotFallbacks(tl);
-    tl.querySelectorAll('[data-pick]').forEach(el => el.onclick = () => {
-      history_pick(decodeURIComponent(el.dataset.pick), el.dataset.url);
-    });
+    if(hist.roundsLoading) tl.textContent = '读取巡检轮次…';
+    else if(hist.roundsError) tl.textContent = '巡检轮次读取失败：' + hist.roundsError;
+    else if(hist.rounds.length) tl.textContent = '所选批次/日期没有可精确归属的巡检轮次';
+    else tl.textContent = '还没有带轮次 ID 的巡检记录';
+    drawCurve();
+    updateFrameInfo();
+    return;
+  }
+
+  const colsFromStations = Math.max(0, ...stations.map(item => Number(item.col) || 0));
+  const layersFromStations = Math.max(0, ...stations.map(item => Number(item.layer) || 0));
+  const colsValue = Number(grid?.cols) || colsFromStations;
+  const layersValue = Number(grid?.layers) || layersFromStations;
+  const cols = Math.max(1, Math.min(100, Math.trunc(colsValue)));
+  const layers = Math.max(1, Math.min(20, Math.trunc(layersValue)));
+  const stationByCell = new Map();
+  for(const station of stations){
+    const layer = Number(station.layer), col = Number(station.col);
+    if(!Number.isInteger(layer) || !Number.isInteger(col) || layer < 1 || layer > layers || col < 1 || col > cols) continue;
+    const key = `${layer}:${col}`;
+    if(!stationByCell.has(key)) stationByCell.set(key, station);
   }
   drawCurve();
   updateFrameInfo();
 }
 
-function history_pick(id, url){
+function history_pick(id, url, stationId){
+  const stationChanged = !!stationId && hist.focusedStationId !== stationId;
+  if(stationId) hist.focusedStationId = stationId;
+  if(stationChanged){ hist.growth = null; growthRequestSeq++; }
   hist.picked = id;
   const img = $('#bigimg');
   if(url){
@@ -1695,7 +1747,10 @@ function history_pick(id, url){
     img.onload = () => { $('#viewhint').textContent = id; };
     img.src = url; img.style.display = ''; $('#viewhint').textContent = id;
   }
-  else { img.style.display = 'none'; $('#viewhint').textContent = '这一帧没有可用的图（失败帧或对象已不在）'; }
+  else {
+    img.onload = null; img.onerror = null; img.removeAttribute('src'); img.style.display = 'none';
+    $('#viewhint').textContent = '本轮这个站位没有可用的图（缺帧、采图失败或对象不可取）';
+  }
   hist.zoom = 1; hist.px = hist.py = 0;
   applyZoom();
   renderHistory();
@@ -1710,29 +1765,30 @@ function applyZoom(){
 
 /* ---- P2-3 逐帧导航：时间轴是多天长条，翻"最近一帧"以前只能靠滚 ---- */
 function timelineFrames(){
-  return Array.from(document.querySelectorAll('.tl .im[data-pick]'));
+  return Array.from(document.querySelectorAll('#timeline .mosaic-cell[data-pick][data-station-id]'));
 }
 function updateFrameInfo(){
   const els = timelineFrames();
-  const i = els.findIndex(el => el.classList.contains('sel'));
+  const i = els.findIndex(el => el.dataset.stationId === hist.focusedStationId);
   $('#frameinfo').textContent = els.length
-    ? (i >= 0 ? `第 ${i + 1} / ${els.length} 帧` : `共 ${els.length} 帧，未选`)
-    : '当前筛选下没有帧';
+    ? (i >= 0 ? `第 ${i + 1} / ${els.length} 站位` : `共 ${els.length} 个站位，未选`)
+    : '当前轮次没有配置站位';
 }
 function pickRelative(delta){
   const els = timelineFrames();
   if(!els.length) return;
-  const i = els.findIndex(el => el.classList.contains('sel'));
+  const i = els.findIndex(el => el.dataset.stationId === hist.focusedStationId);
   const j = Math.min(els.length - 1, Math.max(0, (i < 0 ? 0 : i) + delta));
   const el = els[j];
-  history_pick(decodeURIComponent(el.dataset.pick), el.dataset.url);
+  pickHistoryCell(el);
   if(el.scrollIntoView) el.scrollIntoView({block:'nearest', inline:'nearest'});
 }
 
 function drawCurve(){
   const box = $('#curve'), note = $('#growthnote');
   const g = hist.growth;
-  if(!selected || !g){ box.className = 'empty'; box.textContent = '选一个站位，看它所在框的生长'; note.textContent = ''; return; }
+  const stationId = mode === 'history' ? hist.focusedStationId : selected;
+  if(!stationId || !g){ box.className = 'empty'; box.textContent = '选一个站位，看它所在框的生长'; note.textContent = ''; return; }
   if(!g.ok){
     // prod 查不到 **与** 还没有测量值，必须分得开：前者要排障，后者只需等待
     box.className = 'empty'; box.textContent = '查不到生长数据';
@@ -1748,10 +1804,13 @@ function drawCurve(){
   }
   const W = 640, H = 170, padL = 46, padR = 12, padT = 12, padB = 24;
   const vals = [];
+    if(!hist.focusedStationId) hist.focusedStationId = selected;
+    stationRequestSeq++;
   for(const p of pts){
     for(const k of ['mean_len_mm', 'mean_cap_mm']) if(typeof p[k] === 'number') vals.push(p[k]);
   }
   const lo = vals.length ? Math.min(...vals) : 0, hi = vals.length ? Math.max(...vals) : 1;
+    }
   const span = (hi - lo) || 1;
   const X = i => padL + (pts.length === 1 ? (W - padL - padR) / 2
                                           : i * (W - padL - padR) / (pts.length - 1));
@@ -1778,6 +1837,10 @@ function drawCurve(){
   <div class="legend"><span><i style="background:#1f6feb"></i>平均长度 mm</span>
     <span><i style="background:#18794e"></i>平均伞盖 mm</span>
     <span>最新判词：${esc((g.latest && g.latest.verdict_text) || (g.latest && g.latest.verdict) || '—')}</span></div>`;
+  $('#curvetitle').textContent = st ? '· ' + st.box_id : '';
+  $('#filterinfo').textContent = round
+    ? `本轮 ${hist.rows.length} 帧，筛出 ${rows.length} 帧`
+    : `${hist.rounds.length} 条巡检记录`;
   const recent = pts.slice(-8).reverse();
   note.innerHTML = `<table class="meas"><tr><th>时间</th><th>长度 mm</th><th>伞盖 mm</th><th>判词</th></tr>
     ${recent.map(p => `<tr><td>${esc(String(p.ts).replace('T',' '))}</td>
@@ -1786,34 +1849,167 @@ function drawCurve(){
 }
 
 async function loadHistory(force){
-  const stationId = selected;
-  if(!stationId) return;
+  if(!force && hist.roundsLoaded){
+    const roundId = syncRoundOptions();
+    return loadRoundImages(roundId);
+  }
+  if(force){ hist.growth = null; growthRequestSeq++; }
   const requestId = ++historyRequestSeq;
-  if(!force && hist.loadedFor === stationId){
-    if(!hist.growth) await loadGrowth();
+  hist.roundsLoading = true;
+  $('#timeline').className = 'empty';
+  $('#timeline').textContent = '读取巡检轮次…';
+  try{
+    const data = await jget('/api/rounds?limit=2000');
+    if(requestId !== historyRequestSeq) return;
+    hist.rounds = data.rounds || [];
+    hist.roundsProdError = data.prod_error || '';
+    hist.roundsError = '';
+    hist.roundsLoaded = true;
+  }catch(e){
+    if(requestId !== historyRequestSeq) return;
+    hist.rounds = [];
+    hist.roundsError = e.message;
+    hist.roundsLoaded = true;
+  }
+  if(requestId !== historyRequestSeq) return;
+  hist.roundsLoading = false;
+  syncBatchOptions();
+  const roundId = syncRoundOptions();
+  renderHistory();
+  await loadRoundImages(roundId);
+}
+
+function batchKey(row){
+  return JSON.stringify([row.room_id || '', row.entry_date || '', row.batch_no || '']);
+}
+
+function syncBatchOptions(){
+  const batches = new Map();
+  for(const round of hist.rounds){
+    const key = batchKey(round);
+    if(!batches.has(key)) batches.set(key, round);
+  }
+  const options = [...batches.entries()];
+  const roomKey = lastStatus?.room ? batchKey(lastStatus.room) : '';
+  const hasKey = key => options.some(([optionKey]) => optionKey === key);
+  if(!hasKey(hist.selectedBatchKey)){
+    hist.selectedBatchKey = hasKey(roomKey) ? roomKey : (options[0]?.[0] || '');
+  }
+  $('#batchSel').innerHTML = options.length
+    ? options.map(([key, row]) => {
+        const label = [row.room_id && `库房 ${row.room_id}`, row.entry_date && `入库 ${row.entry_date}`,
+                       row.batch_no || '批次未标记'].filter(Boolean).join(' · ');
+        return `<option value="${esc(encodeURIComponent(key))}">${esc(label)}</option>`;
+      }).join('')
+    : '<option value="">暂无生产批次</option>';
+  $('#batchSel').value = hist.selectedBatchKey ? encodeURIComponent(hist.selectedBatchKey) : '';
+}
+
+function syncRoundOptions(){
+  const from = $('#fromDate').value, to = $('#toDate').value;
+  const batchRounds = hist.rounds.filter(row => batchKey(row) === hist.selectedBatchKey);
+  const legacyRounds = batchRounds.filter(row => !row.round_id).length;
+  const rounds = batchRounds.filter(row => {
+    if(!row.round_id) return false;
+    const date = rowDate(row);
+    return (!from || !date || date >= from) && (!to || !date || date <= to);
+  });
+  $('#roundSel').innerHTML = rounds.length
+    ? rounds.map(row => {
+        const status = rowOk(row) ? '完成' : '有失败';
+        return `<option value="${esc(row.round_id)}">${esc(String(row.ts || '').replace('T', ' '))} · ${status}</option>`;
+      }).join('')
+    : '<option value="">当前筛选没有可拼图轮次</option>';
+  const selected = rounds.find(row => row.round_id === hist.selectedRoundId) || rounds[0] || null;
+  hist.selectedRoundId = selected ? selected.round_id : '';
+  $('#roundSel').value = hist.selectedRoundId;
+  hist.legacyRounds = legacyRounds;
+  return hist.selectedRoundId;
+}
+
+async function loadRoundImages(roundId){
+  hist.selectedRoundId = roundId || '';
+  const requestId = ++historyRequestSeq;
+  hist.rows = [];
+  hist.picked = null;
+  hist.imagesProdError = '';
+  hist.imageError = '';
+  clearHistoryImage(roundId ? '读取本轮原图…' : '选择有轮次 ID 的巡检记录查看原图');
+  if(!roundId){
+    syncAngleOptions();
     renderHistory();
     return;
   }
-  hist.loadedFor = null;
   $('#timeline').className = 'empty';
-  $('#timeline').textContent = '读取中…';
+  $('#timeline').textContent = '读取本轮图像…';
   try{
-    const {rows, prod_error} = await fetchStationImages(stationId);
-    if(requestId !== historyRequestSeq || selected !== stationId) return;
-    hist.rows = rows;
-    hist.loadedFor = stationId;
-    if(prod_error) $('#filterinfo').textContent = '⚠ prod 查询失败（只显示本地待同步的）：' + prod_error;
+    const data = await jget('/api/images?round_id=' + encodeURIComponent(roundId) + '&limit=2000');
+    if(requestId !== historyRequestSeq || hist.selectedRoundId !== roundId) return;
+    hist.rows = data.rows || [];
+    hist.imagesProdError = data.prod_error || '';
   }catch(e){
-    if(requestId !== historyRequestSeq || selected !== stationId) return;
-    hist.rows = [];
-    $('#timeline').className = 'empty';
-    $('#timeline').textContent = '读取失败：' + e.message;
+    if(requestId !== historyRequestSeq || hist.selectedRoundId !== roundId) return;
+    hist.imageError = e.message;
   }
-  if(requestId !== historyRequestSeq || selected !== stationId) return;
+  const rowByStation = new Map();
+  for(const row of rows){
+    if(row.station_id && !rowByStation.has(row.station_id)) rowByStation.set(row.station_id, row);
+  }
+  const cells = ['<div class="mosaic-axis">Y →</div>'];
+  for(let col = 1; col <= cols; col++) cells.push(`<div class="mosaic-col">${String(col).padStart(2, '0')}</div>`);
+  for(let layer = 1; layer <= layers; layer++){
+    cells.push(`<div class="mosaic-layer">第 ${layer} 层</div>`);
+    for(let col = 1; col <= cols; col++){
+      const station = stationByCell.get(`${layer}:${col}`);
+      if(!station){
+        cells.push(`<div class="mosaic-cell vacant" aria-label="第 ${layer} 层第 ${col} 框未配置">—</div>`);
+        continue;
+      }
+      const row = rowByStation.get(station.id);
+      const url = row ? imageUrlFor(row) : '';
+      const id = String(row?.object_name ?? row?.ts ?? station.id);
+      const time = String(row?.ts || '').slice(11, 16);
+      const status = !row ? '本轮无帧' : !rowOk(row) ? '采图失败' : url ? time || '可查看' : '图取不到';
+      const classes = ['mosaic-cell'];
+      if(row && !rowOk(row)) classes.push('fail');
+      if(row?.source === 'local') classes.push('local');
+        if(station.id === hist.focusedStationId) classes.push('sel');
+      cells.push(`<button type="button" class="${classes.join(' ')}"
+          data-pick="${esc(encodeURIComponent(id))}" data-url="${esc(url)}"
+          data-station-id="${esc(station.id)}" data-ts="${esc(row?.ts || '')}"
+          aria-pressed="${station.id === hist.focusedStationId}"
+          aria-label="第 ${layer} 层第 ${col} 框，${esc(station.id)}，${esc(status)}">
+        <span class="mosaic-thumb">${url
+          ? `<img loading="lazy" decoding="async" src="${esc(url)}" alt="">`
+          : `<span class="mosaic-empty">${esc(status)}</span>`}</span>
+        <span class="mosaic-meta"><b>${esc(station.id)}</b>
+          <small>${esc(row?.source === 'local' ? '本地待同步' : status)}</small></span>
+      </button>`);
+    }
+  }
+  tl.className = 'mosaic-scroll';
+  tl.innerHTML = `<div class="mosaic" style="grid-template-columns:64px repeat(${cols},64px);min-width:${64 * (cols + 1)}px">${cells.join('')}</div>`;
+  wireShotFallbacks(tl);
+  tl.querySelectorAll('[data-pick]').forEach(el => el.onclick = () => {
+    pickHistoryCell(el);
+  });
+  if(requestId !== historyRequestSeq || hist.selectedRoundId !== roundId) return;
   syncAngleOptions();
-  hist.growth = null;
   renderHistory();
-  await loadGrowth();
+  if(hist.focusedStationId){
+    const row = filtered().find(item => item.station_id === hist.focusedStationId);
+    history_pick(String(row?.object_name ?? row?.ts ?? hist.focusedStationId),
+                 row ? imageUrlFor(row) : '', hist.focusedStationId);
+    if(!hist.growth) await loadGrowth();
+  }
+}
+
+function clearHistoryImage(message){
+  const img = $('#bigimg');
+  img.onload = null; img.onerror = null; img.removeAttribute('src'); img.style.display = 'none';
+  $('#viewhint').textContent = message;
+  hist.zoom = 1; hist.px = hist.py = 0;
+  applyZoom();
 }
 
 function syncAngleOptions(){
@@ -1825,27 +2021,38 @@ function syncAngleOptions(){
 }
 
 async function loadGrowth(){
-  const stationId = selected;
+  const stationId = mode === 'history' ? hist.focusedStationId : selected;
   const requestId = ++growthRequestSeq;
   const st = stationId ? stations.find(s => s.id === stationId) : null;
   if(!st){ hist.growth = null; drawCurve(); return; }
   let growth;
+  if(stationChanged) loadGrowth();
   try{
     growth = await jget('/api/growth?box_id=' + encodeURIComponent(st.box_id));
   }catch(e){
     growth = {ok: false, error: '生长接口不可达：' + e.message, points: []};
   }
-  if(requestId !== growthRequestSeq || selected !== stationId) return;
+  const currentStationId = mode === 'history' ? hist.focusedStationId : selected;
+  if(requestId !== growthRequestSeq || currentStationId !== stationId) return;
   hist.growth = growth;
   drawCurve();
 }
 
 function wireHistory(){
   document.querySelectorAll('#modeSeg button').forEach(b => b.onclick = () => setMode(b.dataset.mode));
-  $('#fromDate').onchange = renderHistory;
-  $('#toDate').onchange = renderHistory;
+  const refreshFilteredRounds = () => loadRoundImages(syncRoundOptions());
+  $('#batchSel').onchange = () => {
+    hist.selectedBatchKey = decodeURIComponent($('#batchSel').value || '');
+    refreshFilteredRounds();
+  };
+  $('#roundSel').onchange = () => loadRoundImages($('#roundSel').value);
+  $('#fromDate').onchange = refreshFilteredRounds;
+  $('#toDate').onchange = refreshFilteredRounds;
   $('#angleSel').onchange = renderHistory;
-  $('#clearfilter').onclick = () => { $('#fromDate').value = ''; $('#toDate').value = ''; $('#angleSel').value = ''; renderHistory(); };
+  $('#clearfilter').onclick = () => {
+    $('#fromDate').value = ''; $('#toDate').value = ''; $('#angleSel').value = '';
+    refreshFilteredRounds();
+  };
   $('#reloadbtn').onclick = () => loadHistory(true);
   document.querySelectorAll('[data-zoom]').forEach(b => b.onclick = () => {
     hist.zoom = Number(b.dataset.zoom); hist.px = hist.py = 0; applyZoom();
@@ -1855,10 +2062,17 @@ function wireHistory(){
   $('#prevframe').onclick = () => pickRelative(-1);
   $('#nextframe').onclick = () => pickRelative(1);
   $('#latestframe').onclick = () => {
-    const els = timelineFrames();
+    const els = timelineFrames().filter(el => el.dataset.ts);
     if(!els.length) return;
-    const el = els[0];                       // DOM 顺序已是"日期倒序、日内正序" ⇒ 0 号就是最近
-    history_pick(decodeURIComponent(el.dataset.pick), el.dataset.url);
+    const el = els.reduce((latest, item) => item.dataset.ts > latest.dataset.ts ? item : latest);
+    pickHistoryCell(el);
+function pickHistoryCell(el){
+  if(!el) return;
+  const stationChanged = hist.focusedStationId !== el.dataset.stationId;
+  history_pick(decodeURIComponent(el.dataset.pick), el.dataset.url, el.dataset.stationId);
+  if(stationChanged || !hist.growth) loadGrowth();
+}
+
     if(el.scrollIntoView) el.scrollIntoView({block:'nearest', inline:'nearest'});
   };
   document.addEventListener('keydown', e => {

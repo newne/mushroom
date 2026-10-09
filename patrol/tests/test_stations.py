@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from patrol.motion_profile import M1
 from patrol.stations import (
@@ -15,6 +17,7 @@ from patrol.stations import (
     grid_geometry,
     layer_z,
     nearest_station,
+    retarget,
 )
 
 
@@ -35,16 +38,14 @@ def test_station_ids_read_as_layer_and_col():
 
 def test_layer_one_is_at_the_top_and_layer_four_at_the_bottom():
     """Z 原点在顶端、Z **向下为正**（ADR-0018）：第 1 层最靠近 0，层号越大 z 越大。"""
-    assert layer_z(1) == pytest.approx(53.0 / 2)
-    assert layer_z(GRID_LAYERS) == pytest.approx(212 - 53.0 / 2)
+    assert [layer_z(layer) for layer in range(1, GRID_LAYERS + 1)] == pytest.approx(
+        [10.0, 60.0, 132.0, 155.0]
+    )
     assert layer_z(1) < layer_z(2) < layer_z(GRID_LAYERS)
 
 
-def test_layers_evenly_split_the_whole_z_travel():
+def test_calibrated_layers_stay_inside_the_z_travel():
     zs = [layer_z(i) for i in range(1, GRID_LAYERS + 1)]
-    gaps = [zs[i + 1] - zs[i] for i in range(len(zs) - 1)]
-    assert all(g == pytest.approx(212 / GRID_LAYERS) for g in gaps)
-    # 首末层各留半个层距的余量，既不贴顶也不贴底
     assert M1.z.travel_min < zs[0] and zs[-1] < M1.z.travel_max
 
 
@@ -60,11 +61,28 @@ def test_layer_z_refuses_to_leave_the_travel_range():
         layer_z(1, flipped)
 
 
-def test_cols_evenly_split_the_whole_y_travel():
+def test_columns_keep_the_nominal_pitch_with_calibrated_c08_offset():
     ys = [col_y(c) for c in range(1, GRID_COLS + 1)]
-    assert ys[0] > M1.y.travel_min and ys[-1] < M1.y.travel_max
-    gaps = [ys[i + 1] - ys[i] for i in range(len(ys) - 1)]
-    assert all(g == pytest.approx(4492 / GRID_COLS) for g in gaps)
+    nominal = [
+        M1.y.travel_min + (col - 0.5) * (M1.y.travel_span / GRID_COLS)
+        for col in range(1, GRID_COLS + 1)
+    ]
+    expected = [y - 80.0 if col == 8 else y for col, y in enumerate(nominal, start=1)]
+    assert ys == pytest.approx(expected)
+    assert all(M1.y.contains(y) for y in ys)
+
+
+def test_c08_layer_two_offset_is_used_by_grid_and_retarget():
+    nominal_c08 = M1.y.travel_min + 7.5 * (M1.y.travel_span / GRID_COLS)
+    stations = {(s.layer, s.col): s for s in build_grid()}
+    assert stations[(1, 8)].y == pytest.approx(nominal_c08 - 80.0)
+    assert stations[(2, 8)].y == pytest.approx(nominal_c08 - 40.0)
+    assert stations[(4, 8)].y == pytest.approx(nominal_c08 - 80.0)
+
+    stale = [replace(stations[key], y=0.0) for key in ((2, 8), (4, 8))]
+    updated = {(s.layer, s.col): s for s in retarget(stale)}
+    assert updated[(2, 8)].y == pytest.approx(nominal_c08 - 40.0)
+    assert updated[(4, 8)].y == pytest.approx(nominal_c08 - 80.0)
 
 
 @pytest.mark.parametrize("bad", [0, -1, GRID_LAYERS + 1])
@@ -87,7 +105,7 @@ def test_visit_order_is_serpentine_so_the_return_trip_is_free():
     layer2 = [s for s in st if s.layer == 2]
     assert [s.col for s in layer1] == list(range(1, GRID_COLS + 1))
     assert [s.col for s in layer2] == list(range(GRID_COLS, 0, -1))
-    # 换层处 Y 几乎不动（只有 Z 的 53mm），而不是从最右折回最左
+    # 换层处 Y 几乎不动，而不是从最右折回最左
     assert layer2[0].y == pytest.approx(layer1[-1].y)
     assert max(ys) - min(ys) == pytest.approx(4492 * (GRID_COLS - 1) / GRID_COLS)
 
@@ -102,7 +120,7 @@ def test_grid_geometry_matches_the_builder():
     geom = grid_geometry()
     assert geom["cols"] == GRID_COLS and geom["layers"] == GRID_LAYERS
     assert geom["y_pitch"] == pytest.approx(4492 / GRID_COLS)
-    assert geom["z_pitch"] == pytest.approx(212 / GRID_LAYERS)
+    assert geom["z_pitch"] == pytest.approx(145 / 3)
     assert (geom["y_min"], geom["y_max"]) == (0.0, 4492.0)
     assert (geom["z_min"], geom["z_max"]) == (0.0, 212.0)
 
@@ -159,9 +177,9 @@ def test_nearest_is_none_on_an_empty_table():
 
 
 def test_nearest_switches_layer_at_half_a_layer():
-    """层号边界落在半层处（±26.5mm）：这是"这个点属于哪一层"的那条线。
+    """层号边界落在相邻实测层心的中点：这是"这个点属于哪一层"的那条线。
 
-    Z 的层距只有 53mm，而 Y 的框距有 374mm —— 判错一层的代价是拍到隔壁层的菇，
+    Z 的平均格距约 50mm，而 Y 的框距有 374mm —— 判错一层的代价是拍到隔壁层的菇，
     所以边界必须钉死，不能"大概往上靠"。
     """
     st = build_grid()
@@ -175,10 +193,10 @@ def test_nearest_compares_in_grid_units_not_raw_millimetres():
 
     构造一对必然分歧的候选：A 同 Y、偏 Z 50mm；B 同 Z、偏 Y 60mm。
     - 比毫米：A(50) < B(60) ⇒ 选 A
-    - 比格数：A 偏了 50/53 ≈ 0.94 层，B 只偏 60/374.3 ≈ 0.16 框 ⇒ 选 B
+    - 比格数：A 偏了 50/50 = 1 层，B 只偏 60/374.3 ≈ 0.16 框 ⇒ 选 B
 
     B 才对：偏了整整一层意味着镜头压根不在那一层，而 Y 上偏 60mm 连半个框都不到。
-    直接比毫米的话，Y 的 374mm 格距会把 Z 的 53mm 完全盖住（见 nearest_station 注释）。
+    直接比毫米的话，Y 的 374mm 格距会把 Z 的平均 50mm 格距完全盖住（见 nearest_station 注释）。
     """
     py = grid_geometry()["y_pitch"]
     pz = grid_geometry()["z_pitch"]

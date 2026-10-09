@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS measurements (
 
 CREATE TABLE IF NOT EXISTS rounds (
   ts         TEXT PRIMARY KEY,
+    round_id   TEXT,
   ok         INTEGER,
   n_results  INTEGER,
   n_failures INTEGER,
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS rounds (
 
 CREATE TABLE IF NOT EXISTS images (
   ts            TEXT NOT NULL,       -- 采图时刻（ISO8601，来自索引记录）
+    round_id      TEXT,
   station_id    TEXT,
   box_id        TEXT,
   angle_profile TEXT,
@@ -88,8 +90,18 @@ def connect(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
 #: 现场库是长期存在的，所以这里必须能就地升级——否则老库会一直是"缺列"的样子，
 #: 而写入方（daemon）并不知道，只会静默丢字段。
 ADDED_COLUMNS: dict[str, dict[str, str]] = {
-    "images": {"room_id": "TEXT", "entry_date": "TEXT", "batch_no": "TEXT"},
-    "rounds": {"room_id": "TEXT", "entry_date": "TEXT", "batch_no": "TEXT"},
+    "images": {
+        "round_id": "TEXT",
+        "room_id": "TEXT",
+        "entry_date": "TEXT",
+        "batch_no": "TEXT",
+    },
+    "rounds": {
+        "round_id": "TEXT",
+        "room_id": "TEXT",
+        "entry_date": "TEXT",
+        "batch_no": "TEXT",
+    },
 }
 
 
@@ -145,11 +157,35 @@ def fetch_measurements(conn: sqlite3.Connection) -> list[dict]:
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+ROUND_FIELDS = (
+    "ts",
+    "round_id",
+    "ok",
+    "n_results",
+    "n_failures",
+    "aborted",
+    "room_id",
+    "entry_date",
+    "batch_no",
+)
+
 IMAGE_FIELDS = (
-    "ts", "station_id", "box_id", "angle_profile", "camera_ip",
-    "y", "z", "object_name", "cloud_url", "ok", "error",
+    "ts",
+    "round_id",
+    "station_id",
+    "box_id",
+    "angle_profile",
+    "camera_ip",
+    "y",
+    "z",
+    "object_name",
+    "cloud_url",
+    "ok",
+    "error",
     # 库房维度：与 daemon 写入的行一一对应（见 SCHEMA 里 images 的注释）
-    "room_id", "entry_date", "batch_no",
+    "room_id",
+    "entry_date",
+    "batch_no",
 )
 
 
@@ -177,10 +213,16 @@ def insert_images(conn: sqlite3.Connection, rows: list[dict]) -> None:
     conn.commit()
 
 
-def fetch_images(conn: sqlite3.Connection, *, station_id: str | None = None,
-                 box_id: str | None = None, room_id: str | None = None,
-                 limit: int | None = None) -> list[dict]:
-    """按站位/框/库房（都可选）倒序取图像索引，供巡检台的历史模式使用（ADR-0003/0005）。"""
+def fetch_images(
+    conn: sqlite3.Connection,
+    *,
+    station_id: str | None = None,
+    box_id: str | None = None,
+    room_id: str | None = None,
+    round_id: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """按轮次/站位/框/库房（都可选）倒序取图像索引，供历史模式使用。"""
     sql = f"SELECT {', '.join(IMAGE_FIELDS)} FROM images"
     where: list[str] = []
     params: list = []
@@ -193,6 +235,40 @@ def fetch_images(conn: sqlite3.Connection, *, station_id: str | None = None,
     if room_id:
         where.append("room_id = ?")
         params.append(room_id)
+    if round_id:
+        where.append("round_id = ?")
+        params.append(round_id)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY ts DESC"
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    cur = conn.execute(sql, params)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def fetch_rounds(
+    conn: sqlite3.Connection,
+    *,
+    room_id: str | None = None,
+    entry_date: str | None = None,
+    batch_no: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """按库房/入库日期/生产批次筛选巡检轮次，最新轮次优先。"""
+    sql = f"SELECT {', '.join(ROUND_FIELDS)} FROM rounds"
+    where: list[str] = []
+    params: list = []
+    for field, value in (
+        ("room_id", room_id),
+        ("entry_date", entry_date),
+        ("batch_no", batch_no),
+    ):
+        if value:
+            where.append(f"{field} = ?")
+            params.append(value)
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY ts DESC"

@@ -160,8 +160,8 @@ def next_run_delay(now: datetime, at_minute: int) -> float:
 def load_station_list(path: str, *, camera_ip: str, log_fn=None) -> list[Station]:
     """读站位表；文件不存在则按行程推导生成一份并落盘（避免每次重算）。
 
-    网格坐标是**推导**出来的（``stations.build_grid``：12 框 × 5 层，两轴行程整除
-    该网格），因此不需要逐点示教就能开跑；示教只在"实际框位与均分不符"时才需要，
+    网格坐标由 ``stations.build_grid`` 生成（12 列按 Y 间距布置，4 层 Z 逐层标定，C08 有横向偏移），
+    因此不需要逐点示教就能开跑；示教只在"实际框位与标定值不符"时才需要，
     届时用 ``patrol-teach`` 到位后 ``record``、``save``，覆盖这里的 YAML。
 
     已存在的表里若有**显式**空 ``camera_ip``（``camera_ip: ""``），用 ``--camera-ip``
