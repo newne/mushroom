@@ -1475,3 +1475,69 @@ sed -i '/^[[:space:]]*image:.*mushroom_solution:/ s|mushroom_solution:[^"]*|mush
 main 上重写过的 `mushroom_image_encoder.py`（`cba6a40` 那张 WIP 快照里）也许已处理，
 需算法侧判断。
 
+---
+
+## 19. 2026-10-09 / 2026-10-10：Z 轴方向改回 ADR-0018（只换标签，不动机器）
+
+**背景**：2026-10-09 按"从回零位 Z=0 向 +Z 走到行程尽头触发**正限位**（落点 Z≈210.15）"
+把 Z 的框架改判成"原点在底端、`Z+ = 向上`"（`7169156`）。那条实测只证明"回零落在负限位
+那一端"，而"负限位在哪端"正是要证明的东西——**循环论证**，当时并没有肉眼核对 +Z 到底是上
+还是下。
+
+**2026-10-10 现场复核**（直接看机器，不看屏幕）：按「回零」Z 滑台仍然**往上**到顶端、
+Z=0 在顶端；`jog Z 40` 机构**往下**走（控制器 Z+ = 下）。所以 Z 的框架仍是 ADR-0018：
+**原点在顶端（靠近电机端）、向下为正**。`home_dir=HOME_DIR_NEGATIVE`（=2，负限位）与行程
+`0…212` 自始至终没变——用户看到的"回零方向是正限位"其实是**页面把"上"标成了 `Z+`**，
+把标签改回即可，机构一个字节都没动。
+
+**改动（`3537d00`，只换标签与派生量）**：
+
+| 层 | 改动 |
+| --- | --- |
+| `patrol.motion_profile` | `positive_towards` `"up"`→`"down"`（`home_dir`、行程不动） |
+| `patrol.framing` | `default_sign_z()` 由它派生 ⇒ **+1**（docstring 同步） |
+| `web/console/index.html` | 平面图标题/aria、地图 Z 映射（去掉原点在底端的翻转）、点动方向盘（↑=Z−、↓=Z+，键盘同步）、`#envlbl` 文案 |
+| 测试 | `test_motion_profile`（down）、`test_framing`（sign_z=+1）；`ruff` 通过 |
+| 文档 | `console-ui/spec.md`、`console-ui/verify-page.js`、`prod-deploy/station-retarget.md` §8.2、`deploy/README.md` |
+
+**发版（重建 `mushroom_patrol` 镜像 + 换页面）**：
+
+```bash
+# 开发机（WSL）：从 main@3537d00 构建并推版本 tag（没动 :latest）
+cd /mnt/d/code/mushroom
+TAG=0.1.0-20261010152748-3537d00
+docker build -f docker/Dockerfile.patrol -t registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:$TAG .
+docker push  registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:$TAG
+```
+
+```bash
+# 库房主机：钉 tag + 只重建 patrol/console（preview 不动）
+cd /home/sysadmin/algorithm/mushroom_service
+cp -p .env .env.bak-20261010-153441
+sed -i 's#^PATROL_IMAGE=.*#PATROL_IMAGE=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261010152748-3537d00#' .env
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_patrol mushroom_console
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_patrol mushroom_console
+```
+
+页面是 `mushroom_console_web` 的 bind-mount（`../mushroom_patrol/web`），**只换文件**：先
+`cp -p index.html index.html.bak-20261010-153324`，上传到 `index.html.new`、核对 sha 再
+同盘 `mv` 原子替换（不重建 console_web）。
+
+**验收**：
+
+| 检查 | 结果 |
+| --- | --- |
+| 容器 | patrol/console 换到新 tag、`healthy`、`restarts=0` |
+| 镜像内单源 | `positive_towards=down`、`default_sign_z()=+1.0`、`home_dir=2`、`travel 0…212` |
+| 页面 | `/`（nginx :8002）4×「Z 向下」、0×「Z 向上」；字节 sha 与本地一致 |
+| 接口 | `/healthz {"ok":true}`、`/api/grid z 0…212` |
+| 未波及 | `mushroom_preview` 仍 `station-calibration-…`；`mushroom_console_web` 未重建 |
+
+**回滚**：`.env` 换回 `.env.bak-20261010-153441`（tag `0.1.0-20261010140703-fde98e1`，10-09
+的"向上"版）、页面换回 `index.html.bak-20261010-153324`，再
+`up -d --force-recreate --no-deps mushroom_patrol mushroom_console`。
+
+**教训**：方向这种事，"撞到哪个限位"证明不了"哪端是原点"——**得用眼睛**（或回零前后读
+位置）。同一台机器上 Y 与 Z 的原点都在**靠近电机那一端**，这条不变量由 `home_position`
+派生并可断言。
+
