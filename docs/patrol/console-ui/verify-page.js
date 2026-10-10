@@ -134,6 +134,22 @@ function fakeNearest(y, z) {
   return best;
 }
 
+// SVG 视口像素 → mm（Y, Z）：与 web/console/index.html 的 mapScale / mapPointFromEvent 同规则。
+// 存在的唯一理由：测试要点图上某个位置，而"像素 ↔ mm"随坐标框架翻转过
+// （2026-10-09 Z 从向下为正改成向上为正）。手推像素点会静默点到别的层去，
+// 所以测试一律走这个换算，不写死数字。
+const MAP_FOR_TEST = { W: 920, H: 170, padL: 26, padR: 12, padT: 14, padB: 22 };
+function mapMmFromSvgPx(px, py) {
+  const M = MAP_FOR_TEST, g = GRID;
+  const iw = M.W - M.padL - M.padR, ih = M.H - M.padT - M.padB;
+  const fx = Math.min(1, Math.max(0, (px - M.padL) / iw));
+  const fy = Math.min(1, Math.max(0, (py - M.padT) / ih));
+  const y = g.y_min + fx * (g.y_max - g.y_min);
+  // Z 向上为正：图上 y 越大 ⇒ z 越小
+  const z = g.z_min + (1 - fy) * (g.z_max - g.z_min);
+  return [y, z];
+}
+
 function json(status, body) { return { status, ok: status < 400, json: async () => body }; }
 
 function route(method, url, body) {
@@ -329,15 +345,17 @@ const lastCmd = () => {
   check('未接管时抓拍**可用**（不移动机构 ⇒ 不需要会话）', $('#capbtn').disabled === false);
   check('未接管时给出接管提示', T('#sessionline').includes('未接管'), T('#sessionline'));
 
-  // 1a. 坐标框架（ADR-0018）：Z 的原点在**顶端**、向下为正。
-  //     平面图必须把第 1 层画在最上面——旧代码按 z_max 起算，把第 1 层画到了最下面，
-  //     而"层画反了"与"机器去错层"是同一个错的两个面。
-  check('平面图标明 Z 向下', html.includes('Z 向下'), 'h2=' + T('section h2'));
-  check('坐标范围文案来自 /api/grid 且说明 Z 向下',
-    T('#envlbl').includes('Z 0…212') && T('#envlbl').includes('向下'), T('#envlbl'));
+  // 1a. 坐标框架（2026-10-09 现场 SDK 实测）：Z 的原点在**底端**、向上为正。
+  //     Z+ 走到行程尽头触发的是**正限位**（Z≈210），按说明书“正限位=远离电机端”反推 ⇒
+  //     电机在底端、原点在底端、坐标朝上。平面图把第 1 层画在最下面，
+  //     而“层画反了”与“机器去错层”是同一个错的两个面。
+  check('平面图标明 Z 向上', html.includes('Z 向上'), 'h2=' + T('section h2'));
+  check('坐标范围文案来自 /api/grid 且说明 Z 向上',
+    T('#envlbl').includes('Z 0…212') && T('#envlbl').includes('向上'), T('#envlbl'));
   const dots = Array.from(document.querySelectorAll('#map circle'));
   const yOf = id => Number(dots.find(c => c.dataset.id === id)?.getAttribute('cy'));
-  check('第 1 层的点画在图的上半部（Z 原点在顶端）', yOf('S101') < 100, 'cy=' + yOf('S101'));
+  check('第 1 层的点画在图的下半部（Z 原点在底端）', yOf('S101') > 100, 'cy=' + yOf('S101'));
+  check('第 4 层的点画在图的上半部（Z 向上为正）', yOf('S412') < 100, 'cy=' + yOf('S412'));
   check('点动按钮标出物理方向（Z + 是向上）',
     T('[data-jog="Z+"]').includes('上') && T('[data-jog="Z-"]').includes('下'),
     T('[data-jog="Z+"]') + ' / ' + T('[data-jog="Z-"]'));
@@ -478,17 +496,17 @@ const lastCmd = () => {
   const mapsvg = $('#map');
   mapsvg.getBoundingClientRect = () => ({ left: 0, top: 0, width: 920, height: 170 });
   state.calls.length = 0;
-  mapsvg.dispatchEvent(new window.MouseEvent('click', { clientX: 460, clientY: 85, bubbles: true }));
+  mapsvg.dispatchEvent(new window.MouseEvent('click', { clientX: 300, clientY: 40, bubbles: true }));
   await sleep(120);
-  check('地图空白处点击填入两位小数坐标', $('#gtY').value === '2210.35' && $('#gtZ').value === '112.33',
-    $('#gtY').value + ' / ' + $('#gtZ').value);
-  check('地图点击**不直接发指令**', lastCmd() === null || lastCmd() === undefined,
-    JSON.stringify(lastCmd()));
+  const blankPt = mapMmFromSvgPx(300, 40);
+  check('地图空白处点击填入两位小数坐标',
+    $('#gtY').value === blankPt[0].toFixed(2) && $('#gtZ').value === blankPt[1].toFixed(2),
+    $('#gtY').value + ' / ' + $('#gtZ').value + '（期望 ' + blankPt.map(v=>v.toFixed(2)).join(' / ') + '）');
   check('待定目标画出了虚线框', !!document.querySelector('#map .map-pending'));
-  mapsvg.dispatchEvent(new window.MouseEvent('mousemove', { clientX: 460, clientY: 85, bubbles: true }));
-  check('悬停显示光标处坐标', T('#maphover').includes('Y=2210.35') && T('#maphover').includes('Z=112.33'),
+  mapsvg.dispatchEvent(new window.MouseEvent('mousemove', { clientX: 300, clientY: 40, bubbles: true }));
+  check('悬停显示光标处坐标',
+    T('#maphover').includes('Y=' + blankPt[0].toFixed(2)) && T('#maphover').includes('Z=' + blankPt[1].toFixed(2)),
     T('#maphover'));
-
   // P1-3：导轨图拆成静态层/动态层——每秒轮询不该再把整张图重建一遍
   const mapStaticBefore = $('#map .map-static');
   await sleep(1200);                      // 至少等一拍 tick（1s）
@@ -700,8 +718,13 @@ const lastCmd = () => {
     T('#cmdline'));
   state.machine_position = [200.0, -20.0];    // 复原：后面的"控制器实读"断言依赖这个位置
 
-  // 再走"显式指定站位"这条老路：从**地图**上点站位（S102 图心 ≈ 136,27，命中圈内）
-  mapsvg.dispatchEvent(new window.MouseEvent('click', { clientX: 136, clientY: 27, bubbles: true }));
+  // 再走"显式指定站位"这条老路：从**地图**上点站位。
+  // ⚠️ 点圆心的 cx/cy，不写死像素：Z 翻转过（2026-10-09 原点从顶端改为底端），
+  // 写死的坐标会静默点到别的层——旧版这里写的 136,27 现在就属于第 4 层。
+  const s102dot = Array.from(document.querySelectorAll('#map circle'))
+    .find(c => c.dataset && c.dataset.id === 'S102');
+  const s102x = Number(s102dot.getAttribute('cx')), s102y = Number(s102dot.getAttribute('cy'));
+  mapsvg.dispatchEvent(new window.MouseEvent('click', { clientX: s102x, clientY: s102y, bubbles: true }));
   await sleep(400);
   check('点地图上的站点 = 选中站位', T('#imgtitle').includes('S102'), T('#imgtitle'));
   check('站位选择状态可被辅助技术识别', $('.stn[data-id="S102"]').getAttribute('aria-pressed') === 'true' &&

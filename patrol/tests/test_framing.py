@@ -96,21 +96,21 @@ def test_converges_in_one_tap_and_reports_trim():
 def test_z_sign_default_moves_camera_down_when_target_is_low():
     """目标偏画面下方 ⇒ 相机往下走，把目标拉回中间。
 
-    本机 Z 的原点在顶端、坐标**往下增长**（ADR-0018），所以"往下"是 Z 的 **+** 方向：
-    默认 `sign_z` 必须从机器约定派生（+1），而不是照抄"向上为正"年代写的 -1。
+    本机 Z 的原点在底端、坐标**往上增长**（2026-10-09 现场 SDK 实测），所以"往下"是 Z 的
+    **−** 方向：默认 `sign_z` 必须从机器约定派生（-1）。
     """
     rig = Rig([(0.0, 20.0), (0.0, 0.0)])
     run(rig, recipe(tol_px=10.0))
-    assert rig.moves[0][1] > NOMINAL[1], "Z 增大 = 向下；目标偏下要往 + 方向挪"
-    assert rig.moves[0][1] == pytest.approx(NOMINAL[1] + 10.0)
+    assert rig.moves[0][1] < NOMINAL[1], "Z 增大 = 向上；目标偏下要往 − 方向挪"
+    assert rig.moves[0][1] == pytest.approx(NOMINAL[1] - 10.0)
 
 
 def test_default_sign_z_follows_the_machine_convention():
     """把"符号"与"Z 往哪边增长"绑在一起：改坐标框架时不会再漏改这一处。"""
     from patrol.framing import FramingRecipe, default_sign_z
 
-    assert default_sign_z() == 1.0
-    assert FramingRecipe(mm_per_px_y=1.0, mm_per_px_z=1.0).sign_z == 1.0
+    assert default_sign_z() == -1.0
+    assert FramingRecipe(mm_per_px_y=1.0, mm_per_px_z=1.0).sign_z == -1.0
 
 
 def test_sign_flip_reverses_the_step():
