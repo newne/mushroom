@@ -445,9 +445,9 @@
     <!-- 导轨图（2026-09-17 从左栏移入中栏并放大）：滑台在 Y/Z 两轴自由移动，图就是"往哪挪"
          的主交互面。点击任意位置 = 填坐标（仍走「移动到该点」+二次确认）；点站点 = 选中站位。 -->
     <div class="card">
-      <h2>导轨平面图（Y 向右 · Z 向上）</h2>
+      <h2>导轨平面图（Y 向右 · Z 向下）</h2>
       <svg id="map" viewBox="0 0 920 170" preserveAspectRatio="xMidYMid meet"
-           role="img" aria-label="导轨平面图：Y 向右，Z 向上，点击任意位置设为目标点"></svg>
+           role="img" aria-label="导轨平面图：Y 向右，Z 向下，点击任意位置设为目标点"></svg>
       <div class="mapcap">
         <span id="maphover" class="mono">移到图上查看坐标 · 点击任意位置设为目标点</span>
         <span>Z 方向放大显示（实际 Y:Z ≈ 21:1）· 点站点 = 选中站位</span>
@@ -540,21 +540,24 @@
         </select>
       </div>
       <!-- 十字方向盘：轴向标签与键盘方向映射保持一致。
-           2026-10-09 现场**直接看机器**复核（不看屏幕）：回零后 **Z=0 在底部、Y=0 在左端**。
+           物理事实（ADR-0018；2026-10-10 现场直接看机器复核）：回零往**上**到顶端，
+           回零后 **Z=0 在顶端、Y=0 在左端**；`jog Z 40` 实测机构**往下**走，
+           即控制器 Z+ = 下。
            按“原点在靠近电机端、坐标朝离开电机方向增长”（说明书 §三.2：负限位=靠近电机端 ⇒ homeDir=2）：
-             · Z 的电机在**底部** ⇒ Z+ **向上**；
+             · Z 的电机在**顶端** ⇒ Z+ **向下**；
              · Y 的电机在**左端** ⇒ Y+ **向右**。
-           Z 这一条 2026-10-09 已在 motion_profile.positive_towards 落成 "up"，平面图与 envlbl
-           文案同步翻正，framing.sign_z 由它派生（-1）。三层必须一起改，别再只翻页面。 -->
+           Z 这一条在 motion_profile.positive_towards 落成 "down"，平面图与 envlbl
+           文案同步，framing.sign_z 由它派生（+1）。三层必须一起改，别再只翻页面。
+           （2026-10-09 曾据“向 +Z 走到尽头触发正限位”翻成“向上”，10-10 现场复核后改回。） -->
       <div class="jogpad" role="group" aria-label="空间方向点动（↑↓ Z 轴，←→ Y 轴）">
         <button type="button" disabled aria-hidden="true"></button>
-        <button data-jog="Z+" aria-label="Z 正方向，上" title="Z+（上）">↑<span class="jd">Z+</span><span class="sr-only"> Z +（上）</span></button>
+        <button data-jog="Z-" aria-label="Z 负方向，上（朝回零端）" title="Z−（上，朝回零端）">↑<span class="jd">Z−</span><span class="sr-only"> Z −（上）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
         <button data-jog="Y-" aria-label="Y 负方向，左" title="Y−（左）">←<span class="jd">Y−</span><span class="sr-only"> Y −（左）</span></button>
         <div class="jogmid" id="jogmid" title="方向轴中心">AXIS</div>
         <button data-jog="Y+" aria-label="Y 正方向，右" title="Y+（右）">→<span class="jd">Y+</span><span class="sr-only"> Y +（右）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
-        <button data-jog="Z-" aria-label="Z 负方向，下" title="Z−（下）">↓<span class="jd">Z−</span><span class="sr-only"> Z −（下）</span></button>
+        <button data-jog="Z+" aria-label="Z 正方向，下" title="Z+（下）">↓<span class="jd">Z+</span><span class="sr-only"> Z +（下）</span></button>
         <button type="button" disabled aria-hidden="true"></button>
       </div>
 
@@ -831,9 +834,9 @@ function mapScale(){
   const {y_min, y_max, z_min, z_max} = grid;
   const iw = MAP.W - MAP.padL - MAP.padR, ih = MAP.H - MAP.padT - MAP.padB;
   return {
-    // Z 向上为正（原点在底端，2026-10-09 现场实测）：z 越大越靠上，第 1 层用 z_min 起算 = 最下层。
+    // Z 向下为正（原点在顶端，ADR-0018）：z 越大越靠下，第 1 层用 z_min 起算 = 最上层。
     X: y => MAP.padL + (y - y_min) / Math.max(1, y_max - y_min) * iw,
-    Y: z => MAP.padT + (1 - (z - z_min) / Math.max(1, z_max - z_min)) * ih,
+    Y: z => MAP.padT + (z - z_min) / Math.max(1, z_max - z_min) * ih,
   };
 }
 
@@ -850,10 +853,8 @@ function mapPointFromEvent(e){
   const fx = (v[0] - MAP.padL) / (MAP.W - MAP.padL - MAP.padR);
   const fy = (v[1] - MAP.padT) / (MAP.H - MAP.padT - MAP.padB);
   const y = grid.y_min + Math.min(1, Math.max(0, fx)) * (grid.y_max - grid.y_min);
-  // Z 与 Y(z) 同步翻转过（原点在底端、向上为正）：图上 y 越大 = z 越小。
-  // 这里必须做同样的 (1 - fy)，否则"点图上某点"反算出的 z 是镜像的——
-  // 表现就是点 S102 会选中 S101，点空白处填进输入框的目标也上下颠倒。
-  const z = grid.z_min + (1 - Math.min(1, Math.max(0, fy))) * (grid.z_max - grid.z_min);
+  // Z 与 Y(z) 同向（原点在顶端、向下为正）：图上 y 越大 = z 越大。
+  const z = grid.z_min + Math.min(1, Math.max(0, fy)) * (grid.z_max - grid.z_min);
   return [y, z];
 }
 
@@ -886,7 +887,7 @@ function mapStaticSvg(){
   const {X, Y} = mapScale();
   const zPitch = (z_max - z_min) / layers;
   let s = '';
-  // 层带（第 1 层在最下：Z 原点在底端、向上为正）
+  // 层带（第 1 层在最上：Z 原点在顶端、向下为正）
   for(let L = 1; L <= layers; L++){
     const y0 = Y(z_min + (L-1)*zPitch), y1 = Y(z_min + L*zPitch);
     if(L % 2 === 1) s += `<rect x="${padL}" y="${y0.toFixed(1)}" width="${W-padL-padR}" height="${(y1-y0).toFixed(1)}" fill="#f5f8fc"/>`;
@@ -1448,7 +1449,7 @@ function renderEnvelopeLabel(){
   const el = $('#envlbl'); const env = envelope();
   if(!el) return;
   el.textContent = env
-    ? `坐标（Y ${env.y[0]}…${env.y[1]} · Z ${env.z[0]}…${env.z[1]}，Z 向上为正）`
+    ? `坐标（Y ${env.y[0]}…${env.y[1]} · Z ${env.z[0]}…${env.z[1]}，Z 向下为正）`
     : '坐标（读取中…）';
   // 输入框占位换成**该轴的有效范围**（比重复一遍轴名有用：现场"填多少算越界"是高频疑问）。
   // 范围仍来自 /api/grid，不写死（同上一条注释）。
@@ -1653,7 +1654,7 @@ function wireOps(){
      ⚠️ 节拍 = 步长 ÷ 点动速度（10 mm/s，patrol.motion_profile 的点动档）：5mm ⇒ 500ms。
         发得比这快，指令会在执行方排队，抬手之后机器还要多走一段。 */
   const JOG_SPEED_MM_S = 10;                       // 与 motion_profile 点动档一致：改那边要改这里
-  const KEY_DIR = {ArrowUp:'Z+', ArrowDown:'Z-', ArrowLeft:'Y-', ArrowRight:'Y+'};
+  const KEY_DIR = {ArrowUp:'Z-', ArrowDown:'Z+', ArrowLeft:'Y-', ArrowRight:'Y+'};
   let heldKey = null, heldTimer = null;
   function releaseHeldKey(){
     if(heldTimer){ clearInterval(heldTimer); heldTimer = null; }
