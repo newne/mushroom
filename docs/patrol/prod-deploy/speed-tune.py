@@ -5,8 +5,8 @@
     python .scratch/prod-deploy/speed-tune.py 150 20 1.0 # 指定 Y/Z 速度与单站采图耗时
 
 **为什么要脚本而不是文档里一行字**——`motor-command-review.md` §2.5 的"一轮时长下界 ≈ 86 s"
-只算了**一层**的横向空程（4118 mm），而蛇形遍历 5 层每层都要横着走满一遍：真实 Y 空程是
-5 × 4118 = 20.8 m。口径错 5 倍，直接把"提速值不值得"的结论带偏了。模型固化下来可重跑。
+只算了**一层**的横向空程（4118 mm）。当前 4 层蛇形路线的 Y 空程约 16.66 m，包含原点至首站
+的 187 mm；模型固化下来可重跑，避免用旧层数估算提速收益。
 
 另含 ``--buggy`` 复现**改造前 ``goto`` 的两段限值颠倒**（长段喂接近档、最后 5 mm 喂全速档）
 对整轮时长的放大倍数，便于回归时对照。
@@ -22,7 +22,7 @@ sys.path.insert(0, "patrol/src")
 
 from patrol.fmc.geometry import approach_point, composite_limits, segment_delta  # noqa: E402
 from patrol.motion_profile import M1, MotionProfile  # noqa: E402
-from patrol.stations import GRID_LAYERS, build_grid  # noqa: E402
+from patrol.stations import GRID_COLS, GRID_LAYERS, build_grid  # noqa: E402
 
 # 实测（2026-09-12 prod 读回）：控制器脉冲当量 = 细分 / 导程
 PPMM = 100_000 / 95                   # = 1052.632 脉冲/mm（Y/Z 同值）
@@ -59,7 +59,7 @@ def _leg(delta, limits, buggy: bool, tag: str) -> tuple[float, float]:
 
 
 def round_time(profile: MotionProfile, capture_s: float = 1.0, buggy: bool = False) -> dict:
-    """整轮（原点 → 蛇形走完 60 站位）耗时分解。
+    """整轮（原点 → 按蛇形走完当前站位表）耗时分解。
 
     ``buggy=True`` 复现改造前 `goto`：**起点→mid 用接近档，mid→目标 用巡检档**。
     """
@@ -118,9 +118,10 @@ def main() -> None:
 
     base = round_time(M1, capture_s)
     print("=" * 92)
-    print("二、整轮时长口径（60 站位 = 5 层 × 12 框，蛇形，换层只动 Z）")
-    print(f"  Y 累计空程 {base['y_span']:.0f} mm = {GRID_LAYERS} 层 × 11 框 × 374.33 mm"
-          f"   ← 上轮 86 s 口径漏乘的就是这个 ×{GRID_LAYERS}")
+    first_y = build_grid(M1)[0].y
+    print(f"二、整轮时长口径（{base['stations']} 站位，蛇形 {GRID_LAYERS} 层 × {GRID_COLS} 框，换层只动 Z）")
+    print(f"  Y 累计空程 {base['y_span']:.0f} mm = {GRID_LAYERS} 层 × {GRID_COLS - 1} 框 × "
+          f"{M1.y.travel_span / GRID_COLS:.2f} mm + 原点至首站 {first_y:.0f} mm")
     print(f"  Z 累计空程 {base['z_span']:.0f} mm")
     print(f"  单站固定开销 {station_dwell(M1, capture_s):.2f} s "
           f"= 衰减 {M1.decay_s} + 灯稳 {M1.lamp_settle_s} + 采图 {capture_s} + 灯后 {M1.lamp_after_s}")

@@ -14,9 +14,8 @@
 - **格子怎么排**：`S<层><两位框>` 解出 (层, 框)；层自上而下、框自左而右。行数按该轮
   实际最大层数（旧表是 5 层，2026-10-07 起是 4 层）。
 - **标注**用索引里的**原值**（站位 id / 坐标 / 时间），不是推算的。
-- `--rotate 180` 是给"相机装反"这个现状用的默认值（原始图上下颠倒、且时间戳是上游在
-  翻好的画面上正着烧进去的，所以整幅转 180° 看最顺）；**上游修好后要改成 `--rotate 0`**，
-  否则会翻两次。
+- 当前巡检图的时间戳和 `CAM01` 标记方向正常，因此默认不旋转；若某批图像确认整体倒置，
+    再显式指定 `--rotate 180`。
 """
 from __future__ import annotations
 
@@ -139,8 +138,13 @@ def main(argv=None) -> int:
     ap.add_argument("--api", default="http://10.77.77.39:8001")
     ap.add_argument("--out", required=True)
     ap.add_argument("--since", default=None, help="只处理这之后的轮次（YYYY-MM-DD）")
-    ap.add_argument("--rotate", type=int, default=180, choices=(0, 180),
-                    help="整幅旋转角度。默认 180：相机装反、上游未修；上游修好后改 0，否则翻两次")
+    ap.add_argument(
+        "--rotate",
+        type=int,
+        default=0,
+        choices=(0, 180),
+        help="整幅旋转角度。默认 0；仅在确认原图倒置时指定 180",
+    )
     ap.add_argument("--thumb", type=int, default=400, help="每格缩略宽度（默认 400）")
     ap.add_argument("--workers", type=int, default=4, help="并发下载数（默认 4，别把巡检台打满）")
     ap.add_argument("--min-images", type=int, default=10, help="少于这个张数的不算一轮（默认 10）")
