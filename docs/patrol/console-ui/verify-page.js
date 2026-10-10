@@ -136,7 +136,7 @@ function fakeNearest(y, z) {
 
 // SVG 视口像素 → mm（Y, Z）：与 web/console/index.html 的 mapScale / mapPointFromEvent 同规则。
 // 存在的唯一理由：测试要点图上某个位置，而"像素 ↔ mm"随坐标框架翻转过
-// （Z 在 ADR-0018 / 2026-10-09 之间来回翻过一次）。手推像素点会静默点到别的层去，
+// （2026-10-09 Z 从向下为正改成向上为正）。手推像素点会静默点到别的层去，
 // 所以测试一律走这个换算，不写死数字。
 const MAP_FOR_TEST = { W: 920, H: 170, padL: 26, padR: 12, padT: 14, padB: 22 };
 function mapMmFromSvgPx(px, py) {
@@ -145,8 +145,8 @@ function mapMmFromSvgPx(px, py) {
   const fx = Math.min(1, Math.max(0, (px - M.padL) / iw));
   const fy = Math.min(1, Math.max(0, (py - M.padT) / ih));
   const y = g.y_min + fx * (g.y_max - g.y_min);
-  // Z 向下为正（ADR-0018）：图上 y 越大 ⇒ z 越大
-  const z = g.z_min + fy * (g.z_max - g.z_min);
+  // Z 向上为正：图上 y 越大 ⇒ z 越小
+  const z = g.z_min + (1 - fy) * (g.z_max - g.z_min);
   return [y, z];
 }
 
@@ -345,18 +345,19 @@ const lastCmd = () => {
   check('未接管时抓拍**可用**（不移动机构 ⇒ 不需要会话）', $('#capbtn').disabled === false);
   check('未接管时给出接管提示', T('#sessionline').includes('未接管'), T('#sessionline'));
 
-  // 1a. 坐标框架（ADR-0018；2026-10-10 现场复核）：Z 的原点在**顶端**、向下为正。
-  //     回零往**上**到顶端（=负限位），jog Z 40 往下（控制器 Z+ = 下）。
-  //     平面图把第 1 层画在最上面，而“层画反了”与“机器去错层”是同一个错的两个面。
-  check('平面图标明 Z 向下', html.includes('Z 向下'), 'h2=' + T('section h2'));
-  check('坐标范围文案来自 /api/grid 且说明 Z 向下',
-    T('#envlbl').includes('Z 0…212') && T('#envlbl').includes('向下'), T('#envlbl'));
+  // 1a. 坐标框架（2026-10-09 现场 SDK 实测）：Z 的原点在**底端**、向上为正。
+  //     Z+ 走到行程尽头触发的是**正限位**（Z≈210），按说明书“正限位=远离电机端”反推 ⇒
+  //     电机在底端、原点在底端、坐标朝上。平面图把第 1 层画在最下面，
+  //     而“层画反了”与“机器去错层”是同一个错的两个面。
+  check('平面图标明 Z 向上', html.includes('Z 向上'), 'h2=' + T('section h2'));
+  check('坐标范围文案来自 /api/grid 且说明 Z 向上',
+    T('#envlbl').includes('Z 0…212') && T('#envlbl').includes('向上'), T('#envlbl'));
   const dots = Array.from(document.querySelectorAll('#map circle'));
   const yOf = id => Number(dots.find(c => c.dataset.id === id)?.getAttribute('cy'));
-  check('第 1 层的点画在图的上半部（Z 原点在顶端）', yOf('S101') < 100, 'cy=' + yOf('S101'));
-  check('第 4 层的点画在图的下半部（Z 向下为正）', yOf('S412') > 100, 'cy=' + yOf('S412'));
-  check('点动按钮标出物理方向（Z + 是向下）',
-    T('[data-jog="Z+"]').includes('下') && T('[data-jog="Z-"]').includes('上'),
+  check('第 1 层的点画在图的下半部（Z 原点在底端）', yOf('S101') > 100, 'cy=' + yOf('S101'));
+  check('第 4 层的点画在图的上半部（Z 向上为正）', yOf('S412') < 100, 'cy=' + yOf('S412'));
+  check('点动按钮标出物理方向（Z + 是向上）',
+    T('[data-jog="Z+"]').includes('上') && T('[data-jog="Z-"]').includes('下'),
     T('[data-jog="Z+"]') + ' / ' + T('[data-jog="Z-"]'));
   check('点动按钮标出物理方向（Y+ 在右、Y− 在左）',
     T('[data-jog="Y+"]').includes('右') && T('[data-jog="Y-"]').includes('左'),
@@ -562,8 +563,8 @@ const lastCmd = () => {
   await sleep(50);
   document.dispatchEvent(new window.KeyboardEvent('keyup', {key:'ArrowUp', bubbles:true}));
   await sleep(1200);
-  check('键盘↑ = Z−（物理向上，朝回零端）',
-    JSON.stringify(lastCmd()) === '{"kind":"jog","args":{"axis":"Z","mm":-5}}', JSON.stringify(lastCmd()));
+  check('键盘↑ = Z+（物理向上）',
+    JSON.stringify(lastCmd()) === '{"kind":"jog","args":{"axis":"Z","mm":5}}', JSON.stringify(lastCmd()));
   state.calls.length = 0;
   document.dispatchEvent(new window.KeyboardEvent('keydown',
     {key:'ArrowUp', bubbles:true, cancelable:true}));
@@ -718,7 +719,7 @@ const lastCmd = () => {
   state.machine_position = [200.0, -20.0];    // 复原：后面的"控制器实读"断言依赖这个位置
 
   // 再走"显式指定站位"这条老路：从**地图**上点站位。
-  // ⚠️ 点圆心的 cx/cy，不写死像素：Z 的坐标框架翻转过（原点在顶端 ↔ 底端之间来回），
+  // ⚠️ 点圆心的 cx/cy，不写死像素：Z 翻转过（2026-10-09 原点从顶端改为底端），
   // 写死的坐标会静默点到别的层——旧版这里写的 136,27 现在就属于第 4 层。
   const s102dot = Array.from(document.querySelectorAll('#map circle'))
     .find(c => c.dataset && c.dataset.id === 'S102');

@@ -4,7 +4,7 @@
 几个独立常量表达，但那样就无法互相校验：
 
 - 两轴的原点都落在各自回零方向的行程端点上，且该端点必须是 0；
-- 行程从原点**单侧**展开，因此坐标符号自带方向（Y 增大向右、Z 增大向下）；
+- 行程从原点**单侧**展开，因此坐标符号自带方向（Y 增大向右、Z 减小向下）；
 - 两轴插补掩码由轴号派生（Y+Z=0x06），改接线不会漏改；
 - M1/M2 共用同一组轴参数，只差灯窗（ADR-0002）。
 """
@@ -63,12 +63,13 @@ def test_z_travel_is_vertical_and_origin_at_the_top():
 def test_both_axes_home_to_the_motor_end():
     """两轴同构：原点都在**靠近电机**的一端，回零都找负限位（说明书 §三.2）。
 
-    Y 的电机在左端、Z 的电机在顶端，所以 Y 往左回零、Z 往上回零——**都是负限位**。
-    这条不变量是 ADR-0018 的全部内容：搞错它的代价是撞限位。
+    Y 的电机在左端、Z 的电机在底端，所以 Y 往左回零、Z 往下回零——**都是负限位**。
+    这条不变量是 ADR-0018 的一半：搞错它的代价是撞限位。另一半"正方向朝哪"是
+    `positive_towards`，2026-10-09 现场实测更正：Z+ **向上**（不是 ADR-0018 说的向下）。
     """
     assert M1.y.home_dir == M1.z.home_dir == HOME_DIR_NEGATIVE
     assert M1.y.positive_towards == "right"       # 离开左端电机
-    assert M1.z.positive_towards == "down"        # 离开顶端电机
+    assert M1.z.positive_towards == "up"          # 离开底端电机（2026-10-09 实测更正）
 
 
 def test_origin_is_the_homing_position_on_both_axes():
