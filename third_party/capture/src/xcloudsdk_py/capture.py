@@ -4,12 +4,11 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from .minio_uploader import MinIOUploader
 from .pool import DeviceConnectionPool
 from .sdk import XCloudSDK
-
 
 logger = logging.getLogger("xcloudsdk_py.capture")
 
@@ -193,7 +192,7 @@ class CaptureService:
         *,
         sdk: XCloudSDK,
         picture_dir: str | Path,
-        minio: Optional[MinIOUploader] = None,
+        minio: MinIOUploader | None = None,
         enable_pool: bool = True,
     ) -> None:
         self._sdk = sdk
@@ -201,12 +200,12 @@ class CaptureService:
         self._minio = minio
         self._op_lock = None  # lazy init to keep module import light
 
-        self._pool: Optional[DeviceConnectionPool] = None
+        self._pool: DeviceConnectionPool | None = None
         if enable_pool:
             self._pool = DeviceConnectionPool(sdk=sdk)
 
     @property
-    def pool(self) -> Optional[DeviceConnectionPool]:
+    def pool(self) -> DeviceConnectionPool | None:
         return self._pool
 
     def _lock(self):
@@ -534,6 +533,7 @@ class CaptureService:
                         response["delete_error"] = str(e)
                 except Exception:
                     response["cloud_uploaded"] = False
+                    response["cloud_error"] = "Failed to upload to MinIO"
             if not response["cloud_uploaded"]:
                 response["success"] = False
                 response["message"] = (
@@ -541,6 +541,5 @@ class CaptureService:
                 )
                 response["file_exists"] = file_path.exists()
                 response["local_file_deleted"] = False
-                    response["cloud_error"] = "Failed to upload to MinIO"
 
         return response
