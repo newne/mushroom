@@ -1,8 +1,9 @@
 """站位表：库房每个拍照位的坐标与成像配置（spec §4.4 数据契约）。
 
 坐标是**虚拟坐标系**的 (y, z) mm，与导轨实轴的对应关系见 ``patrol.motion_profile``：
-Y 为水平长行程（0…4492，向右为正），Z 为竖直短行程（0…212，**向下为正**）。
-两轴的原点都在**靠近电机**的那一端（Y 左端、Z 顶端），坐标从原点单侧增长（ADR-0018）。
+Y 为水平长行程（0…4492，向右为正），Z 为竖直短行程（−212…0，**向上为正**）。
+Y 的原点在左端（靠近电机）；Z 现场要求**回零向上**，原点在**顶端**（远离电机），
+`+Z` 仍向上，从顶端往下走 Z 为负。
 
 现场布局：**横向 12 框 × 竖向 4 层 = 48 个站位，每框 1 个站位**。
 Y 框心按行程间距推导，Z 层心和 C08 横向位置叠加现场抓图标定偏移；
@@ -23,16 +24,18 @@ from patrol.motion_profile import M1, MotionProfile
 # ---------- 现场布局 ----------
 
 GRID_COLS = 12          # 横向框数（沿 Y 长行程 0…4492mm）
-GRID_LAYERS = 4         # 竖向层数（沿 Z 短行程 0…212mm，**第 1 层在最上**＝靠近 Z 原点）
+GRID_LAYERS = 4         # 竖向层数（沿 Z 短行程 −212…0mm，**第 1 层在最上**＝靠近 Z 原点＝顶端）
 # ⚠️ 2026-10-07：由 5 改为 4。判据是**实测**不是估计——用实时预览沿 Z 扫全程（5mm 一档、43 帧），
 # 43 帧两两做图像自相似度（灰度归一化后的 MSE）：
 #   · 单周期最优拟合 52.0mm；2 周期 102.5mm、3 周期 157.0mm 交叉验证
 #   · **z=0 与 z=210 两帧 MSE≈0.99（几乎逐像素相同）** ⇒ 212mm 行程正好 **4 个整周期**
 #   · 旧值 5 层 ⇒ 均分 42.4mm，与实测 52mm 不齐，偏离逐层累积到第 5 层达 30.4mm（半个周期）
 #     ⇒ 那些站位多数落在"袋身侧面/失焦近景"的相位上，照片对判长势无效。
-#   2026-10-08 按层实拍微调后，层心为 10 / 60 / 132 / 155mm。
+#   2026-10-08 按层实拍微调后，层心（当时以"底端原点、向上为正"计）为 10 / 60 / 132 / 155mm。
+#   2026-10-10 原点改到顶端、并把"第 1 层"重新定义成**最上面那层**后，层心到原点的距离
+#   （即 `-(z)`）为 57 / 80 / 152 / 202mm；下表是**距原点距离**上的逐层实拍偏移。
 #   完整证据见 docs/patrol/prod-deploy/station-retarget.md §6/§7。
-GRID_LAYER_Z_OFFSETS = (-16.5, -19.5, -0.5, -30.5)
+GRID_LAYER_Z_OFFSETS = (30.5, 0.5, 19.5, 16.5)
 GRID_COL_Y_OFFSETS = {8: -80.0}
 GRID_CELL_Y_OFFSETS = {(2, 8): -40.0}
 # 全场**唯一**相机：老系统与 M1 共用同一台（spec §2；现场 2026-09-12 确认 238 无密码）。
@@ -85,21 +88,18 @@ def layer_z(layer: int, profile: MotionProfile = M1) -> float:
 
     以均分格心为基准叠加逐层实拍标定偏移；实际层间距不要求相等。
 
-    ⚠️ 从**原点那一侧**起算（ADR-0018）：Z 的原点在顶端、坐标往下增长，所以层号越大
-    z 越大。写成 `travel_max - …` 就会整体镜像（第 1 层跑到最下面）。
+    从**原点那一侧**起算：Z 的原点在顶端、`+Z` 向上，所以层号越大、离原点越远、z 越小
+    （越负）。``distance`` 是该层中心到顶端原点的**距离** mm（为正），坐标取 ``home_position − distance``。
     """
     if not 1 <= layer <= GRID_LAYERS:
         raise ValueError(f"层号越界 {layer}（1…{GRID_LAYERS}）")
     pitch = profile.z.travel_span / GRID_LAYERS
-    z = (
-        profile.z.home_position
-        + (layer - 0.5) * pitch
-        + GRID_LAYER_Z_OFFSETS[layer - 1]
-    )
+    distance = (layer - 0.5) * pitch + GRID_LAYER_Z_OFFSETS[layer - 1]
+    z = profile.z.home_position - distance
     if not profile.z.contains(z):
         raise ValueError(
             f"第 {layer} 层的 z={z} 不在行程 {profile.z.travel_min}…{profile.z.travel_max} 内："
-            "两轴的原点都应当落在**靠近电机**的那一端（ADR-0018）"
+            "第 1 层应当贴近顶端的 Z 原点（Z 需向上回零）"
         )
     return z
 
@@ -129,7 +129,8 @@ def grid_geometry(profile: MotionProfile = M1) -> dict[str, float]:
         "cols": GRID_COLS,
         "layers": GRID_LAYERS,
         "y_pitch": profile.y.travel_span / GRID_COLS,
-        "z_pitch": (z_centers[-1] - z_centers[0]) / (GRID_LAYERS - 1),
+        # 层距取**幅值**：前端/`nearest_station` 只关心"一格多宽"，方向由 z_min/z_max 给出。
+        "z_pitch": abs(z_centers[-1] - z_centers[0]) / (GRID_LAYERS - 1),
         "y_min": profile.y.travel_min,
         "y_max": profile.y.travel_max,
         "z_min": profile.z.travel_min,
@@ -254,44 +255,41 @@ def nearest_station(stations: list[Station], y: float, z: float,
     return min(stations, key=lambda s: ((y - s.y) / py) ** 2 + ((z - s.z) / pz) ** 2)
 
 
-# ---------- Z 框架镜像的一次性迁移（ADR-0018） ----------
-
-#: 旧 Z 框架的下限（ADR-0018 之前写成 `-212…0`：顶端为 0、**向上**为正）。
-#: 新框架跨度不变（212），只是把"向下"从负号改成正号。
-OLD_Z_MIN = -212.0
+# ---------- Z 框架迁移：原点搬到顶端、第 1 层改到最上面（2026-10-10） ----------
 
 
-def mirror_z_in_file(path: str, *, out: str | None = None,
-                     log: Callable[[str], None] = print) -> int:
-    """把一份站位表的 Z 坐标从**旧框架**搬到新框架（ADR-0018），返回改动的站位数。
+def retarget_z_in_file(path: str, *, out: str | None = None,
+                       log: Callable[[str], None] = print) -> int:
+    """把站位表的 Z 从"底端原点、0…212"搬到"顶端原点、−212…0"，返回改动的站位数。
 
-    换算只有一步：**去掉负号**（`z_new = -z_old`，`trim_z` 同）。
+    这一步把两件事一起做：
 
-    为什么不是"加 212"：两张表描述的物理位置是**同一批**——旧表里 `-21.2` 是"顶端往下
-    21.2 mm"（旧模型把向下记成负），新表里同一个点是 `+21.2`。加 212 会把第 1 层送到
-    第 5 层的位置（测试 `test_migrated_table_matches_the_new_grid` 钉住这一点）。
+    1. **原点翻到顶端**——`+Z` 仍是"向上"，底端原点与顶端原点的 `z` 不再是一回事；
+    2. **第 1 层改到最上面那层**——现场把"第 1 层"定义成最靠近新原点（顶端）的那一层。
 
-    防重复执行：旧框架的 z 必然 ≤ 0，所以只要表里出现 `z > 0` 就认定"已经是新框架"并
-    抛错，而不是再翻一次符号（翻两次等于没迁，但会让人以为迁过了）。
+    所以既不是 `z → -z`，也不是 `z → z ± 212`，而是**按层号重算**：新 `z = layer_z(layer)`。
+    层心**位置集合不变**（还是那 4 个层心），只是编号与坐标一起翻过来。真实旧表
+    （`z = 10/60/132/155`）迁完是 `-57/-80/-152/-202`（第 1 层在最上）。
+
+    防重复执行：新框架的 z 必然 ≤ 0，所以表里若已全是 `z ≤ 0` 就认定迁过了并抛错，
+    而不是再算一遍（再算结果相同，但会让人以为"上一次没生效"）。
     """
+    if M1.z.travel_max > 1e-6:
+        raise ValueError("这条迁移假设 Z 原点在顶端（travel_max=0）；先改 motion_profile 再迁表")
     stations = load_stations(path)
     if not stations:
         raise ValueError(f"{path} 里没有站位，不迁移")
-    if abs(OLD_Z_MIN) != M1.z.travel_span:
-        raise ValueError(f"Z 行程跨度变了（{M1.z.travel_span} ≠ {abs(OLD_Z_MIN)}）："
-                         "这条迁移是给 ADR-0018 那一次用的，跨度变了要重新推导")
-    ahead = [s.id for s in stations if s.z > 0]
-    if ahead:
-        raise ValueError(f"{path} 看起来已经是新框架（有 z>0：{ahead[:3]}…），拒绝重复迁移")
-    below = [s.id for s in stations if s.z < OLD_Z_MIN - 1e-6]
-    if below:
-        raise ValueError(f"{path} 里有超出旧行程的 z（{below[:3]}…），这份表不对劲，先人工看")
+    if all(s.z <= 1e-6 for s in stations):
+        raise ValueError(f"{path} 看起来已经是新框架（z 全 ≤ 0），拒绝重复迁移")
+    beyond = [s.id for s in stations if s.z > M1.z.travel_span + 1e-6]
+    if beyond:
+        raise ValueError(f"{path} 里有超出旧行程的 z（{beyond[:3]}…），这份表不对劲，先人工看")
 
-    shifted = [replace(s, z=-s.z, trim_z=-s.trim_z) for s in stations]
-    save_stations(shifted, out or path)
-    log(f"Z 框架迁移：{path} → {out or path}，{len(shifted)} 个站位（z 与 trim_z 取反）；"
-        "物理位置不变")
-    return len(shifted)
+    migrated = [replace(s, z=layer_z(s.layer)) if s.layer else s for s in stations]
+    save_stations(migrated, out or path)
+    log(f"Z 框架迁移：{path} → {out or path}，{len(migrated)} 个站位（按层号重算 z，"
+        "第 1 层改为最上；层心位置集合不变）")
+    return len(migrated)
 
 
 # ---------- 标定字段 ----------

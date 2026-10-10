@@ -17,8 +17,8 @@ from patrol.framing import (
     fine_tune,
 )
 
-LIMITS = (0.0, 4492.0, 0.0, 212.0)
-NOMINAL = (187.17, 21.2)
+LIMITS = (0.0, 4492.0, -212.0, 0.0)
+NOMINAL = (187.17, -21.2)
 
 
 def recipe(**kw) -> FramingRecipe:
@@ -96,8 +96,8 @@ def test_converges_in_one_tap_and_reports_trim():
 def test_z_sign_default_moves_camera_down_when_target_is_low():
     """目标偏画面下方 ⇒ 相机往下走，把目标拉回中间。
 
-    本机 Z 的原点在底端、坐标**往上增长**（2026-10-09 现场 SDK 实测），所以"往下"是 Z 的
-    **−** 方向：默认 `sign_z` 必须从机器约定派生（-1）。
+    本机 `+Z` **向上**（接线定死），所以"往下"是 Z 的 **−** 方向：默认 `sign_z` 必须从
+    机器约定派生（-1）。原点在顶端只是把数值整体平移，不改"哪边是正"。
     """
     rig = Rig([(0.0, 20.0), (0.0, 0.0)])
     run(rig, recipe(tol_px=10.0))
@@ -166,7 +166,7 @@ def test_divergence_reverts_to_the_best_seen_not_the_first():
 def test_already_at_travel_limit_reports_it_instead_of_pretending():
     """已经贴在限位上：一步都挪不动，理由必须说"限位"，不能含糊成"改善不足"。"""
     rig = Rig([(100.0, 0.0)])
-    out = run(rig, nominal=(4492.0, 21.2), r=recipe(max_taps=3))
+    out = run(rig, nominal=(4492.0, -21.2), r=recipe(max_taps=3))
     assert out.converged is False
     assert "限位" in out.reason
     assert rig.moves == []
@@ -175,9 +175,9 @@ def test_already_at_travel_limit_reports_it_instead_of_pretending():
 def test_never_commands_outside_travel_limits():
     """贴着边界时单步会被截短——截短可以，"发一个越界目标"不可以。"""
     rig = Rig([(100.0, 0.0), (100.0, 0.0)])
-    run(rig, nominal=(4490.0, 21.2), r=recipe(max_taps=3))
+    run(rig, nominal=(4490.0, -21.2), r=recipe(max_taps=3))
     assert rig.moves, "还有 2mm 余量时应该真的挪过去"
-    assert all(0.0 <= y <= 4492.0 and 0.0 <= z <= 212.0 for y, z in rig.moves)
+    assert all(0.0 <= y <= 4492.0 and -212.0 <= z <= 0.0 for y, z in rig.moves)
 
 
 def test_respects_max_total_mm():

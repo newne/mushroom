@@ -17,6 +17,7 @@ from patrol.motion_profile import (
     CONTROLLER_IP,
     CONTROLLER_PORT,
     HOME_DIR_NEGATIVE,
+    HOME_DIR_POSITIVE,
     M1,
     M2,
 )
@@ -50,26 +51,26 @@ def test_y_travel_is_horizontal_and_origin_at_the_left_end():
 
 
 def test_z_travel_is_vertical_and_origin_at_the_top():
-    """**向下为正**（ADR-0018）：原点在顶端（靠近电机端 = 负限位），坐标往下增长。
+    """**向上为正、原点在顶端**：Z 回零向上（正限位 = 远离电机端的顶端），坐标向上增长。
 
-    这条曾经写成 `-212…0 / 向上为正 / 正限位回零`——方向整好反了：`homeDir=1`（正限位）
-    在 Z 上指向**远离电机端**，回零会往下跑到远端开关、把底部当成 0。
+    `+Z = 向上` 由接线定死；既然回零去正限位，`Z=0` 就落在顶端，从顶端往下走 Z 为负，
+    所以行程是 −212…0（不是 0…212）。别再假设"原点必在靠近电机端"。
     """
-    assert (M1.z.travel_min, M1.z.travel_max) == (0.0, 212.0)
-    assert M1.z.home_dir == HOME_DIR_NEGATIVE     # 往上（负限位 = 靠近电机端）回零
+    assert (M1.z.travel_min, M1.z.travel_max) == (-212.0, 0.0)
+    assert M1.z.home_dir == HOME_DIR_POSITIVE     # 往上（正限位 = 远离电机端 = 顶端）回零
     assert M1.z.home_position == 0.0
 
 
-def test_both_axes_home_to_the_motor_end():
-    """两轴同构：原点都在**靠近电机**的一端，回零都找负限位（说明书 §三.2）。
+def test_origin_is_the_end_each_axis_homes_to():
+    """两轴各自的原点 = 各自回零方向的行程端点：Y 找负限位（左端）、Z 找正限位（顶端）。
 
-    Y 的电机在左端、Z 的电机在底端，所以 Y 往左回零、Z 往下回零——**都是负限位**。
-    这条不变量是 ADR-0018 的一半：搞错它的代价是撞限位。另一半"正方向朝哪"是
-    `positive_towards`，2026-10-09 现场实测更正：Z+ **向上**（不是 ADR-0018 说的向下）。
+    两轴**不再同构**——Z 是现场要求的"向上回零"，原点落在**远离电机**的顶端；这是刻意为之。
+    别再假设"都回负限位"。`+Z` 仍是向上：这个方向由接线定，与回零方向无关。
     """
-    assert M1.y.home_dir == M1.z.home_dir == HOME_DIR_NEGATIVE
+    assert M1.y.home_dir == HOME_DIR_NEGATIVE     # 左端（靠近电机）
+    assert M1.z.home_dir == HOME_DIR_POSITIVE     # 顶端（远离电机）
     assert M1.y.positive_towards == "right"       # 离开左端电机
-    assert M1.z.positive_towards == "up"          # 离开底端电机（2026-10-09 实测更正）
+    assert M1.z.positive_towards == "up"          # 向上（接线定死）
 
 
 def test_origin_is_the_homing_position_on_both_axes():
@@ -82,12 +83,12 @@ def test_origin_is_the_homing_position_on_both_axes():
 def test_direction_semantics_follow_from_the_origin():
     """行程单侧展开 → 符号即方向。"""
     assert M1.y.contains(4492.0) and not M1.y.contains(-1.0)   # Y 只能向正（右）
-    assert M1.z.contains(212.0) and not M1.z.contains(-1.0)    # Z 只能向正（下）
+    assert M1.z.contains(-212.0) and not M1.z.contains(1.0)    # Z 原点在顶端，只能向负（向上）
 
 
 @pytest.mark.parametrize(
     ("spec_name", "inside", "outside"),
-    [("y", 3000.0, 5000.0), ("z", 100.0, -300.0)],
+    [("y", 3000.0, 5000.0), ("z", -100.0, 300.0)],
 )
 def test_contains_rejects_anything_beyond_travel(spec_name, inside, outside):
     spec = getattr(M1, spec_name)

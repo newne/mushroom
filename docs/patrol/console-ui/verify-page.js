@@ -28,18 +28,18 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // ---------- 假后端：说话方式与 deploy/console.py 一致 ----------
 const NOW = '2026-09-14T10:00:00';
 const STATIONS = [
-  { id: 'S101', box_id: 'B101', y: 187.1, z: 21.2, layer: 1, col: 1, angle_profile: 'top45',
-    camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 187.1, target_z: 21.2 },
-  { id: 'S102', box_id: 'B102', y: 561.5, z: 21.2, layer: 1, col: 2, angle_profile: 'top45',
-    camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 561.5, target_z: 21.2 },
-  { id: 'S412', box_id: 'B412', y: 4300.0, z: 190.0, layer: 4, col: 12, angle_profile: 'top45',
-    camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 4300.0, target_z: 190.0 },
+  { id: 'S101', box_id: 'B101', y: 187.1, z: -57.0, layer: 1, col: 1, angle_profile: 'top45',
+    camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 187.1, target_z: -57.0 },
+  { id: 'S102', box_id: 'B102', y: 561.5, z: -57.0, layer: 1, col: 2, angle_profile: 'top45',
+    camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 561.5, target_z: -57.0 },
+  { id: 'S412', box_id: 'B412', y: 4300.0, z: -202.0, layer: 4, col: 12, angle_profile: 'top45',
+    camera_ip: '192.168.1.238', trim_y: 0, trim_z: 0, target_y: 4300.0, target_z: -202.0 },
 ];
 // 与 patrol.stations.grid_geometry() 同形状：**y_pitch/z_pitch 不能省**——页面的
 // nearestStation 按格距归一化后再比站距（见该函数注释），少了这两个字段它会退回
 // "直接比毫米"，与假后端的 fakeNearest 口径就不一样了：假件更松，真分歧测不出来。
 const GRID = { cols: 12, layers: 4, y_pitch: 4492.0 / 12, z_pitch: 212.0 / 4,
-               y_min: 0.0, y_max: 4492.0, z_min: 0.0, z_max: 212.0 };
+               y_min: 0.0, y_max: 4492.0, z_min: -212.0, z_max: 0.0 };
 
 // 历史模式用：同一批次的两轮、失败帧、本地待同步帧和无 round_id 的旧轮次。
 //
@@ -136,7 +136,7 @@ function fakeNearest(y, z) {
 
 // SVG 视口像素 → mm（Y, Z）：与 web/console/index.html 的 mapScale / mapPointFromEvent 同规则。
 // 存在的唯一理由：测试要点图上某个位置，而"像素 ↔ mm"随坐标框架翻转过
-// （2026-10-09 Z 从向下为正改成向上为正）。手推像素点会静默点到别的层去，
+// （Z 的框架翻过多次，2026-10-10 定稿为"顶端原点、向上为正"）。手推像素点会静默点到别的层去，
 // 所以测试一律走这个换算，不写死数字。
 const MAP_FOR_TEST = { W: 920, H: 170, padL: 26, padR: 12, padT: 14, padB: 22 };
 function mapMmFromSvgPx(px, py) {
@@ -345,17 +345,16 @@ const lastCmd = () => {
   check('未接管时抓拍**可用**（不移动机构 ⇒ 不需要会话）', $('#capbtn').disabled === false);
   check('未接管时给出接管提示', T('#sessionline').includes('未接管'), T('#sessionline'));
 
-  // 1a. 坐标框架（2026-10-09 现场 SDK 实测）：Z 的原点在**底端**、向上为正。
-  //     Z+ 走到行程尽头触发的是**正限位**（Z≈210），按说明书“正限位=远离电机端”反推 ⇒
-  //     电机在底端、原点在底端、坐标朝上。平面图把第 1 层画在最下面，
-  //     而“层画反了”与“机器去错层”是同一个错的两个面。
+  // 1a. 坐标框架（2026-10-10 定稿，ADR-0019）：Z 的原点在**顶端**、向上为正、行程 −212…0。
+  //     回零向上（找正限位 = 顶端）⇒ Z=0 落在顶端、第 1 层（最上面那层）画在最上面。
+  //     “层画反了”与“机器去错层”是同一个错的两个面。
   check('平面图标明 Z 向上', html.includes('Z 向上'), 'h2=' + T('section h2'));
   check('坐标范围文案来自 /api/grid 且说明 Z 向上',
-    T('#envlbl').includes('Z 0…212') && T('#envlbl').includes('向上'), T('#envlbl'));
+    T('#envlbl').includes('Z -212…0') && T('#envlbl').includes('向上'), T('#envlbl'));
   const dots = Array.from(document.querySelectorAll('#map circle'));
   const yOf = id => Number(dots.find(c => c.dataset.id === id)?.getAttribute('cy'));
-  check('第 1 层的点画在图的下半部（Z 原点在底端）', yOf('S101') > 100, 'cy=' + yOf('S101'));
-  check('第 4 层的点画在图的上半部（Z 向上为正）', yOf('S412') < 100, 'cy=' + yOf('S412'));
+  check('第 1 层的点画在图的上半部（Z 原点在顶端）', yOf('S101') < 100, 'cy=' + yOf('S101'));
+  check('第 4 层的点画在图的下半部（离顶端原点最远）', yOf('S412') > 100, 'cy=' + yOf('S412'));
   check('点动按钮标出物理方向（Z + 是向上）',
     T('[data-jog="Z+"]').includes('上') && T('[data-jog="Z-"]').includes('下'),
     T('[data-jog="Z+"]') + ' / ' + T('[data-jog="Z-"]'));
@@ -374,10 +373,10 @@ const lastCmd = () => {
     $('#rtmain #map') ? '中栏 ✓' : '不在中栏');
   check('站点 tooltip 给的是毫米坐标（两位小数），不是 SVG 像素',
     (dots.find(c => c.dataset.id === 'S101')?.querySelector('title')?.textContent || '')
-      .includes('Y=187.10 Z=21.20 mm'),
+      .includes('Y=187.10 Z=-57.00 mm'),
     dots.find(c => c.dataset.id === 'S101')?.querySelector('title')?.textContent || '(无 title)');
   check('站位列表不暴露设备坐标',
-    !T('#list').includes('187.10') && !T('#list').includes('21.20'), T('#list'));
+    !T('#list').includes('187.10') && !T('#list').includes('-57.00'), T('#list'));
   check('站位行触控高度至少 44px', window.getComputedStyle($('.stn')).minHeight === '44px',
     window.getComputedStyle($('.stn')).minHeight);
   const stationSearchInput = $('#stationSearch');
@@ -608,7 +607,7 @@ const lastCmd = () => {
   state.machine_pos_source = 'unknown';
   state.result = null;
   await sleep(1100);
-  $('#gtY').value = '1200'; $('#gtZ').value = '100';
+  $('#gtY').value = '1200'; $('#gtZ').value = '-100';
   $('#gtY').dispatchEvent(new window.Event('input'));
   await click('#gotobtn');
   check('定位前弹出页内确认（.confirm-pop，不是原生 confirm）',
@@ -631,9 +630,9 @@ const lastCmd = () => {
   document.querySelector('.confirm-pop [data-yes]').click();
   await sleep(400);
   check('确认后定位载荷 = {y:1200, z:-100}',
-    JSON.stringify(lastCmd()) === '{"kind":"goto","args":{"y":1200,"z":100}}', JSON.stringify(lastCmd()));
+    JSON.stringify(lastCmd()) === '{"kind":"goto","args":{"y":1200,"z":-100}}', JSON.stringify(lastCmd()));
   check('结构化位置结果更新可信读数（两位小数）',
-    T('#actualpos').includes('Y=1200.00') && T('#actualpos').includes('Z=100.00') && T('#actualpos').includes('最后成功目标'),
+    T('#actualpos').includes('Y=1200.00') && T('#actualpos').includes('Z=-100.00') && T('#actualpos').includes('最后成功目标'),
     T('#actualpos'));
   state.machine_position = [200.0, -20.0];
   state.machine_pos_source = 'controller';
@@ -719,7 +718,7 @@ const lastCmd = () => {
   state.machine_position = [200.0, -20.0];    // 复原：后面的"控制器实读"断言依赖这个位置
 
   // 再走"显式指定站位"这条老路：从**地图**上点站位。
-  // ⚠️ 点圆心的 cx/cy，不写死像素：Z 翻转过（2026-10-09 原点从顶端改为底端），
+  // ⚠️ 点圆心的 cx/cy，不写死像素：Z 的框架翻过（2026-10-10 定稿顶端原点），
   // 写死的坐标会静默点到别的层——旧版这里写的 136,27 现在就属于第 4 层。
   const s102dot = Array.from(document.querySelectorAll('#map circle'))
     .find(c => c.dataset && c.dataset.id === 'S102');
@@ -730,7 +729,7 @@ const lastCmd = () => {
   check('站位选择状态可被辅助技术识别', $('.stn[data-id="S102"]').getAttribute('aria-pressed') === 'true' &&
     $('.stn[data-id="S102"]').getAttribute('aria-current') === 'false',
     $('.stn[data-id="S102"]').getAttribute('aria-label'));
-  check('选中后坐标框填成该站目标（两位小数）', $('#gtY').value === '561.50' && $('#gtZ').value === '21.20',
+  check('选中后坐标框填成该站目标（两位小数）', $('#gtY').value === '561.50' && $('#gtZ').value === '-57.00',
     $('#gtY').value + ' / ' + $('#gtZ').value);
   check('选中站位后抓拍仍可用', $('#capbtn').disabled === false);
   check('选中站位后不再预告归属（按选的走）', T('#capnote') === '', T('#capnote'));
@@ -829,7 +828,7 @@ const lastCmd = () => {
   document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await sleep(80);
   check('空闲时按 Esc 不发急停', !state.calls.some(c => c.url.startsWith('/api/stop')));
-  state.cmd = { id: 'c-2', kind: 'goto', args: { y: 1200, z: 100 }, started_at: NOW };
+  state.cmd = { id: 'c-2', kind: 'goto', args: { y: 1200, z: -100 }, started_at: NOW };
   state.result = null;
   await sleep(1200);                          // 等一拍 /api/cmd 轮询把"在飞"读进来
   check('运动中显示"执行中"', T('#cmdline').includes('执行中'), T('#cmdline'));

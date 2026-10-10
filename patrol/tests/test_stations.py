@@ -37,11 +37,11 @@ def test_station_ids_read_as_layer_and_col():
 
 
 def test_layer_one_is_at_the_top_and_layer_four_at_the_bottom():
-    """Z 原点在顶端、Z **向下为正**（ADR-0018）：第 1 层最靠近 0，层号越大 z 越大。"""
+    """Z 原点在顶端、**向上为正**：第 1 层最靠近 0（顶端），层号越大离原点越远、z 越负。"""
     assert [layer_z(layer) for layer in range(1, GRID_LAYERS + 1)] == pytest.approx(
-        [10.0, 60.0, 132.0, 155.0]
+        [-57.0, -80.0, -152.0, -202.0]
     )
-    assert layer_z(1) < layer_z(2) < layer_z(GRID_LAYERS)
+    assert layer_z(1) > layer_z(2) > layer_z(GRID_LAYERS)
 
 
 def test_calibrated_layers_stay_inside_the_z_travel():
@@ -50,14 +50,14 @@ def test_calibrated_layers_stay_inside_the_z_travel():
 
 
 def test_layer_z_refuses_to_leave_the_travel_range():
-    """层是从**原点那一侧**排下去的：若有人把原点配到行程的另一端（正限位回零），
-    这里要当场喊出来，而不是算出一串越界坐标——ADR-0018 的镜像错就是这么来的。"""
+    """层是从**原点那一侧**排下去的：若有人把 Z 配成向下回零（原点跑到底端），
+    这里要当场喊出来，而不是算出一串越界坐标——镜像错就是这么来的。"""
     from dataclasses import replace
 
-    from patrol.motion_profile import HOME_DIR_POSITIVE
+    from patrol.motion_profile import HOME_DIR_NEGATIVE
 
-    flipped = replace(M1, z=replace(M1.z, home_dir=HOME_DIR_POSITIVE))   # 原点跑到 212
-    with pytest.raises(ValueError, match="靠近电机"):
+    flipped = replace(M1, z=replace(M1.z, home_dir=HOME_DIR_NEGATIVE))   # 原点跑到底端 −212
+    with pytest.raises(ValueError, match="顶端"):
         layer_z(1, flipped)
 
 
@@ -122,7 +122,7 @@ def test_grid_geometry_matches_the_builder():
     assert geom["y_pitch"] == pytest.approx(4492 / GRID_COLS)
     assert geom["z_pitch"] == pytest.approx(145 / 3)
     assert (geom["y_min"], geom["y_max"]) == (0.0, 4492.0)
-    assert (geom["z_min"], geom["z_max"]) == (0.0, 212.0)
+    assert (geom["z_min"], geom["z_max"]) == (-212.0, 0.0)
 
 
 def test_angles_dimension_can_be_reopened_without_touching_coordinates():

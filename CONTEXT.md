@@ -11,7 +11,7 @@
 | 框（box） | 库房内的一个栽培框，测量的基本归属单位（`box_id`，如 `B105` = 第 1 层第 5 框） |
 | 站位（station） | 一个框的一个拍照位，对应一组 `(y, z)` 坐标（`station_id`，如 `S105`）；当前每框 1 个站位 |
 | 货架网格（rack grid） | 现场布局：横向 `GRID_COLS` 框 × 竖向 `GRID_LAYERS` 层（当前 **12 × 4 = 48**）；站位坐标由行程推导并叠加实拍标定偏移（`patrol.stations.build_grid`） |
-| 层（layer） | 竖向第几层蘑菇架，1…`GRID_LAYERS`，**自顶向下**（第 1 层贴近 Z 原点，z **最小**）；`Station.layer` |
+| 层（layer） | 竖向第几层蘑菇架，1…`GRID_LAYERS`，**自顶向下**（第 1 层＝**最上面那层**、贴近顶端 Z 原点，z **最大**＝最接近 0）；`Station.layer` |
 | 框序号（col） | 横向第几框，1…`GRID_COLS`，沿 Y 递增（最左为 1）；`Station.col` |
 | 蛇形遍历（snake order） | 站位生成/巡检顺序：层内单方向走完、相邻层反向，使换层只在同侧落一格，**横向空程为 0**（省掉每层约 4.1m 折返） |
 | 巡检轮次（patrol round） | 依次经过全部站位采图的一轮作业；回零开始、回原位结束（`PatrolRound`） |

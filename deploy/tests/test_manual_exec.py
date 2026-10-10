@@ -155,10 +155,10 @@ def test_home_runs_and_reports_position(tmp_path):
 def test_goto_reaches_target(tmp_path):
     channel, fmc, executor, _rows, _logs = make(tmp_path)
     channel.open_session("t")
-    _cmd, res = run(channel, executor, "goto", {"y": 1200.0, "z": 100.0})
+    _cmd, res = run(channel, executor, "goto", {"y": 1200.0, "z": -100.0})
     assert res.ok is True
-    assert res.data == {"position_yz": [1200.0, 100.0]}
-    assert fmc.called("goto") == [("goto", 1200.0, 100.0)]
+    assert res.data == {"position_yz": [1200.0, -100.0]}
+    assert fmc.called("goto") == [("goto", 1200.0, -100.0)]
 
 
 def test_jog_relative_and_axis_by_name(tmp_path):
@@ -298,7 +298,7 @@ def test_estop_during_motion_aborts_and_stops(tmp_path):
 def test_wait_stop_timeout_is_reported(tmp_path):
     channel, _fmc, executor, _rows, _logs = make(tmp_path, fmc=FakeFmc(never_stops=True))
     channel.open_session("t")
-    _cmd, res = run(channel, executor, "jog", {"axis": "Z", "mm": 5.0})
+    _cmd, res = run(channel, executor, "jog", {"axis": "Z", "mm": -5.0})
     assert res.ok is False
     assert "未在" in res.detail and "停稳" in res.detail
 
@@ -491,7 +491,7 @@ def test_progress_is_streamed_during_motion_and_cleared_after(tmp_path):
     orig_write = channel.write_progress
     channel.write_progress = lambda p: (written.append(p), orig_write(p))
     channel.open_session("t")
-    cmd, res = run(channel, executor, "goto", {"y": 1200.0, "z": 100.0})
+    cmd, res = run(channel, executor, "goto", {"y": 1200.0, "z": -100.0})
     assert res.ok is True
     assert [p["position_yz"] for p in written] == [[100.0, 5.0], [200.0, 10.0]]
     assert all(p["id"] == cmd.id and p["kind"] == "goto" for p in written)
@@ -511,6 +511,6 @@ def test_progress_write_failure_does_not_break_the_command(tmp_path):
         raise OSError("盘满了")
 
     channel.write_progress = boom
-    _cmd, res = run(channel, executor, "goto", {"y": 1200.0, "z": 100.0})
+    _cmd, res = run(channel, executor, "goto", {"y": 1200.0, "z": -100.0})
     assert res.ok is True
     assert any("实时位置写回失败" in line for line in logs)

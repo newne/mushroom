@@ -1,6 +1,7 @@
 """一次性数据迁移的入口（`patrol-migrate`）。
 
-现在只有一个子命令：`z-frame`——把站位表的 Z 坐标从旧框架搬到 ADR-0018 的新框架。
+现在只有一个子命令：`z-frame`——把站位表的 Z 坐标搬到"顶端原点、−212…0、第 1 层在最上"
+的新框架（2026-10-10）。
 
 为什么单独给个命令而不是"跑个 python 片段"：这是**动生产配置**的操作，必须有
 "先看 diff、再落盘、落盘前自动备份"的固定动作，且能被写进上机手册里逐条执行。
@@ -17,7 +18,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from patrol.stations import load_stations, mirror_z_in_file
+from patrol.stations import load_stations, retarget_z_in_file
 
 
 def _backup(path: str) -> str:
@@ -45,7 +46,7 @@ def cmd_z_frame(args: argparse.Namespace) -> int:
 
         with tempfile.TemporaryDirectory() as tmp:
             out = str(Path(tmp) / "stations.yaml")
-            mirror_z_in_file(str(path), out=out, log=print)
+            retarget_z_in_file(str(path), out=out, log=print)
             after = load_stations(out)
         if after:
             print(f"  迁移后 S 例：{after[0].id} y={after[0].y:.1f} z={after[0].z:.1f} "
@@ -55,7 +56,7 @@ def cmd_z_frame(args: argparse.Namespace) -> int:
 
     bak = _backup(str(path))
     print(f"已备份：{bak}")
-    mirror_z_in_file(str(path), log=print)
+    retarget_z_in_file(str(path), log=print)
     after = load_stations(str(path))
     if after:
         print(f"  迁移后 S 例：{after[0].id} y={after[0].y:.1f} z={after[0].z:.1f} "
@@ -68,7 +69,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="patrol-migrate", description="一次性数据迁移")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    z = sub.add_parser("z-frame", help="Z 坐标框架镜像（ADR-0018）")
+    z = sub.add_parser("z-frame", help="Z 坐标框架迁移：原点搬到顶端（−212…0，第 1 层在最上）")
     z.add_argument("--stations", default="/app/configs/stations.yaml")
     z.add_argument("--dry-run", action="store_true", help="只看换算结果，不落盘")
     z.set_defaults(func=cmd_z_frame)

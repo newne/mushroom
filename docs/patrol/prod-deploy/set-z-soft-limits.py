@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""把 Z 的控制器软限位整定为 `0…212`（ADR-0018 的框架迁移配套动作）。
+"""把 Z 的控制器软限位整定为 `−212…0`（顶端原点框架的迁移配套动作）。
 
-为什么必须做：Z 的框架改成"顶端为 0、向下为正、行程 0…212"之后，控制器里那层软限位
-（ADR-0008）还停留在旧值——现场读回是 `softLimitMax[2] = -1`，即**取消**。带着它跑并非
-"少一层保护"这么简单：控制器若把目标按旧范围截断，会在**返回成功**的情况下少走一段，
+为什么必须做：Z 的框架改成"顶端为 0、向上为正、行程 −212…0"之后，控制器里那层软限位
+（ADR-0008）还停留在旧值（现场读回是 `0…212`）。带着它跑并非"多一层保护"这么简单：
+控制器会认为 `-212…0` 里的负半边越界，把目标截断或在**返回成功**的情况下少走一段，
 而精度问题在采图偏位上才暴露。
 
 用法（在库房主机上，**先停 patrol 容器**——控制器是单会话设备）：
@@ -30,7 +30,7 @@ from patrol.motion_profile import CONTROLLER_IP, CONTROLLER_PORT, DEVICE_ID, M1
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="整定 Z 的控制器软限位（ADR-0018）")
+    ap = argparse.ArgumentParser(description="整定 Z 的控制器软限位（−212…0）")
     ap.add_argument("--go", action="store_true", help="真写入（默认只打印）")
     ap.add_argument("--lib", default=None)
     args = ap.parse_args()
@@ -45,12 +45,15 @@ def main() -> int:
 
         want_max = list(before.soft_limit_max)
         want_min = list(before.soft_limit_min)
-        want_max[z] = int(M1.z.travel_max)      # 212
-        want_min[z] = int(M1.z.travel_min)      # 0
+        # 约定（见 DevicePara.effective_limits）：生效区间 = [−softLimitMin, +softLimitMax]，
+        # 且负极限字段按**幅值**存。所以 "−212…0" 要写成 softLimitMin=212、softLimitMax=0；
+        # 写成负数会被控制器当成**取消**——那不是我们要的。
+        want_min[z] = int(-M1.z.travel_min)     # 212（= |下限|）
+        want_max[z] = int(M1.z.travel_max)      # 0（上限即"顶端原点"）
         after = replace(before, soft_limit_max=tuple(want_max), soft_limit_min=tuple(want_min))
 
-        print(f"将要写入：轴{z} 软限位 = {want_min[z]} … {want_max[z]}"
-              f"（= 行程 {M1.z.travel_min:g}…{M1.z.travel_max:g}）")
+        print(f"将要写入：轴{z} 软限位原值 min={want_min[z]} max={want_max[z]}"
+              f"（生效 {M1.z.travel_min:g}…{M1.z.travel_max:g}）")
         if not args.go:
             print("（未写入：加 --go 才真写）")
             return 0
