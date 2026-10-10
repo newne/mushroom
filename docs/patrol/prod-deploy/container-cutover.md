@@ -1479,6 +1479,9 @@ main 上重写过的 `mushroom_image_encoder.py`（`cba6a40` 那张 WIP 快照�
 
 ## 19. 2026-10-09 / 2026-10-10：Z 轴方向改回 ADR-0018（只换标签，不动机器）
 
+> ⚠️ **本节结论已被 §20 推翻**：当天稍晚用户在现场直接观察，按 `Z+` 机构**往上**走——正方向
+> 是"上"，详见 §20。本节的"复核 `jog Z 40` 往下"结论作废。
+
 **背景**：2026-10-09 按"从回零位 Z=0 向 +Z 走到行程尽头触发**正限位**（落点 Z≈210.15）"
 把 Z 的框架改判成"原点在底端、`Z+ = 向上`"（`7169156`）。那条实测只证明"回零落在负限位
 那一端"，而"负限位在哪端"正是要证明的东西——**循环论证**，当时并没有肉眼核对 +Z 到底是上
@@ -1540,4 +1543,66 @@ docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate 
 **教训**：方向这种事，"撞到哪个限位"证明不了"哪端是原点"——**得用眼睛**（或回零前后读
 位置）。同一台机器上 Y 与 Z 的原点都在**靠近电机那一端**，这条不变量由 `home_position`
 派生并可断言。
+
+## 20. 2026-10-10（同日晚些）：Z 轴方向定稿 `Z+ = 向上`（现场用户观察，撤销 §19）
+
+**背景**：§19 依"现场复核 `jog Z 40` 往下"把 Z 定成"向下为正"（`3537d00`）。当天用户自己
+在机器旁操作后指出：**按 `Z+` 机构往上、`Z−` 往下**，且"方向键（键盘 ↑/↓、页面方向盘）
+也要同步"。这正是 `7169156` 的框架（`positive_towards="up"`）——§19 那次复核只有约 2 mm
+位移，把方位看反了，结论作废。
+
+**定稿框架**（`home_dir`/行程与 §19 完全相同，只把"正方向"翻回"上"，代码 `40c8434`）：
+
+| 层 | 值 |
+| --- | --- |
+| `patrol.motion_profile` | `positive_towards="up"`；`home_dir=HOME_DIR_NEGATIVE`(=2)、行程 `0…212`、`home_position=0.0` 不变 |
+| `patrol.framing` | `default_sign_z()` 由它派生 ⇒ **−1** |
+| 页面 | 平面图 `Z 向上`、地图 Z 映射（z 越大越靠上）、方向盘 ↑=`Z+` / ↓=`Z−`、键盘 ↑/↓ 同步、`#envlbl` "Z 向上为正" |
+| 测试 | `test_motion_profile`（up）、`test_framing`（sign_z=−1）；并补上 10-09 漏改的两个 framing 用例（一直按 `+1` 期望、在 up 框架下红着） |
+| 文档 | `console-ui/spec.md`、`console-ui/verify-page.js`、`station-retarget.md` §8.2、`deploy/README.md` |
+
+`verify-page.js` 195/195；patrol 全量 `690 passed`（唯一红 `test_migrate_z_frame` 为既有、与本改无关）；`ruff` 过。
+
+**发版**（重建 `mushroom_patrol` 镜像 + 换页面）：
+
+```bash
+# 开发机（WSL）：从 main@40c8434 构建并推版本 tag（没动 :latest）
+cd /mnt/d/code/mushroom
+TAG=0.1.0-20261010155834-40c8434
+docker build -f docker/Dockerfile.patrol -t registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:$TAG .
+docker push  registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:$TAG
+# digest sha256:09b7abc4…；image id sha256:d64b6efd…
+```
+
+```bash
+# 库房主机：钉 tag + 只重建 patrol/console（preview / console_web 不动）
+cd /home/sysadmin/algorithm/mushroom_service
+cp -p .env .env.bak-20261010-160140
+sed -i 's#^PATROL_IMAGE=.*#PATROL_IMAGE=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261010155834-40c8434#' .env
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_patrol mushroom_console
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_patrol mushroom_console
+```
+
+页面是 `mushroom_console_web` 的 bind-mount（`../mushroom_patrol/web`），**只换文件**：先
+`cp -p index.html index.html.bak-20261010-160021`，上传到 `index.html.new`、核对 sha
+（`478a95e5…`）再同盘 `mv` 原子替换（不重建 console_web）。
+
+**验收**：
+
+| 检查 | 结果 |
+| --- | --- |
+| 容器 | patrol/console 换到 `0.1.0-20261010155834-40c8434`、`healthy`、`restarts=0` |
+| 镜像内单源 | `positive_towards=up`、`default_sign_z()=-1.0`、`home_dir=2`、`travel 0…212`、`home_position=0.0` |
+| 页面 | `/`（nginx :8002）4×「Z 向上」、0×「Z 向下」；字节 sha `478a95e5…` 与本地一致 |
+| 接口 | `/healthz {"ok":true}`、`/api/grid z 0…212`；机器 `IDLE`、无进行中轮次 |
+| 未波及 | `mushroom_preview` 仍 `station-calibration-…`；`mushroom_console_web` 未重建 |
+
+**回滚**：`.env` 换回 `.env.bak-20261010-160140`（tag `0.1.0-20261010152748-3537d00`，§19 的
+"向下"版）、页面换回 `index.html.bak-20261010-160021`，再
+`up -d --force-recreate --no-deps mushroom_patrol mushroom_console`。
+
+**教训**：Z 的方向在同一天被翻了两次——根因是"同一事实有三处副本"（`positive_towards`、
+页面文案、`framing.sign_z`）且现场结论互相打架。定论只能来自**用户在机器旁直接看"按哪个
+方向、执行器往哪走"**，而且是看**轴命令符号**（`jog Z +N` 往上 ⇒ `+Z = 上`），不要从
+"撞到哪个限位"反推原点。
 
