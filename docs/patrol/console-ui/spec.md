@@ -234,6 +234,23 @@ ADR-0008（控制器整定参数与软限位）
 `real_pos` / `target` 的元素顺序恒为 `[y, z]`，与 §2 的轴顺序一致。
 `envelope` 即 §2 的机械行程，前端据此做浏览器侧越界拦截。
 
+`trigger` 块（2026-10-12 加）与 `patrol` 并列返回，页面据此显示"加湿保持中 / 已延后"：
+
+```json
+"trigger": {
+  "job": {"id": "20261012-131614", "created_at": "…", "created_by": "scheduler",
+          "reason": "", "consumed_at": null, "note": "", "not_before": "2026-10-12T14:00:00",
+          "pending": true},
+  "pending": true, "age_s": 12.0, "stale": false,
+  "due_at": "2026-10-12T14:00:00", "wait_s": 2388.0,
+  "hold": {"active": true, "until": "2026-10-12T13:40:00", "defer_s": 1200,
+           "reason": "加湿", "set_by": "operator", "set_at": "…", "seconds_left": 1520.0}
+}
+```
+
+`wait_s` / `hold.seconds_left` 一律由**服务端**算：现场上位机与库房主机时钟不一致是常态，
+前端自己数会骗人。
+
 ### 6.2 命令端点
 
 | 方法 | 路径 | 请求体 | 成功 | 失败 |
@@ -256,6 +273,29 @@ ADR-0008（控制器整定参数与软限位）
 **抓拍的归属（2026-09-21）**：抓拍**不移动机构**，拍的就是当前位置。`station_id` 决定的是
 "这张照片以后挂在哪一站的历史下"，而拍照位置作为事实逐帧记在 `y`/`z` 两列里。
 
+#### 巡检触发与时间偏置（2026-10-12）
+
+加湿期水汽重 ⇒ 图像过曝、对比度低（开蓝光也压不住），所以"跑一轮"要能晚点再跑。
+页面在"上一轮 / 本轮"卡片放三个按钮，全部走这三条路，**不进 `/api/cmd`**——它们是
+"什么时候跑轮"的事，不是机构动作。
+
+| 方法 | 路径 | 请求体/参数 | 成功 | 失败 |
+| --- | --- | --- | --- | --- |
+| POST | `/api/patrol/run` | `?reason=&by=&defer_s=`（`defer_s ≤ 3600`） | `202 {accepted, job, due_at, wait_s, hold}` | `409` 已有一轮在排队（单飞，不排队）/ `422` 偏置越界 |
+| GET | `/api/patrol/run` | — | `{job, pending, age_s, stale, due_at, wait_s, hold}` | — |
+| PUT | `/api/patrol/hold` | `{minutes: 30}` 或 `{until: ISO}`，可选 `defer_s/reason/by` | `200 {ok, hold, state}` | `422` 参数非法 |
+| DELETE | `/api/patrol/hold` | — | `200 {ok, cleared, state}` | — |
+
+保持期内来的触发**一律**延后到"保持结束 + `defer_s`"（默认 20 分钟），已在排队的那轮
+也会被一起推后。偏置落在请求文件的 `not_before` 上，console 重启不丢。详情与三条硬规则
+见 `deploy/README.md` §4.0。
+
+#### 导轨平面图：层带按实标层心画（2026-10-12 重绘）
+
+层带、层号、横线一律由 `mapLayerBands()` 从**站位表里的实际 z** 推导，不再按
+`(z_max-z_min)/layers` 均分——实标层心 40/90/145/195mm 不等分（层距 50/55/50），
+均分画出来的带与站位点能错开 13.5mm，层号会指在错误的带上。每层右缘标出该层锚点 z，
+层界取相邻层心中点。图高 170 → 238 图内单位，否则分不出层界。
 - 给了 `station_id`：按它归属；给了**不认识的**站位仍报 `400`（明确点了名却拍到别处是两回事，不替他猜）。
 - 没给：服务端按**当前位置最近的格点**归属（`patrol.stations.nearest_station`），
   结果 detail 里注明"自动归到最近站位"。

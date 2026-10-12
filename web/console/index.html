@@ -225,12 +225,20 @@
   .station-empty{padding:12px 8px;font-size:12px}
   /* 导轨图：中栏全宽，viewBox 与 aspect-ratio 同比例 ⇒ 像素坐标与图内坐标是线性映射，
      点击/悬停换算不需要处理 letterbox（preserveAspectRatio 的留白）。crosshair 提示可点。
-     170 的图高是压扁过的：1080p 下与 44vh 的实时画面同屏，不挤成滚动才见得着的第二页。 */
-  #map{width:100%;height:auto;aspect-ratio:92/17;background:linear-gradient(180deg,#ffffff,#f9fbfd);border:1px solid var(--line);
+     2026-10-12 重绘：图高 170 → 238。原来的层带按名义层距均分画，而实标层心
+     40/90/145/195mm 不等分（层距 50/55/50）——均分画出来的带与站位点能错开 13.5mm，
+     层号会指在错误的带上。现在层带/层号/横线都由 mapLayerBands() 从实际坐标推导，
+     图高也要足够分得出层界。 */
+  #map{width:100%;height:auto;aspect-ratio:92/23.8;background:linear-gradient(180deg,#ffffff,#f9fbfd);border:1px solid var(--line);
        border-radius:8px;cursor:crosshair;touch-action:manipulation;display:block;box-shadow:inset 0 1px 2px rgba(0,0,0,.02);transition:border-color .15s}
   #map:hover{border-color:#b5ccdf}
   .mapcap{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:12px;color:var(--dim);margin-top:8px}
   .mapcap .mono{white-space:nowrap;padding:2px 8px;background:var(--soft);border-radius:4px;border:1px solid var(--line)}
+  /* 加湿保持：一行四个控件，按钮挤一点（min-height 44 的全局值在这里太占地方） */
+  .holdrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}
+  .holdrow button{min-height:34px;padding:6px 10px;font-size:13px}
+  .holdrow .tag{font-size:12px;padding:3px 8px;border-radius:20px;border:1px solid var(--line);background:var(--soft);color:var(--dim)}
+  .holdrow .tag.on{background:#fdf3e3;border-color:#e6c07a;color:#8a5a00}
   .stn{color:var(--fg);background:transparent;border-color:transparent;min-height:44px}
   .stn:hover{background:var(--soft)} .stn.sel{background:var(--accent-soft);border-color:#bcd4ff;border-left:3px solid var(--accent);padding-left:7px}
   .stn-id{font-weight:600}
@@ -446,7 +454,7 @@
          的主交互面。点击任意位置 = 填坐标（仍走「移动到该点」+二次确认）；点站点 = 选中站位。 -->
     <div class="card">
       <h2>导轨平面图（Y 向右 · Z 向上）</h2>
-      <svg id="map" viewBox="0 0 920 170" preserveAspectRatio="xMidYMid meet"
+      <svg id="map" viewBox="0 0 920 238" preserveAspectRatio="xMidYMid meet"
            role="img" aria-label="导轨平面图：Y 向右，Z 向上，点击任意位置设为目标点"></svg>
       <div class="mapcap">
         <span id="maphover" class="mono">移到图上查看坐标 · 点击任意位置设为目标点</span>
@@ -457,6 +465,18 @@
       <h2>上一轮 / 本轮</h2>
       <div class="kv" id="round">—</div>
       <div class="bar" id="progresswrap" style="display:none"><i id="progress" style="width:0%"></i></div>
+      <!-- 加湿期偏置（2026-10-12）：水汽重、开蓝光也压不住时，48 张全过曝，
+           拍了判不了长势还白动机架 11 分钟。保持期内来的触发一律延后。 -->
+      <div class="holdrow">
+        <span id="holdstate" class="tag">未设保持</span>
+        <button type="button" id="holdbtn">加湿保持 30 分钟</button>
+        <button type="button" id="holdclear" disabled>解除保持</button>
+        <button type="button" id="deferbtn">这一轮延后 20 分钟</button>
+      </div>
+      <div id="holdnote" class="empty" style="padding:6px 0 0">
+        设保持后，期间来的巡检触发（含算法侧每 3 小时那次）一律延后到保持结束再等 20 分钟；
+        已在排队的那一轮也会被一起推后。偏置写在请求文件里，console 重启不丢。
+      </div>
     </div>
     <div class="card">
       <h2>历史图像 <span id="imgtitle" style="color:var(--dim);font-weight:400"></span></h2>
@@ -825,7 +845,7 @@ function renderPositionReadouts(){
    getBoundingClientRect 的像素与图内坐标是**线性映射**，点击/悬停换算不用管
    preserveAspectRatio 的 letterbox。所有图元内联设色（不依赖 CSS 类——旧版
    .map-band/.map-grid 等类一条规则都没写，层带与路径其实是默认黑色）。 */
-const MAP = {W:920, H:170, padL:26, padR:12, padT:14, padB:22};
+const MAP = {W:920, H:238, padL:30, padR:38, padT:18, padB:24};
 
 function mapScale(){
   const {y_min, y_max, z_min, z_max} = grid;
@@ -875,6 +895,28 @@ function mapStationAt(vx, vy){
    移动时主线程被白耗——静态层的关键串不变就整个跳过。 */
 let mapStaticKey = null;                 // 上一次静态层的输入指纹
 
+/* 层带按**实标层心**推导，不按名义层距均分（2026-10-12 重绘）：
+   实标层心 40/90/145/195mm 不等分（层距 50/55/50），而 `(z_max-z_min)/layers` 均分
+   画出来的带与站位点能错开 13.5mm——层号指在错误的带上，平面图就成了"看着对、照着错"。
+   边界取相邻层心的中点，首末贴行程端。一张站位坐标都没有时退化成均分（不至于白屏）。 */
+function mapLayerBands(){
+  const bands = [];
+  for(let L = 1; L <= grid.layers; L++){
+    const zs = stations.filter(st => st.layer === L).map(stationTarget)
+                       .filter(t => t).map(t => t[1]);
+    if(zs.length) bands.push({L, z: zs.reduce((a,b)=>a+b,0)/zs.length});
+  }
+  if(!bands.length){                            // 没有站位坐标可依：按名义层距兜底
+    const pitch = (grid.z_max - grid.z_min) / grid.layers;
+    for(let L = 1; L <= grid.layers; L++) bands.push({L, z: grid.z_max - (L-0.5)*pitch});
+  }
+  for(let i = 0; i < bands.length; i++){
+    bands[i].top = i === 0 ? grid.z_max : (bands[i-1].z + bands[i].z)/2;
+    bands[i].bottom = i === bands.length-1 ? grid.z_min : (bands[i].z + bands[i+1].z)/2;
+  }
+  return bands;
+}
+
 function mapStaticSignature(){
   const cur = lastStatus?.patrol?.current_station || '';
   return JSON.stringify([grid, selected, cur,
@@ -885,31 +927,33 @@ function mapStaticSvg(){
   const {cols, layers, y_min, y_max, z_min, z_max} = grid;
   const {W, H, padL, padR, padT, padB} = MAP;
   const {X, Y} = mapScale();
-  const zPitch = (z_max - z_min) / layers;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const bands = mapLayerBands();
   let s = '';
-  // 层带（第 1 层在最上：Z 原点在顶端、向上为正，层号从顶端往下数）
-  for(let L = 1; L <= layers; L++){
-    const y0 = Y(z_max - (L-1)*zPitch), y1 = Y(z_max - L*zPitch);
-    if(L % 2 === 1) s += `<rect x="${padL}" y="${y0.toFixed(1)}" width="${W-padL-padR}" height="${(y1-y0).toFixed(1)}" fill="#f5f8fc"/>`;
+  // 层带（第 1 层在最上：Z 原点在顶端、向上为正，层号从顶端往下数）——按实标层心画
+  for(const b of bands){
+    const y0 = Y(b.top), y1 = Y(b.bottom);
+    if(b.L % 2 === 1) s += `<rect x="${padL}" y="${y0.toFixed(1)}" width="${iw}" height="${(y1-y0).toFixed(1)}" fill="#f5f8fc"/>`;
   }
-  // 外框 + 网格线
-  s += `<rect x="${padL}" y="${padT}" width="${W-padL-padR}" height="${H-padT-padB}" fill="none" stroke="#c7d2e2"/>`;
+  // 外框 + 纵向网格（列）
+  s += `<rect x="${padL}" y="${padT}" width="${iw}" height="${ih}" fill="none" stroke="#c7d2e2"/>`;
   for(let c = 0; c <= cols; c++){
-    const x = padL + c*(W-padL-padR)/cols;
+    const x = padL + c*iw/cols;
     s += `<line x1="${x.toFixed(1)}" y1="${padT}" x2="${x.toFixed(1)}" y2="${H-padB}" stroke="#dbe3ef" stroke-width="0.8"/>`;
   }
-  for(let L = 0; L <= layers; L++){
-    const y = padT + L*(H-padT-padB)/layers;
+  // 横向网格 = **实标层界**（相邻层心中点 + 行程两端），不再是均分画出来的假层界
+  for(const z of bands.map(b => b.top).concat([z_min])){
+    const y = Y(z);
     s += `<line x1="${padL}" y1="${y.toFixed(1)}" x2="${W-padR}" y2="${y.toFixed(1)}" stroke="#dbe3ef" stroke-width="0.8"/>`;
   }
-  // 列号（下）、层号（左）、量程（右上）
+  // 列号（下）、层号（左）、该层锚点 z（右）
   for(let c = 1; c <= cols; c++){
-    const x = padL + (c-0.5)*(W-padL-padR)/cols;
+    const x = padL + (c-0.5)*iw/cols;
     s += `<text x="${x.toFixed(1)}" y="${H-7}" text-anchor="middle" font-size="9" fill="#6b7785">${c}</text>`;
   }
-  for(let L = 1; L <= layers; L++){
-    const y = padT + (L-0.5)*(H-padT-padB)/layers;
-    s += `<text x="${padL-9}" y="${(y+3).toFixed(1)}" text-anchor="middle" font-size="9" fill="#6b7785">${L}</text>`;
+  for(const b of bands){
+    s += `<text x="${padL-9}" y="${(Y(b.z)+3).toFixed(1)}" text-anchor="end" font-size="10" fill="#5b6b7d">${b.L}</text>`;
+    s += `<text x="${W-padR+5}" y="${(Y(b.z)+3).toFixed(1)}" font-size="9" fill="#8b98a5">${b.z.toFixed(0)}</text>`;
   }
   s += `<text x="${W-padR}" y="${padT-4}" text-anchor="end" font-size="9" fill="#6b7785">Y ${esc(y_min)} → ${esc(y_max)} mm · Z ${esc(z_min)} → ${esc(z_max)} mm</text>`;
   // 蛇形路径（巡检走法：层内单向、换层同侧——不允许斜向段）
@@ -990,6 +1034,54 @@ function updateMapDynamic(){
   const dyn = svg && svg.querySelector('.map-dyn');
   if(!dyn || !grid) return;
   dyn.innerHTML = mapDynamicSvg();
+}
+
+/* 加湿保持 / 偏置的三个按钮。全部走 /api/patrol/* 三条路，**不发 /api/cmd**——
+   保持与偏置是"什么时候跑轮"的事，不是机构动作，混进指令通道会让急停语义变浑。
+   `jsend` 不把 4xx 当异常（409 = 已有一轮在排队，是业务回答不是故障），所以这里
+   逐个看 status，不靠 catch。 */
+function wireHold(){
+  const btn = $('#holdbtn'), clear = $('#holdclear'), defer = $('#deferbtn');
+  btn?.addEventListener('click', async () => {
+    btn.disabled = true;
+    try{
+      const r = await jsend('/api/patrol/hold', 'PUT',
+                            {minutes: 30, reason: '加湿', by: 'operator'});
+      if(!r.ok){
+        opmsg('设保持失败：HTTP ' + r.status + ' ' +
+              (r.data?.detail || r.data?.error || ''), 'bad');
+        return;
+      }
+      opmsg('已设保持 30 分钟：期间来的巡检一律延后到结束再等 20 分钟'
+            + (r.data?.state?.pending ? '（排队中的那一轮已一起推后）' : ''), 'ok');
+    }finally{ btn.disabled = false; tick(); }
+  });
+  clear?.addEventListener('click', async () => {
+    clear.disabled = true;
+    try{
+      const r = await jsend('/api/patrol/hold', 'DELETE');
+      if(!r.ok){
+        opmsg('解除保持失败：HTTP ' + r.status, 'bad');
+        return;
+      }
+      opmsg('已解除保持（已偏置的请求按它自己的时间跑，不提前）', 'ok');
+    }finally{ clear.disabled = false; tick(); }
+  });
+  defer?.addEventListener('click', async () => {
+    defer.disabled = true;
+    try{
+      const r = await jsend('/api/patrol/run?by=operator&reason=加湿期手动延后&defer_s=1200',
+                            'POST');
+      if(r.status === 409){
+        opmsg('已有一轮在排队（单飞、不排队）：' + (r.data?.due_at || '时间未知'), 'warn');
+      }else if(!r.ok){
+        opmsg('延后触发失败：HTTP ' + r.status + ' ' +
+              (r.data?.detail || r.data?.error || ''), 'bad');
+      }else{
+        opmsg('这一轮已延后 20 分钟（应到 ' + (r.data?.due_at || '?') + '）', 'ok');
+      }
+    }finally{ tick(); }
+  });
 }
 
 function wireMap(){
@@ -1244,6 +1336,29 @@ async function selectStation(id){
   if(mode === 'history'){ syncAngleOptions(); renderHistory(); await loadGrowth(); }
 }
 
+/* 加湿保持 / 巡检偏置（2026-10-12）：水汽重的时候拍了也白拍，所以"现在别拍"要是
+   页面上看得见、点得到的一件事。倒计时按**服务器时钟**算（clockSkewMs 已校准），
+   前端不自己猜"还有多久"——主机与上位机时钟不一致是常态。 */
+function renderTrigger(trig){
+  const tag = $('#holdstate'), clear = $('#holdclear'), defer = $('#deferbtn');
+  if(!tag) return;
+  const t = trig || {};
+  const hold = t.hold || {};
+  if(hold.active){
+    tag.textContent = `加湿保持中 · 剩 ${Math.max(0, Math.round(hold.seconds_left/60))} 分钟`;
+    tag.className = 'tag on';
+  } else {
+    tag.textContent = '未设保持';
+    tag.className = 'tag';
+  }
+  if(clear) clear.disabled = !hold.active;
+  if(defer){
+    defer.disabled = !!(t.pending && t.wait_s > 0);
+    defer.textContent = (t.pending && t.wait_s > 0)
+      ? `已延后 · 剩 ${Math.ceil(t.wait_s/60)} 分钟` : '这一轮延后 20 分钟';
+  }
+}
+
 function renderStatus(s){
   lastStatus = s;
   // 服务器时间 − 浏览器时间：会话倒计时与"还要多久"都按**服务器口径**算。现场上位机的
@@ -1286,7 +1401,8 @@ function renderStatus(s){
     ['取证文件', p.file || '—'],
   ];
   $('#round').innerHTML = rows.map(([k,v]) => `<b>${esc(k)}</b><span>${esc(v)}</span>`).join('');
-  $('#machine').innerHTML = [
+  renderTrigger(s.trigger);
+  renderTrigger(s.trigger);  $('#machine').innerHTML = [
     ['页面状态', m.state], ['控制器连接', m.connected ? '已连' : '未连（巡检进行中时刻意不连）'],
     ['位置来源', m.pos_source], ['相机服务', m.host],
   ].map(([k,v]) => `<b>${esc(k)}</b><span>${esc(v ?? '—')}</span>`).join('');
@@ -2385,6 +2501,7 @@ document.addEventListener('visibilitychange', () => {
   wireHistory();
   wirePreview();
   wireMap();
+  wireHold();
   await refreshCmd();
   // 页面是刷新/重开后回来的，而后端可能还开着会话：把画面接着打开，别让人以为它坏了
   if(cmd.session_active) openPreview();

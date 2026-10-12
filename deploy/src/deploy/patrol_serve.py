@@ -101,6 +101,10 @@ def serve_forever(
             continue
         log(f"领到巡检请求 {req.id}（来自 {req.created_by}"
             f"{'：' + req.reason if req.reason else ''}），开始跑一轮")
+        if req.not_before:
+            # 偏置过的请求要留痕：现场问"这轮为什么晚了两分钟"时，答案在这里，
+            # 而不是去翻 console 的内存（它早重启过了）。
+            log(f"  该请求带偏置：创建于 {req.created_at}，应到 {req.not_before}")
         started = datetime.now()
         try:
             rc = run_once()

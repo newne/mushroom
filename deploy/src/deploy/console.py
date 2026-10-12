@@ -28,11 +28,11 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from patrol.room import RoomStateError, load_room_state
 from patrol.stations import GRID_ANGLES, grid_geometry, load_stations
@@ -40,7 +40,7 @@ from patrol.store import JsonlStore
 from pydantic import BaseModel
 
 from deploy.manual import ALL_KINDS, SESSION_TTL_S, ManualChannel, estop_allows
-from deploy.patrol_trigger import TriggerStore
+from deploy.patrol_trigger import DEFAULT_DEFER_S, MAX_DEFER_S, TriggerStore
 
 #: 心跳超过这么久没更新 ⇒ 不认为"正在巡检"（一轮约 11 分钟，逐站心跳是秒级）
 HEARTBEAT_STALE_S = 180.0
@@ -115,6 +115,20 @@ class CmdBody(BaseModel):
 
     kind: str
     args: dict | None = None        # 默认 None 而不是 {}：可变默认值是个陷阱
+    by: str = "operator"
+
+
+class HoldBody(BaseModel):
+    """设一个"现在别拍"的保持（加湿期用）。
+
+    `minutes` 与 `until` 给一个就行：现场按"还要加湿半小时"想问题，给分钟数比敲
+    ISO 时间戳顺手；脚本/排班则可以直接给 `until`。两个都不给 = 请求没意义，拒。
+    """
+
+    minutes: float | None = None
+    until: str | None = None
+    defer_s: float = DEFAULT_DEFER_S   # 保持结束后再偏置多少秒（现场口径 20 分钟）
+    reason: str = ""
     by: str = "operator"
 
 
@@ -375,6 +389,10 @@ class Console:
             },
             "patrol": patrol,
             "room": room,
+            # 触发/偏置/保持跟着 status 一起走：页面 1 秒一拍已经在轮询它，
+            # 单开一个端点只会多一条要维护的轮询路径（还会和 status 差一拍）。
+            "trigger": TriggerStore(dir_path=self.deps.trigger_dir,
+                                    now=self.deps.now).state(),
             "envelope": self.deps.envelope(),
             "events": self.events[-EVENT_BUFFER:],
         }
@@ -844,33 +862,80 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
                                  headers={"Cache-Control": "no-store"})
 
     @app.post("/api/patrol/run", status_code=202)
-    def api_patrol_run(reason: str = "", by: str = "scheduler") -> JSONResponse:
+    def api_patrol_run(reason: str = "", by: str = "scheduler",
+                       defer_s: float = 0.0) -> JSONResponse:
         """投一个"跑一轮"的请求：**立刻返回**，绝不等巡检跑完。
 
         为什么必须快进快出：调用方是算法工程的 APScheduler（`max_instances=1`、
         `misfire_grace_time=300s`），而我们一轮 11 分钟——job 里等结果会让下一次触发
         被判 misfire 丢掉。同一时刻只允许一个待处理请求，重复触发回 409 + 现有请求，
         **不排队**（排队会让两次挤在一起连跑 22 分钟）。
+
+        `defer_s` = 这一轮晚多少秒再跑。**保持期内的触发不受它影响**——保持是强约束，
+        单次参数只能更晚、不能更早（见 `patrol_trigger._effective_defer`）。
         """
+        if not 0.0 <= defer_s <= MAX_DEFER_S:
+            raise HTTPException(422, f"defer_s 必须在 0…{MAX_DEFER_S:.0f} 秒之间"
+                                     "（再长该去调调度器，不是加偏置）")
         store = TriggerStore(dir_path=deps.trigger_dir, now=deps.now)
-        req, created = store.request(by=by, reason=reason)
+        req, created = store.request(by=by, reason=reason, defer_s=defer_s)
         body = {"accepted": created, "job": {**asdict(req), "pending": req.pending},
-                "pending_age_s": store.age_s(req)}
+                "pending_age_s": store.age_s(req), "due_at": req.due_at,
+                "wait_s": store.wait_s(req), "hold": store.hold_summary()}
         if not created:
             console.note(f"重复触发被拒（{req.id} 已在待处理）", level="warn")
             return JSONResponse(body, status_code=409)
-        console.note(f"收到巡检请求 {req.id}（来自 {by}{'：' + reason if reason else ''}）")
+        console.note(f"收到巡检请求 {req.id}（来自 {by}{'：' + reason if reason else ''}"
+                     f"{f'，{defer_s:.0f} 秒后执行' if defer_s else ''}）")
         return JSONResponse(body, status_code=202)
 
     @app.get("/api/patrol/run")
     def api_patrol_run_state() -> dict:
-        """这个请求现在什么状态（调度器与被触发的执行方都看它）。"""
+        """这个请求现在什么状态（调度器与被触发的执行方都看它）。
+
+        除请求本身，还报 `due_at` / `wait_s` / `hold`：偏置与保持是**服务端**算的，
+        页面只负责显示——前端自己猜"还有多久"会和主机时钟打架。
+        """
         store = TriggerStore(dir_path=deps.trigger_dir, now=deps.now)
-        req = store.current()
-        return {"job": {**asdict(req), "pending": req.pending} if req else None,
-                "pending": bool(req and req.pending),
-                "age_s": store.age_s(req),
-                "stale": store.is_stale(req)}
+        return store.state()
+
+    @app.put("/api/patrol/hold")
+    def api_hold_set(body: HoldBody) -> dict:
+        """设保持：加湿（或别的"现在拍了也白拍"）期间，触发一律延后。
+
+        保持对**调度器**也生效——它打的 `/api/patrol/run` 不带参数，所以偏置只能在
+        服务端按保持状态算。已在排队的请求会被一起推后，否则"先触发、后设保持"
+        会让那一轮照原时间撞上进湿段。
+        """
+        now = deps.now()
+        if body.minutes is not None:
+            if body.minutes <= 0:
+                raise HTTPException(422, "minutes 必须为正")
+            until = now + timedelta(minutes=body.minutes)
+        elif body.until:
+            try:
+                until = datetime.fromisoformat(body.until)
+            except ValueError as e:
+                raise HTTPException(422, f"until 不是 ISO 时间：{body.until}") from e
+        else:
+            raise HTTPException(422, "给 minutes 或 until 之一")
+        store = TriggerStore(dir_path=deps.trigger_dir, now=deps.now)
+        try:
+            hold = store.set_hold(until=until, defer_s=body.defer_s,
+                                  reason=body.reason, by=body.by)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        console.note(f"设保持至 {hold['until']}（之后偏置 {hold['defer_s']:.0f}s，"
+                     f"{body.reason or '未注明原因'}）")
+        return {"ok": True, "hold": store.hold_summary(), "state": store.state()}
+
+    @app.delete("/api/patrol/hold")
+    def api_hold_clear() -> dict:
+        """解除保持。**不动已偏置的请求**：那条请求的 `not_before` 是它自己的事实。"""
+        store = TriggerStore(dir_path=deps.trigger_dir, now=deps.now)
+        cleared = store.clear_hold()
+        console.note("解除巡检保持" if cleared else "解除保持：本来就没有生效的保持")
+        return {"ok": True, "cleared": cleared, "state": store.state()}
 
     # ---------- 手动控制：会话 / 指令 / 急停（ADR-0013 的语义） ----------
 

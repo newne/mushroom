@@ -126,6 +126,38 @@ python3 -m deploy.m1             # 常驻：每小时第 5 分钟一轮
 | `--camera-ip` | `192.168.1.238` | 全场同一台相机（生成站位表时写入） |
 | `--ip/--port/--device/--lib` | `192.168.1.239/8088/1/环境变量` | 控制器寻址 |
 
+### 4.0 加湿保持与时间偏置：什么时候**晚点**再拍（`patrol_trigger`）
+
+加湿期水汽重，48 张会全过曝、对比度塌掉，判不了长势还白动机架 11 分钟；开蓝光也压不住。
+所以触发要能"晚点再跑"。三条路都在 `console`（:8001），页面"上一轮 / 本轮"卡片里有对应按钮：
+
+```bash
+# 设保持 30 分钟：这期间来的触发一律延后到"结束 + 20 分钟"
+curl -X PUT  localhost:8001/api/patrol/hold -H 'Content-Type: application/json' \
+     -d '{"minutes":30,"reason":"加湿"}'
+# 也可给绝对时刻：{"until":"2026-10-12T16:30:00","defer_s":1200}
+
+curl -X DELETE localhost:8001/api/patrol/hold          # 解除（不动已偏置的请求）
+
+# 单次延后：这一轮晚 1200 秒再跑
+curl -X POST 'localhost:8001/api/patrol/run?by=operator&reason=%E5%8A%A0%E6%B9%BF%E6%9C%9F&defer_s=1200'
+```
+
+`GET /api/patrol/run` 与 `GET /api/status` 的 `trigger` 块给全 `pending / due_at / wait_s /
+hold`——倒计时按**服务器时钟**算，页面不自己猜。
+
+三条硬规则（改这里前先读 `deploy/src/deploy/patrol_trigger.py` 的模块 docstring）：
+
+1. 偏置写在请求文件的 `not_before` 上，**不在 console 内存里**——重启不丢，消费方
+   （`patrol-serve`）到点才 `consume()` 得到。
+2. `STALE_AFTER_S` 必须从 `max(created_at, not_before)` 起算。从 `created_at` 算的话，
+   偏置 20 分钟的请求在第 15 分钟被判过期，随后到的触发会把它**替换成一条立即执行的**——
+   偏置被静默吃掉，页面上看不出任何异常。
+3. 单次 `defer_s` 与保持期**取更大**，不是覆盖：保持是"现在不该拍"的强约束，
+   单次参数只能更晚、不能更早。设保持时会把**已在排队**的请求一起推后。
+
+`defer_s` 上限 1 小时（`MAX_DEFER_S`）：再长不该叫偏置，该去调调度器。
+
 ### 4.1 准入规则：什么时候**不许**动（`room.yaml`）
 
 | 在库天数 | 是否巡检 |
