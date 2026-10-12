@@ -202,7 +202,7 @@ def test_capture_station_sequence_and_metadata():
     meta = sc.run(st, ts=datetime(2026, 8, 30, 8, 0, 0))
 
     assert fmc.events == [("goto", 10.0, -20.0), ("lamp", True, 0), ("lamp", False, 0)]
-    assert meta["object_name"] == "20260830/B01_S01_top45_080000.jpg"
+    assert meta["object_name"] == "20260830/B01_S01_level0_080000.jpg"
     assert meta["yz"] == [10.0, -20.0]
     assert seen_params[0]["ip"] == "192.168.1.231"
     assert meta["cloud_url"].endswith(".jpg")

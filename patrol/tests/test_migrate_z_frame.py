@@ -39,15 +39,15 @@ def write(path, stations):
 
 
 def test_migration_flips_layer_one_to_the_top(tmp_path):
-    """旧 10（底层层心）→ layer_z(1)（新：最上层心 −57）；第 4 层落到最下 −202。"""
+    """旧 10（底层层心）→ layer_z(1)（新：最上层心 −40）；第 4 层落到最下 −195。"""
     path = write(tmp_path / "stations.yaml", old_table())
     retarget_z_in_file(path, log=lambda _m: None)
 
     got = {s.id: s for s in load_stations(path)}
-    assert got["S101"].z == pytest.approx(-57.0)
-    assert got["S201"].z == pytest.approx(-80.0)
-    assert got["S301"].z == pytest.approx(-152.0)
-    assert got["S401"].z == pytest.approx(-202.0)
+    assert got["S101"].z == pytest.approx(-40.0)
+    assert got["S201"].z == pytest.approx(-90.0)
+    assert got["S301"].z == pytest.approx(-145.0)
+    assert got["S401"].z == pytest.approx(-195.0)
     # 层号越大 ⇒ 离顶端原点越远 ⇒ z 越小（更负）
     assert layer_z(1) > layer_z(2) > layer_z(GRID_LAYERS)
     for s in got.values():
@@ -117,7 +117,7 @@ def test_cli_apply_makes_a_backup(tmp_path, capsys):
     backups = list(tmp_path.glob("stations.yaml.bak-z-frame-*"))
     assert len(backups) == 1
     assert load_stations(str(backups[0]))[0].z == pytest.approx(10.0)
-    assert load_stations(path)[0].z == pytest.approx(-57.0)
+    assert load_stations(path)[0].z == pytest.approx(-40.0)
 
 
 def test_cli_reports_a_missing_file(tmp_path, capsys):

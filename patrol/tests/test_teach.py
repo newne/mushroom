@@ -44,8 +44,8 @@ def test_parse_record_full_form():
 
 
 def test_parse_record_with_angle():
-    cmd = parse_teach_command("record S105 B105 1 5 top45")
-    assert cmd.angle == "top45"
+    cmd = parse_teach_command("record S105 B105 1 5 level0")
+    assert cmd.angle == "level0"
 
 
 def test_parse_record_rejects_out_of_range_layer_and_col():
@@ -61,7 +61,7 @@ def test_parse_record_rejects_non_integer_cell_and_unknown_angle():
     with pytest.raises(ValueError, match="整数"):
         parse_teach_command("record S1 B1 一 1")
     with pytest.raises(ValueError, match="角度档"):
-        parse_teach_command("record S1 B1 1 1 top0")   # 一期只有 top45
+        parse_teach_command("record S1 B1 1 1 top0")   # 不在当前 GRID_ANGLES 里
 
 
 def test_parse_record_arity():

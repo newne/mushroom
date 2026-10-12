@@ -26,7 +26,7 @@ def test_grid_size_is_cols_times_layers_times_angles():
     assert len(st) == GRID_COLS * GRID_LAYERS == 48
     assert len({s.id for s in st}) == 48
     assert len({s.box_id for s in st}) == 48      # 每框 1 个站位
-    assert {s.angle_profile for s in st} == {"top45"}
+    assert {s.angle_profile for s in st} == {"level0"}
 
 
 def test_station_ids_read_as_layer_and_col():
@@ -37,9 +37,13 @@ def test_station_ids_read_as_layer_and_col():
 
 
 def test_layer_one_is_at_the_top_and_layer_four_at_the_bottom():
-    """Z 原点在顶端、**向上为正**：第 1 层最靠近 0（顶端），层号越大离原点越远、z 越负。"""
+    """Z 原点在顶端、**向上为正**：第 1 层最靠近 0（顶端），层号越大离原点越远、z 越负。
+
+    2026-10-10 用户重定的**初始锚点**：层心到顶端原点的距离 40 / 90 / 145 / 195mm，
+    层距 50/55/50 **不等分**——这四个数是起点，现场还要按实际取景精修（`patrol-teach`）。
+    """
     assert [layer_z(layer) for layer in range(1, GRID_LAYERS + 1)] == pytest.approx(
-        [-57.0, -80.0, -152.0, -202.0]
+        [-40.0, -90.0, -145.0, -195.0]
     )
     assert layer_z(1) > layer_z(2) > layer_z(GRID_LAYERS)
 
@@ -120,7 +124,7 @@ def test_grid_geometry_matches_the_builder():
     geom = grid_geometry()
     assert geom["cols"] == GRID_COLS and geom["layers"] == GRID_LAYERS
     assert geom["y_pitch"] == pytest.approx(4492 / GRID_COLS)
-    assert geom["z_pitch"] == pytest.approx(145 / 3)
+    assert geom["z_pitch"] == pytest.approx(155 / 3)
     assert (geom["y_min"], geom["y_max"]) == (0.0, 4492.0)
     assert (geom["z_min"], geom["z_max"]) == (-212.0, 0.0)
 

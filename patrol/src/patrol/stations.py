@@ -6,8 +6,8 @@ Y 的原点在左端（靠近电机）；Z 现场要求**回零向上**，原点
 `+Z` 仍向上，从顶端往下走 Z 为负。
 
 现场布局：**横向 12 框 × 竖向 4 层 = 48 个站位，每框 1 个站位**。
-Y 框心按行程间距推导，Z 层心和 C08 横向位置叠加现场抓图标定偏移；
-``build_grid`` 为缺少站位表的新环境生成同一套坐标。
+Y 框心按行程间距推导，Z 层心是用户给定的**初始锚点**（第 1…4 层 z = −40/−90/−145/−195），
+C08 横向位置叠加现场抓图标定偏移；``build_grid`` 为缺少站位表的新环境生成同一套坐标。
 """
 
 from __future__ import annotations
@@ -33,18 +33,31 @@ GRID_LAYERS = 4         # 竖向层数（沿 Z 短行程 −212…0mm，**第 1 
 #     ⇒ 那些站位多数落在"袋身侧面/失焦近景"的相位上，照片对判长势无效。
 #   2026-10-08 按层实拍微调后，层心（当时以"底端原点、向上为正"计）为 10 / 60 / 132 / 155mm。
 #   2026-10-10 原点改到顶端、并把"第 1 层"重新定义成**最上面那层**后，层心到原点的距离
-#   （即 `-(z)`）为 57 / 80 / 152 / 202mm；下表是**距原点距离**上的逐层实拍偏移。
+#   （即 `-(z)`）为 57 / 80 / 152 / 202mm。
 #   完整证据见 docs/patrol/prod-deploy/station-retarget.md §6/§7。
-GRID_LAYER_Z_OFFSETS = (30.5, 0.5, 19.5, 16.5)
+# ⚠️ 2026-10-10（晚）用户重定**初始锚点**：第 1…4 层 `z = −40 / −90 / −145 / −195`，
+#   即层心到顶端原点的距离 40 / 90 / 145 / 195mm（层距 50/55/50，**不等分**）。
+#   这是**起点不是终值**：当前生长阶段（蘑菇未长出菌包）要的是"俯拍看菌包表面"，
+#   长出菌包后要改成"平视看菌杆/菌盖/整体形态"——换角度＝重新固定相机支架，
+#   之后必须**重扫 z**（station-retarget.md §10）。均分格心之上只剩逐层偏移。
+GRID_LAYER_Z_OFFSETS = (13.5, 10.5, 12.5, 9.5)
 GRID_COL_Y_OFFSETS = {8: -80.0}
 GRID_CELL_Y_OFFSETS = {(2, 8): -40.0}
 # 全场**唯一**相机：老系统与 M1 共用同一台（spec §2；现场 2026-09-12 确认 238 无密码）。
 # 收敛成全局常量而不是每站位一个字段——"每框一个 IP"是改造前的假想，实际只有一台。
 CAMERA_IP = "192.168.1.238"
 # 角度档。一期每框 1 个站位 → 单档；Z 的行程已全部让给"选层"，没有余量再切角度。
-# 单档取斜拍 45°（沿用改造前的整定值：一帧同时拿到菌盖直径与菇体长度两个量）。
+# 档位名的含义（改这里等于改**标签**，不改光轴）：
+#   top0    顶拍/俯拍：光轴垂直向下（量菌盖直径、看菌包表面）
+#   top45   侧斜 45°：光轴俯斜（量菇体长度）
+#   level0  平视：光轴近水平（看菌杆/菌盖/整体形态）
+# ⚠️ 2026-10-10 现场确认：支架当前装在**平视**位，所以单档是 level0——旧标签 `top45`
+#   与实物不符，图像索引里的角度档一直是假的（已随 z 重锚一并归一）。
+#   而用户口径要求**按生长阶段换角**：前期（未长出菌包）要**俯拍**看菌包表面，
+#   后期（长出菌包）**平视**即可看菌杆/菌盖/整体形态。两个阶段不是同一个角度，
+#   换阶段＝重新固定相机支架，之后必须同步改这里**并重扫 z**（station-retarget.md §10.3）。
 # 要恢复双档就写成 ("top0", "top45")——站位 id 会自动加角度后缀。
-GRID_ANGLES = ("top45",)
+GRID_ANGLES = ("level0",)
 DEFAULT_ANGLE = GRID_ANGLES[0]
 
 
@@ -54,7 +67,7 @@ class Station:
     box_id: str
     y: float
     z: float
-    angle_profile: str = DEFAULT_ANGLE   # 见 GRID_ANGLES（top0 量盖径 | top45 量菇长）
+    angle_profile: str = DEFAULT_ANGLE   # 见 GRID_ANGLES（top0 顶拍 | top45 斜拍 | level0 平视）
     camera_ip: str = CAMERA_IP           # 全场同一台（见模块顶部的 CAMERA_IP）
     camera_user: str = "admin"
     camera_pwd: str = ""
@@ -87,6 +100,8 @@ def layer_z(layer: int, profile: MotionProfile = M1) -> float:
     """层号 → 该层中心的 Z 坐标（第 1 层在最上，即最靠近 Z 原点 = 顶端）。
 
     以均分格心为基准叠加逐层实拍标定偏移；实际层间距不要求相等。
+    当前锚点（2026-10-10 用户给定）：层心到顶端原点的距离 40 / 90 / 145 / 195mm，
+    即 ``z = −40 / −90 / −145 / −195``（层距 50/55/50）。
 
     从**原点那一侧**起算：Z 的原点在顶端、`+Z` 向上，所以层号越大、离原点越远、z 越小
     （越负）。``distance`` 是该层中心到顶端原点的**距离** mm（为正），坐标取 ``home_position − distance``。
@@ -290,6 +305,80 @@ def retarget_z_in_file(path: str, *, out: str | None = None,
     log(f"Z 框架迁移：{path} → {out or path}，{len(migrated)} 个站位（按层号重算 z，"
         "第 1 层改为最上；层心位置集合不变）")
     return len(migrated)
+
+
+# ---------- Z 重锚：按当前层心刷新已落盘的表（2026-10-10） ----------
+
+
+def reanchor_z_in_file(path: str, *, out: str | None = None,
+                       log: Callable[[str], None] = print) -> int:
+    """把站位表的 ``z`` 重算成**当前的层心锚点**（`layer_z`），返回改动数。
+
+    与 `retarget_z_in_file` 的分工：那个迁的是**坐标框架**（原点从底端搬到顶端、
+    第 1 层翻到最上），一辈子只用一次；这个迁的是**锚点数值**——框架没变，
+    只是用户重新定了初始锚点（2026-10-10：−40/−90/−145/−195，见 `GRID_LAYER_Z_OFFSETS`）。
+
+    为什么必须有它：改 `GRID_LAYER_Z_OFFSETS` **不会**重算已经落盘的站位表
+    （`station-retarget.md` §2 记着这个坑）——库里的 `configs/stations.yaml` 会继续
+    按旧锚点跑，看起来就像"改了没生效"。框架迁移同理，所以两条路都在这里。
+
+    做四件事：
+
+    1. ``z`` 按层号重算（``z = layer_z(layer)``）；
+    2. ``trim_z`` **清零**——它是相对**旧锚点**学到的（`Station.trim_z` 的语义是
+       "叠在锚点上的小量"），锚点一换就失去意义，留着只会把新锚点悄悄推偏；
+    3. ``y`` / ``trim_y`` / id / 相机与标定字段**原样保留**——横向装配误差与层锚点无关；
+    4. 单角度档时把 ``angle_profile`` 归一成 ``DEFAULT_ANGLE``——标签必须和实物一致
+       （现场确认支架是**平视**，而表里还留着历史的 ``top45``）。多档配置下**不动**：
+       那张表本来就该有多个档，全刷成一个等于偷偷把双档改成单档。
+
+    **不需要重新回零**：坐标框架没动（原点还在顶端、行程还是 −212…0），
+    动的只是目标值。这一点与 Z 框架迁移正相反，别照那次的开机清单做。
+
+    防呆：表里每个站位都得带层号（``layer`` 为 0 的示教残留没有层，无从按层重算），
+    否则报错并把 id 列出来，而不是跳过——跳过等于"悄悄少改几个站"。
+    """
+    stations = load_stations(path)
+    if not stations:
+        raise ValueError(f"{path} 里没有站位，不重锚")
+    unknown = [s.id for s in stations if not s.layer]
+    if unknown:
+        raise ValueError(
+            f"{path} 里有 {len(unknown)} 个站位没有层号（{unknown[:3]}…），"
+            "无从按层重算 z——用 patrol-teach record 补上层号/框号再来"
+        )
+
+    single_angle = len(GRID_ANGLES) == 1
+    moved = 0
+    out_stations: list[Station] = []
+    for s in stations:
+        z = layer_z(s.layer)
+        note = s.trim_note
+        if s.trim_z:
+            log(f"  {s.id}: trim_z {s.trim_z:+.1f} → 0.0（相对旧锚点学到的微调，随重锚作废）")
+            if s.trim_y:
+                log(f"      trim_note 原样保留：它还说明 trim_y={s.trim_y:+.1f} 的来历")
+            else:
+                note = ""
+        if single_angle and s.angle_profile != DEFAULT_ANGLE:
+            log(f"  {s.id}: 角度档 {s.angle_profile} → {DEFAULT_ANGLE}"
+                "（标签与现场支架不一致，一并归一）")
+        changed = abs(z - s.z) > 1e-6 or s.trim_z or (
+            single_angle and s.angle_profile != DEFAULT_ANGLE)
+        if changed:
+            moved += 1
+        out_stations.append(replace(
+            s,
+            z=z,
+            angle_profile=DEFAULT_ANGLE if single_angle else s.angle_profile,
+            trim_z=0.0,
+            trim_note=note,
+        ))
+
+    save_stations(out_stations, out or path)
+    log(f"Z 重锚：{path}，{len(out_stations)} 个站位按层号重算 z"
+        f"（{moved} 个站位有改动；框架未变，不需要重新回零）")
+    return moved
 
 
 # ---------- 标定字段 ----------

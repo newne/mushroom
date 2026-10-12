@@ -342,7 +342,7 @@ def test_image_index_rows_carry_room_time_and_position(tmp_path):
     # 站位与拍照位置
     assert row["station_id"] == "S101" and row["box_id"] == "B101"
     assert row["yz"] == [187.17, -21.2]
-    assert row["angle_profile"] == "top45"
+    assert row["angle_profile"] == "level0"
     # 照片去向（MinIO）
     assert row["object_name"].endswith(".jpg")
 
