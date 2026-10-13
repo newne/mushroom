@@ -173,7 +173,7 @@ def test_ranges_reads_materialized_table(client, db_path):
         rows.append({"ts": ts, "box_id": "B01", "mean_len_mm": 10.0 + i})
         upsert_environment(conn, [{"ts": ts, "zone": "room1",
                                    "temp_c": 22.0 + (i % 2) * 4.0,
-                                   "rh_pct": 85.0, "co2_ppm": 800.0, "light_lux": 100.0}])
+                                   "rh_pct": 85.0, "co2_ppm": 800.0, "lamp_state": 2.0}])
     from analysis.db import insert_measurements
 
     insert_measurements(conn, rows)

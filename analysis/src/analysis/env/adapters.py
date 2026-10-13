@@ -21,7 +21,14 @@ class EnvRow:
     temp_c: float | None = None
     rh_pct: float | None = None
     co2_ppm: float | None = None
-    light_lux: float | None = None
+    #: 补光灯**设备状态**（0=自动 1=手动 2=停止 3=关闭），不是照度也不是点亮信号（ADR-0021）
+    lamp_state: float | None = None
+    #: 循环补光参数：**四个原值都要**，因为现场口径是"开几秒 / 停约两小时"，
+    #: 秒档（OnSSet/OffSSet）与分档（OnMSet/OffMSet）同时在用（2026-10-12 用户口径）。
+    lamp_on_s: float | None = None
+    lamp_off_s: float | None = None
+    lamp_on_m: float | None = None
+    lamp_off_m: float | None = None
 
 
 class EnvSource(Protocol):
@@ -35,7 +42,7 @@ def _to_float(v) -> float | None:
 
 
 class CsvEnvSource:
-    """读取目录下的 CSV 文件（列：ts,zone,temp_c,rh_pct,co2_ppm,light_lux）。
+    """读取目录下的 CSV 文件（列：ts,zone,temp_c,rh_pct,co2_ppm,lamp_state）。
 
     现场接口确认前的默认通道：环控系统若只能导出/落盘 CSV，用本适配器接入。
     """
@@ -59,7 +66,7 @@ class CsvEnvSource:
                             temp_c=_to_float(rec.get("temp_c")),
                             rh_pct=_to_float(rec.get("rh_pct")),
                             co2_ppm=_to_float(rec.get("co2_ppm")),
-                            light_lux=_to_float(rec.get("light_lux")),
+                            lamp_state=_to_float(rec.get("lamp_state")),
                         )
                     )
         return rows
@@ -102,7 +109,7 @@ class HttpEnvSource:
                 temp_c=_to_float(it.get("temp_c")),
                 rh_pct=_to_float(it.get("rh_pct")),
                 co2_ppm=_to_float(it.get("co2_ppm")),
-                light_lux=_to_float(it.get("light_lux")),
+                lamp_state=_to_float(it.get("lamp_state")),
             )
             for it in items
         ]

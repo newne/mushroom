@@ -2,26 +2,37 @@
 
 用法::
 
-    python -m analysis.env_ingest --db data.db --source csv --path ./env_csv --interval 300
-    python -m analysis.env_ingest --db data.db --source csv --path ./env_csv --once
+    python -m analysis.env.ingest --db data.db --source csv --path ./env_csv --interval 300
+    python -m analysis.env.ingest --db data.db --source csv --path ./env_csv --once
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import time
 
 from analysis.db import connect, upsert_environment
 from analysis.env.adapters import CsvEnvSource, EnvSource, HttpEnvSource
+from analysis.env.tdengine import TdengineEnvSource
+from analysis.environment import aggregate_hourly
+
+
+def hour_start(ts: str) -> str:
+    return ts[:13] + ":00:00"
 
 
 def run_once(conn, source: EnvSource, since_ts: str | None = None) -> str | None:
-    """拉取一批环境数据入库，返回本批最大 ts（作为增量游标）。"""
+    """拉一批采样、折成小时聚合入库，返回下一轮的游标。
+
+    **游标退到整点**：一小时的聚合必须由该小时的全部采样算出来。若只拉"游标之后"的
+    新增行，当前这个小时的均值会被算小——每次都从头重算这一小时（最多 60 行）才对。
+    """
     rows = source.fetch_since(since_ts)
     if not rows:
         return since_ts
-    upsert_environment(conn, [r.__dict__ for r in rows])
-    return max(r.ts for r in rows)
+    upsert_environment(conn, aggregate_hourly([r.__dict__ for r in rows]))
+    return hour_start(max(r.ts for r in rows))
 
 
 def loop(conn, source: EnvSource, *, interval_s: float = 300.0, max_cycles: int | None = None) -> None:
@@ -39,9 +50,14 @@ def loop(conn, source: EnvSource, *, interval_s: float = 300.0, max_cycles: int 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="环境数据定时入库（票 03）")
     p.add_argument("--db", required=True, help="SQLite 路径")
-    p.add_argument("--source", choices=["csv", "http"], default="csv")
+    p.add_argument("--source", choices=["csv", "http", "tdengine"], default="csv")
     p.add_argument("--path", help="csv 源目录")
-    p.add_argument("--url", help="http 源地址")
+    p.add_argument("--url", help="http 源地址；tdengine 源给 REST 根地址，如 http://127.0.0.1:6041")
+    p.add_argument("--database", default="data1", help="tdengine 库名")
+    p.add_argument("--rooms", help="tdengine 源要拉的库房号，逗号分隔；默认四个都拉")
+    p.add_argument("--user", default=os.environ.get("TDENGINE_USER", "root"))
+    p.add_argument("--password", default=os.environ.get("TDENGINE_PASSWORD", "taosdata"))
+    p.add_argument("--lookback", type=float, default=120.0, help="无游标时的回溯分钟数")
     p.add_argument("--interval", type=float, default=300.0, help="轮询间隔秒")
     p.add_argument("--once", action="store_true", help="只拉取一次后退出")
     args = p.parse_args(argv)
@@ -51,10 +67,21 @@ def main(argv: list[str] | None = None) -> None:
         if not args.path:
             p.error("--source csv 需要 --path")
         source = CsvEnvSource(args.path)
-    else:
+    elif args.source == "http":
         if not args.url:
             p.error("--source http 需要 --url")
         source = HttpEnvSource(args.url)
+    else:
+        if not args.url:
+            p.error("--source tdengine 需要 --url")
+        source = TdengineEnvSource(
+            args.url,
+            database=args.database,
+            rooms=[r.strip() for r in args.rooms.split(",")] if args.rooms else None,
+            user=args.user,
+            password=args.password,
+            lookback_minutes=int(args.lookback),
+        )
 
     conn = connect(args.db)
     if args.once:

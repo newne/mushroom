@@ -5,13 +5,26 @@ from __future__ import annotations
 import sqlite3
 
 SCHEMA = """
+-- 环境表存的是**小时聚合**，不是原始分钟序列（2026-10-12 定）。
+-- 原始序列的权威在 TDengine，需要分钟级时按窗口现取（`GET /environment?granularity=raw`）；
+-- 库里只留界面与分析真正要用的指标，69k 行原始点里绝大部分是没人看的。
 CREATE TABLE IF NOT EXISTS environment (
-  ts        TEXT NOT NULL,          -- ISO8601
-  zone      TEXT NOT NULL,          -- 库房/分区标识
-  temp_c    REAL,
-  rh_pct    REAL,
-  co2_ppm   REAL,
-  light_lux REAL,
+  ts         TEXT NOT NULL,          -- 整点（本地时间，与 rounds/images 同口径）
+  zone       TEXT NOT NULL,          -- 库房号（611/612/607/608），不是自由文本
+  temp_c     REAL, temp_min REAL, temp_max REAL,
+  rh_pct     REAL, rh_min   REAL, rh_max   REAL,
+  co2_ppm    REAL, co2_min  REAL, co2_max  REAL,
+  -- 补光灯**设备状态**：0=自动 1=手动 2=停止 3=关闭（ADR-0021）。分类量，取该小时众数，
+  -- 不是"灯亮没亮"。
+  lamp_state REAL,
+  -- 循环补光：开 OnSSet 秒 / 停 OffSSet 秒（该小时最后一次设定），
+  -- lamp_on_min = 该小时采样点数 × 占空比 ——"点亮分钟"是**设定量**，不是照度（ADR-0021）。
+  lamp_on_s   REAL,
+  lamp_off_s  REAL,
+  lamp_on_m   REAL,
+  lamp_off_m  REAL,
+  lamp_on_min REAL,
+  n          INTEGER,                -- 该小时实际采样点数：60 = 完整，不足即断档
   PRIMARY KEY (ts, zone)
 );
 
@@ -66,9 +79,35 @@ CREATE TABLE IF NOT EXISTS images (
   PRIMARY KEY (ts, station_id, angle_profile)
 );
 
+-- 操作日志：环控平台的命令审计（谁、何时、把哪个点改成什么）。
+-- **逐条留，不聚合**：一天几十条，事件本身就是最小有意义单位（见 analysis/audit.py 顶部）。
+CREATE TABLE IF NOT EXISTS operations (
+  ts          TEXT NOT NULL,       -- 操作时刻（本地 ISO8601）
+  device_code TEXT NOT NULL,
+  point_code  TEXT NOT NULL,
+  zone        TEXT,                -- 库房号，由设备号前缀推出
+  device_name TEXT,
+  point_name  TEXT,
+  value       TEXT,                -- 改成的值（字符串：可能是枚举/开关量）
+  operator    TEXT,
+  source      TEXT,                -- 现场 / 远程 …
+  content     TEXT,                -- 平台给的一句话（"加湿开启设定[5]"）
+  PRIMARY KEY (ts, device_code, point_code)
+);
+
+-- 批次台账（来自生产库 `mogu.mo_gu_batch`）。批次边界只能来自这里：
+-- 环境数据是连续采集的，换批不会让传感器停，"按断档切段"在真机上被证否（2026-10-12）。
+CREATE TABLE IF NOT EXISTS batches (
+  room_id    TEXT NOT NULL,
+  entry_date TEXT NOT NULL,        -- 入库日期 YYYY-MM-DD
+  batch_no   TEXT,                 -- mogu-<id>
+  batch_id   TEXT,
+  PRIMARY KEY (room_id, entry_date)
+);
+
 CREATE TABLE IF NOT EXISTS ranges (
   stage        TEXT NOT NULL,      -- 生长阶段（按菇体长度分段）
-  param        TEXT NOT NULL,      -- temp_c / rh_pct / co2_ppm / light_lux
+  param        TEXT NOT NULL,      -- temp_c / rh_pct / co2_ppm / lamp_on_min
   lo           REAL,
   hi           REAL,
   rate_mm_per_h REAL,
@@ -102,7 +141,51 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "entry_date": "TEXT",
         "batch_no": "TEXT",
     },
+    # 循环补光（2026-10-12）：加列即可，不用重建——老行这三列留空表示"那时还没采这个量"，
+    # 比编一个 0 诚实（0 会被读成"补光为零"）。
+    "environment": {
+        "lamp_on_s": "REAL",
+        "lamp_off_s": "REAL",
+        "lamp_on_m": "REAL",
+        "lamp_off_m": "REAL",
+        "lamp_on_min": "REAL",
+    },
 }
+
+
+#: 改过名的列。老库是长期存在的，改名必须就地做（SQLite ≥ 3.25 支持 RENAME COLUMN）。
+#: `environment.light_lux` 当时是空表，改名不动任何数据（ADR-0021）。
+RENAMED_COLUMNS: dict[str, dict[str, str]] = {
+    "environment": {"light_lux": "lamp_state"},
+}
+
+
+def _rename_columns(conn: sqlite3.Connection) -> list[str]:
+    renamed: list[str] = []
+    for table, mapping in RENAMED_COLUMNS.items():
+        have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for old, new in mapping.items():
+            if old in have and new not in have:
+                conn.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+                renamed.append(f"{table}.{old}→{new}")
+    if renamed:
+        conn.commit()
+    return renamed
+
+
+def _rebuild_environment(conn: sqlite3.Connection) -> list[str]:
+    """老库的 environment 是**逐分钟原始行**（2026-10-12 之前），现在只留小时聚合。
+
+    两种形状加列兼容不了（原始行没有 min/max，聚合行也不该混进原始点），所以直接重建。
+    敢 drop 的理由：这张表里全是**可再生的派生数据**，原始序列在 TDengine，重跑一次
+    ingest 就回来了。重建后立刻按新 schema 建表。"""
+    have = {row[1] for row in conn.execute("PRAGMA table_info(environment)")}
+    if not have or {"temp_min", "n"} <= have:
+        return []
+    conn.execute("DROP TABLE environment")
+    conn.executescript(SCHEMA)
+    conn.commit()
+    return ["environment(重建：原始分钟行 → 小时聚合)"]
 
 
 def migrate(conn: sqlite3.Connection) -> list[str]:
@@ -112,8 +195,12 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
     历史行就保持"库房未知"——这比编一个默认值诚实。幂等，每次启动跑一遍。
     """
     added: list[str] = []
+    added.extend(_rebuild_environment(conn))
+    added.extend(_rename_columns(conn))
     for table, columns in ADDED_COLUMNS.items():
         have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not have:
+            continue      # 表还不存在：建表阶段会按当前 schema 建，这里不用补列
         for name, ddl in columns.items():
             if name not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
@@ -124,12 +211,117 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
 
 
 def upsert_environment(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    """按 (ts, zone) 覆盖写。行允许缺字段（按 NULL 入库）——同一小时的聚合会随
+    新采样到达被重算并覆盖，所以键在 (ts, zone) 上而不是追加。"""
+    cols = ", ".join(ENVIRONMENT_FIELDS)
+    marks = ", ".join(f":{f}" for f in ENVIRONMENT_FIELDS)
     conn.executemany(
-        "INSERT OR REPLACE INTO environment (ts, zone, temp_c, rh_pct, co2_ppm, light_lux) "
-        "VALUES (:ts, :zone, :temp_c, :rh_pct, :co2_ppm, :light_lux)",
-        rows,
+        f"INSERT OR REPLACE INTO environment ({cols}) VALUES ({marks})",
+        [{f: row.get(f) for f in ENVIRONMENT_FIELDS} for row in rows],
     )
     conn.commit()
+
+
+ENVIRONMENT_FIELDS = (
+    "ts", "zone",
+    "temp_c", "temp_min", "temp_max",
+    "rh_pct", "rh_min", "rh_max",
+    "co2_ppm", "co2_min", "co2_max",
+    "lamp_state", "lamp_on_s", "lamp_off_s", "lamp_on_m", "lamp_off_m",
+    "lamp_on_min", "n",
+)
+
+
+def fetch_environment(
+    conn: sqlite3.Connection,
+    *,
+    zone: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> list[dict]:
+    """按库房与时间窗取实测序列（升序）。时间窗是含端点的 ISO8601 前缀比较。"""
+    sql = f"SELECT {', '.join(ENVIRONMENT_FIELDS)} FROM environment"
+    where: list[str] = []
+    params: list = []
+    for field, value, op in (("zone", zone, "="), ("ts", start, ">="), ("ts", end, "<=")):
+        if value:
+            where.append(f"{field} {op} ?")
+            params.append(value)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY ts"
+    cur = conn.execute(sql, params)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+OPERATION_FIELDS = (
+    "ts", "zone", "device_code", "device_name", "point_code", "point_name",
+    "value", "operator", "source", "content",
+)
+
+
+def upsert_operations(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    """同一 (时刻, 设备, 点位) 覆盖写：重拉同一窗口不会翻倍。"""
+    cols = ", ".join(OPERATION_FIELDS)
+    marks = ", ".join(f":{f}" for f in OPERATION_FIELDS)
+    conn.executemany(
+        f"INSERT OR REPLACE INTO operations ({cols}) VALUES ({marks})",
+        [{f: row.get(f) for f in OPERATION_FIELDS} for row in rows],
+    )
+    conn.commit()
+
+
+def fetch_operations(
+    conn: sqlite3.Connection,
+    *,
+    zone: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    limit: int | None = None,
+) -> list[dict]:
+    """按库房与时间窗取操作日志，最新在前。"""
+    sql = f"SELECT {', '.join(OPERATION_FIELDS)} FROM operations"
+    where: list[str] = []
+    params: list = []
+    for field, value, op in (("zone", zone, "="), ("ts", start, ">="), ("ts", end, "<=")):
+        if value:
+            where.append(f"{field} {op} ?")
+            params.append(value)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY ts DESC, device_code"
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    cur = conn.execute(sql, params)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+BATCH_FIELDS = ("room_id", "entry_date", "batch_no", "batch_id")
+
+
+def upsert_batches(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    cols = ", ".join(BATCH_FIELDS)
+    marks = ", ".join(f":{f}" for f in BATCH_FIELDS)
+    conn.executemany(
+        f"INSERT OR REPLACE INTO batches ({cols}) VALUES ({marks})",
+        [{f: row.get(f) for f in BATCH_FIELDS} for row in rows],
+    )
+    conn.commit()
+
+
+def fetch_batches(conn: sqlite3.Connection, *, room_id: str | None = None) -> list[dict]:
+    sql = f"SELECT {', '.join(BATCH_FIELDS)} FROM batches"
+    params: list = []
+    if room_id:
+        sql += " WHERE room_id = ?"
+        params.append(room_id)
+    sql += " ORDER BY room_id, entry_date"
+    cur = conn.execute(sql, params)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
 MEASUREMENT_FIELDS = (

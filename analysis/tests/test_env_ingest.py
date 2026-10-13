@@ -3,7 +3,7 @@ from analysis.db import connect, upsert_environment
 from analysis.env.adapters import CsvEnvSource, HttpEnvSource
 from analysis.env.ingest import run_once
 
-CSV_HEADER = "ts,zone,temp_c,rh_pct,co2_ppm,light_lux\n"
+CSV_HEADER = "ts,zone,temp_c,rh_pct,co2_ppm,lamp_state\n"
 
 
 @pytest.fixture
@@ -53,14 +53,14 @@ def test_http_source_parse():
     payload = {
         "rows": [
             {"ts": "2026-08-30T10:00:00", "zone": "room1", "temp_c": "25.5",
-             "rh_pct": "", "co2_ppm": None, "light_lux": 300},
+             "rh_pct": "", "co2_ppm": None, "lamp_state": 2},
         ]
     }
     rows = HttpEnvSource._parse(payload)
     assert len(rows) == 1
     assert rows[0].temp_c == 25.5
     assert rows[0].rh_pct is None
-    assert rows[0].light_lux == 300
+    assert rows[0].lamp_state == 2.0
 
 
 def test_http_source_parse_bare_list():
@@ -91,10 +91,10 @@ def test_upsert_environment_overwrites(tmp_path):
     conn = connect(str(tmp_path / "t.db"))
     upsert_environment(conn, [
         {"ts": "t1", "zone": "z", "temp_c": 20.0, "rh_pct": None,
-         "co2_ppm": None, "light_lux": None},
+         "co2_ppm": None, "lamp_state": None},
     ])
     upsert_environment(conn, [
         {"ts": "t1", "zone": "z", "temp_c": 21.0, "rh_pct": None,
-         "co2_ppm": None, "light_lux": None},
+         "co2_ppm": None, "lamp_state": None},
     ])
     assert read_env(conn) == [("t1", "z", 21.0)]

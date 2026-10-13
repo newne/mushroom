@@ -16,7 +16,8 @@ def make_data():
     for i, ts in enumerate(hours):
         temp = 20 + (i % 4) * 3  # 20,23,26,29 循环 → 温区各 12 小时
         env_rows.append({"ts": ts.isoformat(), "temp_c": float(temp),
-                         "rh_pct": 85.0, "co2_ppm": 800.0, "light_lux": 100.0})
+                         "rh_pct": 85.0, "co2_ppm": 800.0, "lamp_state": 2.0,
+                         "lamp_on_min": 30.0})
 
     # 每小时一个框的一条测量：level 累积，增速取决于上一小时的温度
     measure_rows = []
@@ -64,5 +65,6 @@ def test_stage_bucketing():
 
 def test_empty_inputs_yield_no_ranges():
     empty_m = pd.DataFrame(columns=["ts", "box_id", "mean_len_mm"])
-    empty_e = pd.DataFrame(columns=["ts", "temp_c", "rh_pct", "co2_ppm", "light_lux"])
+    empty_e = pd.DataFrame(columns=["ts", "temp_c", "rh_pct", "co2_ppm", "lamp_state",
+                                    "lamp_on_min"])
     assert best_ranges(align(hourly_rates(empty_m), empty_e)) == []

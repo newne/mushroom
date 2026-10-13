@@ -73,6 +73,52 @@ const GROWTH = [
     verdict_text: '比上一个时间点长 2.8 mm（+9.9%），在长' },
 ];
 
+// 环境模式用：两个小时点，补光一个是"停止"(2) 一个是"关闭"(3)。
+// 分类量走色带，不走折线——对它求平均没有意义（ADR-0021）。
+const ENV_ROWS = [
+  { ts: '2026-10-12T14:00:00', zone: '611', temp_c: 19.6, rh_pct: 92.4, co2_ppm: 1620.0, lamp_state: 2.0,
+    lamp_on_min: 20.0, lamp_on_s: 20.0, lamp_off_s: 40.0, n: 60 },
+  { ts: '2026-10-12T15:00:00', zone: '611', temp_c: 19.9, rh_pct: 92.5, co2_ppm: 1639.0, lamp_state: 3.0,
+    lamp_on_min: 20.0, lamp_on_s: 20.0, lamp_off_s: 40.0, n: 60 },
+];
+const ENV_SUMMARY = {
+  zone: '611', n: 120, first_ts: '2026-10-12T14:00:00', last_ts: '2026-10-12T15:00:00',
+  params: {
+    temp_c: { min: 19.6, q25: 19.7, median: 19.8, q75: 19.9, max: 19.9, count: 120 },
+    rh_pct: { min: 92.4, q25: 92.4, median: 92.5, q75: 92.5, max: 92.5, count: 120 },
+    co2_ppm: { min: 1620.0, q25: 1630.0, median: 1630.0, q75: 1639.0, max: 1639.0, count: 120 },
+  },
+  lamp_states: { '2': 60, '3': 60 }, gaps: [], sources_missing: [],
+  lamp: { on_min_total: 40.0, on_min_per_hour: 20.0, on_s: 20.0, off_s: 40.0,
+          on_m: null, off_m: null, on_effective_s: 20.0, off_effective_s: 40.0, duty: 0.333333 },
+};
+
+// 操作日志：运行经验的原始记录（谁把哪个点改成了什么）。
+const OPS_ROWS = [
+  { ts: '2026-10-12T10:10:00', zone: '607', device_code: 'TD1_Q3MDHUM02',
+    device_name: '607库-右加湿器', point_code: 'On', point_name: '加湿开启设定',
+    value: '5', operator: '现场操作员', source: '现场', content: '加湿开启设定[5]' },
+];
+const OPS_SUMMARY = { n: 1, first_ts: '2026-10-12T10:10:00', last_ts: '2026-10-12T10:10:00',
+  by_day: { '2026-10-12': 1 }, by_device: { '607库-右加湿器': 1 },
+  by_point: { '加湿开启设定': 1 }, by_operator: { '现场操作员': 1 }, by_zone: { '607': 1 } };
+
+// 批次对比：按断档切段，最新在前
+const BATCHES = [
+  { batch_no: 'mogu-107', entry_date: '2026-09-30',
+    start: '2026-09-30T00:00:00', end: '2026-10-12T17:00:00', hours: 290, samples: 17279, days: 12.1,
+    params: { temp_c: { mean: 19.7, min: 18.0, median: 19.8, max: 21.0 },
+              rh_pct: { mean: 92.3, min: 90.0, median: 92.3, max: 94.0 },
+              co2_ppm: { mean: 1800.0, min: 1500.0, median: 1780.0, max: 2200.0 } },
+    lamp: { lamp_on_s: 2.0, lamp_off_s: 0.0, lamp_on_m: 0.0, lamp_off_m: 120.0, on_min_total: 5.0 } },
+  { batch_no: 'mogu-103', entry_date: '2026-09-17',
+    start: '2026-09-17T00:00:00', end: '2026-09-29T23:00:00', hours: 300, samples: 17800, days: 12.5,
+    params: { temp_c: { mean: 20.4, min: 19.0, median: 20.4, max: 22.0 },
+              rh_pct: { mean: 91.0, min: 89.0, median: 91.0, max: 93.0 },
+              co2_ppm: { mean: 1650.0, min: 1400.0, median: 1640.0, max: 2000.0 } },
+    lamp: { lamp_on_s: 0.0, lamp_off_s: 0.0, lamp_on_m: 5.0, lamp_off_m: 120.0, on_min_total: 700.0 } },
+];
+
 const state = {
   calls: [],                                  // {method, url, body}
   estop: false,
@@ -83,6 +129,9 @@ const state = {
   patrol_active: false,
   reject_cmd: null,                           // 覆盖 POST /api/cmd 的状态码（测拒绝显示）
   growth_error: false,                        // 让 /api/growth 回"prod 查不到"
+  env_error: false,                           // 让 /api/environment 回"prod 查不到"
+  env_empty: false,                           // 让 /api/environment 回"窗口内没有数据"
+  ops_error: false,                           // 让 /api/operations 回"prod 查不到"
   preview_down: false,                        // 让 /api/preview/status 回"预览服务连不上"
   preview_frame_age: 0.4,                     // 上游"最新一帧多久之前"（>3 秒 = 卡住）
   preview_frames: 42,                         // 上游累计帧计数（只增不减；页面只拿它算 fps 差值）
@@ -211,6 +260,27 @@ function route(method, url, body) {
     if (state.growth_error) return json(200, { ok: false, error: 'prod 查询失败：不通', points: [] });
     return json(200, { ok: true, box_id: 'B102', points: GROWTH,
                        latest: GROWTH[GROWTH.length - 1] });
+  }
+  if (path === '/api/environment') {
+    if (state.env_error) return json(200, { ok: false, error: 'prod 查询失败：不通', rows: [] });
+    if (state.env_empty) return json(200, { ok: true, granularity: 'hour', rows: [] });
+    return json(200, { ok: true, granularity: 'hour', rows: ENV_ROWS });
+  }
+  if (path === '/api/environment/summary') {
+    if (state.env_error) return json(200, { ok: false, error: 'prod 查询失败：不通', params: {} });
+    if (state.env_empty) {
+      return json(200, { ok: true, n: 0, params: {}, lamp_states: {}, gaps: [],
+                         sources_missing: ['temp_c', 'rh_pct', 'co2_ppm', 'lamp_state'] });
+    }
+    return json(200, Object.assign({ ok: true }, ENV_SUMMARY));
+  }
+  if (path === '/api/environment/batches') {
+    return json(200, { ok: true, zone: '611', batches: BATCHES,
+                       data_from: '2026-09-17T10:00:00', data_to: '2026-10-12T18:00:00' });
+  }
+  if (path === '/api/operations') {
+    if (state.ops_error) return json(200, { ok: false, error: 'prod 查询失败：不通', rows: [] });
+    return json(200, { ok: true, rows: OPS_ROWS, summary: OPS_SUMMARY });
   }
   if (path === '/api/preview/status') {
     // 与 deploy/console.py 的 /api/preview/status 同形状：available + 拒绝理由 + 上游健康
@@ -532,6 +602,74 @@ const lastCmd = () => {
   check('未选站位时不画曲线', T('#curve').includes('选一个站位'), T('#curve'));
   await click('#modeSeg [data-mode="realtime"]');
   check('切回实时模式：操作区回来', $('#rtcol').style.display === '' && $('#rtmain').style.display === '');
+
+// 1c. 环境模式：实测参数为主线；同样不占相机（与历史模式一样的让位规矩）
+await click('#modeSeg [data-mode="env"]');
+await sleep(250);
+check('环境模式：中栏换成实测环境、右栏换成统计',
+      $('#envmain').style.display === '' && $('#rtmain').style.display === 'none'
+      && $('#envcol').style.display === '' && $('#rtcol').style.display === 'none',
+      [$('#envmain').style.display, $('#rtmain').style.display].join(' / '));
+// 用 '/api/environment?' 精确匹配，别把 /api/environment/batches 也捞进来
+const envCall = state.calls.filter(c => c.url.includes('/api/environment?')).pop();
+check('环境模式：按小时粒度取数、带上库房号',
+      !!envCall && envCall.url.includes('granularity=hour') && envCall.url.includes('zone=611'),
+      envCall ? envCall.url : '(没有发请求)');
+check('环境模式：三条实测曲线（温/湿/CO₂ 各一根轴；补光不再画状态色带）',
+      !!$('#envchart svg') && document.querySelectorAll('#envchart svg path').length === 3
+      && document.querySelectorAll('#envchart svg rect').length === 0,
+      document.querySelectorAll('#envchart svg path').length + ' path / '
+      + document.querySelectorAll('#envchart svg rect').length + ' rect');
+check('环境模式：补光色带已去掉，改为卡片里的四个实际参数',
+      T('#envlight').includes('OnSSet') && T('#envlight').includes('OffMSet'),
+      T('#envlight').slice(0, 50));
+check('环境模式：统计面板给出分位数与样本数',
+      T('#envsummary').includes('19.8') && T('#envsummary').includes('120'),
+      T('#envsummary').slice(0, 50));
+check('环境模式：补光状态显示成语义（2=停止、3=关闭），不显示裸数字',
+      T('#envlight').includes('停止') && T('#envlight').includes('关闭'), T('#envlight'));
+check('环境模式：补光给出折算周期与点亮分钟（并标它是推算，不是照度）',
+      T('#envlight').includes('开 20 秒') && T('#envlight').includes('占空比 33.3')
+      && T('#envlight').includes('折算点亮'), T('#envlight'));
+check('环境模式：补光卡片标出四个原值，数不对时能一眼看出是哪一侧',
+      T('#envlight').includes('开启秒设定') && T('#envlight').includes('关闭分设定'),
+      T('#envlight').slice(0, 60));
+check('环境模式：操作记录列出"谁把哪个点改成了什么"',
+      T('#envops').includes('607库-右加湿器') && T('#envops').includes('加湿开启设定')
+      && T('#envops').includes('5'), T('#envops').slice(0, 60));
+check('环境模式：批次对比按台账批次号列出当前与前一批的实际参数',
+      T('#envbatches').includes('mogu-107') && T('#envbatches').includes('（当前）')
+      && T('#envbatches').includes('mogu-103') && T('#envbatches').includes('19.7'),
+      T('#envbatches').slice(0, 90));
+check('环境模式：批次对比说明数据覆盖起点（更早的批次只有窗口没有数据）',
+      T('#batchnote').includes('环境数据自 2026-09-17'), T('#batchnote').slice(0, 60));
+check('环境模式：批次对比显示各批次的补光周期（秒档与分档都认）',
+      T('#envbatches').includes('开 2 秒') && T('#envbatches').includes('停 120 分'),
+      T('#envbatches').slice(-60));
+check('环境模式：没有区间表就直说，不编一个"最优"出来',
+      T('#batchnote').includes('05 号票') && T('#batchnote').includes('ranges'), T('#batchnote').slice(0, 60));
+check('环境模式：左栏站位表让位（单列看数据）',
+      document.querySelector('main').classList.contains('envmode')
+      && window.getComputedStyle(document.querySelector('main>section:first-child')).display === 'none',
+      document.querySelector('main').className);
+check('环境模式：操作记录给出按天计数与操作人',
+      T('#opsstat').includes('10-12 1 次') && T('#opsstat').includes('现场操作员'), T('#opsstat'));
+await click('#modeSeg [data-mode="realtime"]');
+await sleep(200);
+check('切回实时模式：环境区让位', $('#envmain').style.display === 'none' && $('#rtmain').style.display === '');
+
+// 「这段时间没人操作」与「问不到 prod」必须分得开——前者是有用的结论，后者要排障
+state.ops_error = true;
+await click('#modeSeg [data-mode="env"]');
+await sleep(250);
+check('环境模式：操作记录取不到时如实说，不拿"没人操作"顶替',
+      T('#envops').includes('取不到') && T('#opsstat').includes('prod'),
+      T('#envops') + ' / ' + T('#opsstat'));
+state.ops_error = false;
+await click('#modeSeg [data-mode="realtime"]');
+await sleep(150);
+
+
 
   // 2. 接管 → 解锁
   await click('#takebtn');

@@ -20,6 +20,8 @@
 | `GET /api/status`、`/api/room`、`/api/stations`、`/api/grid` | 实时状态 |
 | `GET /api/images?station_id=`、`/api/events` | 历史图像与日志 |
 | `GET /api/growth?box_id=` | 生长曲线（console 代理 prod 的 `/growth`，保持单一 origin） |
+| `GET /api/environment?zone=&start=&end=&granularity=` | 实测环境序列（代理 prod 的 `/environment`；`hour`/`day` 读小时聚合，`raw` 现取 TDengine 且限 6 小时） |
+| `GET /api/environment/summary?zone=&start=&end=` | 窗口极值/分位数、断档与"整列无源"（代理 prod 的 `/environment/summary`） |
 | `GET /api/preview`（MJPEG 流）、`/api/preview/status`、`/api/preview/frame.jpg` | 实时画面（console 反代预览容器；巡检中拒绝，ADR-0017） |
 | `POST/DELETE /api/session`、`GET/POST /api/cmd`、`POST/DELETE /api/stop` | 手动控制（受 ADR-0013/0016 约束：巡检中拒绝、急停是闩锁）。`GET /api/cmd` 额外带 `progress`：执行方在运动过程中写回的实时位置/速度（只认属于在飞指令且 ≤5s 新鲜的） |
 

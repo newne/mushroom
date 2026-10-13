@@ -31,20 +31,22 @@ def hourly_rates(measurements: pd.DataFrame) -> pd.DataFrame:
 def align(rates: pd.DataFrame, environment: pd.DataFrame) -> pd.DataFrame:
     """生长速率与环境小时均值按时间对齐。
 
-    environment 列: ts, temp_c, rh_pct, co2_ppm, light_lux
+    environment 列: ts, temp_c, rh_pct, co2_ppm
     """
     env = environment.copy()
     env["ts"] = pd.to_datetime(env["ts"])
     env["hour"] = env["ts"].dt.floor("h")
-    env_hourly = (env.groupby("hour")[["temp_c", "rh_pct", "co2_ppm", "light_lux"]]
-                  .mean().reset_index())
+    cols = [c for c in ("temp_c", "rh_pct", "co2_ppm", "lamp_on_min") if c in env.columns]
+    env_hourly = env.groupby("hour")[cols].mean().reset_index()
     merged = rates.merge(env_hourly, on="hour", how="inner")
     merged["stage_mm"] = (merged["level_mm"] // 20 * 20).astype(int)
     merged["stage"] = merged["stage_mm"].astype(str) + "-" + (merged["stage_mm"] + 20).astype(str) + "mm"
     return merged
 
 
-PARAM_COLS = ("temp_c", "rh_pct", "co2_ppm", "light_lux")
+#: 可分箱的连续环境量。补光的设备状态（0=自动…3=关闭）是分类量，不进分箱；
+#: 进分箱的是由循环参数（OnSSet/OffSSet）折算出来的**点亮分钟**（ADR-0021）。
+PARAM_COLS = ("temp_c", "rh_pct", "co2_ppm", "lamp_on_min")
 
 
 def best_ranges(merged: pd.DataFrame, *, n_bins: int = 4) -> list[dict]:
@@ -83,7 +85,9 @@ def run_from_db(db_path: str) -> list[dict]:
 
     conn = connect(db_path)
     measurements = pd.read_sql("SELECT ts, box_id, mean_len_mm FROM measurements", conn)
-    environment = pd.read_sql("SELECT ts, temp_c, rh_pct, co2_ppm, light_lux FROM environment", conn)
+    environment = pd.read_sql(
+        "SELECT ts, temp_c, rh_pct, co2_ppm, lamp_on_min FROM environment", conn
+    )
     if measurements.empty or environment.empty:
         return []
     return best_ranges(align(hourly_rates(measurements), environment))

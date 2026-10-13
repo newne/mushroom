@@ -8,18 +8,31 @@
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+import os
+from datetime import datetime, timedelta
+
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from analysis.audit import summarize_operations
+from analysis.batches import window_of
 from analysis.db import (
     ROUND_FIELDS,
     connect,
+    fetch_batches as db_fetch_batches,
+    fetch_environment,
+    fetch_operations,
     fetch_images,
     fetch_measurements,
     fetch_ranges,
     fetch_rounds,
     insert_images,
     insert_measurements,
+)
+from analysis.environment import (
+    batches as env_batches,
+    series as env_series,
+    summary as env_summary,
 )
 from analysis.growth import latest_delta, room_summary, series
 
@@ -30,7 +43,18 @@ class IngestBody(BaseModel):
     rows: list[dict]
 
 
-def create_app(db_path: str = "mushrooms.db") -> FastAPI:
+#: 原始分钟序列不落库，按窗口现取；窗口上限给排障用，趋势图请用 hour。
+RAW_WINDOW_MAX_HOURS = 6
+DEFAULT_TDENGINE_URL = "http://127.0.0.1:6041"
+
+
+def _span_hours(start: str, end: str | None) -> float:
+    first = datetime.fromisoformat(start)
+    last = datetime.fromisoformat(end) if end else datetime.now()
+    return (last - first).total_seconds() / 3600.0
+
+
+def create_app(db_path: str = "mushrooms.db", *, raw_source_factory=None) -> FastAPI:
     app = FastAPI(title="mushroom-analysis")
     # 单 worker 部署，允许跨线程复用连接（FastAPI 线程池执行 sync 端点）
     conn = connect(db_path, check_same_thread=False)
@@ -149,6 +173,123 @@ def create_app(db_path: str = "mushrooms.db") -> FastAPI:
         latest = latest_delta(rows, wanted[0]) if len(wanted) == 1 else None
         summary["latest"] = latest.to_row() if latest else None
         return summary
+
+    def _raw_rows(zone: str, start: str, end: str) -> list[dict]:
+        """原始分钟序列**不落库**，按窗口现取 TDengine（2026-10-12 定）。"""
+        if not start:
+            raise HTTPException(status_code=400, detail="raw 粒度必须给 start：原始序列不落库，按窗口现取")
+        if _span_hours(start, end or None) > RAW_WINDOW_MAX_HOURS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"raw 窗口最多 {RAW_WINDOW_MAX_HOURS} 小时；趋势图请用 granularity=hour",
+            )
+        if raw_source_factory is not None:
+            source = raw_source_factory(zone)
+        else:
+            from analysis.env.tdengine import TdengineEnvSource
+
+            source = TdengineEnvSource(
+                os.environ.get("TDENGINE_URL", DEFAULT_TDENGINE_URL),
+                rooms=[zone] if zone else None,
+                user=os.environ.get("TDENGINE_USER", "root"),
+                password=os.environ.get("TDENGINE_PASSWORD", "taosdata"),
+            )
+        rows = [r.__dict__ for r in source.fetch_since(start)]
+        if end:
+            rows = [r for r in rows if r["ts"] <= end]
+        return rows
+
+    @app.get("/environment")
+    def environment(
+        zone: str = "", start: str = "", end: str = "", granularity: str = "hour"
+    ) -> dict:
+        """实测环境序列（票 01 入库、票 02 读）。
+
+        `hour`/`day` 读库里的小时聚合；**`raw` 不落库**，按窗口现取 TDengine
+        （最长 `RAW_WINDOW_MAX_HOURS` 小时）。补光的 `lamp_state` 是设备状态
+        （0=自动 1=手动 2=停止 3=关闭），分类量，聚合取众数（ADR-0021）。
+        """
+        if granularity == "raw":
+            return {
+                "granularity": "raw",
+                "source": "tdengine",
+                "rows": _raw_rows(zone, start, end),
+            }
+        rows = fetch_environment(
+            conn, zone=zone or None, start=start or None, end=end or None
+        )
+        return {
+            "granularity": granularity,
+            "source": "aggregate",
+            "rows": env_series(
+                rows,
+                granularity=granularity,
+                zone=zone or None,
+                start=start or None,
+                end=end or None,
+            ),
+        }
+
+    @app.get("/environment/batches")
+    def environment_batches(zone: str = "", limit: int = 3) -> dict:
+        """按**生产台账的批次窗口**汇总环境参数，最新在前，供"当前 vs 前两批"对比。
+
+        批次边界只能来自台账：环境是连续采集的，换批不会让传感器停（真机证否过
+        "按断档切段"那条路）。台账由 `analysis.batch_ingest` 从 `mogu.mo_gu_batch` 同步。
+        """
+        if not (zone or "").strip():
+            raise HTTPException(status_code=400, detail="批次对比要指定 zone（批次按库房算）")
+        ledger = db_fetch_batches(conn, room_id=zone)
+        if not ledger:
+            return {
+                "ok": False,
+                "error": "还没有批次台账：先跑一次 analysis.batch_ingest",
+                "batches": [],
+            }
+        windows = window_of(ledger, room=zone, limit=max(1, min(limit, 12)))
+        rows = fetch_environment(conn, zone=zone)
+        kept = [r for r in rows if r.get("ts")]
+        return {
+            "ok": True,
+            "zone": zone,
+            "batches": env_batches(rows, windows, zone=zone),
+            # 数据实际覆盖到哪天：更早的批次只有窗口没有数据，对比时要看"覆盖天数"
+            "data_from": min((r["ts"] for r in kept), default=None),
+            "data_to": max((r["ts"] for r in kept), default=None),
+        }
+
+    @app.get("/environment/summary")
+    def environment_summary(zone: str = "", start: str = "", end: str = "") -> dict:
+        """窗口内的极值/分位数、缺口清单与"整列无源"标记（都基于小时聚合）。"""
+        rows = fetch_environment(
+            conn, zone=zone or None, start=start or None, end=end or None
+        )
+        return env_summary(
+            rows, zone=zone or None, start=start or None, end=end or None
+        )
+
+    @app.get("/operations")
+    def operations(
+        zone: str = "", start: str = "", end: str = "", limit: int = 200
+    ) -> dict:
+        """操作日志：谁、何时、把哪个点改成了什么。
+
+        **逐条返回，不聚合**——"那天 10:10 谁把右加湿器的开启设定改成 5"
+        是运行经验的最小单位，聚合掉就答不出来了。同时给一份按天/设备/点位的计数。
+        """
+        rows = fetch_operations(
+            conn,
+            zone=zone or None,
+            start=start or None,
+            end=end or None,
+            limit=max(1, min(limit, 2000)),
+        )
+        return {
+            "ok": True,
+            "zone": zone or None,
+            "rows": rows,
+            "summary": summarize_operations(list(reversed(rows))),
+        }
 
     @app.get("/ranges")
     def ranges() -> list[dict]:
