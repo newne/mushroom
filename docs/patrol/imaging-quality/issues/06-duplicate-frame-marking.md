@@ -102,3 +102,82 @@ patrol 又是"库内零网络调用"，拿不到字节。**只有服务侧能算
 - 单测绿（`third_party/capture` 12 项 + 巡检手新增的轮次级用例）；
 - 用 10-09 那轮的 object_name 序列回放：35 帧被打标、且**没有**被丢弃；
 - `patrol-workspace` 全量 pytest 绿。
+
+---
+
+# 发版记录（发版官，2026-10-13）
+
+## A. "未定"已结案：**设备掉线（停流），不是 SDK 解码器卡死**
+
+只读取证（`docker logs` 采图容器 + 宿主 `.../xcloudsdk_py_offline_20260120_175307/log/`
+的 `mediacodec.*.log` / `xcloudsdk.*.log`，均为本地时间）：
+
+| 时刻 | 事件 | 来源 |
+| --- | --- | --- |
+| 18:20:08–**18:22:13.952** | `notifyPlayInfo` 心跳**每秒一条**，`bits` 每秒变化（106 559–311 086）、`relativeTime` 每秒 +1000 ⇒ **流是活的** | `mediacodec.3.log` |
+| **18:22:13.952** | **最后一条心跳**（`relativeTime`=124002）；此后到 18:27:16 一条都没有 | 同上 |
+| 18:22:14.171 | S211 的 `CatchPicture`（冻结第一帧，正好压在心跳停之后 0.2 s） | `xcloudsdk.2.log` |
+| 18:22:36.106 | SDK 才记 `HeartBeat-Timeout` → `Disconnect`，error **-99991** | 同上 |
+| 18:23:10.051 | `NetDevice Timeout`(Spent:61) → `OnDisConnect` → `StartPlay_End`，**`device disconnect, result: -99991`** | 同上 |
+| 18:22:38–18:32 | 重连一直失败：`NetConnect_End  Ret: '-1000(EE_NET)'` | 同上 |
+| **18:32:33.436** | **`Login success. Ret: 0, SessionId: 3`** | 同上 |
+| **18:32:35.052** | 心跳恢复，`relativeTime`=**125002**（接着 124002 走） | `mediacodec.3.log` |
+
+⇒ **设备 `192.168.1.238` 整机掉线，中断 18:22:13.95 → 18:32:33（约 10 分 20 秒）**，
+那一轮（18:22:05→18:27:16）**整段落在中断窗口内**，所以之后每一次 `wait_play_data` 只可能超时、
+每一次 `MediaSnapImageEx` 都写解码器残留帧。交叉校验：18:28–18:59 心跳 **1644** 条 ≈ 18:32:35→19:00 的 **1644** 秒。
+
+**两条副产品**：① **SDK 的掉线检测比实际停流滞后 22 秒** ⇒ 靠 SDK 报错拦不住，也解释了
+"冻结头几帧日志里什么都没有"；② **"心跳停了"本身就是一个极廉价的看门狗信号**（不需要相机配合）。
+③ 本改动正中要害：从 18:22:14 起 `play_data_ready` 只会是 False，**在第一帧就能抓住**。
+
+**全池真 sha256 重扫**（发版官，只读）：全池 3147 帧里度量元组 size≥2 的组**只有 1 个**（就是那 35 帧）；
+补下后**不同 sha256 数 = 1**、**跨轮跨天重复 0**、**假阳性 0** ⇒ **没有同型轮次**，处置范围收干净。
+
+## B. 服务侧进生产的路线与证据（C1 镜像）
+
+**已完成的构建与发布（2026-10-13 20:0x）**：
+
+| 项 | 值 |
+| --- | --- |
+| 基础镜像（厂商） | `registry.cn-beijing.aliyuncs.com/ncgnewne/xcloudsdk-py:0.1.0`，digest `sha256:7f0a61a98fac1d60f3c8776947ca6f3a392318124bc5ca77f276c0f718b2976d` |
+| 推前核对（三方同 digest） | 线上 `xcloudsdk-py:0.1.0` ID = **`sha256:10cad10c8826d6f92436410c9ba16d5da8248cab03ed50481896ca91ae3d2797`** ＝ 离线包 `image.tar.gz` 的 `manifest.json → Config` ＝ `docker load` 后镜像 ID<br>离线包 `/home/sysadmin/algorithm/mushroom_docker/xcloudsdk_py_offline_20260120_175307/image.tar.gz`，sha256 `f0e09d66684e85723d37674ac879a9ff4f77374221fbae39e07c5b92938ec005` |
+| 命名 | **只新增不覆盖**（推前确认 registry 无该 tag）；此镜像是**厂商镜像**，本仓只把它发布到自建 registry 以便可复现重建，不对其内容做任何修改，许可与分发口径以厂商离线包为准 |
+| 衍生镜像 | `registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_capture:0.1.0-20261013200745-f584691`，digest `sha256:750f4e4294c4ba047851b57f8ebd6a894aed5d03e3fdba4875df8f59fc7af75c` |
+| 构建源锁定 | HEAD `f584691`；`capture.py` 工作区 blob ＝ `HEAD:` blob ＝ `d3d62975…`；全量门禁 **939 passed / 0 failed** |
+| **镜像内自查** | `/usr/local/lib/python3.10/site-packages/xcloudsdk_py/capture.py` sha256 = **`1ac2310d5dc78df8227696fc40f9de9d3f5a580e76bbb5730290ce5813896e15`**（＝仓库版）；`image_sha256`/`duplicate_streak` 字段在；Pillow 12.2.0 + libjpeg_turbo |
+| `FROM` | 已钉 **registry 地址**（不再依赖任何机器上的本地镜像） |
+
+**现场生效步骤**（在离线包目录，**不带 `-f`**）：
+`docker-compose.override.yml` 改成 `image: <上面的 mushroom_capture tag>`，
+去掉 `PYTHONPATH: "/app/levels-fix/pylib"` 与两条 `./levels-fix/*` 挂载；
+备份 → 上传并**核对远端 sha256 与本地一致** → `docker compose config` → `docker compose up -d --force-recreate`。
+
+## C. 回滚路径（**动手前先落这里**）
+
+宿主 `./levels-fix/` 目录**保留不删**（只摘挂载，不删文件）。回滚＝把覆盖层换回备份并重建：
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_docker/xcloudsdk_py_offline_20260120_175307
+ls -la docker-compose.override.yml.bak-*            # 备份已先行生成
+cp docker-compose.override.yml.bak-<ts> docker-compose.override.yml
+docker compose config >/dev/null                    # ⚠️ 不带 -f
+docker compose up -d --force-recreate
+```
+
+回滚后应回到"厂商 `xcloudsdk-py:0.1.0` + 宿主 `levels-fix/` bind-mount"那一套
+（`capture.py` 变回 `c65a1aa9…`，**新指纹字段会消失**——这正是回滚的判据）。
+
+## D. 验收口径（Chief 2026-10-13 修订，**替换**原文的"连抓两次验 `same_as_previous: true`**"**）
+
+**同字节只在冻结时才发生**，正常流里抓两次多半都是新帧 ⇒ `same_as_previous: true` **不是硬验收**
+（那会得到一个"总是失败"的判据）。真正的重复检测能力已由 step code 的假 SDK 离线复现证明。
+现场验收改为：
+
+1. 响应里**字段存在且形状正确**：`image_sha256` 为 64 位十六进制、`same_as_previous` 为布尔、
+   `duplicate_streak` 为整数、`play_data_ready` 有值；
+2. 巡检侧 `meta` 里能看到这些字段**落进索引**；
+3. **帧照常入库**、`n_frames_recorded` 等于帧数。
+
+另：**服务侧实时指纹与巡检侧事后复核（`content_sha256`/`--verify-content`）互补，不许互相替代**；
+`--verify-content` 默认关**维持到服务侧上生产之后**。

@@ -21,12 +21,18 @@
 # docker push  $REG/mushroom_capture:$TAG
 # ```
 #
-# ⚠️ **前置**：构建机必须先有基础镜像 `xcloudsdk-py:0.1.0`（现场那份是从离线包 `docker load`
-# 进来的，337 MB、`RepoDigests` 为空 ⇒ 从没推过 registry）。两种取法：
-#   a) 在现场把它推上来（推荐，一次性）：`docker tag xcloudsdk-py:0.1.0 $REG/xcloudsdk-py:0.1.0`
-#      `&& docker push $REG/xcloudsdk-py:0.1.0`，构建机 `docker pull` 后把上面的 `FROM` 换成 registry 地址；
-#   b) 把离线包里的 `image.tar.gz` 拷到构建机 `docker load`。
-# 不改 `FROM` 的话，本文件只在"构建机已有该镜像"时可用。
+# ⚠️ **前置已解除**（2026-10-13 发版官）：基础镜像 `xcloudsdk-py:0.1.0` 已按 Chief 批的走法 A
+# **推上 registry**：`registry.cn-beijing.aliyuncs.com/ncgnewne/xcloudsdk-py:0.1.0`，
+# 所以本文件的 `FROM` **直接钉 registry 地址**，不再依赖任何一台机器上的本地镜像。
+#
+# 推上去的那一份**经过三方 digest 核对**（推错版本比不推更坏）：
+#   线上 `docker inspect xcloudsdk-py:0.1.0` → `sha256:10cad10c8826d6f92436410c9ba16d5da8248cab03ed50481896ca91ae3d2797`
+#   ＝ 离线包 `image.tar.gz` 的 `manifest.json → Config: blobs/sha256/10cad10c8826…`
+#   ＝ 本地 `docker load` 后的镜像 ID。
+#   离线包：`/home/sysadmin/algorithm/mushroom_docker/xcloudsdk_py_offline_20260120_175307/image.tar.gz`
+#   sha256：`f0e09d66684e85723d37674ac879a9ff4f77374221fbae39e07c5b92938ec005`
+# ⚠️ 该镜像是**厂商镜像**（XCloud SDK 运行时，含其 `.so`），本仓只是把它发布到自建 registry 以便可复现重建；
+#   仓库不对其内容做任何改动，许可与分发口径以厂商离线包为准。
 #
 # ## 现场怎么用（只换现有服务的 image tag，不新增 service）
 #
@@ -45,7 +51,7 @@
 # 回滚：`cp docker-compose.override.yml.bak-<ts> docker-compose.override.yml && docker compose up -d --force-recreate`
 # （回到厂商镜像 + 宿主补丁那套，宿主 `levels-fix/` 保留不动）。
 
-FROM xcloudsdk-py:0.1.0
+FROM registry.cn-beijing.aliyuncs.com/ncgnewne/xcloudsdk-py:0.1.0
 
 # 补丁版模块**覆盖**站点包里那一个文件：与现场 bind-mount 的落点逐字节相同，
 # 影子面最小（只覆盖这一个文件，SDK 的 .so 与其它模块一个字节都不动）。
