@@ -93,6 +93,30 @@ p.add_argument("--measure-emit-empty", action="store_true",
 
 ## Comments
 
+- 2026-10-13 巡检手：**装配接线已落地**（commit 见仓库日志，`feat(deploy): 测量接线落装配…`）。
+  - 新增 `deploy/src/deploy/measure_wire.py`：`build(args, *, room_id, fetch, decode, log)
+    -> MeasureWire(fn, reason)`，判定顺序与 §表一致；取图/解码复用 `framing_wire._fetch` /
+    `_imread`（同一条已验证的路）；`room_id` 为空或 `"unset"`（`patrol.room` 的占位值）
+    一并视为"没有库房号"。
+  - `m1.py`：新增三个参数（`--measure` 默认 **off**、`--measure-blur-threshold` 默认 100.0、
+    `--measure-emit-empty`）；装配处 `measure_fn=measure_wire.fn`（**装配时造一次**，
+    不每轮重建；`room_id` 与准入门禁同源）；`--check` 也能看到"测量：开启/拒绝"的那行日志。
+  - **fail-closed**：`--measure on` 但 room.yaml 里没有可用 `room_id` ⇒ **拒绝启动（返回 2）**
+    并打印原因（缺库房的行会拿 `unset` 当幂等键，污染区间表）；缺 `--mm-per-px` 或解码器
+    只拒绝**测量**，巡检照常跑完。
+  - 测试：新增 `deploy/tests/test_measure_wire.py` 11 项（默认关、缺换算/缺房间/缺解码器各自
+    的拒绝文案、开启后产出 `kind=measurement` 行、模糊门旋钮真的进质量门、**真 JPEG 走默认
+    解码器**产出行、CLI 默认与参数）；`deploy/tests` 全绿 **276 passed**。
+- 2026-10-13 巡检手：**未完成的验收**（需要真机/线上，不是本机可证）：
+  - §验收 1「跑一轮，outbox 出现 `kind=measurement` 行」——本机只到"接线 + 回放帧"这一层
+    （daemon 侧行路径已有 `patrol/tests/test_daemon_sync.py::test_daemon_measure_fn_rows_synced`），
+    真机一轮请现场/发版官按 `--measure on --mm-per-px <值>` 跑；
+  - §验收 3「`GET /measurements` 非零行」——线上；
+  - 阈值：真机帧 S306 实测 `lapvar=70.8 < 100` ⇒ 默认门会拒真机帧，现场必须先定这个值
+    （临时旋钮，不静默改默认）。
+- 另：step code 独占文件里的两条口径残留（`patrol/src/patrol/framing.py:67`、
+  `capture_client.py:70`）**不归我改**，已在票 10 §2.4 分派给他。
+
 - 2026-10-13 写票（测量师）。生产者已就绪：`measure/src/measure/production.py` 的
   `make_measure_fn(room_id, mm_per_px, detector=None, fetch, decode, quality_gate)`；
   真机帧 S306 走完整链路产出的行样例与环境发现（`lapvar=70.8 < 100` 默认门拒真机帧）
