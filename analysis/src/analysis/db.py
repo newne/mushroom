@@ -83,6 +83,10 @@ CREATE TABLE IF NOT EXISTS images (
   y             REAL,
   z             REAL,
   object_name   TEXT,                -- MinIO 对象名；失败行为 NULL
+  -- 这个名字是从哪来的（2026-10-13，巡检手加固）：`service` = 抓拍服务返回的 key；
+  -- `request` = 服务没回名字，用我们请求时生成的名字兜底。兜底名可能与 MinIO 里的
+  -- 实际 key 不一致 —— 那种断链只有把来源记下来才查得动。老行 NULL = "那时还没记"。
+  object_name_source TEXT,
   cloud_url     TEXT,
   ok            INTEGER,
   error         TEXT,
@@ -158,6 +162,8 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "batch_no": "TEXT",
         # 成像参数快照 id（巡检手票 11）：老行留 NULL——"那时没记"比编一个 id 诚实。
         "imaging_profile": "TEXT",
+        # object_name 的来源（service / request）：兜底名与 MinIO 实际 key 可能不一致。
+        "object_name_source": "TEXT",
     },
     "rounds": {
         "round_id": "TEXT",
@@ -458,6 +464,7 @@ IMAGE_FIELDS = (
     "y",
     "z",
     "object_name",
+    "object_name_source",
     "cloud_url",
     "ok",
     "error",

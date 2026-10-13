@@ -24,6 +24,7 @@ def image_row(**kw) -> dict:
     row = {"kind": "image_index", "ts": "2026-09-13T20:25:42", "ok": True,
            "box_id": "B101", "station_id": "S101", "angle_profile": "top45",
            "imaging_profile": "img-2026-10-13a",
+           "object_name_source": "service",
            "camera_ip": "192.168.1.238", "yz": [187.167, -21.2],
            "object_name": "20260913/B101_S101_top45_202542",
            "cloud_url": "http://192.168.1.250:9000/mogu/20260913/B101_S101_top45_202542.jpg",
@@ -57,6 +58,8 @@ def test_image_rows_keep_the_room_stamp(tmp_path):
     assert rows[0]["object_name"] == "20260913/B101_S101_top45_202542"
     # 成像参数快照 id（巡检手票 11）：每帧带自己的取证归属，不靠"时间×站位"反推
     assert rows[0]["imaging_profile"] == "img-2026-10-13a"
+    # object_name 的来源（service=服务返回 / request=请求名兜底）：兜底要留痕，别静默
+    assert rows[0]["object_name_source"] == "service"
 
 
 def test_round_rows_keep_the_room_stamp(tmp_path):
@@ -148,13 +151,15 @@ def test_migrate_adds_missing_room_columns(tmp_path):
         "images.entry_date",
         "images.batch_no",
         "images.imaging_profile",
+        "images.object_name_source",
         "rounds.round_id",
         "rounds.room_id",
         "rounds.entry_date",
         "rounds.batch_no",
     }
     cols = {r[1] for r in conn.execute("PRAGMA table_info(images)")}
-    assert {"round_id", "room_id", "entry_date", "batch_no", "imaging_profile"} <= cols
+    assert {"round_id", "room_id", "entry_date", "batch_no", "imaging_profile",
+            "object_name_source"} <= cols
     rounds_cols = {r[1] for r in conn.execute("PRAGMA table_info(rounds)")}
     assert {"round_id", "room_id", "entry_date", "batch_no"} <= rounds_cols
 
