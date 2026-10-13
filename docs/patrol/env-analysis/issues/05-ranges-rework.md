@@ -40,6 +40,14 @@
 - [ ] `refresh_ranges` 接线：接进既有每日任务链
 - [ ] `GET /ranges` 支持按 kind 取；旧字段保留兼容
 - [ ] 单测：现有 6 项 + 分层口径 + 产量列
+- [ ] **速率的两侧都必须是 `verified` 且相邻整点**（Chief 2026-10-13 前向要求）：任一侧缺测、
+      或被 `low_confidence`/`no_light` 等过滤 ⇒ 该段**不产速率**，标"样本不足"；
+      **绝不允许跨小时用单侧差分凑一个数**（`groupby.diff()` 会把"2 小时的增长"算成"每小时"）。
+      已实现：`align.hourly_rates` 只在相邻整点间差分，测试 `test_rate_needs_two_verified_neighbours`
+- [ ] **`low_confidence` 等非 `verified` 行绝不被区间表或建议层当 `verified` 用**
+      （整簇不可分时那面积/投影径是**估出来的**）：`align.hourly_rates` 的
+      `verified_only=True` 是唯一入口，任何绕过它的读取路径都要在评审时挡掉
+- [ ] 引用速率处**同时**给 `metric` 与 `unit`（量纲显示），`rate_mm_per_h` 仅在 `unit='mm/h'` 时非空
 
 ## Comments
 

@@ -46,8 +46,19 @@ def hourly_rates(measurements: pd.DataFrame, *, verified_only: bool = True) -> p
     hourly = (m.groupby(["room_id", "box_id", "hour"])["mean_len_mm"]
               .mean().reset_index(name="level_mm"))
     hourly = hourly.sort_values(["room_id", "box_id", "hour"])
-    hourly["rate_mm_per_h"] = hourly.groupby(["room_id", "box_id"])["level_mm"].diff()
-    return hourly.dropna(subset=["rate_mm_per_h"])
+    # **只允许相邻整点之间差分**（Chief 2026-10-13 前向要求）：
+    # `groupby.diff()` 会跨缺口把"2 小时的增长"算成"每小时的增长"——那是最难发现的一种假速率。
+    # 任一侧缺测（含被 verified 过滤掉的）⇒ 该段 `rate` 留 NULL = "样本不足"，不凑数。
+    grouped = hourly.groupby(["room_id", "box_id"])
+    prev_hour = grouped["hour"].shift(1)
+    prev_level = grouped["level_mm"].shift(1)
+    one_hour = pd.Timedelta(hours=1)
+    hourly["rate_mm_per_h"] = (hourly["level_mm"] - prev_level).where(
+        (hourly["hour"] - prev_hour) == one_hour
+    )
+    return hourly.dropna(subset=["rate_mm_per_h"])[
+        ["room_id", "box_id", "hour", "level_mm", "rate_mm_per_h"]
+    ]
 
 
 def align(rates: pd.DataFrame, environment: pd.DataFrame) -> pd.DataFrame:

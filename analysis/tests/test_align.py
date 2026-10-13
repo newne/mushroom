@@ -98,6 +98,27 @@ def test_unverified_rows_do_not_enter_the_curve():
     assert len(kept) < len(all_rows)
 
 
+def test_rate_needs_two_verified_neighbours(tmp_path):
+    """速率的两侧都必须是相邻整点的可用值；任一侧缺测 ⇒ 留空，不许凑数。
+
+    旧实现用 `groupby.diff()`：缺一小时会把「2 小时的增长」算成「每小时的增长」，
+    是最难发现的一种假速率。
+    """
+    m, _ = make_data()
+    # 挖掉 B01 的 10:00 那一小时（模拟该整点缺测/被 quality 过滤）
+    hole = m[(m["box_id"] == "B01") & (m["ts"] == "2026-08-01T10:00:00")]
+    m = m.drop(hole.index)
+
+    rates = hourly_rates(m)
+    b01 = rates[rates["box_id"] == "B01"].set_index("hour")
+    assert pd.Timestamp("2026-08-01T10:00:00") not in b01.index
+    # 缺口**之后**的第一个整点没有速率（左邻缺测），再往后才恢复
+    assert pd.Timestamp("2026-08-01T11:00:00") not in b01.index
+    assert pd.Timestamp("2026-08-01T12:00:00") in b01.index
+    # 而且恢复后的速率是**一小时**的量级，不是跨两小时的台阶
+    assert abs(float(b01.loc[pd.Timestamp("2026-08-01T12:00:00"), "rate_mm_per_h"])) < 1.0
+
+
 def test_missing_room_id_fails_loudly():
     """缺库房维度必须报错，不许**静默**把库房混起来算。"""
     m, _ = make_data()
