@@ -62,6 +62,15 @@ class FrameInput:
     station_id: str | None = None
     angle_profile: str | None = None
     measure_kind: str | None = None
+    #: 内容完整性标记（巡检手票 13，提交 `6a232e4`）：同一指纹出现在 ≥2 个不同站位 ⇒
+    #: 这一帧不是"它自己那份"。带这个标记的帧**不进测量**（也不进质量统计/标定样本）。
+    frame_dup: bool = False
+    dup_group: str | None = None
+    content_sha256: str | None = None
+    #: 轮级标记：`suspect_duplicate`（该轮有跨站重复指纹）/ `content_check_error`
+    #:（本轮**没查成**，按 fail-closed 处理：不当作"已确认无重复"）
+    suspect_duplicate: bool = False
+    content_check_error: bool = False
 
 
 def frame_from_meta(meta: dict) -> FrameInput | None:
@@ -76,7 +85,28 @@ def frame_from_meta(meta: dict) -> FrameInput | None:
         station_id=meta.get("station_id"),
         angle_profile=meta.get("angle_profile"),
         measure_kind=meta.get("measure_kind"),
+        frame_dup=bool(meta.get("frame_dup")),
+        dup_group=meta.get("dup_group"),
+        content_sha256=meta.get("content_sha256"),
+        suspect_duplicate=bool(meta.get("suspect_duplicate")),
+        content_check_error=bool(meta.get("content_check_error")),
     )
+
+
+def content_integrity_reason(frame: FrameInput) -> str:
+    """内容完整性问题的原因串（空串 = 没问题）。
+
+    规则（票 13-round-content-integrity）：**跨站重复的帧不得进入测量与统计**。
+    单帧 `frame_dup` 与整轮 `suspect_duplicate` 都算——后者是给"轮被整体污染但帧行
+    没逐帧标注"的情况兜底。`content_check_error` **不算问题**（它只是"没查成"），
+    但要记进日志：没查成的轮不能当成"已确认无重复"来做样本筛选（fail-closed 在
+    **样本侧**生效，见 `measure/tools/calibrate_quality_thresholds.py`）。
+    """
+    if frame.frame_dup:
+        return f"frame_dup({frame.dup_group or '?'})"
+    if frame.suspect_duplicate:
+        return "suspect_duplicate_round"
+    return ""
 
 
 def detection_flags(dets: Sequence[Detection]) -> set[str]:
@@ -168,6 +198,25 @@ def rows_from_frames(
         if frame is None:
             continue
         kind = frame.measure_kind or DEFAULT_MEASURE_KIND
+        integrity = content_integrity_reason(frame)
+        if frame.content_check_error:
+            # "没查成" ≠ "确认无重复"：记日志（样本侧还会按 fail-closed 排除该轮）
+            log(f"测量：{frame.box_id} 内容校验没查成（content_check_error）——按未确认处理")
+        if integrity:
+            # 跨站重复帧：不是"它自己那份"，不能进测量与统计（票 13-round-content-integrity）
+            log(f"测量：{frame.box_id} {frame.ts} 内容可疑（{integrity}）——跳过，不产测量行")
+            if not emit_empty:
+                continue
+            extra_dup: set[str] = {"no_detection", LOW_CONFIDENCE_FLAG}
+            stats = aggregate_box([])
+            quality = quality_for(flags=extra_dup, detected=False)
+            rec = row_from_stats(frame=frame, room_id=room_id, stats=stats,
+                                 quality=quality,
+                                 notes=f"内容可疑：{integrity}", flags=extra_dup)
+            row = rec.to_row()
+            row["kind"] = kind
+            out.append(row)
+            continue
         dets: list[Detection] = []
         extra: set[str] = set()
         if fetch is None or decode is None or not frame.cloud_url:

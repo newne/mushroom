@@ -32,6 +32,7 @@ from measure.quality import (  # noqa: E402
     overexposed_fraction,
     p99_brightness,
 )
+from measure.sample_hygiene import is_excluded  # noqa: E402
 
 DEFAULT_DIR = r"D:\code\mushroom\.scratch\frame-quality-samples"
 
@@ -61,8 +62,20 @@ def main() -> int:
         print(f"样本表不存在：{labels}")
         return 2
     with open(labels, encoding="utf-8") as fh:
-        rows = list(csv.DictReader(fh))
-    print(f"样本：{len(rows)} 行（{root}）\n")
+        all_rows = list(csv.DictReader(fh))
+
+    # 样本卫生：跨站重复帧 / 已知坏轮 / 内容校验没查成的轮，一律**不参与拟合**
+    # （票 13-round-content-integrity；fail-closed 见 measure.sample_hygiene）
+    rows, excluded = [], []
+    for row in all_rows:
+        why = is_excluded(row)
+        (excluded if why else rows).append((row, why) if why else row)
+    print(f"样本：{len(all_rows)} 行（{root}）")
+    if excluded:
+        print(f"按样本卫生排除 {len(excluded)} 行：")
+        for row, why in excluded[:10]:
+            print(f"  - {row.get('ts')} {row.get('station_id')}: {why}")
+    print()
 
     by_label: dict[str, list[dict]] = {}
     by_stratum: dict[str, list[dict]] = {}
