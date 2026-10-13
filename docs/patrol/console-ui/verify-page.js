@@ -1817,7 +1817,8 @@ await sleep(150);
   const radiusDecls = [...styleCss.matchAll(/border-radius:\s*([^;}]+)/g)].map(m => m[1]);
   const badRadius = [];
   for (const d of radiusDecls) {
-    if (/var\(--r-/.test(d)) continue;                    // 已 token 化
+    // 只挑 px 数字看：`var(--r-*)` 里没有 px，所以 token 化的声明天然通过；
+    // **不整条跳过含 var( 的声明**——否则 `border-radius:11px var(--r-sm)` 这种会被漏掉。
     for (const n of pxIn(d)) if (!RADIUS_DEBT.includes(n)) badRadius.push(n);
   }
   check('圆角棘轮：新值必须是 token 或已登记的欠账（不许再漂一个新数值）',
@@ -1830,11 +1831,17 @@ await sleep(150);
   const padDecls = [...styleCss.matchAll(/padding(?:-[a-z]+)?:\s*([^;}]+)/g)].map(m => m[1]);
   const badPad = [];
   for (const d of padDecls) {
-    if (/var\(/.test(d)) continue;                        // 用 token 的不管
+    // 同上：只看 px 数字，别整条跳过含 var( 的声明（否则坏值能藏在 token 旁边）
     for (const n of pxIn(d)) if (!SPACING_DEBT.includes(n)) badPad.push(n);
   }
   check('间距棘轮：新值必须在登记的尺度内（间距 token 化留待下一批，但先挡新增）',
     badPad.length === 0, [...new Set(badPad)].join(',') || 'ok');
+  // 间距 token 真的用上了（否则就是"定义了没人用"的假收敛）
+  const spTokens = [...styleCss.matchAll(/(--sp-[0-9]+)\s*:/g)].map(m => m[1]);
+  const unusedSp = spTokens.filter(t => !new RegExp('var\\(' + t + '\\)').test(styleCss));
+  check('间距 token 都被真的用上了（不留死 token）',
+    spTokens.length >= 5 && unusedSp.length === 0,
+    '定义 ' + spTokens.length + ' 个，未使用：' + (unusedSp.join(',') || '无'));
 
   // ---- 14. 契约断言：假后端的字段集必须与**真后端**的响应形状一致（2026-10-13 加）----
   // 为什么非有不可：页面读 `p.mean_len_mm / p.mean_cap_mm` 读了很久，而 `/growth` 从来
