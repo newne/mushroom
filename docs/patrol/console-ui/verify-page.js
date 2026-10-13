@@ -379,6 +379,10 @@ function route(method, url, body) {
                        upstream: { ok: true, frames: state.preview_frames, viewers: 1,
                                    last_frame_age_s: state.preview_frame_age } });
   }
+  if (path === '/api/events') {
+    // deploy/console.py:1323-1325 → {events: [{ts, level, text}, ...]}（底栏日志）
+    return json(200, { events: [{ ts: NOW, level: 'info', text: '页面已连接' }] });
+  }
   if (path === '/api/cmd' && method === 'GET') {
     if (state.command_network_error) throw new Error('offline');
     return json(200, { inflight: state.cmd, result: state.result, progress: state.progress,
@@ -1822,6 +1826,28 @@ await sleep(150);
     '/api/status': { q: '', pick: 'top', fields: ['ts', 'machine', 'patrol', 'room', 'trigger',
                                                    'envelope', 'events'],
       required: ['ts', 'machine', 'patrol', 'room', 'trigger', 'envelope', 'events'] },
+    // deploy/console.py:1247-1272 GET /api/cmd（page 每秒轮询的那条）
+    '/api/cmd': { q: '', pick: 'top', fields: ['inflight', 'result', 'progress', 'estop',
+                                               'session_active'],
+      required: ['inflight', 'result', 'progress', 'estop', 'session_active'] },
+    // deploy/console.py:1274-1321 POST /api/cmd → 202 {command, detail, session}
+    '/api/cmd POST': { path: '/api/cmd', method: 'POST', body: { kind: 'capture', args: {} },
+      pick: 'top', fields: ['command', 'detail', 'session'],
+      required: ['command', 'detail', 'session'] },
+    // deploy/console.py:1185-1190 POST /api/session → 201 {session, ttl_s}
+    '/api/session POST': { path: '/api/session', method: 'POST', pick: 'top',
+      fields: ['session', 'ttl_s'], required: ['session', 'ttl_s'] },
+    // deploy/console.py:1193-1227 DELETE /api/session → {closed, home_command, detail}
+    '/api/session DELETE': { path: '/api/session', method: 'DELETE', pick: 'top',
+      fields: ['closed', 'home_command', 'detail'], required: ['closed', 'detail'] },
+    // deploy/console.py:1236-1245 POST/DELETE /api/stop → {estop}
+    '/api/stop POST': { path: '/api/stop', method: 'POST', pick: 'top', fields: ['estop'],
+      required: ['estop'] },
+    '/api/stop DELETE': { path: '/api/stop', method: 'DELETE', pick: 'top', fields: ['estop'],
+      required: ['estop'] },
+    // deploy/console.py:1323-1325 GET /api/events → {events:[{ts, level, text}]}
+    '/api/events': { q: '', pick: 'events', fields: ['ts', 'level', 'text'],
+      required: ['ts', 'level', 'text'] },
   };
   // 页面实际消费的字段（改页面时同步改这里；这是"页面不许读不存在的字段"的锚）
   const PAGE_CONSUMES = {
@@ -1836,21 +1862,29 @@ await sleep(150);
     '/api/images': ['ts', 'round_id', 'station_id', 'box_id', 'angle_profile', 'object_name',
                     'ok', 'source'],
     '/api/status': ['ts', 'machine', 'patrol', 'room', 'trigger', 'events'],
+    '/api/cmd': ['inflight', 'result', 'progress', 'estop', 'session_active'],
+    '/api/cmd POST': ['command', 'detail', 'session'],
+    '/api/session POST': ['session', 'ttl_s'],
+    '/api/session DELETE': ['closed', 'home_command', 'detail'],
+    '/api/stop POST': ['estop'],
+    '/api/stop DELETE': ['estop'],
+    '/api/events': ['ts', 'level', 'text'],
   };
-  for (const [path, c] of Object.entries(CONTRACT)) {
-    const payload = await (await route('GET', path + c.q)).json();
+  for (const [key, c] of Object.entries(CONTRACT)) {
+    // 有状态路由（POST/DELETE）要指定方法与载荷；`path` 与 key 分开是为了一个路径能有多条契约
+    const payload = await (await route(c.method || 'GET', (c.path || key) + (c.q || ''), c.body)).json();
     const rows = c.pick === 'top' ? [payload] : (payload[c.pick] || []);
     const keys = new Set();
     for (const r of rows) for (const k of Object.keys(r)) keys.add(k);
     const fieldSet = new Set(c.fields);
     const invented = [...keys].filter(k => !fieldSet.has(k));
     const missing = c.required.filter(k => !keys.has(k));
-    const pageBad = (PAGE_CONSUMES[path] || []).filter(k => !fieldSet.has(k));
-    check(`契约 ${path}：fixture 字段全部来自真契约（不许凭空造字段）`,
+    const pageBad = (PAGE_CONSUMES[key] || []).filter(k => !fieldSet.has(k));
+    check(`契约 ${key}：fixture 字段全部来自真契约（不许凭空造字段）`,
       invented.length === 0, invented.join(',') || 'ok');
-    check(`契约 ${path}：页面消费的字段都在真契约里`,
+    check(`契约 ${key}：页面消费的字段都在真契约里`,
       pageBad.length === 0, pageBad.join(',') || 'ok');
-    check(`契约 ${path}：fixture 含页面必需的字段`,
+    check(`契约 ${key}：fixture 含页面必需的字段`,
       missing.length === 0, missing.join(',') || 'ok');
   }
   // 同一个 bug 的直接负向钉子：页面不许再把测量列当 `/growth` 的 delta 字段读
@@ -1883,6 +1917,43 @@ await sleep(150);
   check('契约 /api/status.trigger.hold（有保持）：active + until/defer_s/reason/set_by/set_at/seconds_left 都在',
     ['active', 'until', 'defer_s', 'reason', 'set_by', 'set_at', 'seconds_left']
       .every(k => k in holdActive), Object.keys(holdActive).join(','));
+
+  // ---- 有状态路由的嵌套形状：Command / CommandResult / Session（2026-10-13 补）----
+  // 真形状：`deploy/manual.py:49-81`（@dataclass）。顶层键相等盖不住"指令/会话字段少了"，
+  // 而页面正是按 `result.ok/detail`、`session.expires_at` 这些字段办事的。
+  state.cmd = { id: 'c-contract', kind: 'goto', args: { y: 1, z: -1 }, by: 'operator',
+                session: 't-1', created_at: NOW, started_at: null };
+  state.result = { id: 'c-contract', ok: true, detail: '已到位（契约检查）', ended_at: NOW,
+                   kind: 'goto', args: {}, data: {} };
+  const cmdPayload = await (await route('GET', '/api/cmd')).json();
+  check('契约 /api/cmd.inflight：Command 的 7 个字段齐全（manual.py:49-57）',
+    ['id', 'kind', 'args', 'by', 'session', 'created_at', 'started_at']
+      .every(k => k in (cmdPayload.inflight || {})), Object.keys(cmdPayload.inflight || {}).join(','));
+  check('契约 /api/cmd.result：CommandResult 的 7 个字段齐全（manual.py:64-72）',
+    ['id', 'ok', 'detail', 'ended_at', 'kind', 'args', 'data']
+      .every(k => k in (cmdPayload.result || {})), Object.keys(cmdPayload.result || {}).join(','));
+  state.cmd = null; state.result = null;
+  const sessPayload = await (await route('POST', '/api/session')).json();
+  check('契约 /api/session.session：Session 的 3 个字段齐全（manual.py:75-81）',
+    ['token', 'opened_at', 'expires_at'].every(k => k in (sessPayload.session || {})),
+    Object.keys(sessPayload.session || {}).join(','));
+  check('契约 /api/session：ttl_s 是数字（页面按它算倒计时）',
+    typeof sessPayload.ttl_s === 'number', String(sessPayload.ttl_s));
+  await route('DELETE', '/api/session');
+
+  // `/api/image` 是**字节流**不是 JSON（console.py:867-888）：契约不是字段表，而是
+  // "页面只能给 object_name，地址由服务端拼"——所以断言在页面的 URL 构造上。
+  const imgSrcs = Array.from(document.querySelectorAll('#timeline img, #hmain img, #cmpstrip img'))
+    .map(img => img.getAttribute('src') || '').filter(Boolean);
+  check('契约 /api/image：页面只给 object_name（主机/端口/控制网地址一律不由页面拼）',
+    imgSrcs.length > 0 && imgSrcs.every(s => {
+      try {
+        const u = new URL(s, 'http://console.local');
+        return u.pathname === '/api/image'
+          && !/192\.168|:9000/.test(u.href)
+          && [...u.searchParams.keys()].every(k => k === 'object_name' || k === 't');
+      } catch (e) { return false; }
+    }), imgSrcs.slice(0, 2).join(' | ') || '(无 img)');
 
   console.log(out.join('\n'));
   console.log('\n运行期错误：' + (errors.length ? '\n  ' + errors.join('\n  ') : '无'));

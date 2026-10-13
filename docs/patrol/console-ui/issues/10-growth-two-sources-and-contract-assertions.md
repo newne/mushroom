@@ -103,7 +103,44 @@
    envelope 两轴各两数）——顶层键相等盖不住"语义在嵌套里"的情况。
 
 ### 遗留（下一批，不必等齐）
-- 进契约表：`/api/cmd`、`/api/session`、`/api/stop`（注意后两者是 POST/DELETE 有状态路由，
-  要点入 fixture 的请求方法），`/api/image` 是字节流、按 media type 断言。
 - "同一事实两个来源"：`envelope` 服务端给了、页面自己从 `/api/grid` 再算一遍。目前一致，
   但以后 `grid_geometry()` 若是分叉成两个端点就会漂——建议将来收敛到一个来源。
+
+## 8. 契约表补齐：有状态路由 + `/api/image`（2026-10-13，Chief 指的顺序 ①）
+
+在此之前契约断言只覆盖 GET+JSON 的端点；**有状态路由（POST/DELETE）与字节流端点一直没进表**，
+而 `/api/cmd`、`/api/session`、`/api/stop` 恰恰是"页面读了不存在的字段就静默坏"的重灾区
+（指令结果、会话倒计时都按这些字段办事）。
+
+| 端点 | 真形状出处 | 备注 |
+| --- | --- | --- |
+| `GET /api/cmd` | `console.py:1247-1272` | `{inflight, result, progress, estop, session_active}` |
+| `POST /api/cmd` → 202 | `console.py:1274-1321` | `{command, detail, session}`；409/403/400 错误形态未进表 |
+| `POST /api/session` → 201 | `console.py:1185-1190` | `{session, ttl_s}` |
+| `DELETE /api/session` | `console.py:1193-1227` | `{closed, home_command, detail}` |
+| `POST` / `DELETE /api/stop` | `console.py:1236-1245` | `{estop}` |
+| `GET /api/events` | `console.py:1323-1325` | `{events:[{ts, level, text}]}`（假件原来**没有**这条路由，已补） |
+| 嵌套 `Command`/`CommandResult`/`Session` | `manual.py:49-57 / 64-72 / 75-81` | 7 / 7 / 3 个字段各一条断言 |
+| `GET /api/image` | `console.py:867-888` | **字节流不是 JSON**：契约改成"页面只能给 `object_name`"（断言 URL path 与 searchParams） |
+
+**断言工程上两点**：契约条目支持 `method`/`body`/`path`（一个路径可以有多条契约——`/api/cmd`
+的 GET 与 POST 形态完全不同）；`PAGE_CONSUMES` 同步补上这些端点的消费字段，
+"页面消费的字段 ⊆ 真契约"这条才有意义。
+
+**验证（实测）**
+```
+node docs/patrol/console-ui/verify-page.js web/console/index.html
+→ 322/331 通过，运行期错误：无（连跑 3 次同结果）
+   失败 9 条与 HEAD 逐条相同（Compare-Object 比过清单）
+```
+**护栏自证**：把假 `/api/events` 改坏（去掉 `level`、加一个真契约没有的字段）→ 320/331，
+『fixture 字段全部来自真契约』『fixture 含页面必需的字段』两条当场红。
+（第一次自证选错了端点：改 `/api/cmd` 的 `session_active` 会把页面流程本身打断、跑不到断言处——
+**自证也要挑"只影响被测对象"的改法**。）
+
+### 仍未进自动契约表
+- `/api/cmd` 的 **409/403/400 错误形态**（`{error, patrol, retry_hint}` / `{error, estop}` /
+  `{error, busy_with}` / `{error, need_session}`）：页面按 `status` 分支处理，值得单独一批。
+- `/api/stations`、`/api/grid`、`/api/room`、`/api/station_summary`、`/api/environment/summary`、
+  `/api/environment/batches`、`/api/operations`、`/api/preview/status`、`/api/preview/frame.jpg`：
+  人工对照过形状一致（§4），但要各抄一遍真字段才能进表，属后续。
