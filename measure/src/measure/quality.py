@@ -19,6 +19,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
 import numpy as np
 
 #: 占位阈值（等票 13 用真实帧分布替换；改动必须留回归帧与理由）
@@ -26,6 +29,10 @@ DEFAULT_BLUR_THRESHOLD = 100.0
 DEFAULT_MAX_OVEREXPOSED = 0.05
 #: 近黑：p99 亮度低于此值（[0,1] 归一化）= 整帧几乎没有亮区
 DEFAULT_DARK_P99 = 0.12
+#: **清晰度绝对下限**（票 14，Chief 2026-10-13 加的约束）：相对基线判"塌了"之前，
+#: 先看绝对清晰度。没有它，相机**整体**失焦/镜头被污染时，每帧相对自己的基线都
+#: "正常"，系统性漂移会被相对判据吃掉。占位值待票 13 用样本定。
+DEFAULT_ABS_LAPVAR_FLOOR = 15.0
 
 
 def _as_unit(gray: np.ndarray) -> np.ndarray:
@@ -88,3 +95,105 @@ def frame_quality(gray: np.ndarray, *, blur_threshold: float = DEFAULT_BLUR_THRE
     if is_dark(gray, dark_p99=dark_p99):
         flags.append("no_light")
     return (not flags), "+".join(flags)
+
+
+# ---------- 相对化判据（票 14；绝对兜底 + 同站位基线） ----------
+
+@dataclass(frozen=True)
+class FrameStats:
+    """一帧的客观统计量（相对判据的输入）。"""
+
+    lapvar: float
+    p99: float
+    overexposed_fraction: float
+
+
+@dataclass(frozen=True)
+class StationBaseline:
+    """同站位 + 同角度档的近窗基线（中位数 + MAD，抗少数坏帧污染）。"""
+
+    n: int
+    lapvar_median: float
+    lapvar_mad: float
+    p99_median: float
+    p99_mad: float
+
+
+#: 基线至少要有这么多帧才敢用（票 14 §2）
+MIN_BASELINE_FRAMES = 10
+
+#: 拒绝码 / 标记
+VERDICT_OK = "ok"
+VERDICT_LOW = "low_confidence"
+VERDICT_REJECT = "reject"
+
+
+def frame_stats(gray: np.ndarray) -> FrameStats:
+    """灰度帧 → `FrameStats`。"""
+    return FrameStats(
+        lapvar=laplacian_variance(gray),
+        p99=p99_brightness(gray),
+        overexposed_fraction=overexposed_fraction(gray),
+    )
+
+
+def station_baseline(stats: Sequence[FrameStats]) -> StationBaseline | None:
+    """近窗帧统计 → 基线；空输入返回 None。"""
+    if not stats:
+        return None
+    lap = np.asarray([s.lapvar for s in stats], dtype=float)
+    p99 = np.asarray([s.p99 for s in stats], dtype=float)
+    return StationBaseline(
+        n=len(stats),
+        lapvar_median=float(np.median(lap)),
+        lapvar_mad=float(np.median(np.abs(lap - np.median(lap)))),
+        p99_median=float(np.median(p99)),
+        p99_mad=float(np.median(np.abs(p99 - np.median(p99)))),
+    )
+
+
+def relative_verdict(
+    now: FrameStats,
+    base: StationBaseline | None,
+    *,
+    dark_p99: float = DEFAULT_DARK_P99,
+    abs_lapvar_floor: float = DEFAULT_ABS_LAPVAR_FLOOR,
+    min_frames: int = MIN_BASELINE_FRAMES,
+    lapvar_sigma: float = 3.5,
+    p99_sigma: float = 4.0,
+) -> tuple[str, list[str]]:
+    """相对判据 → ``(verdict, reasons)``，verdict ∈ ``ok / low_confidence / reject``。
+
+    判定顺序（票 14 §5）：
+
+    1. **绝对兜底先判**：
+       - 近黑（`p99 < dark_p99`）⇒ ``reject``（没有信息量）；
+       - 清晰度绝对下限（`lapvar < abs_lapvar_floor`）⇒ ``reject``
+         —— **这条不能省**：相机整体失焦时每帧相对自己的基线都"正常"，
+         只靠相对判据会把系统性漂移放过去（Chief 2026-10-13 约束）；
+    2. **基线不足**（`base is None` 或 `n < min_frames`）⇒ ``low_confidence``
+       + `baseline_missing`（**不是 ok**：宁可不发 verified）；
+    3. **相对异常**：`lapvar < median − k·MAD`（纹理塌了：先扣镜头污/失焦）
+       或 `|p99 − median| > k·MAD`（照度漂到本点位没见过的地方）⇒ ``low_confidence``；
+    4. 其余 ⇒ ``ok``。
+
+    注意 ``ok`` **不等于** 发 `verified`：`verified` 还要过"站位×时段"抽样验收
+    （指标：该站位该时段的人工判可用帧中，被自动门判低纹理的比例 ≤ 既定上限；
+    逐帧看图的成本不可接受，只用抽样）。见票 14 §3 与票 11 §3。
+    """
+    reasons: list[str] = []
+    if now.p99 < dark_p99:
+        return VERDICT_REJECT, ["no_light"]
+    if now.lapvar < abs_lapvar_floor:
+        reasons.append("below_abs_lapvar_floor")
+        return VERDICT_REJECT, reasons
+    if base is None or base.n < min_frames:
+        return VERDICT_LOW, ["baseline_missing"]
+    # MAD 为 0（近窗帧彼此几乎一样）时退回"只比中位数"，避免除零式的误判
+    lap_span = lapvar_sigma * base.lapvar_mad
+    if lap_span > 0 and now.lapvar < base.lapvar_median - lap_span:
+        reasons.append("lapvar_below_baseline")
+    p99_span = p99_sigma * base.p99_mad
+    if p99_span > 0 and abs(now.p99 - base.p99_median) > p99_span:
+        reasons.append("brightness_off_baseline")
+    return (VERDICT_LOW, reasons) if reasons else (VERDICT_OK, [])

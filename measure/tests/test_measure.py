@@ -2,13 +2,21 @@ import numpy as np
 import pytest
 from measure.pipeline import DummyDetector, aggregate_box, aggregate_round
 from measure.quality import (
+    DEFAULT_ABS_LAPVAR_FLOOR,
+    DEFAULT_DARK_P99,
+    VERDICT_LOW,
+    VERDICT_OK,
+    VERDICT_REJECT,
     frame_quality,
+    frame_stats,
     is_blurry,
     is_dark,
     is_overexposed,
     laplacian_variance,
     overexposed_fraction,
     p99_brightness,
+    relative_verdict,
+    station_baseline,
 )
 
 
@@ -65,6 +73,81 @@ def test_vignetted_frame_is_not_mistaken_for_no_light():
     assert not is_dark(vignette)
     ok, flags = frame_quality(vignette, blur_threshold=0.0)   # 只考近黑判据
     assert "no_light" not in flags and ok
+
+
+# ---------- 相对化判据（票 14） ----------
+
+def _noise_frame(seed: int, size: int = 64) -> np.ndarray:
+    """有纹理的帧：拉普拉斯方差高（≈ 数千）。"""
+    return np.random.default_rng(seed).integers(0, 255, (size, size), dtype=np.uint8)
+
+
+def _smooth_frame(seed: int, size: int = 64) -> np.ndarray:
+    """几乎无纹理的帧：极缓慢的斜面 + 微噪声（lapvar 远低于绝对下限）。"""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:size, 0:size]
+    base = 120 + 20 * (yy + xx) / (2 * size)
+    return np.clip(base + rng.normal(0, 0.4, (size, size)), 0, 255).astype(np.uint8)
+
+
+def _soft_frame(seed: int, size: int = 64, amplitude: float = 3.0) -> np.ndarray:
+    """纹理变弱但还没到绝对下限的帧（失焦的中间态）。"""
+    rng = np.random.default_rng(seed)
+    yy, xx = np.mgrid[0:size, 0:size]
+    base = 120 + 20 * (yy + xx) / (2 * size)
+    return np.clip(base + rng.normal(0, amplitude, (size, size)), 0, 255).astype(np.uint8)
+
+
+def test_frame_stats_and_baseline_from_noise_frames():
+    stats = [frame_stats(_noise_frame(i)) for i in range(12)]
+    base = station_baseline(stats)
+    assert base is not None and base.n == 12
+    assert base.lapvar_median == pytest.approx(np.median([s.lapvar for s in stats]))
+    assert station_baseline([]) is None
+
+
+def test_relative_verdict_ok_when_frame_matches_baseline():
+    stats = [frame_stats(_noise_frame(i)) for i in range(12)]
+    base = station_baseline(stats)
+    verdict, reasons = relative_verdict(frame_stats(_noise_frame(99)), base)
+    assert verdict == VERDICT_OK and reasons == []
+
+
+def test_relative_verdict_low_when_texture_collapses_but_not_dark():
+    """纹理塌了（相对基线低）但亮度正常 ⇒ low_confidence，不是 reject。"""
+    stats = [frame_stats(_noise_frame(i)) for i in range(12)]
+    base = station_baseline(stats)
+    now = frame_stats(_soft_frame(1, amplitude=1.5))   # lapvar ≈ 46：高于绝对下限、远低于基线
+    assert now.p99 >= DEFAULT_DARK_P99             # 不是近黑
+    assert now.lapvar >= DEFAULT_ABS_LAPVAR_FLOOR  # 也没到绝对下限
+    verdict, reasons = relative_verdict(now, base)
+    assert verdict == VERDICT_LOW
+    assert "lapvar_below_baseline" in reasons
+
+
+def test_relative_verdict_low_when_baseline_missing():
+    """基线不足时**不是 ok**：宁可不发 verified，也不乱发。"""
+    verdict, reasons = relative_verdict(frame_stats(_noise_frame(0)), None)
+    assert verdict == VERDICT_LOW and reasons == ["baseline_missing"]
+    base = station_baseline([frame_stats(_noise_frame(i)) for i in range(5)])
+    assert relative_verdict(frame_stats(_noise_frame(1)), base)[0] == VERDICT_LOW
+
+
+def test_relative_verdict_rejects_absolute_floor_even_if_baseline_agrees():
+    """**绝对下限兜底**（Chief 约束）：相机整体失焦 ⇒ 所有帧相对基线都"正常"，
+    只有绝对下限能拦住这种系统性漂移。"""
+    blind = [_smooth_frame(i) for i in range(12)]          # 一批整体失焦的帧
+    base = station_baseline([frame_stats(f) for f in blind])
+    assert base is not None
+    verdict, reasons = relative_verdict(frame_stats(blind[0]), base)
+    assert verdict == VERDICT_REJECT
+    assert "below_abs_lapvar_floor" in reasons
+
+
+def test_relative_verdict_rejects_dark_frame():
+    dark = np.full((64, 64), 12, dtype=np.uint8)
+    verdict, reasons = relative_verdict(frame_stats(dark), None)
+    assert verdict == VERDICT_REJECT and reasons == ["no_light"]
 
 
 def test_quality_requires_2d():
