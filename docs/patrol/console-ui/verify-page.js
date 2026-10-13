@@ -1731,6 +1731,52 @@ await sleep(150);
     $('#pvimg').getAttribute('src') || '(无)');
   check('再打开后按钮又是"关闭画面"', T('#pvbtn') === '关闭画面', T('#pvbtn'));
 
+  // ---- 13b. 视觉/可读性护栏：能扫出来的就别靠眼睛（2026-10-13 视觉批次）----
+  // 这些不是审美判断，是**以前真的踩过**的坑，写成扫描断言才不会复发：
+  //   ① P0-1 的暗色主题硬编码（#2a3340/#8b98a5/#58a6ff/#7ee2a8）贴在浅色界面上像补丁
+  //      —— 2026-10-13 又在导轨图里抓到一处 `#8b98a5`（Z 锚点标签）；
+  //   ② `var(--x)` 用了却没定义 ⇒ 该属性静默失效，最难查的一类；
+  //   ③ CSS 里出现 <10px 的字：现场远看/亮光下没有意义；
+  //   ④ 键盘焦点不可见（现场有人全程用键盘走点动/急停）；
+  //   ⑤ 触控目标小于 44px。
+  const styleCss = (() => {
+    const m = html.match(/<style>([\s\S]*?)<\/style>/);
+    return m ? m[1] : '';
+  })();
+  // 查硬编码颜色时要去掉注释：注释里**允许**提到旧色值（那是在记录历史），
+  // 顺手把整行 `//` / `*` 开头的注释行也排除掉。
+  const codeOnly = html.replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').filter(l => !/^\s*(\/\/|\*)/.test(l)).join('\n');
+  // 定义可以出现在 CSS 里，也可以是 JS/内联样式在运行时注入的（`--cellw` 就是拼图格 JS 写的），
+  // 所以定义扫描要覆盖整页代码而不仅是 <style>。
+  const defined = new Set([...codeOnly.matchAll(/(--[a-z0-9-]+)\s*:/gi)].map(m => m[1]));
+  // `var(--x, fallback)` 是有意为之的兜底（CSS 允许），只把"既没定义、又没兜底"的当问题。
+  const varUses = [...codeOnly.matchAll(/var\(\s*(--[a-z0-9-]+)\s*(,)?/gi)]
+    .map(m => ({ name: m[1], hasFallback: !!m[2] }));
+  const brokenVars = [...new Set(varUses.filter(u => !u.hasFallback && !defined.has(u.name))
+    .map(u => u.name))];
+  const fallbackOnly = [...new Set(varUses.filter(u => u.hasFallback && !defined.has(u.name))
+    .map(u => u.name))];
+  check('用到的每个 var(--x) 要么有定义、要么自带兜底（静默失效最难查）',
+    brokenVars.length === 0,
+    brokenVars.length ? brokenVars.join(',') : ('ok（带兜底的：' + (fallbackOnly.join(',') || '无') + '）'));
+  const darkLeftovers = ['#2a3340', '#8b98a5', '#58a6ff', '#7ee2a8']
+    .filter(c => codeOnly.toLowerCase().includes(c));
+  check('没有暗色主题遗留硬编码（P0-1 名单；注释里的历史记载不算）',
+    darkLeftovers.length === 0, darkLeftovers.join(',') || 'ok');
+  const tinyFonts = [...styleCss.matchAll(/font-size:\s*([0-9.]+)px/gi)]
+    .map(m => Number(m[1])).filter(n => n < 10);
+  check('CSS 里没有小于 10px 的字（现场可读性下限，现下限 10.5px）',
+    tinyFonts.length === 0, tinyFonts.join(',') || 'ok');
+  check('触控目标下限仍在（button 至少 44px）',
+    /min-height:\s*44px/.test(styleCss), (styleCss.match(/min-height:\s*\d+px/) || ['(无)'])[0]);
+  check('键盘焦点环用 :focus-visible（鼠标点完不残留一圈）且用主题 accent 色',
+    /:focus-visible/.test(styleCss) && /outline:\s*2px solid var\(--accent\)/.test(styleCss),
+    'focus-visible=' + /:focus-visible/.test(styleCss));
+  check('主题变量只有一处 :root 定义（防"定义两遍各自漂"）',
+    (styleCss.match(/:root\{/g) || []).length === 1,
+    String((styleCss.match(/:root\{/g) || []).length));
+
   // ---- 14. 契约断言：假后端的字段集必须与**真后端**的响应形状一致（2026-10-13 加）----
   // 为什么非有不可：页面读 `p.mean_len_mm / p.mean_cap_mm` 读了很久，而 `/growth` 从来
   // 没有这两列（它给的是 delta 行）——真机上曲线一直是空的、回归却一直绿，因为

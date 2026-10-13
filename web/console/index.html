@@ -98,13 +98,13 @@
   .mosaic-cell:hover:not(.vacant){border-color:#b5ccdf;box-shadow:0 1px 4px rgba(15,23,42,.08)}
   .mosaic-cell .mosaic-thumb{display:flex;align-items:center;justify-content:center;min-width:0;
     width:100%;aspect-ratio:16/9;overflow:hidden;background:var(--panel);
-  color:var(--dim);font-size:10px}
+  color:var(--dim);font-size:var(--fs-micro)}
   .mosaic-cell .mosaic-thumb img{display:block;width:100%;height:100%;object-fit:contain;background:var(--panel)}
   .mosaic-cell .mosaic-empty{display:flex;align-items:center;justify-content:center;width:100%;height:100%}
   /* 只在"图在、但状态本身有话要说"时才有一行小字（采图失败/待同步）；
      正常帧一个字都不挂。位置与时间由 aria-label 承载，读屏仍然拿得到。 */
   .mosaic-cell .mosaic-meta{display:block;min-width:0;line-height:1.1}
-  .mosaic-cell .mosaic-meta small{font-size:9px;color:var(--dim);overflow:hidden;
+  .mosaic-cell .mosaic-meta small{font-size:var(--fs-micro);color:var(--dim);overflow:hidden;
     white-space:nowrap;text-overflow:clip}
   .mosaic-cell.sel{outline:2px solid var(--accent);outline-offset:-2px}
   .mosaic-cell.fail{border-color:var(--bad)}
@@ -130,8 +130,8 @@
   .cmpstrip .cmp-empty{display:flex;align-items:center;justify-content:center;width:100%;height:100%}
   .cmpstrip .cmp-meta{display:flex;flex-direction:column;gap:1px;padding:4px 2px 0;font-size:11px}
   .cmpstrip .cmp-when{color:var(--fg);font-variant-numeric:tabular-nums}
-  .cmpstrip .cmp-note{color:var(--dim);font-size:10.5px}
-  .cmpstrip .cmp-meas{color:var(--fg);font-size:10.5px;font-variant-numeric:tabular-nums}
+  .cmpstrip .cmp-note{color:var(--dim);font-size:var(--fs-micro)}
+  .cmpstrip .cmp-meas{color:var(--fg);font-size:var(--fs-micro);font-variant-numeric:tabular-nums}
   .cmpstrip .cmp-note.bad{color:var(--bad)}
   .cmpstrip .cmp-note.warn{color:var(--warn)}
   /* ---- 大图查看器 ---- */
@@ -256,6 +256,13 @@
         --ok:#18794e;--warn:#a35d00;--bad:#c73535;--accent:#1f6feb;
         --soft:#f7f9fb;--accent-soft:#e8f0fe;--ok-soft:#e8f5ee;--bad-soft:#fcecec;
         --shadow:0 1px 3px rgba(24,38,52,.06),0 4px 14px rgba(24,38,52,.04);
+        /* 字号下限：现场是远看/亮光下看的，**低于 10.5px 的字在这里没有意义**
+           （回归里有一条断言扫 CSS，禁止任何 font-size 小于 10px 的声明）。
+           2026-10-13 视觉批次：原来拼图格的小字是 9px、格内空态是 10px，都提到这个下限。 */
+        --fs-micro:10.5px;
+        /* 键盘焦点环：只对键盘用户显示（鼠标点击不出现），深浅色都够醒目。
+           `:focus-visible` 而不是 `:focus`——后者会在鼠标点按钮后也留一圈，现场反而像卡住。 */
+        --focus-ring:0 0 0 3px rgba(31,111,235,.35);
         /* 实时画面：--pv-k = **预览流当前档位实际输出帧**的宽高比 1280/718
            （`PREVIEW_SCALE=1280`；`scale=1280:-2` 从相机原生 2880×1616 偶数取整得 718）。
            2026-09-21 试过"与档位解耦、恒写相机原生 2880/1616"——三档只差 <0.1% 不假，
@@ -349,6 +356,11 @@
   button.danger:hover:not(:disabled){background:#ad2e2e}
   button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #bcd4ff;outline-offset:1px}
   input,select{color:var(--fg);background:var(--panel);border-color:var(--line)}
+  /* 键盘焦点环：`:focus-visible` 只在键盘操作时出现——鼠标点完不残留一圈，现场不会误以为卡住。
+     点动/定位/急停这些按钮现场有人全程用键盘走，焦点看不见比"不好看"严重得多。 */
+  button:focus-visible,input:focus-visible,select:focus-visible,
+  a:focus-visible,[tabindex]:focus-visible{
+    outline:2px solid var(--accent);outline-offset:2px;box-shadow:var(--focus-ring)}
   .estopcard{top:0;background:var(--bad-soft);border-color:#efc2c2;box-shadow:var(--shadow);transition:all .2s ease}
   .estopcard.is-stopped{background:#fee2e2;border-color:#ef4444;box-shadow:0 0 0 3px rgba(239,68,68,.25)}
   .estopcard h2{color:#8e2424}
@@ -1136,7 +1148,7 @@ function mapStaticSvg(){
   }
   for(const b of bands){
     s += `<text x="${padL-9}" y="${(Y(b.z)+3).toFixed(1)}" text-anchor="end" font-size="10" fill="#5b6b7d">${b.L}</text>`;
-    s += `<text x="${W-padR+5}" y="${(Y(b.z)+3).toFixed(1)}" font-size="9" fill="#8b98a5">${b.z.toFixed(0)}</text>`;
+    s += `<text x="${W-padR+5}" y="${(Y(b.z)+3).toFixed(1)}" font-size="9" fill="#5b6b7d">${b.z.toFixed(0)}</text>`;
   }
   s += `<text x="${W-padR}" y="${padT-4}" text-anchor="end" font-size="9" fill="#6b7785">Y ${esc(y_min)} → ${esc(y_max)} mm · Z ${esc(z_min)} → ${esc(z_max)} mm</text>`;
   // 蛇形路径（巡检走法：层内单向、换层同侧——不允许斜向段）
