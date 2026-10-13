@@ -2252,14 +2252,15 @@ function rowOk(r){ return r.ok !== false && r.ok !== 0; }
 function integrityOfRound(round){
   if(!round) return { level: 'ok', label: '', detail: '' };
   const dup = round.n_duplicate;
-  const suspect = round.suspect_duplicate === 1 || (typeof dup === 'number' && dup > 0);
+  const suspect = isFlag(round.suspect_duplicate) || (typeof dup === 'number' && dup > 0);
   if(suspect){
     const recorded = (typeof round.n_frames_recorded === 'number') ? round.n_frames_recorded : null;
-    const groups = Array.isArray(round.dup_groups) ? round.dup_groups : [];
+    // `n_duplicate` 为 NULL 是"**那时没记**"，不是"确认无重复"（票 12/17 的 NULL 语义）：
+    // 轮子已经被判可疑，只是张数不知道 ⇒ 如实说"张数未记录"，不许写 0、也不许不写。
+    const dupText = (typeof dup === 'number') ? ('重复 ' + dup + ' 张') : '可疑重复（张数未记录）';
     return { level: 'suspect',
-             label: '重复 ' + (typeof dup === 'number' ? dup : '?') + ' 张'
-                    + (recorded ? '（记录 ' + recorded + ' 张）' : ''),
-             detail: groups.length ? ('重复组：' + groups.join('、')) : '' };
+             label: dupText + (recorded ? '（记录 ' + recorded + ' 张）' : ''),
+             detail: dupGroupsText(round.dup_groups) };
   }
   const err = round.content_check_error;
   if(typeof err === 'string' && err.trim()){
@@ -2272,18 +2273,34 @@ function integrityOfRound(round){
   return { level: 'ok', label: '', detail: '' };
 }
 
+/** 轮级重复组的可读文本。**元素是对象不是字符串**（`patrol/daemon.py:344`：
+ *  `{sha256_12, n, stations}`）——按字符串渲染会得到 `[object Object]`。
+ *  真跑起来之前这里只按"设想的形状"写过一版 list[str]，那是错的；现在两种都容。 */
+function dupGroupsText(groups){
+  if(!Array.isArray(groups) || !groups.length) return '';
+  const parts = groups.map(g => {
+    if(typeof g === 'string') return g;
+    if(!g || typeof g !== 'object') return String(g);
+    const sha = g.sha256_12 || g.sha || g.sha256 || '?';
+    const n = (typeof g.n === 'number') ? (g.n + ' 帧') : '';
+    const st = Array.isArray(g.stations) && g.stations.length ? (g.stations.join('/')) : '';
+    return [sha, n, st].filter(Boolean).join(' ');
+  });
+  return '重复组：' + parts.join('；');
+}
+
 /** 一帧的内容可信度（票 12）。判据与环境官聚合侧同口径：
  *  `frame_dup=1` 或 `duplicate_streak>0` ⇒ 不可信。**NULL/缺键不是"干净"**，
  *  但帧级没有"未核查"这个档（轮级才有）——所以这里只认显式标记。 */
 function frameDupInfo(row){
   const streak = (row && typeof row.duplicate_streak === 'number') ? row.duplicate_streak : null;
-  const flagged = !!row && (row.frame_dup === 1 || (streak !== null && streak > 0));
+  const flagged = !!row && (isFlag(row.frame_dup) || (streak !== null && streak > 0));
   if(!flagged) return { dup: false, label: '', detail: '' };
   const label = (streak !== null && streak > 0) ? ('连续重复 ' + streak + ' 张') : '重复帧';
   const detail = [
     row.dup_group ? ('重复组 ' + row.dup_group) : '',
     row.content_sha256 ? ('内容指纹 ' + String(row.content_sha256).slice(0, 12)) : '',
-    row.same_as_previous === 1 ? '与上一张相同' : '',
+    isFlag(row.same_as_previous) ? '与上一张相同' : '',
   ].filter(Boolean).join(' · ');
   return { dup: true, label, detail };
 }
@@ -2822,6 +2839,12 @@ const GROWTH_METRICS = [
 // 顺序与 `analysis/growth.py:48 GROWTH_METRICS` 一致（杆长 > 投影径 > 面积），
 // 这样"画出来的那条线"和"判词用的那个量"不会是两个量。平视单档下杆长恒 NULL，
 // 自然落到投影径/面积；换角之后杆长有值就自动回到最高优先量。
+/** 布尔标记的读法：生产者写的是 `True/False`（`patrol/daemon.py:259`），
+ *  进 SQLite 成 INTEGER 1/0，接口上两种都可能出现 ⇒ **只认 1 会漏判**。
+ *  这里统一按 truthy 认（1/true/'1'），与 `analysis/integrity.py` 的 `_truthy` 同口径。 */
+function isFlag(v){
+  return v === true || v === 1 || v === '1';
+}
 const QUALITY_NO_ANGLE = 'no_angle_profile';
 
 /** API 的量纲是 ASCII（`mm` / `mm2`，见 growth.py:48）；显示时换成排版形。 */

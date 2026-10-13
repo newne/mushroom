@@ -57,9 +57,11 @@ const IMAGES = [
   // 把实时区"无帧站位""层开关"几条不相干的断言一起搞挂了：fixture 副作用）。
   { round_id: 'round-20260913', ts: '2026-09-13T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top0',
     ok: true, object_name: '20260913/B102_S102_top0_093000', source: 'local',
-    frame_dup: 1, dup_group: '41685c09a1b2',
+    // ⚠️ 2026-10-13 更正：生产者写的是**布尔** `True`（`patrol/daemon.py`），
+    // 不是 1。页面原来判 `=== 1` ⇒ 这条标记在真机上会被漏判。
+    frame_dup: true, dup_group: '41685c09a1b2',
     content_sha256: '41685c09a1b2c3d4e5f60718293a4b5c6d7e8f9012345678abcdef0123456789',
-    same_as_previous: 1, duplicate_streak: 5, elapsed_s: 5.2 },
+    same_as_previous: true, duplicate_streak: 5, elapsed_s: 5.2 },
   { round_id: 'round-20260913', ts: '2026-09-13T06:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
     ok: false, object_name: null, source: 'prod' },
   // 第三轮（round-20260910）也有一帧，且是本地待同步：让它落进拼图，
@@ -74,10 +76,14 @@ const ROUNDS = [
     suspect_duplicate: 0, n_duplicate: 0, n_frames_recorded: 48, content_check_error: '',
     dup_groups: [] },
   // 可疑轮：复刻 10-09 那种"ok=1 但 35 帧同一份字节"（数字必须能数出来，不许写死）
+  // ⚠️ 2026-10-13 更正两处形状，都是**真机上会渲染错的**：
+  //  ① `suspect_duplicate` 是**布尔**（`patrol/daemon.py:259`），不是 1 ⇒ 判 `=== 1` 会漏；
+  //  ② `dup_groups` 的元素是**对象** `{sha256_12, n, stations}`（`patrol/daemon.py:344`），
+  //     不是字符串 ⇒ 按字符串拼会渲染成 `[object Object]`。
   { round_id: 'round-20260913', ts: '2026-09-13T10:00:00', room_id: '611', entry_date: '2026-09-04',
     batch_no: 'BATCH-10', ok: false, n_results: 48, n_failures: 2,
-    suspect_duplicate: 1, n_duplicate: 35, n_frames_recorded: 48, content_check_error: '',
-    dup_groups: ['41685c091234'] },
+    suspect_duplicate: true, n_duplicate: 35, n_frames_recorded: 48, content_check_error: '',
+    dup_groups: [{ sha256_12: '41685c091234', n: 35, stations: ['S102', 'S211'] }] },
   // 巡检失败、48 张全空：这种轮次不该进列表（2026-10-13 用户口径），也不该被"上一轮"选中
   { round_id: 'round-20260912', ts: '2026-09-12T10:00:00', room_id: '611', entry_date: '2026-09-04',
     batch_no: 'BATCH-10', ok: false, n_results: 0, n_failures: 48 },
@@ -1639,6 +1645,24 @@ await sleep(150);
     T('#roundnavinfo'));
   check('② 可疑轮的 tooltip 给出重复组（可追溯）',
     (($('#roundnavinfo').title) || '').includes('41685c091234'), $('#roundnavinfo').title || '(无)');
+  // ⚠️ 2026-10-13 更正：`dup_groups` 的元素是**对象** `{sha256_12, n, stations}`
+  // （`patrol/daemon.py:344`），不是字符串。按字符串渲染会得到 `[object Object]`——
+  // 也就是说这条 tooltip 在真机上一直是"重复组：[object Object]"，而回归绿着。
+  check('② 重复组按**对象**渲染：sha12 + 张数 + 涉及的站位（不是 [object Object]）',
+    (($('#roundnavinfo').title) || '').includes('35 帧')
+    && (($('#roundnavinfo').title) || '').includes('S102')
+    && (($('#roundnavinfo').title) || '').includes('S211'),
+    $('#roundnavinfo').title || '(无)');
+  // 兜底钉子：**渲染出来的文本**里不许出现对象被字符串化后的样子。
+  // 注意只看屏幕元素——`<script>`/`<style>` 的 textContent 是源码本身，注释里出现这个词
+  // 不算渲染（第一版没排除，结果红了，红的是我自己的注释）。
+  const ooHits = [...document.querySelectorAll('body *')]
+    .filter(el => !/^(SCRIPT|STYLE)$/.test(el.tagName))
+    .filter(el => el.children.length === 0 && (el.textContent || '').includes('[object Object]'))
+    .map(el => el.tagName + '#' + (el.id || '') + '.' + (el.className || ''));
+  check('② 屏幕上任何一处都不出现 [object Object]（对象渲染的兜底钉子）',
+    !(($('#roundnavinfo').title) || '').includes('[object Object]') && ooHits.length === 0,
+    ooHits.slice(0, 5).join(' , ') || (($('#roundnavinfo').title) || '').slice(0, 100) || 'ok');
   check('③ 只有可疑轮才换说法：两个数分开写「记录 48 张 · 成功 N 站」',
     T('#roundnavinfo').includes('记录 48 张') && T('#roundnavinfo').includes('成功 '),
     T('#roundnavinfo'));
@@ -1673,6 +1697,74 @@ await sleep(150);
     T('#roundnavinfo').includes('未核查（核查失败：内容核查读取失败）')
     && !T('#roundnavinfo').includes('那时没有'), T('#roundnavinfo'));
   delete legacyRound.content_check_error;           // 复原 fixture
+  await click('#reloadbtn');
+  await sleep(300);
+  $('#roundSel').value = 'round-20260914';
+  $('#roundSel').dispatchEvent(new window.Event('change'));
+  await waitCell('S102');
+
+  // ---- ② 布尔 / 整数两种形态都必须认（2026-10-13 更正后加）----
+  // 生产者写的是 Python `True`（`patrol/daemon.py:259`），进 SQLite 成 INTEGER `1`，
+  // 接口上两种都可能出现。页面原来写 `=== 1` ⇒ 真机上的布尔标记**全被漏判**。
+  //
+  // ⚠️ 两条都做成**隔离用例**（自证时发现的覆盖漏洞）：最初只改 `suspect_duplicate` 的形态，
+  // 而那一轮 `n_duplicate=35>0` 也成立，于是把 `isFlag()` 退回 `=== 1` 时**照样绿**——
+  // 布尔这条路其实没被单独测到。所以这里每次都把 `n_duplicate` 置 NULL（= "那时没记"），
+  // 只留 `suspect_duplicate` 一个信号：只认一种形态的那版实现必然红。
+  const suspectRound = ROUNDS.find(r => r.round_id === 'round-20260913');
+  const boolForm = suspectRound.suspect_duplicate;
+  const dupForm = suspectRound.dup_groups;
+
+  // 形态 1：SQLite 落地形态 `1`
+  suspectRound.suspect_duplicate = 1;
+  suspectRound.n_duplicate = null;
+  suspectRound.dup_groups = ['41685c091234'];       // 旧契约的 list[str] 形态也必须不崩
+  await click('#reloadbtn');
+  await sleep(300);
+  $('#roundSel').value = 'round-20260913';
+  $('#roundSel').dispatchEvent(new window.Event('change'));
+  await waitFor(() => T('#roundnavinfo').includes('重复'), 4000);
+  check('② 整数形态 `suspect_duplicate=1` 是**唯一**信号时也判可疑（只认布尔会漏）',
+    T('#roundnavinfo').includes('可疑重复（张数未记录）') && T('#roundnavinfo').includes('记录 48 张'),
+    T('#roundnavinfo'));
+  check('② 重复组兼容字符串形态（旧契约的 list[str] 也能渲染，不出现 [object Object]）',
+    (($('#roundnavinfo').title) || '').includes('41685c091234')
+    && !(($('#roundnavinfo').title) || '').includes('[object Object]'),
+    $('#roundnavinfo').title || '(无)');
+
+  // 形态 2：布尔 `true`（同样只留这一个信号）
+  suspectRound.suspect_duplicate = true;
+  suspectRound.dup_groups = [{ sha256_12: '41685c091234', n: 35, stations: ['S102'] }];
+  await click('#reloadbtn');
+  await sleep(300);
+  $('#roundSel').value = 'round-20260913';
+  $('#roundSel').dispatchEvent(new window.Event('change'));
+  await waitFor(() => T('#roundnavinfo').includes('重复'), 4000);
+  check('② 布尔是**唯一**信号时也必须判可疑（`n_duplicate` NULL = 那时没记，不是"确认无重复"）',
+    T('#roundnavinfo').includes('可疑重复（张数未记录）') && T('#roundnavinfo').includes('记录 48 张'),
+    T('#roundnavinfo'));
+
+  // 帧级同样的隔离：`duplicate_streak` 拿掉，只留布尔 `frame_dup=true`。
+  const dupFrame = IMAGES.find(im => im.round_id === 'round-20260913' && im.station_id === 'S102');
+  const streakForm = dupFrame.duplicate_streak;
+  dupFrame.duplicate_streak = null;
+  await click('#reloadbtn');
+  await sleep(300);
+  $('#roundSel').value = 'round-20260913';
+  $('#roundSel').dispatchEvent(new window.Event('change'));
+  await waitCell('S102');
+  const dupCell2 = document.querySelector('#timeline .mosaic-cell[data-station-id="S102"]');
+  check('⑥ 布尔 `frame_dup` 是唯一信号时，格子仍标 dup（退回 `=== 1` 会漏）',
+    !!dupCell2 && dupCell2.classList.contains('dup') && !dupCell2.classList.contains('fail'),
+    dupCell2 ? dupCell2.className : '(无)');
+  check('⑥ `duplicate_streak` 为 NULL 时角标如实说"重复帧"、不编张数',
+    T('#timeline .mosaic-cell[data-station-id="S102"]').includes('重复帧')
+    && !/连续重复/.test(T('#timeline .mosaic-cell[data-station-id="S102"]')),
+    T('#timeline .mosaic-cell[data-station-id="S102"]'));
+  dupFrame.duplicate_streak = streakForm;           // 复原
+  suspectRound.suspect_duplicate = boolForm;        // 复原 fixture（n_duplicate 也回到 35）
+  suspectRound.n_duplicate = 35;
+  suspectRound.dup_groups = dupForm;
   await click('#reloadbtn');
   await sleep(300);
   $('#roundSel').value = 'round-20260914';
