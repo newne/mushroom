@@ -409,6 +409,16 @@ const click = async sel => {
   await sleep(1200);
 };
 const lastCall = p => [...state.calls].reverse().find(c => c.url.split('?')[0] === p);
+// 有界轮询：断言"页面最终会做到某事"，而不是"在某个墙钟窗口内做到"。
+// 留一条卡死在门禁里的墙钟相位用例，比没有这条用例更坏——随机红灯会把真红灯一起淹掉。
+const waitFor = async (fn, ms = 8000, step = 100) => {
+  const deadline = Date.now() + ms;
+  while(Date.now() < deadline){
+    if(fn()) return true;
+    await sleep(step);
+  }
+  return !!fn();
+};
 // 只看**发出去的指令**：页面每次提交后都会紧跟着 GET /api/cmd，取"最后一条同路径"
 // 会拿到那次轮询（这正是本文件第一版踩过的坑）。
 const lastCmd = () => {
@@ -1282,6 +1292,104 @@ await sleep(150);
   await sleep(300);
   check('点"下一轮"回到最新一轮', $('#roundSel').value === 'round-20260914', $('#roundSel').value);
 
+  // ---- 同一站位按天对比（2026-10-13，Chief 定的抽样维度：按天，不按轮）----
+  // 一轮≈7min40s、一天约 8 轮：取"最近 6 轮"只覆盖不到 20 小时，相邻帧几乎一样，看不出生长。
+  // 假件里 S102 有三天的帧（09-14 / 09-13 / 09-10），正好验证"每天一块、跨天并排"。
+  await click('#timeline .mosaic-cell[data-station-id="S102"]');
+  await waitFor(() => document.querySelectorAll('#cmpstrip [data-cmp]').length > 0, 4000);
+  const cmpSel = () => document.querySelectorAll('#cmpstrip [data-cmp]');
+  const cmpDate = el => String(((el.querySelector('.cmp-when') || {}).textContent) || '').slice(0, 10);
+  check('对比视图给"当前选中站位"（标题带站位与框号）',
+    T('#cmptitle').includes('S102') && T('#cmptitle').includes('B102'), T('#cmptitle'));
+  check('按天抽样：三天各一块，不是"最近 3 轮"堆在同一天',
+    cmpSel().length === 3
+    && cmpDate(cmpSel()[0]).includes('2026-09-14')
+    && cmpDate(cmpSel()[1]).includes('2026-09-13')
+    && cmpDate(cmpSel()[2]).includes('2026-09-10'),
+    Array.from(cmpSel()).map(cmpDate).join(' | '));
+  check('对比卡如实标注"这是原图"（缩略图服务到位前不假装省带宽）',
+    T('#cmphint').includes('原图'), T('#cmphint'));
+
+  // 按天抽样必须真的"按时段挑"：把取样时段改到 23:20（假件里没有那一轮），
+  // 断言三块都掉了"邻近时段"的标记——只堆轮次不挑时段的实现过不了这条。
+  $('#cmpTime').value = '1400';
+  $('#cmpTime').dispatchEvent(new window.Event('change'));
+  await waitFor(() => document.querySelectorAll('#cmpstrip .cmp-note').length >= 3, 4000);
+  check('改取样时段真的重挑（23:20 时三点都标"邻近时段"，不假装准）',
+    document.querySelectorAll('#cmpstrip .cmp-note').length >= 3, T('#cmpstrip'));
+  // 回到默认档：**必须选一个真实存在的选项值**。直接 set value='570' 会被浏览器忽略
+  // （570 不在选项里：只有步长整点 + 数据里真实存在的时段），随后 dispatch change 是空动作
+  // ——第一版就这么写的，结果"回到默认"那步其实没执行，白白红了两条。
+  $('#cmpTime').value = 'auto';
+  $('#cmpTime').dispatchEvent(new window.Event('change'));
+  await waitFor(() => document.querySelectorAll('#cmpstrip .cmp-note').length === 0, 8000, 200);
+  check('回到默认档（跟随当前轮次）后标记消失、说明恢复',
+    T('#cmpnote').includes('按"最近 → 更早"排列'), T('#cmpnote') + ' / ' + T('#cmphint'));
+  check('默认档是"跟随当前轮次"，不是一个写死的时刻',
+    ($('#cmpTime').value === 'auto') && T('#cmpTime').includes('跟随当前轮次'),
+    $('#cmpTime').value + ' / ' + T('#cmpTime').slice(0, 40));
+
+  const cmpSrcs = Array.from(document.querySelectorAll('#cmpstrip img'))
+    .map(img => img.getAttribute('src') || '');
+  const cmpPaths = cmpSrcs.map(s => { try { return new URL(s, 'http://console.local').pathname; }
+                                      catch (e) { return '(非法)'; } });
+  check('对比条的图全部走 /api/image 同源代理（页面不直连 MinIO）',
+    cmpSrcs.length >= 2 && cmpPaths.every(p => p === '/api/image'), cmpSrcs.join(' | ') || '(没有 img)');
+  check('对比条的图带的是有效对象名（不是 cloud_url、没有控制网地址）',
+    cmpSrcs.some(s => s.includes(encodeURIComponent('20260910/B102_S102_top0_093000')))
+    && !cmpSrcs.some(s => s.includes('192.168') || s.includes(':9000')), cmpSrcs.join(' | '));
+
+  // 对比条必须与拼图/原图用同一个筛选口径：筛某个角度档时，不能漏出别的档的帧。
+  // ⚠️ 断言里**不能随手写一个档名**：`#angleSel` 只列当前数据里真实存在的档，且会被
+  //    syncAngleOptions() 重建；写一个当时不存在的档名，赋值会被忽略、change 成了空动作，
+  //    于是一条"永远通过/永远失败"的假用例（2026-07-13 联调踩到：top0 当时根本不在选项里）。
+  //    所以先读回真实档名，再对它断言。
+  const cmpTiles = () => Array.from(document.querySelectorAll('#cmpstrip [data-cmp]'));
+  const shotAngle = 'top45';   // 当前选中轮次里 S102 那一帧的档
+  check('角度筛选里有可用于对比的档（先确认断言前提成立）',
+    Array.from($('#angleSel').options).some(o => o.value === shotAngle),
+    Array.from($('#angleSel').options).map(o => o.value).join(','));
+  document.querySelectorAll('#cmpmore').forEach(b => b.remove());
+  $('#angleSel').value = shotAngle;
+  $('#angleSel').dispatchEvent(new window.Event('change'));
+  // 等"筛过之后的那一次渲染"跑完再断言：change 只是触发者，重绘在逐天取数回来之后。
+  // ⚠️ 这里只断言"图"，别再要求"此刻一定有条"——等条件满足的那一拍条可能还没重绘完，
+  //    把"条数 > 0"塞进断言就是自造竞态（连跑 5 次会稳红的那条）。
+  await waitFor(() => (T('#cmpstrip').includes('该角度档无帧')
+                       && !!document.querySelector('#cmpstrip img')), 8000, 150);
+  // 正面断言，别写反：此刻**能有**图，但每一张都必须是所选档；被筛掉的那几天要挂原因占位。
+  // （第一版写成"不许有 img"，等于把正确行为判红——"断言写了"和"断言有用"的区别就在这。）
+  check('角度档筛选时，图只出现在所选档的那一天（别的天挂"该角度档无帧"）',
+    cmpTiles().some(el => el.querySelector('img'))
+    && cmpTiles().filter(el => el.querySelector('img'))
+        .every(el => (el.dataset.url || '').includes(shotAngle))
+    && cmpTiles().filter(el => !el.querySelector('img'))
+        .every(el => el.textContent.includes('该角度档无帧')),
+    T('#cmpstrip').slice(0, 120));
+  check('被筛掉的块如实标明原因（不是默默空白）',
+    T('#cmpstrip').includes('该角度档无帧'), T('#cmphint'));
+  $('#angleSel').value = '';
+  $('#angleSel').dispatchEvent(new window.Event('change'));
+  await waitFor(() => !!document.querySelector('#cmpstrip img'), 8000, 200);
+
+  // 点对比条里的某一天 = 看那一天的完整图像（详情区在上面，不跳卡不滚动）
+  const oldest = cmpTiles().pop();
+  check('对比条里能拿到最早那天的块（最新在前）',
+    !!oldest && decodeURIComponent(oldest.dataset.cmp) === 'round-20260910',
+    oldest ? oldest.dataset.cmp : '(无)');
+  oldest.click();
+  await sleep(400);
+  check('点对比条里的一天 → 详情大图换成那一天的图',
+    ($('#bigimg').getAttribute('src') || '').includes('20260910'), $('#bigimg').getAttribute('src') || '(无)');
+  check('点过的对比块标成选中（不是"总是最新那块"高亮）',
+    !!document.querySelector('#cmpstrip [data-cmp].sel')
+    && T('#cmpstrip [data-cmp].sel').includes('2026-09-10'),
+    document.querySelector('#cmpstrip [data-cmp].sel')
+      ? T('#cmpstrip [data-cmp].sel').slice(0, 24) : '(无选中)');
+  check('详情大图仍然走 /api/image（对比视图没把它换成别的源）',
+    (function(){ try{ return new URL($('#bigimg').getAttribute('src'), 'http://console.local').pathname === '/api/image'; }
+                 catch(e){ return false; } })(), $('#bigimg').getAttribute('src') || '(无)');
+
   // ---- 下拉直接选轮次必须和按钮走同一条路（2026-10-13 修）----
   // 原来 #roundSel.onchange 直接 loadRoundImages()，绕过 syncRoundOptions()：
   // 导航状态与按钮置灰停在上一轮算出的值，也不清上一轮的选中站位。
@@ -1405,15 +1513,20 @@ await sleep(150);
     !!lastCall('/api/preview/status') && !state.calls.some(c => /192\.168|:554/.test(c.url)),
     JSON.stringify([...new Set(state.calls.map(c => c.url.split('?')[0]))].slice(-6)));
 
-  // 流"卡住"（连接还在、没有新帧）浏览器不会报错：页面必须靠上游的帧龄自己发现并重连
+  // 流"卡住"（连接还在、没有新帧）浏览器不会报错：页面必须靠上游的帧龄自己发现并重连。
+  // ⚠️ 页面判据是 `age > 3 && Date.now() - pv.startedAt > 4000`（index.html:2077）：
+  //    **流开始后 4 秒内的窗口正常不触发重连**。原来这里固定 sleep(2600) 就断言，
+  //    等于拿"这段墙钟刚好够"当判据——前面用例多插几条就会翻（2026-10-13 实测到一次）。
+  //    改法：显式等过那个 4 秒窗口，再用**有界轮询**等页面做到（不是把等待调大）。
   const stalledSrc = $('#pvimg').getAttribute('src');
+  await sleep(4200);                           // 显式跨过"流开始后 4 秒"的保护窗
   state.preview_frame_age = 9;
-  await sleep(2600);
-  check('画面卡住时自动重连（换一个 src）',
-    $('#pvimg').getAttribute('src') !== stalledSrc && T('#pvstate').includes('重连'),
-    T('#pvstate') + ' / ' + $('#pvimg').getAttribute('src'));
+  const reconnected = await waitFor(
+    () => $('#pvimg').getAttribute('src') !== stalledSrc || T('#pvstate').includes('重连'), 8000, 200);
+  check('画面卡住时自动重连（换一个 src）', reconnected,
+    T('#pvstate') + ' / ' + ($('#pvimg').getAttribute('src') || '(无)'));
   state.preview_frame_age = 0.4;
-  await sleep(2600);
+  await waitFor(() => T('#pvstate').includes('播放中'), 8000, 200);
   check('恢复后重新播放', T('#pvstate').includes('播放中'), T('#pvstate'));
 
   await click('#dropbtn');

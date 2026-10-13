@@ -110,6 +110,29 @@
   .mosaic-cell.fail{border-color:var(--bad)}
   .mosaic-cell.local .mosaic-meta small{color:var(--warn)}
   .mosaic-cell.vacant{cursor:default;background:transparent;border-style:dashed;color:var(--dim)}
+  /* ---- 同一站位跨轮次对比（2026-10-13，积累期主线）----
+     固定"当前选中的站位"，把最近几轮的同一个框并排摆出来，一眼看出这几天怎么长的。
+     纯前端：逐轮问 /api/images?round_id=…&station_id=…，图仍走 /api/image 同源代理。
+     ⚠️ 一帧约 750 KB，所以默认只铺 4 轮、其余按需展开——缩略图能力到了再换源。 */
+  .cmphead{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
+    margin:14px 0 6px;padding-top:12px;border-top:1px solid var(--line)}
+  .cmphead .cmptitle{font-size:13px;font-weight:600;color:var(--fg)}
+  .cmphead .cmpmeta{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .cmpstrip{display:grid;gap:8px;padding:2px 0 4px;
+    grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+  .cmpstrip .cmp{display:block;padding:4px;border:1px solid var(--line);border-radius:8px;
+    background:var(--soft);cursor:pointer;text-align:left}
+  .cmpstrip .cmp:hover{border-color:#b5ccdf;box-shadow:0 1px 4px rgba(15,23,42,.08)}
+  .cmpstrip .cmp.sel{outline:2px solid var(--accent);outline-offset:-2px}
+  .cmpstrip .cmp-shot{display:block;width:100%;aspect-ratio:16/9;overflow:hidden;
+    border-radius:5px;background:var(--panel)}
+  .cmpstrip .cmp-shot img{display:block;width:100%;height:100%;object-fit:contain;background:var(--panel)}
+  .cmpstrip .cmp-empty{display:flex;align-items:center;justify-content:center;width:100%;height:100%}
+  .cmpstrip .cmp-meta{display:flex;flex-direction:column;gap:1px;padding:4px 2px 0;font-size:11px}
+  .cmpstrip .cmp-when{color:var(--fg);font-variant-numeric:tabular-nums}
+  .cmpstrip .cmp-note{color:var(--dim);font-size:10.5px}
+  .cmpstrip .cmp-note.bad{color:var(--bad)}
+  .cmpstrip .cmp-note.warn{color:var(--warn)}
   /* ---- 大图查看器 ---- */
   .viewer{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:8px;
           display:flex;align-items:center;justify-content:center;cursor:grab}
@@ -598,6 +621,20 @@
         读取巡检轮次…
       </div>
       <div class="navhint">点任意格位，上面显示那张完整图像</div>
+      <!-- 跨轮次对比：固定当前选中的站位，把最近几轮同一个框并排（积累期主线）。
+           放在拼图**之下**、卡内——不动"第一眼是拼图"那个口径。 -->
+      <div id="comparewrap" style="display:none">
+        <div class="cmphead">
+          <span class="cmptitle" id="cmptitle">同一位置 · 按天对比</span>
+          <span class="cmpmeta">
+            <label class="sr-only" for="cmpTime">每天取样时段</label>
+            <select id="cmpTime" style="min-height:32px;padding:4px 8px;width:auto"></select>
+            <span id="cmphint">选中一个站位后，这里并排显示它最近几天的样子</span>
+          </span>
+        </div>
+        <div class="cmpstrip" id="cmpstrip"></div>
+        <div class="empty" id="cmpnote" style="padding:4px 0 0"></div>
+      </div>
     </div>
     <div class="card">
       <h2>生长曲线 <span id="curvetitle" style="color:var(--dim);font-weight:400"></span></h2>
@@ -2119,10 +2156,21 @@ function wirePreview(){
 
 /* ---------------- 历史模式：时间轴 / 大图 / 生长曲线 ---------------- */
 
+/* 跨轮次对比的规模上限：必须在 hist 初始化之前声明，否则 hist 的字面量里用到
+   CMP_DEFAULT_SHOWN 会踩 const 的 TDZ（Cannot access before initialization）。 */
+const CMP_MAX_DAYS = 7;        // 最多回溯几天
+const CMP_DEFAULT_SHOWN = 5;   // 默认铺几天：一轮≈7min40s、一天约 8 轮，5–7 天够看出趋势
+const CMP_TOD_STEP_MIN = 20;   // 时段选择器的步长
+const CMP_TOD_TOLERANCE_MIN = 90;  // 偏离参考时段超过这么久就标"邻近时段"（如实标注，不假装准）
+
 let mode = 'realtime';
 const hist = { rows: [], rounds: [], growth: null, picked: null, zoom: 1, px: 0, py: 0,
                selectedRoundId: '', selectedBatchKey: '', focusedStationId: '',
   roundIndex: -1, roundCount: 0, hiddenRounds: 0,
+               // 跨轮次对比（按天）：blocks = 每天一块（该天最接近参考时段的那一轮）；
+               // compareStationId = 这批数据是为哪个站位取的（幂等护栏用）
+               compareRows: [], compareStationId: '', compareLoading: false,
+               compareShown: CMP_DEFAULT_SHOWN,
                roundsLoading: false, roundsLoaded: false };
 
 function setMode(m){
@@ -2166,6 +2214,10 @@ function setMode(m){
 
 function rowDate(r){ return String(r.ts || '').slice(0, 10); }
 function rowOk(r){ return r.ok !== false && r.ok !== 0; }
+/** 当前角度档筛选值（'' = 全部）。对比条必须和拼图/原图用**同一个**筛选口径，
+ *  否则会出现"拼图里筛 top0、对比条却拿到 top45"这种自相矛盾的画面。 */
+function angleFilter(){ return $('#angleSel') ? $('#angleSel').value : ''; }
+function rowMatchesAngle(r){ const a = angleFilter(); return !a || r.angle_profile === a; }
 
 function filtered(){
   const from = $('#fromDate').value, to = $('#toDate').value, ang = $('#angleSel').value;
@@ -2209,6 +2261,7 @@ function renderHistory(){
     else tl.textContent = '还没有带轮次 ID 的巡检记录';
     drawCurve();
     updateFrameInfo();
+    renderCompare();
     return;
   }
 
@@ -2279,6 +2332,7 @@ function renderHistory(){
   });
   drawCurve();
   updateFrameInfo();
+  renderCompare();
 }
 
 /* ---- 拼图格子尺寸：按容器实测宽度算；**窗口/栏位变化后要重算**（2026-10-13 补）----
@@ -2343,6 +2397,225 @@ function wireMosaicResize(){
   window.addEventListener('resize', schedule);
 }
 
+/* ---- 同一站位跨天对比（2026-10-13，积累期主线）----------------------------------
+   现场要的是"这株这几天怎么长的"。**抽样维度是按天，不是按轮**：
+   一轮约 7 min 40 s、一天约 8 轮，取"最近 6 轮"只覆盖不到 20 小时，相邻帧几乎一样——
+   看不出生长。所以：固定当前选中站位 → **每天取最接近参考时段的那一轮** →
+   跨 5–7 天并排（同一天各轮的切片留作次要，不做）。
+
+   纯前端，不新增后端：逐轮问 /api/images?round_id=…&station_id=…，图仍走 /api/image
+   同源代理（ADR-0003，页面不直连 MinIO）。
+
+   ⚠️ 一帧约 750 KB（1080×648），所以默认只铺 CMP_DEFAULT_SHOWN 天、其余按需展开；
+   缩略图能力（票 08）到位后把这里的图片地址换成缩略图即可，其余逻辑不用动。 */
+const CMP_FRAME_LIMIT = 20; // 每轮最多取几帧：一个站位在几何上只有一帧，留余量防重复帧
+
+/** 从 ISO 时间串取"当天第几分钟"，用于按时段挑轮次（取不到返回 null）。 */
+function todMinutes(ts){
+  const m = /T(\d{2}):(\d{2})/.exec(String(ts || ''));
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+function todLabel(minutes){
+  const h = Math.floor(minutes / 60), m = minutes % 60;
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+}
+
+/** 参考时段：默认取"当前选中那一轮"的时刻——这一轮是几点跑的，就按几点比。卡上可改。 */
+function compareTod(){
+  if(Number.isFinite(hist.compareTod)) return hist.compareTod;
+  const cur = hist.rounds.find(row => row.round_id === hist.selectedRoundId);
+  const t = todMinutes(cur && cur.ts);
+  return t === null ? 9 * 60 + 20 : t;   // 取不到就用现场常规巡检时段兜底
+}
+
+/** 按天抽样：每天取最接近参考时段的那一轮；一天最多一块，最新在前，最多 CMP_MAX_DAYS 天。 */
+function comparePlan(){
+  const { rounds } = visibleRounds();
+  const ref = compareTod();
+  const byDate = new Map();
+  for(const row of rounds){
+    const date = rowDate(row);
+    const tod = todMinutes(row.ts);
+    if(!date || tod === null) continue;
+    const drift = Math.abs(tod - ref);
+    const prev = byDate.get(date);
+    // 同一天挑"最接近参考时段"的那一轮；一样近就取更晚的（同时段优先新数据）
+    if(!prev || drift < prev.drift || (drift === prev.drift && String(row.ts) > String(prev.row.ts))){
+      byDate.set(date, { row, drift });
+    }
+  }
+  return [...byDate.entries()]
+    .sort((a, b) => String(b[1].row.ts).localeCompare(String(a[1].row.ts)))   // 最新在前
+    .slice(0, CMP_MAX_DAYS)
+    .map(([date, item]) => ({ date, roundId: item.row.round_id, ts: item.row.ts,
+                              frame: null, driftMin: item.drift }));
+}
+
+function compareFrameOf(roundRows, stationId, angle){
+  const list = (roundRows && roundRows.rows) || [];
+  const a = (angle === undefined) ? angleFilter() : angle;
+  // 与拼图/原图同一套筛选口径；角度取**发起这次取数时的快照**（见 loadCompare 的说明）
+  return list.find(r => r.station_id === stationId && (!a || r.angle_profile === a)) || null;
+}
+
+/** 逐天取该站位的那一帧。串行发请求：前台页面不该为一张对比卡同时开 7 条连接。 */
+async function loadCompare(){
+  if(mode !== 'history' || !hist.focusedStationId){
+    hist.compareRows = []; hist.compareStationId = ''; hist.compareLoading = false;
+    renderCompare();
+    return;
+  }
+  const stationId = hist.focusedStationId;
+  const ref = compareTod();
+  // 幂等护栏：同一站位 + 同一参考时段已有数据就直接复用。
+  // （pickHistoryCell → history_pick → renderHistory → 这里 与它自己那一次会先后进来，
+  //   没有它就会取两遍；参考时段变了则必须重取。）
+  if(hist.compareStationId === stationId && hist.compareRows.length && hist.compareTodOf === ref){
+    renderCompare();
+    return;
+  }
+  hist.compareShown = CMP_DEFAULT_SHOWN;   // 换站位/换参考时段都回到默认铺开量
+  hist.compareTodOf = ref;
+  // 角度档在**取数发起时**就冻住：这批 rows 必须自洽。
+  // 否则"取的时候按 top0 找、渲染的时候按 top45 判"会出现中间态——
+  // 同一批 rows 一会儿显示 2 张图、一会儿显示占位（2026-10-13 联调踩到）。
+  const angleAtFetch = angleFilter();
+  hist.compareLoading = true;
+  renderCompare();
+  const blocks = comparePlan();
+  const rows = [];
+  for(const block of blocks){
+    let data = { rows: [] };
+    try{
+      data = await jget('/api/images?round_id=' + encodeURIComponent(block.roundId)
+                        + '&station_id=' + encodeURIComponent(stationId)
+                        + '&limit=' + CMP_FRAME_LIMIT);
+    }catch(e){
+      data = { rows: [], error: e.message };
+    }
+    if(mode !== 'history' || hist.focusedStationId !== stationId) return;  // 站位变了，这批结果作废
+    rows.push({ ...block, frame: compareFrameOf(data, stationId, angleAtFetch), error: data.error || '' });
+  }
+  hist.compareRows = rows;
+  hist.compareStationId = stationId;
+  hist.compareLoading = false;
+  renderCompare();
+}
+
+/** 时段选择器：默认档"跟随当前轮次"，另列步长上的整点时段 + 数据里真实存在的时段。
+ *  ⚠️ "跟随当前轮次"必须是一个真选项：否则用户（或用例）没法回到默认——
+ *  直接 set value 到一个不在选项里的值会被浏览器忽略，随后 dispatch change 就是空动作
+ *  （2026-10-13 联调时踩到：值没生效，界面看着却"没反应"）。 */
+function syncCompareTimeOptions(ref){
+  const sel = $('#cmpTime');
+  if(!sel) return;
+  const wanted = [];
+  for(let t = 0; t < 24 * 60; t += CMP_TOD_STEP_MIN) wanted.push(t);
+  for(const row of hist.rounds){
+    const t = todMinutes(row.ts);
+    if(t !== null && !wanted.includes(t)) wanted.push(t);
+  }
+  if(Number.isFinite(hist.compareTod) && !wanted.includes(hist.compareTod)) wanted.push(hist.compareTod);
+  wanted.sort((a, b) => a - b);
+  sel.innerHTML = '<option value="auto">跟随当前轮次</option>'
+    + wanted.map(t => `<option value="${t}">每天 ${todLabel(t)}</option>`).join('');
+  sel.value = Number.isFinite(hist.compareTod) ? String(hist.compareTod) : 'auto';
+}
+
+/** 只画"看得见"的那几天；其余用一句话说明还有多少（点一下展开，不再多发请求）。 */
+function renderCompare(){
+  const wrap = $('#comparewrap');
+  if(!wrap) return;
+  const station = hist.focusedStationId
+    ? stations.find(item => item.id === hist.focusedStationId) : null;
+  const hint = $('#cmphint'), note = $('#cmpnote'), strip = $('#cmpstrip');
+  wrap.style.display = '';
+  const ref = compareTod();
+  syncCompareTimeOptions(ref);
+  $('#cmptitle').textContent = station
+    ? `同一位置 · 按天对比 · ${station.id}${station.box_id ? ' · ' + station.box_id : ''}`
+    : '同一位置 · 按天对比';
+  if(!station){
+    strip.innerHTML = '';
+    hint.textContent = '选中一个站位后，这里并排显示它最近几天的样子';
+    note.textContent = '';
+    return;
+  }
+  const all = hist.compareRows || [];
+  const shown = all.slice(0, hist.compareShown);
+  hint.textContent = hist.compareLoading
+    ? '逐天读取中…'
+    : (all.length
+        ? `每天 ${todLabel(ref)} 前后一轮 · 共 ${shown.length} 天 · 每张都是原图（约 750 KB）· 缩略图服务到位后自动换源`
+        : (angleFilter() ? `没有可对比的轮次（当前角度档 ${angleFilter()} 没有这个站位的帧）` : '没有可对比的轮次'));
+  if(hist.compareLoading && !all.length){ strip.innerHTML = ''; note.textContent = ''; return; }
+  strip.innerHTML = shown.map((row, i) => {
+    const frame = row.frame;
+    const url = frame ? imageUrlFor(frame) : '';
+    const angleMiss = !!frame && !rowMatchesAngle(frame);   // 当前角度档下这个站位这一天没有帧
+    const failed = !!frame && !rowOk(frame);
+    const gone = !frame;
+    // 图在、但状态有话要说时才挂一行小字（与拼图格同一套口径）
+    const tag = angleMiss ? '该角度档无帧'
+      : gone ? '本轮无帧' : failed ? '采图失败' : !url ? '图取不到'
+      : frame.source === 'local' ? '本地待同步' : '';
+    const when = String(row.ts || '').replace('T', ' ');
+    // 该天没有"参考时段"附近的轮次 ⇒ 取了更远的一轮：如实标出来，不假装准
+    const drifted = Number.isFinite(row.driftMin) && row.driftMin > CMP_TOD_TOLERANCE_MIN;
+    const badgeCls = (gone || failed || !url || angleMiss) ? 'bad' : (tag ? 'warn' : '');
+    const inner = (url && !angleMiss)
+      ? `<span class="cmp-shot"><img loading="lazy" decoding="async" src="${esc(url)}" alt=""></span>`
+      : `<span class="cmp-shot"><span class="cmp-empty">${esc(tag || '无图')}</span></span>`;
+    // data-pick 是必须的：点它走的是 pickHistoryCell()，那里读的就是 el.dataset.pick
+    // （拼图格用的是 row.object_name ?? row.ts ?? station.id，这里同一套口径）。
+    const pick = frame ? String(frame.object_name ?? frame.ts ?? row.roundId) : row.roundId;
+    return `<button type="button" class="cmp${row.roundId === hist.selectedRoundId ? ' sel' : ''}"
+        data-cmp="${esc(encodeURIComponent(row.roundId))}"
+        data-pick="${esc(encodeURIComponent(pick))}"
+        data-url="${esc(url)}" data-station-id="${esc(station.id)}"
+        data-ts="${esc(frame?.ts || '')}"
+        aria-label="${esc(station.id)} ${esc(when)} ${esc(tag || '有图')}">
+      ${inner}
+      <span class="cmp-meta">
+        <span class="cmp-when">${esc(when)}</span>
+        ${tag ? `<span class="cmp-note ${badgeCls}">${esc(tag)}</span>` : ''}
+        ${drifted ? '<span class="cmp-note">邻近时段（这天没有更近的一轮）</span>' : ''}
+      </span>
+    </button>`;
+  }).join('');
+  const rest = all.length - shown.length;
+  note.textContent = rest > 0
+    ? `还有 ${rest} 天没铺开（每张约 750 KB，为省带宽默认只铺 ${hist.compareShown} 天）`
+    : (normalCount(shown) ? '按"最近 → 更早"排列；点任意一张看它的完整图像' : '');
+  if(rest > 0){
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.id = 'cmpmore';
+    btn.textContent = `展开全部 ${all.length} 天`;
+    btn.onclick = () => { hist.compareShown = all.length; renderCompare(); };
+    note.append(' ', btn);
+  }
+  // 点任意一张 = 看它的完整图像：图就在上面那个详情区里，不跳卡也不滚动。
+  // 这里复用 pickHistoryCell()，所以"点历史站不改实时选站"那条口径自动一致。
+  // ⚠️ 点完必须重绘一次：选中高亮是按 hist.selectedRoundId 算的，而 pickHistoryCell
+  //    只在**站位变化**时才会牵动重绘——同站换天（对比条最常见的用法）不重绘就会
+  //    停在旧高亮上（2026-10-13 联调发现）。
+  strip.querySelectorAll('[data-cmp]').forEach(el => el.onclick = () => {
+    // 这块代表"某一天那一轮"：点它 = 既看那天的完整图，也把轮次选中同步过去，
+    // 否则选中高亮仍停在别处（对比条最常见的用法就是同站换天，站位不变 ⇒ 走不到重绘）。
+    const id = decodeURIComponent(el.dataset.cmp || '');
+    if(id) hist.selectedRoundId = id;
+    pickHistoryCell(el);
+    syncRoundOptions();
+    renderCompare();
+  });
+  wireShotFallbacks(strip);
+}
+
+function normalCount(rows){
+  return rows.filter(row => row.frame && rowOk(row.frame) && row.frame.source !== 'local').length;
+}
+
 function history_pick(id, url, stationId){
   const stationChanged = !!stationId && hist.focusedStationId !== stationId;
   if(stationId) hist.focusedStationId = stationId;
@@ -2389,6 +2662,10 @@ function updateFrameInfo(){
   $('#frameinfo').textContent = els.length
     ? (i >= 0 ? `第 ${i + 1} / ${els.length} 站位` : `共 ${els.length} 个站位，未选`)
     : '当前轮次没有配置站位';
+  // 跨轮次对比跟着"当前选中站位"走。挂在这里而不是 pickHistoryCell()：
+  // 拼图格、对比条、"上一站/下一站"、"选最新帧"、方向键全都经过这个函数，挂一处就全覆盖。
+  // loadCompare() 自己幂等，所以同一次点击里被调用两次也只逐轮取一遍。
+  loadCompare();
 }
 function pickRelative(delta){
   const els = timelineFrames();
@@ -2405,6 +2682,7 @@ function pickHistoryCell(el){
   const stationChanged = hist.focusedStationId !== el.dataset.stationId;
   history_pick(decodeURIComponent(el.dataset.pick), el.dataset.url, el.dataset.stationId);
   if(stationChanged || !hist.growth) loadGrowth();
+  // 对比条由 updateFrameInfo() 统一触发（幂等），这里不用再喊一次
 }
 
 function drawCurve(){
@@ -2469,7 +2747,7 @@ async function loadHistory(force){
     const roundId = syncRoundOptions();
     return loadRoundImages(roundId);
   }
-  if(force){ hist.growth = null; growthRequestSeq++; }
+  if(force){ hist.growth = null; growthRequestSeq++; hist.compareRows = []; hist.compareStationId = ''; }
   const requestId = ++historyRequestSeq;
   hist.roundsLoading = true;
   $('#timeline').className = 'empty';
@@ -2604,8 +2882,12 @@ async function switchToRound(roundId, idx){
   const i = (typeof idx === 'number' && idx >= 0) ? idx
     : rounds.findIndex(row => row.round_id === roundId);
   hist.selectedRoundId = (i >= 0 && rounds[i]) ? rounds[i].round_id : '';
+  hist.compareRows = [];
+  hist.compareStationId = '';
+  hist.compareShown = CMP_DEFAULT_SHOWN;
   syncRoundOptions();
   await loadRoundImages(hist.selectedRoundId, true);
+  await loadCompare();
   scrollToMosaic();
 }
 
@@ -3127,6 +3409,12 @@ function wireHistory(){
   // 原来这里直接 loadRoundImages()，绕过 syncRoundOptions()：导航状态与按钮置灰
   // 停在上一轮的值，也不清选中站位。
   $('#roundSel').onchange = () => switchToRound($('#roundSel').value);
+  // 对比取样时段：改了就按新时段重新逐天取（幂等护栏会因 compareTodOf 变化而放行）
+  if($('#cmpTime')) $('#cmpTime').onchange = () => {
+    const raw = $('#cmpTime').value;
+    hist.compareTod = raw === 'auto' ? undefined : Number(raw);   // 数值 or undefined（undefined = 跟随当前轮次）
+    loadCompare();
+  };
   $('#fromDate').onchange = refreshFilteredRounds;
   $('#toDate').onchange = refreshFilteredRounds;
   $('#angleSel').onchange = renderHistory;
