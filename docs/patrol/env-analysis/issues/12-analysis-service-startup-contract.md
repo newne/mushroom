@@ -27,41 +27,51 @@
    曾因此把服务打挂 4 分钟）。现役 API 不在这个坑里：`analysis/api.py` 不 import `align`
    （只有 `align.py:11` 自己用 pandas，`environment.py:6` 注释明确"刻意不依赖 pandas"）。
 
-## 1. 四个作业的启动契约
+## 1. 四个作业的启动契约（最终形态：**1 个容器**）
 
-| 作业 | 形态 | 命令行 | 周期 | 依据 |
-| --- | --- | --- | --- | --- |
-| **analysis API** | 常驻 | `uvicorn analysis.api:create_app --factory --host 0.0.0.0 --port 8000` | 常驻 | `deploy/systemd/mushroom-analysis.service:15-16`；**单 worker 是硬约束**（`create_app` 在工厂里建一个 SQLite 连接，多 worker 各持一份写不进对方，`analysis/api.py:57-62`） |
-| **环境入库** | 常驻轮询 | `python -m analysis.env.ingest --db <db> --source tdengine --url http://<tdengine>:6041 --interval 300` | 每 300 s | `issues/01-environment-ingest.md:22`（线上每 5 分钟一轮）；`analysis/env/ingest.py:38-47` 的 `loop` |
-| **操作日志入库** | 常驻轮询 | `python -m analysis.audit_ingest --db <db> --interval 600` | 每 600 s | `issues/09-daily-setpoint-state.md:23`（设计每 10 分钟）；`analysis/audit_ingest.py:63-70` 的循环 |
-| **批次台账同步** | 常驻（**新增 loop 模式**，见下） | `python -m analysis.batch_ingest --db <db> --daily-at 05:20` | 启动时先跑一次，之后每天 05:20 | 发版官实测：线上 `mushroom-batch-ingest.timer` 每天 05:20 |
+| 作业 | 在哪儿跑 | 周期 | 依据 |
+| --- | --- | --- | --- |
+| **analysis API** | 容器主进程 `uvicorn analysis.api:create_app --factory --host 0.0.0.0 --port 8000` | 常驻 | `deploy/systemd/mushroom-analysis.service:15-16`；**单 worker 硬约束**（`create_app` 建一个 SQLite 连接，多 worker 各持一份、写入互相看不见） |
+| **环境入库** | **同一进程**：`analysis.api` 的 lifespan 里的常驻 asyncio 任务（`analysis/jobs.py`） | `ENV_INGEST_INTERVAL`（生产 300 s） | 线上每 300 s（`issues/01:22`） |
+| **操作日志入库** | 同上 | `AUDIT_INTERVAL`（生产 600 s） | 设计每 10 分钟（`issues/09:23`）；线上缺陷见 §0.2 |
+| **批次台账同步** | 同上（**过渡期不装配**，见 §1.1） | `BATCH_AT`（生产 `05:20`） | 线上 `mushroom-batch-ingest.timer` 每天 05:20 |
 
-**batch-ingest 的形态是本票唯一的选型点**：它**没有循环入口**（`batch_ingest.py:28-35`
-只跑一次就退），所以容器化必须二选一 ——
-(a) 容器内定时器（cron / supercronic）每天触发一次；(b) 在 analysis 侧加常驻循环模式（我的活，另开票）。
-**不选 c**：不许用 `--once` + `restart: always` 这种退化成"每分钟跑一次"的写法（见 §0.2）。
+**为什么同容器、定时落 lifespan（Chief 2026-10-13 定稿）：** 净新增只有 **1 个** compose service
+（用户红线：非必要不加 service）；四个作业共享同一个 SQLite、同一套凭据、同一条 import 链；
+`patrol-entrypoint.sh` 不加角色；不引 cron/supercronic/supervisor。
 
-**结论（按"最少新机制"原则，Chief 2026-10-13 倾向 + 环境官同意）：选 (b) 常驻 loop 模式。**
-取舍：
+**开关语义：** `ENV_INGEST_INTERVAL` / `AUDIT_INTERVAL` / `BATCH_AT` **设了才跑**，
+不设就安静（开发与测试默认无后台请求），实现见 `analysis/jobs.py` 的 `default_jobs`。
+API 的 db 路径缺省取 `ANALYSIS_DB`（容器里显式给，**不靠工作目录**）。
+凭据不齐（`EMS_ACCOUNT`/`EMS_PASSWORD_MD5` 缺）时**不装配 audit 作业** —— 拿空口令去打
+环控平台只是白挨一次 401。
 
-| | (a) 容器内 cron | **(b) 常驻 loop（选它）** |
-| --- | --- | --- |
-| 新增机制 | 容器里多一套调度器（cron/supercronic）+ 它自己的时区/日志 | **零**：与 env/audit 两个作业同构（常驻 + `--interval`） |
-| 观测 | 两处日志（调度器 + 作业） | 一处 `docker logs`，一条命令行 |
-| 参数 | 周期写在 compose 或 crontab，改口径要动两处 | 周期写在命令行，改一处 |
-| 代价 | —— | 需要我在 `batch_ingest.py` 加 `--interval`/loop 分支（小改动，与 `ingest.py:38-47` 同形） |
+**"不许拿 restart 当调度"（不变式）：** 每个作业是**进程内循环**：先跑一轮，再睡一个周期
+（`analysis/jobs.py:run_job`），不是"进程退出 + 容器重启"。循环体吞掉 `Exception`，
+单轮失败只打印、等下一周期。线上 audit 单元 `Type=simple` + `--once` + `Restart=always`
+把 10 分钟退化成 60 秒一次（24 h 内 2466 次 Started/Deactivated），还持续打对方的登录接口
+—— 这次迁移就是要去掉它。
 
-⇒ compose 里三个 ingest 全是常驻进程，写法一致。**发版官若无异议按此执行**；
-若发版官坚持 (a)，需要在 compose 注释里写明"cron 时区基准 + 日志去向"，并保留 §0.2 的
-"不许拿 restart 当调度"。
+**代价，写清楚：** 作业由 API 进程承载 ⇒ ① API 被 kill（OOM/SIGKILL）时作业一起停，
+由 compose 的 `restart` 拉起**整个容器**（可接受：主进程本来就是 API）；
+② 单个 asyncio 任务若死掉没有 supervisor 复活，靠"循环体永不退出"这条纪律兜。
+**不为此引入 supervisor**（最少新机制）。
 
-**新增 loop 的语义（我实现，票外小改动）：** `batch_ingest.py` 加
-`--interval <秒>` 与 `--daily-at HH:MM`（二选一，默认仍是跑一次即退）：
-- 生产用 `--daily-at 05:20`，时区 = 容器本地（`Asia/Shanghai`）；
-- **启动时先跑一次**，之后按 05:20 对齐：容器在当天 05:20 之后启动 ⇒ 下一次是明天 05:20；
-  启动先跑一次保证"新容器当天也有台账"。全量覆盖 upsert（PK `(room_id, entry_date)`）
-  ⇒ 多跑几次无害，幂等。
-- 循环体同样 `try/except` + `print` + `sleep`，与 `ingest.py:38-47`、`audit_ingest.py:63-70` 同形。
+### 1.1 批次台账同步：过渡期暂停（Chief 2026-10-13 裁）
+
+`analysis.batch_ingest` 今天走 `docker exec tools_mysql mysql …` 读台账（`batches.py:56-59`），
+口令只在 `tools_mysql` 的 env 里。搬进容器要挂 `docker.sock` = 给**对外的 :8000 服务**
+配 root 等价权限 —— **Chief 不批，这条作废**。故：
+
+- 迁移当天**不装配**这条作业：compose 不设 `BATCH_AT`，`default_jobs` 直接跳过它。
+- 目标形态 = **直连 MySQL 只读账号**（代码改动 + 凭据走挂载 env），见票 13。
+- 落地后**补跑一次**把窗口补齐：全量覆盖 upsert（PK `(room_id, entry_date)`）⇒ 缺几天都能回补。
+- 过渡期台账停在迁移前那份快照：`window_of` 的"当前批次"会按过期台账算，
+  所以界面与接口必须能显示"数据止于 X"（spec §6 的口径已经这么要求）。
+
+**`batch_ingest.py` 的常驻 loop 已经实现**（`--interval` / `--daily-at HH:MM`，
+启动先跑一次、之后按 05:20 对齐），`default_jobs` 通过 `BATCH_AT` 复用它 ——
+过渡期结束后只需在 compose 加一行环境变量，不用再改代码。
 
 ## 2. 环境变量与挂载
 
@@ -158,12 +168,32 @@
 
 ## 7. 验收
 
-- [ ] 四个作业各自一个容器或进程，命令与周期符合 §1
-- [ ] 三个写者共享同一 db 文件；API 容器里 `GET /healthz` 通、`GET /ranges` 能读到 05 号票写的结果
-- [ ] **连续观察 10 分钟**：环控平台登录调用 ≤ 1 次/10 分钟（对照线上 2466 次/24 h 的缺陷）
-- [ ] 重启任一 ingest 容器后：`environment` 无重复行（PK 幂等），且当前小时被重算
+**A. "容器活着"**（**不等于**作业在跑，别拿这组当作业证据）
+
+- [ ] 容器 `healthy`，`:8000/healthz` 200
+- [ ] `GET /ranges` 能读到票 05 批处理写的结果
+- [ ] `/rounds`、`/images` 行数与迁移前逐条相等（这是"还是那一份 DB"的判据）
+
+**B. "作业真的在跑"**（三条独立证据，缺一条不算过）
+
+- [ ] `docker logs mushroom_analysis` 有 `[ingest] 启动作业 env（每 300.0s）`、`audit（每 600.0s）`
+- [ ] **`environment` 有增长**：连续观察 ≥ 2 个 env 周期（≥10 分钟），
+      `SELECT COUNT(*), MAX(ts) FROM environment` 的 `MAX(ts)` 推进到当前小时、行数不减
+- [ ] **`operations` 有增长**：连续观察 ≥ 2 个 audit 周期（≥20 分钟），行数增长
+      或日志出现 `[audit_ingest] N 条`
+- [ ] **环控平台登录调用 ≤ 1 次/10 分钟**（对照线上 2466 次/24 h 的缺陷）
+- [ ] 环境变量不含明文口令（挂载 + source；值不进 compose，也不进 `docker inspect` 的 `Config.Env`）
+
+**C. 幂等与重启**
+
+- [ ] 重启容器后：`environment` 无重复行（PK `(ts, zone)`），当前小时被重算
 - [ ] 在**未装 pandas** 的镜像里 API 能启动（import 链无 pandas）
-- [ ] 环境变量不含明文口令（走 `env_file` / secret）
+
+**D. 过渡期（batch-ingest 暂停）**
+
+- [ ] 不设 `BATCH_AT` 时容器里**没有** batch 作业（日志无该行、`batches` 表不更新）
+- [ ] 票 13 落地后**补跑一次**：`batches` 行数恢复，`GET /environment/batches` 的"当前批次"正确
+      （全量覆盖 upsert，缺几天可回补）
 
 ## Comments
 

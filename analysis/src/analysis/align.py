@@ -13,32 +13,68 @@ import pandas as pd
 MIN_SAMPLES_PER_BIN = 3  # 样本不足的区间不输出（避免误导）
 
 
-def hourly_rates(measurements: pd.DataFrame) -> pd.DataFrame:
-    """按框重采样为小时级生长曲线，差分得生长速率（mm/h）。
+def hourly_rates(measurements: pd.DataFrame, *, verified_only: bool = True) -> pd.DataFrame:
+    """按 (库房, 框) 重采样为小时级生长曲线，差分得生长速率（mm/h）。
 
-    输入列: ts, box_id, mean_len_mm；输出列: ts(小时), box_id, level_mm, rate_mm_per_h
+    输入列: ts, room_id, box_id, mean_len_mm[, quality]
+    输出列: ts(小时), room_id, box_id, level_mm, rate_mm_per_h
+
+    **`room_id` 是必需的**（票 11）：缺库房维度时，`box_id` 只是库房内编号，
+    两个库房的同一个框号会被串成一条曲线，差分出根本不存在的速率。
+    `verified_only`：只吃 `quality` 里含 `verified` 的行（票 11 §3），
+    缺测/近似/低置信的行落在库里但不进统计。
     """
     m = measurements.copy()
+    if "room_id" not in m.columns:
+        raise ValueError(
+            "measurements 缺 room_id（票 11）：缺库房维度会把不同库房串成一条曲线"
+        )
+    if verified_only and "quality" in m.columns:
+        m = m[m["quality"].fillna("").str.contains("verified", regex=False)]
     m["ts"] = pd.to_datetime(m["ts"])
     m["hour"] = m["ts"].dt.floor("h")
-    hourly = (m.groupby(["box_id", "hour"])["mean_len_mm"]
+    if m.empty:
+        # 空表也要带上正确的 dtype：否则 `hour` 是 object，和环境的 datetime64 合并时
+        # pandas 直接抛 "trying to merge on object and datetime64 columns"。
+        return pd.DataFrame({
+            "room_id": pd.Series(dtype="object"),
+            "box_id": pd.Series(dtype="object"),
+            "hour": pd.Series(dtype="datetime64[ns]"),
+            "level_mm": pd.Series(dtype="float64"),
+            "rate_mm_per_h": pd.Series(dtype="float64"),
+        })
+    hourly = (m.groupby(["room_id", "box_id", "hour"])["mean_len_mm"]
               .mean().reset_index(name="level_mm"))
-    hourly = hourly.sort_values(["box_id", "hour"])
-    hourly["rate_mm_per_h"] = hourly.groupby("box_id")["level_mm"].diff()
+    hourly = hourly.sort_values(["room_id", "box_id", "hour"])
+    hourly["rate_mm_per_h"] = hourly.groupby(["room_id", "box_id"])["level_mm"].diff()
     return hourly.dropna(subset=["rate_mm_per_h"])
 
 
 def align(rates: pd.DataFrame, environment: pd.DataFrame) -> pd.DataFrame:
-    """生长速率与环境小时均值按时间对齐。
+    """生长速率与环境小时均值按 **(库房, 小时)** 对齐。
 
-    environment 列: ts, temp_c, rh_pct, co2_ppm
+    environment 列: ts, zone, temp_c, rh_pct, co2_ppm[, lamp_on_min]
+
+    两条硬约束（票 11/票 05）：环境必须按 `zone` 分组，否则四个库房混进同一个分箱；
+    `zone` 与测量的 `room_id` 是同一个东西，只做一次改名，不造第三个名字。
     """
+    if "room_id" not in rates.columns:
+        raise ValueError("rates 缺 room_id（票 11）：对不齐库房的速率不能进分箱")
     env = environment.copy()
+    if "zone" not in env.columns:
+        raise ValueError(
+            "environment 缺 zone（票 05）：不按库房聚合会把四个库房混进同一个分箱"
+        )
     env["ts"] = pd.to_datetime(env["ts"])
     env["hour"] = env["ts"].dt.floor("h")
     cols = [c for c in ("temp_c", "rh_pct", "co2_ppm", "lamp_on_min") if c in env.columns]
-    env_hourly = env.groupby("hour")[cols].mean().reset_index()
-    merged = rates.merge(env_hourly, on="hour", how="inner")
+    env_hourly = (
+        env.groupby(["zone", "hour"])[cols].mean().reset_index()
+        .rename(columns={"zone": "room_id"})
+    )
+    merged = rates.merge(env_hourly, on=["room_id", "hour"], how="inner")
+    # 分箱口径：暂留 20mm 长度分档；spec §2.7 的 D 分档要生长天数，
+    # 等票 04 的批次窗口 join 落地后再换（票 05）。
     merged["stage_mm"] = (merged["level_mm"] // 20 * 20).astype(int)
     merged["stage"] = merged["stage_mm"].astype(str) + "-" + (merged["stage_mm"] + 20).astype(str) + "mm"
     return merged
@@ -84,9 +120,11 @@ def run_from_db(db_path: str) -> list[dict]:
     from analysis.db import connect
 
     conn = connect(db_path)
-    measurements = pd.read_sql("SELECT ts, box_id, mean_len_mm FROM measurements", conn)
+    measurements = pd.read_sql(
+        "SELECT ts, room_id, box_id, mean_len_mm, quality FROM measurements", conn
+    )
     environment = pd.read_sql(
-        "SELECT ts, temp_c, rh_pct, co2_ppm, lamp_on_min FROM environment", conn
+        "SELECT ts, zone, temp_c, rh_pct, co2_ppm, lamp_on_min FROM environment", conn
     )
     if measurements.empty or environment.empty:
         return []

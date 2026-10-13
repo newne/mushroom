@@ -23,6 +23,7 @@ ROOM = {"room_id": "611", "entry_date": "2026-03-16", "batch_no": "mogu-100"}
 def image_row(**kw) -> dict:
     row = {"kind": "image_index", "ts": "2026-09-13T20:25:42", "ok": True,
            "box_id": "B101", "station_id": "S101", "angle_profile": "top45",
+           "imaging_profile": "img-2026-10-13a",
            "camera_ip": "192.168.1.238", "yz": [187.167, -21.2],
            "object_name": "20260913/B101_S101_top45_202542",
            "cloud_url": "http://192.168.1.250:9000/mogu/20260913/B101_S101_top45_202542.jpg",
@@ -54,6 +55,8 @@ def test_image_rows_keep_the_room_stamp(tmp_path):
     assert rows[0]["entry_date"] == "2026-03-16"
     assert rows[0]["batch_no"] == "mogu-100"
     assert rows[0]["object_name"] == "20260913/B101_S101_top45_202542"
+    # 成像参数快照 id（巡检手票 11）：每帧带自己的取证归属，不靠"时间×站位"反推
+    assert rows[0]["imaging_profile"] == "img-2026-10-13a"
 
 
 def test_round_rows_keep_the_room_stamp(tmp_path):
@@ -70,12 +73,13 @@ def test_mixed_batch_ingests_every_kind(tmp_path):
     rows = [round_row(), image_row(),
             image_row(station_id="S102", box_id="B102", ts="2026-09-13T20:26:02",
                       object_name="20260913/B102_S102_top45_202602"),
-            {"kind": "measurement", "ts": "2026-09-13T20:35:15", "box_id": "B101",
+            {"kind": "measurement", "ts": "2026-09-13T20:35:15", "room_id": "611", "box_id": "B101",
              "n": 6, "mean_len_mm": 42.5, "mean_cap_mm": 31.0, "p10_len": 38.0,
              "p90_len": 47.0, "quality": ""}]
     with client(tmp_path) as c:
         got = c.post("/ingest", json={"rows": rows}).json()
-        assert got == {"inserted_measurements": 1, "inserted_rounds": 1, "inserted_images": 2}
+        assert got == {"inserted_measurements": 1, "skipped_measurements": 0,
+                       "inserted_rounds": 1, "inserted_images": 2}
         assert c.get("/images").json()[0]["room_id"] == "611"
         assert c.get("/rounds").json()[0]["room_id"] == "611"
         assert c.get("/measurements").json()[0]["mean_len_mm"] == 42.5
@@ -143,13 +147,14 @@ def test_migrate_adds_missing_room_columns(tmp_path):
         "images.room_id",
         "images.entry_date",
         "images.batch_no",
+        "images.imaging_profile",
         "rounds.round_id",
         "rounds.room_id",
         "rounds.entry_date",
         "rounds.batch_no",
     }
     cols = {r[1] for r in conn.execute("PRAGMA table_info(images)")}
-    assert {"round_id", "room_id", "entry_date", "batch_no"} <= cols
+    assert {"round_id", "room_id", "entry_date", "batch_no", "imaging_profile"} <= cols
     rounds_cols = {r[1] for r in conn.execute("PRAGMA table_info(rounds)")}
     assert {"round_id", "room_id", "entry_date", "batch_no"} <= rounds_cols
 

@@ -8,7 +8,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta
 
 from fastapi import FastAPI, HTTPException
@@ -16,6 +18,7 @@ from pydantic import BaseModel
 
 from analysis.audit import summarize_operations
 from analysis.batches import window_of
+from analysis.jobs import default_jobs, run_job
 from analysis.db import (
     ROUND_FIELDS,
     connect,
@@ -54,11 +57,45 @@ def _span_hours(start: str, end: str | None) -> float:
     return (last - first).total_seconds() / 3600.0
 
 
-def create_app(db_path: str = "mushrooms.db", *, raw_source_factory=None) -> FastAPI:
-    app = FastAPI(title="mushroom-analysis")
+def create_app(
+    db_path: str | None = None,
+    *,
+    raw_source_factory=None,
+    jobs_factory=default_jobs,
+) -> FastAPI:
+    """建应用。`db_path` 缺省取环境变量 `ANALYSIS_DB`（容器里显式给路径，不靠工作目录）。
+
+    **常驻作业在 lifespan 里跑**（票 12）：API 与 env/audit/batch 三个 ingest
+    同一个容器、同一个进程，定时是进程内 asyncio 任务 —— 不靠容器重启，
+    也不引 cron/supervisor。`jobs_factory` 只为测试注入：默认
+    `analysis.jobs.default_jobs`，而不设周期环境变量时它返回空表 ⇒
+    开发与测试里不会有后台网络请求。
+    """
+    resolved_db = db_path or os.environ.get("ANALYSIS_DB", "mushrooms.db")
     # 单 worker 部署，允许跨线程复用连接（FastAPI 线程池执行 sync 端点）
-    conn = connect(db_path, check_same_thread=False)
+    conn = connect(resolved_db, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        jobs = list(jobs_factory(conn, resolved_db))
+        tasks = [asyncio.create_task(run_job(job), name=f"ingest:{job.name}") for job in jobs]
+        for job in jobs:
+            period = (f"每 {job.interval_s}s" if job.interval_s is not None
+                      else f"每天 {job.daily_at}")
+            print(f"[ingest] 启动作业 {job.name}（{period}）")
+        try:
+            yield
+        finally:
+            for task in tasks:
+                task.cancel()
+            for task in tasks:
+                with suppress(asyncio.CancelledError):
+                    await task
+            if tasks:
+                print("[ingest] 作业已停止")
+
+    app = FastAPI(title="mushroom-analysis", lifespan=lifespan)
 
     @app.get("/healthz")
     def healthz() -> dict:
@@ -70,13 +107,23 @@ def create_app(db_path: str = "mushrooms.db", *, raw_source_factory=None) -> Fas
 
         字段名契约由 measure.record.RECORD_FIELDS 单方定义（spec §6）；
         行缺字段时按 NULL 入库，未知 kind 忽略。
+        **measurement 行必须有 `room_id` 与 `box_id`**（票 11）：缺的行不入库
+        （主键 `(ts, room_id, box_id)`，且缺库房的行会污染某个库房的区间表），
+        但计入 `skipped_measurements` 返回给发送方，不静默丢。
         """
         measurements, rounds, images = [], [], []
+        skipped_measurements = 0
         for row in body.rows:
             kind = row.get("kind")
-            if kind == "measurement" and row.get("ts") and row.get("box_id"):
-                row.pop("kind", None)
-                measurements.append(row)
+            if kind == "measurement":
+                # 票 11：测量行必须带库房与框。缺库房的行不入库（主键是
+                # (ts, room_id, box_id)，且它会污染某个库房的区间表），
+                # 但也不静默丢——计数返回给发送方。
+                if row.get("ts") and row.get("room_id") and row.get("box_id"):
+                    row.pop("kind", None)
+                    measurements.append(row)
+                else:
+                    skipped_measurements += 1
             elif kind == "round" and row.get("ts"):
                 rounds.append(row)
             elif kind == "image_index" and row.get("ts"):
@@ -95,14 +142,17 @@ def create_app(db_path: str = "mushrooms.db", *, raw_source_factory=None) -> Fas
             conn.commit()
         return {
             "inserted_measurements": len(measurements),
+            "skipped_measurements": skipped_measurements,
             "inserted_rounds": len(rounds),
             "inserted_images": len(images),
         }
 
     @app.get("/measurements")
-    def measurements(box_id: str = "") -> list[dict]:
-        rows = fetch_measurements(conn)
-        return [r for r in rows if not box_id or r.get("box_id") == box_id]
+    def measurements(room_id: str = "", box_id: str = "") -> list[dict]:
+        """测量行（票 11）。可按库房/框过滤 —— 区间表按库房分组，别在内存里筛。"""
+        return fetch_measurements(
+            conn, room_id=room_id or None, box_id=box_id or None
+        )
 
     @app.get("/rounds")
     def rounds(

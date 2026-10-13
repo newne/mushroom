@@ -15,8 +15,9 @@ def client(tmp_path) -> TestClient:
     return TestClient(create_app(str(tmp_path / "api.db")))
 
 
-def measurement(ts, box_id, mean_len, *, n=6, cap=None) -> dict:
-    return {"kind": "measurement", "ts": ts, "box_id": box_id, "n": n,
+def measurement(ts, box_id, mean_len, *, n=6, cap=None, room_id="611") -> dict:
+    """票 11：测量行必须带 `room_id`，否则 `/ingest` 会拒收（并计数 skipped）。"""
+    return {"kind": "measurement", "ts": ts, "room_id": room_id, "box_id": box_id, "n": n,
             "mean_len_mm": mean_len, "mean_cap_mm": cap, "p10_len": None,
             "p90_len": None, "quality": ""}
 

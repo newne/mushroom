@@ -24,6 +24,7 @@ def test_ingest_measurements_and_rounds(client):
             {
                 "kind": "measurement",
                 "ts": "2026-08-30T08:00:00",
+                "room_id": "611",
                 "box_id": "B01",
                 "n": 3,
                 "mean_len_mm": 52.0,
@@ -60,7 +61,8 @@ def test_ingest_measurements_and_rounds(client):
     resp = client.post("/ingest", json=body)
     assert resp.status_code == 200
     assert resp.json() == {
-        "inserted_measurements": 1, "inserted_rounds": 1, "inserted_images": 1,
+        "inserted_measurements": 1, "skipped_measurements": 0,
+        "inserted_rounds": 1, "inserted_images": 1,
     }
 
     ms = client.get("/measurements").json()
@@ -142,14 +144,19 @@ def test_images_endpoint_filters_by_station(client):
 
 
 def test_ingest_missing_required_fields_ignored(client):
+    """票 11：缺 ts 或缺 room_id 的测量行不入库，但**要计数**（不静默丢）。"""
     resp = client.post("/ingest", json={"rows": [
-        {"kind": "measurement", "box_id": "B01"},  # 缺 ts
+        {"kind": "measurement", "box_id": "B01"},                    # 缺 ts
+        {"kind": "measurement", "ts": "2026-08-30T09:00:00", "box_id": "B02"},  # 缺 room_id
     ]})
     assert resp.json()["inserted_measurements"] == 0
+    assert resp.json()["skipped_measurements"] == 2
+    assert client.get("/measurements").json() == []
 
 
 def test_ingest_idempotent(client):
-    row = {"kind": "measurement", "ts": "t1", "box_id": "B01", "mean_len_mm": 1.0}
+    row = {"kind": "measurement", "ts": "t1", "room_id": "611", "box_id": "B01",
+           "mean_len_mm": 1.0}
     client.post("/ingest", json={"rows": [row]})
     client.post("/ingest", json={"rows": [row]})
     assert len(client.get("/measurements").json()) == 1
@@ -170,7 +177,8 @@ def test_ranges_reads_materialized_table(client, db_path):
     rows = []
     for i in range(24):
         ts = f"2026-08-01T{i:02d}:00:00"
-        rows.append({"ts": ts, "box_id": "B01", "mean_len_mm": 10.0 + i})
+        rows.append({"ts": ts, "room_id": "room1", "box_id": "B01", "mean_len_mm": 10.0 + i,
+                     "quality": "verified"})
         upsert_environment(conn, [{"ts": ts, "zone": "room1",
                                    "temp_c": 22.0 + (i % 2) * 4.0,
                                    "rh_pct": 85.0, "co2_ppm": 800.0, "lamp_state": 2.0}])

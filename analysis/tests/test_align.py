@@ -15,7 +15,7 @@ def make_data():
     env_rows = []
     for i, ts in enumerate(hours):
         temp = 20 + (i % 4) * 3  # 20,23,26,29 循环 → 温区各 12 小时
-        env_rows.append({"ts": ts.isoformat(), "temp_c": float(temp),
+        env_rows.append({"ts": ts.isoformat(), "zone": "611", "temp_c": float(temp),
                          "rh_pct": 85.0, "co2_ppm": 800.0, "lamp_state": 2.0,
                          "lamp_on_min": 30.0})
 
@@ -24,8 +24,8 @@ def make_data():
     for box_id in ("B01", "B02"):
         level = 10.0
         for i, ts in enumerate(hours):
-            measure_rows.append({"ts": ts.isoformat(), "box_id": box_id,
-                                 "mean_len_mm": level})
+            measure_rows.append({"ts": ts.isoformat(), "room_id": "611", "box_id": box_id,
+                                 "mean_len_mm": level, "quality": "verified"})
             temp = env_rows[i]["temp_c"]
             rate = 0.6 if 24 <= temp <= 26 else 0.2
             level += rate
@@ -37,7 +37,7 @@ def test_hourly_rates_shape():
     rates = hourly_rates(m)
     # 2 框 × 48 小时，去掉首个差分行
     assert len(rates) == 2 * 47
-    assert set(rates.columns) >= {"box_id", "hour", "level_mm", "rate_mm_per_h"}
+    assert set(rates.columns) >= {"room_id", "box_id", "hour", "level_mm", "rate_mm_per_h"}
 
 
 def test_best_ranges_finds_hot_bin():
@@ -64,7 +64,48 @@ def test_stage_bucketing():
 
 
 def test_empty_inputs_yield_no_ranges():
-    empty_m = pd.DataFrame(columns=["ts", "box_id", "mean_len_mm"])
-    empty_e = pd.DataFrame(columns=["ts", "temp_c", "rh_pct", "co2_ppm", "lamp_state",
-                                    "lamp_on_min"])
+    empty_m = pd.DataFrame(columns=["ts", "room_id", "box_id", "mean_len_mm", "quality"])
+    empty_e = pd.DataFrame(columns=["ts", "zone", "temp_c", "rh_pct", "co2_ppm",
+                                    "lamp_state", "lamp_on_min"])
     assert best_ranges(align(hourly_rates(empty_m), empty_e)) == []
+
+
+# ---------- 库房维度：这是票 11 那个坑的回归测试 ----------
+
+
+def test_same_box_id_in_two_rooms_is_not_mixed():
+    """两个库房有同一个框号时，差分别把两条曲线串起来（缺 room_id 就会）。"""
+    m, _ = make_data()
+    other = m.copy()
+    other["room_id"] = "612"
+    other["mean_len_mm"] = other["mean_len_mm"] + 100.0   # 另一个库房长得完全不同的量级
+
+    rates = hourly_rates(pd.concat([m, other], ignore_index=True))
+    assert set(rates["room_id"]) == {"611", "612"}
+    # 每 (库房, 框, 小时) 一条，而不是两条被平均成一条
+    assert len(rates) == 4 * 47
+    # 611 的速率不会被 612 的 100mm 台阶污染（台阶只出现在各自的第一条差分里）
+    first = rates[(rates["room_id"] == "611") & (rates["box_id"] == "B01")]
+    assert first["rate_mm_per_h"].abs().max() < 1.0
+
+
+def test_unverified_rows_do_not_enter_the_curve():
+    """票 11 §3：区间表与决策层只吃 `verified`。"""
+    m, _ = make_data()
+    m.loc[m.index[:5], "quality"] = "no_detection"
+    kept = hourly_rates(m)
+    all_rows = hourly_rates(m, verified_only=False)
+    assert len(kept) < len(all_rows)
+
+
+def test_missing_room_id_fails_loudly():
+    """缺库房维度必须报错，不许**静默**把库房混起来算。"""
+    m, _ = make_data()
+    with pytest.raises(ValueError, match="room_id"):
+        hourly_rates(m.drop(columns=["room_id"]))
+
+
+def test_missing_zone_fails_loudly():
+    m, e = make_data()
+    with pytest.raises(ValueError, match="zone"):
+        align(hourly_rates(m), e.drop(columns=["zone"]))

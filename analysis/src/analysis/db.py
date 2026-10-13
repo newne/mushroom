@@ -28,16 +28,25 @@ CREATE TABLE IF NOT EXISTS environment (
   PRIMARY KEY (ts, zone)
 );
 
+-- 测量表（票 11）：生产者是 measure（`measure/record.py` 的 `RECORD_FIELDS`），
+-- analysis 只消费，不复制字段表。主键 (ts, room_id, box_id) —— 缺库房维度会让两个库房
+-- 同一个框号的行互相覆盖，于是 align 按小时聚合时把库房混算，区间表算出来是**错的**，
+-- 不是空的。
+-- `room_id` 必须 NOT NULL：主键里含 NULL 列时 SQLite 认为"每行都不同"，
+-- 幂等（重发覆盖而不是新增）当场失效。
 CREATE TABLE IF NOT EXISTS measurements (
-  ts          TEXT NOT NULL,
-  box_id      TEXT NOT NULL,
-  n           INTEGER,
-  mean_len_mm REAL,
-  mean_cap_mm REAL,
-  p10_len     REAL,
-  p90_len     REAL,
-  quality     TEXT,
-  PRIMARY KEY (ts, box_id)
+  ts            TEXT NOT NULL,       -- 采图/测量时刻（本地 ISO8601，与 rounds/images 同口径）
+  room_id       TEXT NOT NULL,       -- 库房号（611/612/607/608）；由生产者填，不许从 box_id 反推
+  box_id        TEXT NOT NULL,       -- **菇框号**（B105 = 第 1 层第 5 框），不是站位号
+  station_id    TEXT,                -- 站位号（S105）；将来与 images 的 (ts, station_id, angle_profile) join
+  angle_profile TEXT,                -- 角度档；当前单档平视 level0。多档并存时主键要加它（需重建）
+  n             INTEGER,             -- 本行有效检出数
+  mean_len_mm   REAL,                -- 平视单档下**明确缺测**（无对应角度档）→ NULL，不写 0
+  mean_cap_mm   REAL,                -- 同上
+  p10_len       REAL,
+  p90_len       REAL,
+  quality       TEXT,                -- 逗号 flag 串；区间表与决策层只吃含 verified 的行
+  PRIMARY KEY (ts, room_id, box_id)
 );
 
 CREATE TABLE IF NOT EXISTS rounds (
@@ -60,6 +69,9 @@ CREATE TABLE IF NOT EXISTS images (
   station_id    TEXT,
   box_id        TEXT,
   angle_profile TEXT,
+  -- 成像参数快照 id（2026-10-13，巡检手票 11）：指向归档的 `configs/imaging-profile.yaml`
+  -- 里某个快照，**只存 id，不塞参数全文**。老行 NULL = "那时还没记"，不编。
+  imaging_profile TEXT,
   camera_ip     TEXT,
   y             REAL,
   z             REAL,
@@ -134,6 +146,8 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "room_id": "TEXT",
         "entry_date": "TEXT",
         "batch_no": "TEXT",
+        # 成像参数快照 id（巡检手票 11）：老行留 NULL——"那时没记"比编一个 id 诚实。
+        "imaging_profile": "TEXT",
     },
     "rounds": {
         "round_id": "TEXT",
@@ -149,6 +163,12 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "lamp_on_m": "REAL",
         "lamp_off_m": "REAL",
         "lamp_on_min": "REAL",
+    },
+    # 测量表的归属列（票 11）。`room_id` 不在这里 —— 它在主键里，只能靠重建补上
+    # （见 `_rebuild_measurements`）。这两列是主键之外的，可以直接 ADD COLUMN。
+    "measurements": {
+        "station_id": "TEXT",
+        "angle_profile": "TEXT",
     },
 }
 
@@ -188,6 +208,32 @@ def _rebuild_environment(conn: sqlite3.Connection) -> list[str]:
     return ["environment(重建：原始分钟行 → 小时聚合)"]
 
 
+def _rebuild_measurements(conn: sqlite3.Connection) -> list[str]:
+    """老库的 `measurements` 没有 `room_id`，主键也还是 `(ts, box_id)`（票 11）。
+
+    主键是表级约束，SQLite 改不了，只能重建。重建时**绝不编库房号** ——
+    加列之前采的行没有库房信息，编一个就是往区间表里写假归属，比丢行更坏。
+
+    - 表为空（生产 2026-10-12 实测 0 行，spec §7.2）：直接按新 schema 重建。
+    - 表里有行：**整表原样搬进 `measurements_legacy`**，新表按新 schema 建。
+      行不丢、字段不改名，谁要考古自己去查那张表。
+    """
+    have = {row[1] for row in conn.execute("PRAGMA table_info(measurements)")}
+    if not have or "room_id" in have:
+        return []
+    n = conn.execute("SELECT COUNT(*) FROM measurements").fetchone()[0]
+    if n:
+        conn.execute("DROP TABLE IF EXISTS measurements_legacy")
+        conn.execute("ALTER TABLE measurements RENAME TO measurements_legacy")
+        note = f"measurements(重建：{n} 行无库房维度 → measurements_legacy)"
+    else:
+        conn.execute("DROP TABLE measurements")
+        note = "measurements(重建：老主键 (ts, box_id) → (ts, room_id, box_id))"
+    conn.executescript(SCHEMA)
+    conn.commit()
+    return [note]
+
+
 def migrate(conn: sqlite3.Connection) -> list[str]:
     """把老库补到当前 schema，返回补了哪些列（``["images.room_id", …]`）。
 
@@ -196,6 +242,7 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
     """
     added: list[str] = []
     added.extend(_rebuild_environment(conn))
+    added.extend(_rebuild_measurements(conn))
     added.extend(_rename_columns(conn))
     for table, columns in ADDED_COLUMNS.items():
         have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
@@ -324,27 +371,50 @@ def fetch_batches(conn: sqlite3.Connection, *, room_id: str | None = None) -> li
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+#: 测量线的字段清单（票 11）。与 measure 侧 `RECORD_FIELDS` **一字不差**，
+#: 禁第四套命名；`room_id` 在上游是必填，存储层用 NOT NULL 兜底（缺了就插不进去，
+#: 而不是静默丢字段——"写入方多给、存储方少要"这个坑踩过一次）。
 MEASUREMENT_FIELDS = (
-    "ts", "box_id", "n", "mean_len_mm", "mean_cap_mm", "p10_len", "p90_len", "quality",
+    "ts", "room_id", "box_id", "station_id", "angle_profile",
+    "n", "mean_len_mm", "mean_cap_mm", "p10_len", "p90_len", "quality",
 )
 
 
 def insert_measurements(conn: sqlite3.Connection, rows: list[dict]) -> None:
-    """行允许缺字段（按 NULL 入库）；字段名以 MEASUREMENT_FIELDS 为准。"""
+    """按 (ts, room_id, box_id) 覆盖写。行允许缺字段（按 NULL 入库）。
+
+    用**命名**占位符：`MEASUREMENT_FIELDS` 是唯一字段清单，加列时不会出现
+    "SQL 少写一个 ?、值整体错位"这种最难查的错。
+    """
+    cols = ", ".join(MEASUREMENT_FIELDS)
+    marks = ", ".join(f":{f}" for f in MEASUREMENT_FIELDS)
     conn.executemany(
-        "INSERT OR REPLACE INTO measurements (ts, box_id, n, mean_len_mm, mean_cap_mm, "
-        "p10_len, p90_len, quality) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        [[row.get(f) for f in MEASUREMENT_FIELDS] for row in rows],
+        f"INSERT OR REPLACE INTO measurements ({cols}) VALUES ({marks})",
+        [{f: row.get(f) for f in MEASUREMENT_FIELDS} for row in rows],
     )
     conn.commit()
 
 
-def fetch_measurements(conn: sqlite3.Connection) -> list[dict]:
-    cur = conn.execute(
-        "SELECT ts, box_id, n, mean_len_mm, mean_cap_mm, p10_len, p90_len, quality "
-        "FROM measurements ORDER BY ts"
-    )
+def fetch_measurements(
+    conn: sqlite3.Connection,
+    *,
+    room_id: str | None = None,
+    box_id: str | None = None,
+) -> list[dict]:
+    """取测量行（升序）。可按库房/框号过滤 —— 区间表要按库房分组，不该在内存里筛。"""
+    sql = f"SELECT {', '.join(MEASUREMENT_FIELDS)} FROM measurements"
+    where: list[str] = []
+    params: list = []
+    if room_id:
+        where.append("room_id = ?")
+        params.append(room_id)
+    if box_id:
+        where.append("box_id = ?")
+        params.append(box_id)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY ts"
+    cur = conn.execute(sql, params)
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
@@ -367,6 +437,7 @@ IMAGE_FIELDS = (
     "station_id",
     "box_id",
     "angle_profile",
+    "imaging_profile",
     "camera_ip",
     "y",
     "z",
