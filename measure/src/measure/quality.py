@@ -31,7 +31,9 @@ import numpy as np
 #: ⇒ 旧的默认 100 会拒掉 **78.4%** 的正常帧（中位数本身就低于它）。
 #: ⚠️ 这是**当前现场（单档平视 + 矮菇 + 这批光照）**的分布：换角/换灯/相机参数变更后
 #: 必须用同一脚本重算（`measure/tools/calibrate_quality_thresholds.py`）。
-DEFAULT_BLUR_THRESHOLD = 100.0
+#: 旧的"严格"模糊门 100 保留为**参考值**但不再作默认：标定证明它拒掉 78.4% 的正常帧。
+#: 需要"只看纹理很差的帧"时显式传 `blur_threshold=100`（或更高）。
+LEGACY_STRICT_BLUR_THRESHOLD = 100.0
 DEFAULT_MAX_OVEREXPOSED = 0.05
 #: 近黑：p99 亮度低于此值（[0,1] 归一化）。ok 帧实测 p99 min = 0.722、
 #: 两张真暗帧 p99 = 0.008/0.012 ⇒ 0.12 落在巨大的空隙里，两侧都有 6 倍以上余量。
@@ -67,7 +69,7 @@ def laplacian_variance(gray: np.ndarray) -> float:
     return float(lap.var())
 
 
-def is_blurry(gray: np.ndarray, threshold: float = DEFAULT_BLUR_THRESHOLD) -> bool:
+def is_blurry(gray: np.ndarray, threshold: float = DEFAULT_ABS_LAPVAR_FLOOR) -> bool:
     return laplacian_variance(gray) < threshold
 
 
@@ -96,7 +98,7 @@ def is_dark(gray: np.ndarray, *, dark_p99: float = DEFAULT_DARK_P99) -> bool:
     return p99_brightness(gray) < dark_p99
 
 
-def frame_quality(gray: np.ndarray, *, blur_threshold: float = DEFAULT_BLUR_THRESHOLD,
+def frame_quality(gray: np.ndarray, *, blur_threshold: float = DEFAULT_ABS_LAPVAR_FLOOR,
                   max_overexposed: float = DEFAULT_MAX_OVEREXPOSED,
                   dark_p99: float = DEFAULT_DARK_P99) -> tuple[bool, str]:
     """返回 ``(是否可用, 标记串)``；标记串 `+` 分隔（票 11 §3），空串表示通过。"""
