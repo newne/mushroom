@@ -77,3 +77,11 @@ docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate 
   本票即那张小票；§2 的 sha 比对就是"已被主线覆盖"的答案——**是，逐字节相同**。
 - 待巡检手/step code 确认的是**归属**而不是内容：`preview.py` 在 step code 的文件线上，
   并回 tag 这个动作（§4）由发版官执行，动它之前知会一声即可。
+- 2026-10-13 21:0x（发版官，Chief 批 (a′)）：`PATROL_IMAGE` 已改指新 tag
+  `mushroom_patrol:0.1.0-20261013204311-89e4a54`，并**只重建了 `mushroom_analysis` 与
+  `mushroom_patrol`**；**`mushroom_console` 刻意留在旧 tag `b64027b`**（本次只需要 analysis 的
+  DDL 与 patrol 的 meta 字段，动 console 只会无谓扩大停机面）。
+  ⚠️ **这就是本票 §1 那个"一个变量管多个容器"的隐式耦合**：`PATROL_IMAGE` 同时喂
+  patrol / console / analysis，所以"谁重建谁换 tag"。**下次有人对 console 执行
+  `docker compose up -d` 会顺手把它带到新 tag**——那是预期漂移，不是故障；要三者一致需单独批准一次
+  console 重建（preview 已有独立变量，不受影响）。详见票 06 §H。

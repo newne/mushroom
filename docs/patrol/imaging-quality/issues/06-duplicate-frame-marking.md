@@ -231,3 +231,57 @@ docker compose up -d --force-recreate
   帧照常入库且 `n_frames_recorded` 等于帧数——**只能等下一轮巡检**（上轮 18:27 结束）才能观测，
   属**发版后复验**，由发版官在下一轮结束后补。
 - 回滚（§C）未执行；`levels-fix/` 与备份文件都在原处。
+
+## H. (a′) patrol + analysis 重发记录（发版官，2026-10-13 21:00–21:02）——**已上线**
+
+Chief 批准**(a′)：重建 patrol + analysis 两个容器**（附 7 条条件）。起因：C1 上线后实测发现
+**生产者与消费者都还是旧版**（`mushroom_patrol` = `b64027b`/14:48 起，容器内 `orchestrator.py`
+`image_sha256` 0 命中；`mushroom_analysis` = `0a9893c`/16:56 起，`db.py` 0 命中；prod 库
+`images` 17 列 / `rounds` 9 列）⇒ 环境官 `3c0a45b` 只在**仓库层**落地，`ALTER TABLE ADD COLUMN`
+必须在 analysis 容器重建时才跑。
+
+| 项 | 值 |
+| --- | --- |
+| revision | **`89e4a54`** |
+| 门禁（同一 revision） | **945 passed / 0 failed**（exit 0，234.66 s） |
+| 镜像 | `registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261013204311-89e4a54`<br>image ID `sha256:29abb2ed326ee8cd224e159dc4ec9e6d01807f18079117d2d25f2da081aa2150`<br>registry digest **`sha256:58b148f126fa92de391de84e6b81c45808811b9fd9923c35ccd9e88daa87135b`** |
+| **镜像内自查**（"生效"判据） | analysis `db.py`：`same_as_previous`3 / `duplicate_streak`3 / `n_duplicate`3 / `n_frames_recorded`3 / `dup_groups`9 / `frame_dup`4 / `content_sha256`4<br>patrol `orchestrator.py`：`image_sha256`3 / `duplicate_streak`4 / `same_as_previous`5 |
+| DB 备份 | `wal_checkpoint(TRUNCATE)`=(0,0,0)；`/opt/mushroom-analysis/backups/pre-a-prime-20261013-204321/`（db 6 971 392 B + `-wal` 0 B + `-shm` 32 768 B） |
+| **动手前计数** | images **3251** / rounds **68** / measurements 0 / environment 2540 / operations 28 / batches 22 |
+| `.env` | `PATROL_IMAGE` → 新 tag；备份 `.env.bak-20261013-205911`；`diff` **只有第 45 行一处**；远端 sha256 ＝ 本地 `375b8d35…` |
+| **① analysis（21:00:32）** | `docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_analysis`；healthy、新镜像；**prod 库 `images` 17→23 列、`rounds` 9→14 列（7 字段全出现）**；行数 **3251/68 不变**（加列无数据损失）；新列全 NULL |
+| **② patrol（21:02:11）** | 同法重建 `mushroom_patrol`；healthy、新镜像；**运行中容器内 `orchestrator.py` 字段命中 3/4**（不是"仓库里有"） |
+| 健康检查 | 动手前 patrol/analysis 均 healthy、页面 8002=200；动手后两者 healthy、**页面 8002=200**、console 8001 根路径 404（本就是纯 API 后端） |
+
+**刻意不动的容器（条件 5）**：`mushroom_console` 仍是 `b64027b`（`Up 6 hours, healthy`）、
+`mushroom_console_web` `d87486f`、`mushroom_preview` `station-calibration-20261008-…`。
+⚠️ **`PATROL_IMAGE` 是 patrol/console/analysis 共用的同一个变量** ⇒ 本次 `.env` 已指向新 tag，
+而 **console 容器刻意留在旧 tag**（preview 早已有独立变量 `PATROL_PREVIEW_IMAGE`，不受影响）。
+**下次有人对 console 执行 `docker compose up -d` 会顺手把它带到新 tag** —— 这是预期漂移，不是故障；
+若要让三者一致，需单独批准一次 console 重建。
+
+## I. 回滚路径（a′，与 §C 并列）
+
+回滚**必须按**"先后端 schema、后生产者"的**逆序**做，且两端都要回，否则字段会发进一个没有列的后端：
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_service
+# 1) patrol 回旧 tag（生产者先停发新字段）
+cp -a .env.bak-20261013-205911 .env            # PATROL_IMAGE 回到 b64027b
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_patrol
+# 2) analysis 回旧 tag（consumer）
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_analysis
+```
+
+⚠️ **注意：schema 加列是单向的**——回滚**不会**删掉 prod 库里新加的 6+5 个列（`ALTER TABLE ADD COLUMN`
+没有对应的移除；SQLite 也没有 DROP COLUMN 的稳妥路径）。所以**回滚后库里仍是 23/14 列**，
+只是旧代码不再读写它们。**这是预期行为，不要当成回滚失败**。要真正回到旧 schema 只能用
+`/opt/mushroom-analysis/backups/pre-a-prime-20261013-204321/mushrooms.db` 整库替换（代价是丢掉
+那之后入库的帧），**除非确有必要，不做**。
+
+## J. 待观测（下一步，发版官）
+
+**21:27 那轮**（上轮 18:27；现在两端都已部署）跑 `patrol/tools/verify_round_integrity.py`
+＋库侧对账，结论按"**已部署 / 未部署**"标注：FAIL 就是 FAIL，照实报。五点：
+实时指纹落帧、`n_frames_recorded`=帧数、`n_results`=帧数−重复帧数、`n_duplicate`=带 `frame_dup` 帧数、
+正常轮不出现 `suspect_duplicate`；外加 `dup_groups` 读回来必须是**列表**而非 JSON 字符串。
