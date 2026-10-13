@@ -325,6 +325,35 @@ def test_capture_writes_index_with_actual_position(tmp_path):
     assert row["yz"] == [505.0, -50.0]           # 记的是**实际位置**，不是站位坐标
 
 
+def test_capture_no_lamp_shoots_a_lamp_off_control_frame(tmp_path):
+    """对照帧（`no_lamp=true`）：灯全程不亮，其余与常规帧同路。
+
+    现场用它判"补光灯到底有没有进画面"——同站位、同时间窗、开灯/关灯各一帧。
+    ⚠️ 不能拿实时预览当对照：预览与抓拍成像不能逐像素互推。
+    """
+    capture = FakeCapture()
+    channel, fmc, executor, rows, _logs = make(tmp_path, capture=capture)
+    fmc.pos = (505.0, -50.0)
+    _cmd, res = run(channel, executor, "capture", {"station_id": "s105", "no_lamp": True})
+    assert res.ok is True
+    assert res.data["no_lamp"] is True and res.data["lamp_on"] is False
+    assert "对照帧" in res.detail
+    # 先确认灭灯 → 拍 → 再确认灭灯：与常规帧之间唯一差别就是"有没有开灯"
+    assert fmc.called("lamp") == [("lamp", False), ("lamp", False)]
+    assert capture.shots and capture.shots[0]["filename"].endswith("B105_S105_top45_100000")
+    (row,) = rows
+    assert row["lamp_on"] is False and row["manual"] is True
+
+
+def test_capture_rejects_a_non_boolean_no_lamp(tmp_path):
+    """`no_lamp` 只收 true/false：串/数字一律拒绝，不替操作者猜。"""
+    capture = FakeCapture()
+    channel, _fmc, executor, rows, _logs = make(tmp_path, capture=capture)
+    _cmd, res = run(channel, executor, "capture", {"station_id": "s105", "no_lamp": "yes"})
+    assert res.ok is False and "no_lamp" in res.detail
+    assert capture.shots == [] and rows == []
+
+
 def test_capture_index_keeps_the_key_and_url_the_service_returned(tmp_path):
     """索引里必须带上截图服务回的 object_name 与 cloud_url。
 

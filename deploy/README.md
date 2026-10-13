@@ -92,7 +92,7 @@ python3 -m patrol.teach --stations /opt/mushroom-patrol/stations.yaml
 | `save` | 写盘（不 save 不生效；退出时会提醒） |
 
 **示教一个格子的动作**：`jog` 把滑块挪到该框中心 → 目视/尺子确认 → `record`。
-全部 60 个走完 `save`。
+全部 48 个走完 `save`。
 
 ⚠️ 三条现场注意：
 
@@ -116,7 +116,7 @@ python3 -m deploy.m1             # 常驻：每小时第 5 分钟一轮
 | --- | --- | --- |
 | `--once` / `--check` | — | 互斥；单轮 / 只读预检 |
 | `--at-minute` | `5` | 每小时第几分钟启动（错开老系统 `:01–:02`） |
-| `--interval` | 无 | 固定间隔秒数；给了就忽略 `--at-minute`。**下限 15 min**（单轮约 6–7 min） |
+| `--interval` | 无 | 固定间隔秒数；给了就忽略 `--at-minute`。**下限 15 min**（单轮约 7 min 40 s） |
 | `--stations` | `/opt/mushroom-patrol/stations.yaml` | 站位表；不存在时按推导网格生成并落盘 |
 | `--outbox` | `/opt/mushroom-patrol/outbox.jsonl` | 待同步记录 |
 | `--log` | `/opt/mushroom-patrol/m1.log` | 人读日志落盘（同时仍打 stdout）。**别只靠 stdout**：管道接在启动它的会话里，会话一收就什么都不剩 |
@@ -128,7 +128,7 @@ python3 -m deploy.m1             # 常驻：每小时第 5 分钟一轮
 
 ### 4.0 加湿保持与时间偏置：什么时候**晚点**再拍（`patrol_trigger`）
 
-加湿期水汽重，48 张会全过曝、对比度塌掉，判不了长势还白动机架 11 分钟；开蓝光也压不住。
+加湿期水汽重，48 张会全过曝、对比度塌掉，判不了长势还白动机架约 8 分钟；开蓝光也压不住。
 所以触发要能"晚点再跑"。三条路都在 `console`（:8001），页面"上一轮 / 本轮"卡片里有对应按钮：
 
 ```bash
@@ -219,7 +219,7 @@ source: "deploy-fetch-room 2026-09-13 22:42:40 (mo_gu_batch id=100, 在库第 18
 
 **读不到就不动**（fail-closed）：文件缺失、`entry_date` 留空、日期格式不对、包数非数字，
 一律**拒绝巡检**并在日志里说明原因。这台机器会自己走 4.5 米导轨——拿不到准入依据时
-"不动"是唯一安全的默认：误动一次产出 60 张错误照片并写进测量表，少拍一轮只是少一轮数据。
+"不动"是唯一安全的默认：误动一次产出 48 张错误照片并写进测量表，少拍一轮只是少一轮数据。
 
 ```bash
 python3 -m deploy.m1 --why      # 只看判定：今天第几天、为什么不动（不碰控制器）
@@ -243,7 +243,7 @@ OUT0 补光 → `:7003/pool_capture` → 灭灯」→ 回原位 → 落 outbox �
 
 | 失败 | 处置 |
 | --- | --- |
-| **运动失败**（`FmcError`，含 `goto` 的传输/控制器错误） | **立即作废本轮**并急停。传输层事实——同一接线上所有站位都会同样失败，继续跑只会又动 60 次机构 |
+| **运动失败**（`FmcError`，含 `goto` 的传输/控制器错误） | **立即作废本轮**并急停。传输层事实——同一接线上所有站位都会同样失败，继续跑只会又动 48 次机构 |
 | **采图失败**（`CaptureError`） | 跳过该站，**连续 3 次**才中止本轮。那是"这一站没拍成"，下一站仍有意义 |
 | **中断/未预期异常** | 先急停，记为 failed，**不静默** |
 
@@ -258,7 +258,7 @@ OUT0 补光 → `:7003/pool_capture` → 灭灯」→ 回原位 → 落 outbox �
 # 每个站位跑一次闭环，学到的偏移写回 stations.yaml；此后常规轮次直接从这里起步
 .venv/bin/python3 -m deploy.m1 --framing once --mm-per-px 0.25 --max-rounds 1
 
-# 每站每轮都闭环（60 站各多拍一张 ≈ 每轮多约 10 分钟，排障/标定时才用）
+# 每站每轮都闭环（48 站各多拍一张 ≈ 每轮多约 4 分钟，排障/标定时才用）
 .venv/bin/python3 -m deploy.m1 --framing always --mm-per-px 0.25
 ```
 
@@ -352,7 +352,7 @@ deploy-flush-outbox --outbox /opt/mushroom-patrol/outbox.jsonl             # 真
 4. `patrol-m1 --once`：一轮跑完。**一次核四样**（缺一不可）：
    - `tail -3 runs/*.jsonl` → 末行是 `"event": "end"`，且 `status` 与命令输出一致；
      若末行是某条 `station` 心跳，说明**它没跑完**，那一行就是断点。
-   - `wc -l outbox.jsonl` → `1 + 60` 行（1 条 round 汇总 + 60 条 `image_index`，
+   - `wc -l outbox.jsonl` → `1 + 48` 行（1 条 round 汇总 + 48 条 `image_index`，
      失败站也在内，带 `ok:false`）。开同步时它会同步完清空，那就看 `GET /rounds`
      与 `GET /images` 有没有对应行。
    - MinIO / `:7003` 侧能看到对应对象。
@@ -395,11 +395,16 @@ python3 -m deploy.patrol_serve --cmd-dir /app/data/cmd      # 容器里的 patro
    显式做**（`DELETE /api/stop`）。延迟约 1 秒（0.5 s 轮询 + 0.1–0.2 s 检查）——
    这是**软件急停**，不替代硬件急停回路。
 2. **指令有新鲜度**：提交后 60 秒才被领走的一律不执行（判"已过期"）。正常路径上执行方
-   0.5 秒轮询一次，只有"中间隔着 11 分钟的一轮"才可能超时——那正是我们希望它别执行的情形。
+   0.5 秒轮询一次，只有"中间隔着约 8 分钟的一轮"才可能超时——那正是我们希望它别执行的情形。
 3. **巡检进行中不许手动**：console 当场回 409 + "预计 x 分钟后可用"；除急停外连补光灯和
    抓拍也拒（相机链路与曝光窗口都归那一轮）。
 4. **放开会话 = 回零 + 撤权**：手动挪过之后坐标系只有回零能重新对齐硬限位。排不上回零
    （轮内/通道忙）时接口会**明说**没排上。
+
+**对照帧（判补光灯有没有进画面）**：`POST /api/cmd {"kind":"capture","args":{"no_lamp":true}}`
+拍一张**不开补光灯**的帧——先灭灯、仍走同一条采图链路与同一个站位归属，与常规帧只差"灯亮/灯灭"。
+现场按"同站位、同时间窗，开灯/关灯各一帧"配对使用。**不要拿实时预览当对照**：预览与抓拍
+成像不能逐像素互推（`docs/patrol/prod-deploy/station-retarget.md` §8.4 第 2 条）。
 
 关掉急停联动只在排障时说得通：`patrol-m1 --no-estop`（**正常运行不要用**——那会让"有人
 按了急停"拦不住正在跑的那一轮）。
@@ -426,7 +431,7 @@ python3 -m deploy.preview --stations /app/configs/stations.yaml   # 容器里的
 | 相机凭据只有一个来源 | `stations.yaml` 的 `camera_user`/`camera_pwd`，与抓拍共用；URL 里的口令在任何日志里都打码 |
 | 页面**只连 console** | 相机地址与口令不出现在任何浏览器可见的配置里（ADR-0003 单一 origin） |
 | 一个 ffmpeg 服务所有观看者 | 5 fps 下慢客户端丢帧（队列 3）而不是拖住别人；断流按 1/2/5/10 s 退避重启 |
-| 巡检进行中不给看 | 那一轮要抓 60 张；console 拒绝**新**请求（409 + 还要等多久），并且每 8 块回头看一眼，把**已经开着**的流也断掉 |
+| 巡检进行中不给看 | 那一轮要抓 48 张；console 拒绝**新**请求（409 + 还要等多久），并且每 8 块回头看一眼，把**已经开着**的流也断掉 |
 | 它有 `/healthz`（503 = 还没有帧） | 判据是"画面是新的"，不是"进程活着"；直接排障用 `/frame.jpg` 取单帧 |
 
 **为什么不用采图服务当预览**：单次抓图 ≈5.2 s 且必然落一个文件（没有"只回图不落盘"），
@@ -440,7 +445,7 @@ python3 -m deploy.preview --stations /app/configs/stations.yaml   # 容器里的
 - **`--ingest` 端点已就位**（2026-09-13 关掉 gap-list G1）：`http://10.77.77.39:8000/ingest`，
   由 `mushroom-analysis.service` 提供（`analysis.api`，落在 `/opt/mushroom-analysis/mushrooms.db`）。
   历史遗留的 outbox 用 `deploy-flush-outbox` 补传，见 §4。
-- **站位表的 `camera_ip` 是全局配置**：本机只有一台相机（装在滑块上，60 站共用）。
+- **站位表的 `camera_ip` 是全局配置**：本机只有一台相机（装在滑块上，48 站共用）。
   省略该列 → 装载时取 `--camera-ip`（默认 `192.168.1.238`）；写成空串 → 运行时补默认值；
   显式写了 IP → 一律保留（将来分机位仍然由站位表说了算）。要把它固化进文件，
   用 `patrol-teach` 打开后 `save` 一次。

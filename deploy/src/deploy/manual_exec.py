@@ -388,8 +388,15 @@ class ManualExecutor:
         station, auto = self._station_for(cmd, y=y, z=z)
         object_name = image_object_name(station, ts)
         shot = None
+        no_lamp = cmd.args.get("no_lamp", False)
+        if not isinstance(no_lamp, bool):
+            raise CommandError(f"capture 的 no_lamp 需要 true/false，收到 {no_lamp!r}")
         try:
-            fmc.lamp(True)
+            # `no_lamp=true` 是**对照帧**：明确先灭灯再拍，与常规帧只差"灯亮/灯灭"这一项，
+            # 其余（链路、分辨率、站位、时间窗）全同。现场用它配对判"补光灯到底有没有进
+            # 画面"——`station-retarget.md` §1 那条"照不到视野"的记录至今**未证实**。
+            # ⚠️ 别拿实时预览当对照：预览与抓拍成像不能逐像素互推（同文 §8.4 第 2 条）。
+            fmc.lamp(not no_lamp)
             self._sleep(M1.lamp_settle_s)
             shot = self.capture.capture(
                 ip=station.camera_ip,
@@ -418,6 +425,7 @@ class ManualExecutor:
             "object_name": stored_name,
             "cloud_url": cloud_url,
             "manual": True,     # 额外字段：prod 的 images 表只取约定列，多的会被忽略
+            "lamp_on": not no_lamp,
             **self.room_fields(),
         })
         if self.flush is not None:
@@ -428,7 +436,8 @@ class ManualExecutor:
         return ExecOutcome(
             True,
             f"已抓拍 {station.id}{'（自动归到最近站位）' if auto else ''}"
-            f" → {stored_name}（{_off_grid_note(station, y, z)}）",
+            f" → {stored_name}（{_off_grid_note(station, y, z)}）"
+            + ("（对照帧：未开补光灯）" if no_lamp else ""),
             {
                 "station_id": station.id,
                 "object_name": stored_name,
@@ -436,6 +445,7 @@ class ManualExecutor:
                 "position_yz": [round(y, 3), round(z, 3)],
                 "auto_station": auto,
                 "lamp_on": False,
+                "no_lamp": no_lamp,
             },
         )
 

@@ -247,7 +247,7 @@ def test_transport_error_becomes_capture_error_so_the_round_keeps_going():
 
     实测踩过：池化采图偶发 500 → transport 抛 TransportError → 它**不是** CaptureError，
     于是穿透 orchestrator 的站位级重试与 PatrolRound 的"跳过该站位"，一次抖动直接打断
-    整轮 60 站位巡检（`--once` 退出码 1、outbox 空）。
+    整轮 48 站位巡检（`--once` 退出码 1、outbox 空）。
     """
 
     def boom(url, *, params=None, body=None):

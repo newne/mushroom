@@ -13,7 +13,7 @@ patrol 包里 M1 的**逻辑**早已齐备：``round.PatrolRound``（一轮的�
 
 **为什么默认 :05 开始**：采图服务与老系统**共用**同一台相机（192.168.1.238），而老系统
 每小时 :01:0x–:02:00 会批量采 6 台（611 → 238 等）。错开那两分钟，避免抢相机会话。
-一轮实测约 6–7 min（单次采图 5.2 s × 60 站位是主要开销），故周期下限取 15 min。
+一轮实测约 7 min 40 s（单次采图 5.2 s × 48 站位是主要开销；2026-10-13 生产只读实测 470/462/457 s），故周期下限取 15 min。
 """
 
 from __future__ import annotations
@@ -229,7 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     # 换算（--mm-per-px）和一个检测器实现；两者缺一就不该动机构。
     ap.add_argument("--framing", choices=("off", "once", "always"), default="off",
                     help="图像微调：off=只走到推导坐标；once=只微调还没学过的站位；"
-                         "always=每站每轮都闭环（60 站各多拍一张 ≈ 每轮多约 10 分钟）")
+                         "always=每站每轮都闭环（48 站各多拍一张 ≈ 每轮多约 4 分钟）")
     ap.add_argument("--mm-per-px", type=float, default=None,
                     help="图像像素 → mm 的标定换算（横向/Y）；给了才可能开启微调")
     ap.add_argument("--mm-per-px-z", type=float, default=None,
@@ -400,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
 
     schedule = (f"固定间隔 {args.interval} s" if args.interval is not None
                 else f"每小时第 {args.at_minute} 分钟")
-    log(f"进入常驻模式：{schedule}，站位 {len(stations)}，单轮约 6–7 min")
+    log(f"进入常驻模式：{schedule}，站位 {len(stations)}，单轮约 7 min 40 s")
     if not allowed:
         log("准入未通过：进程保持常驻，每个调度时刻重新判定（期间不碰控制器）")
 
