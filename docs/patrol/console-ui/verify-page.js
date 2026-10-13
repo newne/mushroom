@@ -1307,24 +1307,41 @@ await sleep(150);
     const okRow = rowOf('2026-09-13');
     check('有检出 + 无角度档：菌簇量列有数、杆长列「不可测（无角度档）」',
       !!okRow && okRow.children[1].textContent.includes('70.2')
-      && okRow.children[2].textContent.includes('不可测（无角度档）'),
+      && okRow.children[3].textContent.includes('不可测（无角度档）'),
       okRow ? cells(okRow).join(' | ') : '(没有 09-13 那一行)');
 
     const gatedRow = rowOf('2026-09-11');
-    check('被门拒的帧：每一列都说「该帧被判不可用（近黑）」，不说"不可测"',
-      !!gatedRow && cells(gatedRow).slice(1, 4).every(c => c.includes('该帧被判不可用（近黑）'))
+    check('被门拒的帧：量列都说「该帧被判不可用（近黑）」，不说"不可测"',
+      !!gatedRow && [1, 3, 4].every(i => cells(gatedRow)[i].includes('该帧被判不可用（近黑）'))
       && !gatedRow.textContent.includes('不可测'),
       gatedRow ? cells(gatedRow).join(' | ') : '(没有 09-11 那一行)');
+    check('被门拒/没检出的帧不给"较上次"数字（没有可共用量就不显示）',
+      !!gatedRow && cells(gatedRow)[2] === '',
+      gatedRow ? cells(gatedRow).join(' | ') : '(无)');
 
     const nodetRow = rowOf('2026-09-12');
-    check('没检出的帧：每一列都说「没检出」，不说"不可测"也不说"无角度档"',
-      !!nodetRow && cells(nodetRow).slice(1, 4).every(c => c === '没检出')
+    check('没检出的帧：量列都说「没检出」，不说"不可测"也不说"无角度档"',
+      !!nodetRow && [1, 3, 4].every(i => cells(nodetRow)[i] === '没检出')
       && !nodetRow.textContent.includes('不可测'),
       nodetRow ? cells(nodetRow).join(' | ') : '(没有 09-12 那一行)');
   }
   check('速率带量纲显示（"每天" + 单位），不是裸数字',
     T('#curve').includes('/天') && /[+-]?\d+(\.\d+)? mm\/天/.test(T('#curve')),
     T('#curve').slice(0, 160));
+  // 「变化了多少」必须取 `d_value` 且带量纲（环境官：真值在 d_value/rate_per_h；
+  // 旧 d_len_mm 只在量了杆长时才非空）——不许出现"较上次 +1.8"这种没单位的数。
+  check('变化量显示为「较上次 ±X + 量纲」（不是裸数字）',
+    /较上次 \+?-?\d+(\.\d+)? mm/.test(T('#curve')) && /较上次 \+?-?\d+(\.\d+)? mm/.test(T('#growthnote')),
+    T('#curve').slice(0, 200));
+  check('变化量落在单独的"较上次"列，且带单位', (() => {
+    const tr = Array.from(document.querySelectorAll('#growthnote tr'))
+      .find(r => (r.textContent || '').includes('2026-09-14'));
+    return !!tr && tr.children[2] && tr.children[2].textContent.trim() === '较上次 +1.8 mm';
+  })(), (() => {
+    const tr = Array.from(document.querySelectorAll('#growthnote tr'))
+      .find(r => (r.textContent || '').includes('2026-09-14'));
+    return tr ? Array.from(tr.children).map(td => td.textContent.trim()).join(' | ') : '(无)';
+  })());
   check('band_source 未定标只做弱提示（不是告警色、不是硬结论）',
     T('#curve').includes('阈值未定标'), T('#curve').slice(0, 160));
   check('曲线标题带框号', T('#curvetitle').includes('B102'), T('#curvetitle'));
@@ -1456,6 +1473,17 @@ await sleep(150);
     T('#cmpstrip').includes('投影径') && T('#cmpstrip').includes('72 mm'), T('#cmpstrip').slice(0, 140));
   check('对比卡叠的判词带速率、速率带量纲（不是裸数字）',
     /[+-]\d+(\.\d+)? mm\/天/.test(T('#cmpstrip')), T('#cmpstrip').slice(0, 180));
+  check('对比卡也带「较上次」的变化量且带量纲',
+    /较上次 [+-]?\d+(\.\d+)? mm/.test(T('#cmpstrip')), T('#cmpstrip').slice(0, 200));
+  check('没有可共用量那天（no_prev）不出现"较上次"数字（不给光秃秃的数）',
+    (() => {
+      const oldest = Array.from(document.querySelectorAll('#cmpstrip [data-cmp]')).pop();
+      return !!oldest && !oldest.textContent.includes('较上次');
+    })(),
+    (() => {
+      const oldest = Array.from(document.querySelectorAll('#cmpstrip [data-cmp]')).pop();
+      return oldest ? oldest.textContent.trim() : '(无)';
+    })());
   check('band_source 未定标在对比卡上只做弱提示（cmp-note，不是 bad）',
     T('#cmpstrip').includes('阈值未定标')
     && !document.querySelector('#cmpstrip .cmp-note.bad'), T('#cmpstrip').slice(0, 200));

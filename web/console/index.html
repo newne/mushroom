@@ -2603,11 +2603,12 @@ function renderCompare(){
     const verdict = delta ? (delta.verdict_text || delta.verdict || '') : '';
     const rate = rateText(delta);
     const weak = bandWeakHint(delta);
+    const change = deltaText(delta);
     // `/growth` 那一路取不到时要说出来：只显示绝对量而不说"判词取不到"，
     // 等于把"判定不可用"藏起来（与"取不到就直说"的既有口径一致）。
     const growthBad = !!hist.growth && !hist.growth.ok;
     const deltaLine = growthBad ? '判词/速率取不到'
-      : (verdict ? (verdict + (rate ? ' · ' + rate : '')) : '');
+      : [verdict, change, rate].filter(Boolean).join(' · ');
     const measText = measureLine(row.ts);
     const inner = (url && !angleMiss)
       ? `<span class="cmp-shot"><img loading="lazy" decoding="async" src="${esc(url)}" alt=""></span>`
@@ -2852,6 +2853,15 @@ function rateText(delta){
   return signed + ' ' + unitLabel(delta.unit) + '/天';
 }
 
+/** 这次比较**变化了多少**——取 `d_value`（环境官口径：真值在这里；旧 `d_len_mm` 只在
+ *  量了杆长时才非空，不能当"没有数据"）。**必须带量纲**，没有可共用量时返回空串
+ *  （宁可什么都不显示，也不给一个光秃秃的数字）。 */
+function deltaText(delta){
+  if(!delta || typeof delta.d_value !== 'number' || !delta.unit) return '';
+  const v = Math.round(delta.d_value * 100) / 100;
+  return '较上次 ' + (v >= 0 ? '+' : '') + v + ' ' + unitLabel(delta.unit);
+}
+
 function bandWeakHint(delta){
   const src = delta && delta.band_source;
   if(typeof src !== 'string' || !src.startsWith('default_uncalibrated')) return '';
@@ -2927,6 +2937,8 @@ function drawCurve(){
       const last = deltas.get(String(pts[pts.length-1].ts));
       const bits = [];
       if(last) bits.push('最新判词：' + ((last.verdict_text || last.verdict) || '—'));
+      const change = deltaText(last);
+      if(change) bits.push(change);
       const rate = rateText(last);
       if(rate) bits.push('速率 ' + rate);
       const weak = bandWeakHint(last);
@@ -2940,13 +2952,16 @@ function drawCurve(){
         + '</b>——绝对量照常显示，但不要把它当成"长势判定正常"。'
       : ''}</div>`;
   const recent = rows.slice(-8).reverse();
-  // 杆长/菌盖直径两列照实说：平视单档下它们**不可测**，不写 0、不写空格
+  // 杆长/菌盖直径两列照实说：平视单档下它们**不可测**，不写 0、不写空格。
+  // "较上次"这一列取的是 delta 的 **`d_value`**（环境官口径：真值在 `d_value`/`rate_per_h`，
+  // 旧 `d_len_mm` 只在量了杆长时才非空、不能当"没有数据"）——所以没有可共用量时不显示数字。
   note.innerHTML = `<table class="meas"><tr><th>时间</th><th>${esc(metric.label)} ${esc(metric.unit)}</th>
-      <th>杆长 mm</th><th>菌盖直径 mm</th><th>判词</th></tr>
+      <th>较上次</th><th>杆长 mm</th><th>菌盖直径 mm</th><th>判词</th></tr>
     ${recent.map(r => {
       const d = deltas.get(String(r.ts));
       return `<tr><td>${esc(String(r.ts).replace('T',' '))}</td>
       <td>${esc(measureCellText(r, metric.key, metric.unit))}</td>
+      <td>${esc(deltaText(d))}</td>
       <td>${esc(measureCellText(r, 'mean_len_mm', 'mm'))}</td>
       <td>${esc(measureCellText(r, 'mean_cap_mm', 'mm'))}</td>
       <td>${esc((d && (d.verdict_text || d.verdict)) || '—')}</td></tr>`;
