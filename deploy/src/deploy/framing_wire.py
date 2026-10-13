@@ -1,17 +1,26 @@
 """把 `--framing` 参数变成真的微调钩子（图像微调的部署侧接线）。
 
-三件事缺一不可，缺任何一件都**不开启**微调，并且在日志里说清楚缺的是什么：
+四件事缺一不可，缺任何一件都**不开启**微调，并且在日志里说清楚缺的是什么：
 
 1. **换算** `--mm-per-px`（像素 → mm）。这是标定量，没有现场值就只能瞎挪；
 2. **取像素**：采图结果里只有 `object_name` / `cloud_url`，像素得再从 MinIO 取一次；
 3. **解码** JPEG → 灰度数组。`numpy` 解不了 JPEG，所以用 Pillow——**没装就明确拒绝**，
-   而不是让微调静默地不生效。
+   而不是让微调静默地不生效；
+4. **解码必须真的接在检测器前面**：生产链路给 `evaluate` 的是 JPEG **字节**
+   （`orchestrator._shoot` → `framing.pixels` → MinIO 原文），而
+   `measure.framing.bright_region_offset` 要的是灰度**数组**。2026-10-13 发现这里以前
+   漏了一层：字节直接喂进去，`np.asarray(b"…", dtype=float)` 抛
+   `ValueError: could not convert string to float`，`--framing` 一开就会在第一个站位
+   把整轮带崩。因为默认 `--framing off`，线上从未触发；复现与修复记录见
+   `docs/patrol/imaging-quality/issues/01-camera-imaging-quality.md` 的 Comments。
 
-本模块只做接线，判定逻辑全在 `measure.framing`（纯函数，有单测）。
+本模块只做接线，判定逻辑全在 `measure.framing`（检测器）与 `patrol.framing`
+（微调闭环 + 可用帧判定），两边都是纯函数、有单测。
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -51,7 +60,7 @@ def _fetch(url: str, timeout_s: float = 15.0) -> bytes:
     return resp.content
 
 
-def build(args, *, fetch: Callable[[str], bytes] | None = None,
+def build(args, *, fetch: Callable[[bytes], bytes] | None = None,
           imread: Callable[[bytes], object] | None = None,
           log: Callable[[str], None] = print) -> WireResult:
     """按命令行参数造钩子。返回 `WireResult`（不抛错——微调起不来不该拦住巡检）。"""
@@ -73,6 +82,7 @@ def build(args, *, fetch: Callable[[str], bytes] | None = None,
         log(f"图像微调：解码器自检返回 {type(e).__name__}（正常，Pillow 已就位）")
 
     from measure.framing import bright_region_offset
+    from patrol.framing import frame_quality_gate, gated_evaluate
 
     recipe = FramingRecipe(
         mm_per_px_y=args.mm_per_px,
@@ -84,10 +94,32 @@ def build(args, *, fetch: Callable[[str], bytes] | None = None,
     def pixels(result) -> bytes:
         return fetch(result.cloud_url)
 
+    def to_gray(pixels):
+        """像素 → 灰度数组（模块 docstring 第 4 条：这一层以前漏了）。
+
+        已是数组就原样返回——`deploy` 的既有用例直接喂灰度数组，那是**测试口径**，
+        与生产契约（字节）相反。兼容分支只为让那个用例继续绿；票据 04 把它改成正交
+        契约后，这个 `isinstance` 就可以删掉。
+        """
+        return imread(pixels) if isinstance(pixels, (bytes, bytearray)) else pixels
+
+    def detect(pixels):
+        return bright_region_offset(to_gray(pixels))
+
+    # 可用帧判定（imaging-quality 票 01 第 2 项）：默认开——坏帧不该驱动微调。
+    # 阈值与人群证据在 `patrol.framing.judge_frame` 的 docstring 里，可复算。
+    evaluate = detect
+    gate_note = "可用帧判定：关（PATROL_FRAME_QUALITY=0）"
+    if os.environ.get("PATROL_FRAME_QUALITY", "1").strip().lower() not in ("0", "false", "no", "off"):
+        evaluate = gated_evaluate(detect, frame_quality_gate(to_gray))
+        gate_note = ("可用帧判定：开（近黑 >1.5% 或 p99<150 ⇒ underexposed；"
+                     "≥250 >5% ⇒ overexposed）")
+    log(gate_note)
+
     return WireResult(
-        FramingHook(recipe=recipe, evaluate=bright_region_offset, pixels=pixels),
+        FramingHook(recipe=recipe, evaluate=evaluate, pixels=pixels),
         f"图像微调：开启（{args.framing}，{args.mm_per_px:.4f} mm/px，"
-        f"符号 Y={args.framing_sign_y:+.0f} Z={args.framing_sign_z:+.0f}）",
+        f"符号 Y={args.framing_sign_y:+.0f} Z={args.framing_sign_z:+.0f}；{gate_note}）",
     )
 
 
