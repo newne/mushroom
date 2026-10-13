@@ -2047,42 +2047,95 @@ await sleep(150);
   check('主题变量只有一处 :root 定义（防"定义两遍各自漂"）',
     (styleCss.match(/:root\{/g) || []).length === 1,
     String((styleCss.match(/:root\{/g) || []).length));
+  // token 的两条纪律（Chief 2026-10-13）：**单点定义**、**一个台阶一个名字**。
+  // 单点定义：每个名字只出现一次——有覆盖就得先说明为什么，否则改了一处不改另一处就漂。
+  // 一个台阶一个名字：同一尺度里两个 token 同值，等于"该用哪个"靠猜，等于没有尺度。
+  const tokenDefs = [...styleCss.matchAll(/(--[a-z0-9-]+)\s*:/g)].map(m => m[1]);
+  const dupTokens = [...new Set(tokenDefs.filter((t, i) => tokenDefs.indexOf(t) !== i))];
+  check('token 单点定义：每个名字只定义一次（不许悄悄覆盖）',
+    dupTokens.length === 0, dupTokens.join(',') || ('共 ' + tokenDefs.length + ' 个名字，各一次'));
+  const scaleDup = ns => {
+    const pairs = [...styleCss.matchAll(new RegExp('(' + ns + '[a-z0-9-]+)\\s*:\\s*([0-9.]+)px', 'g'))]
+      .map(m => [m[1], m[2]]);
+    const seen = {}, dup = [];
+    for(const [nm, v] of pairs){ if(seen[v]) dup.push(nm + ' 与 ' + seen[v] + ' 同为 ' + v + 'px'); else seen[v] = nm; }
+    return dup;
+  };
+  const dupScales = [...scaleDup('--r-'), ...scaleDup('--sp-'), ...scaleDup('--card-')];
+  check('一个台阶一个名字：`--r-*`/`--sp-*`/`--card-*` 里不许两个 token 同值',
+    dupScales.length === 0, dupScales.join(' ; ') || 'ok');
 
-  // ---- 13c. 尺度棘轮：只挡"再新增一个值"，不要求一次改完（2026-10-13 结构性批次）----
-  // 圆角/间距历史上各漂出过 12 种取值。这一批先把**与原值完全相等**的台阶收进 token
-  // （渲染结果不变），其余登记为白名单欠账；本断言的职责是**防止继续漂**——
-  // 谁再加一个 11px 圆角或 7px padding，就会红，而不是等到哪天没人看得出哪里不对。
-  const RADIUS_DEBT = [2, 3, 5, 7, 14, 20];             // 尚未收敛的历史值（登记在案）
-  // 2026-10-13 结构性批次：`.card` 的 9px 已改为 `var(--card-radius)`（= `--r-lg`，10px），
-  // 所以 **9 从欠账表销掉**——它要是回来（哪怕写在别的选择器里），棘轮就会红。
-  // 间距登记表。里面有两个**别顺手改掉**的：
-  //   `padding-left:7px`（选中站位的 3px 左边框位移补偿，改了文字会跳）、
-  //   `padding-left:42px`（坐标输入框给单位徽标留位，不是随手写的）。
-  // 余下的 11/18 是窄按钮与弹窗的横向/整体留白。
-  const SPACING_DEBT = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 42];
+  // ---- 13c. 尺度棘轮：**按出现次数登记**，不是"允许这个数值"（2026-10-13 结构性批次）----
+  // 圆角/间距历史上各漂出过 12 种取值。做法：**与原值完全相等**的台阶先收进 token
+  // （渲染结果不变），其余按"值 → 最多出现几次"登记在案。
+  //
+  // ⚠️ 为什么是**次数**而不是"允许的值"：白名单式的 `DEBT.includes(n)` 只挡得住"新数值"，
+  // 挡不住"再写一个已登记的数值"——谁在别处再写一个 `border-radius:7px`，白名单照样绿，
+  // 那就等于给了 7px 一张**永久豁免**。按次数登记之后，多一处就变数 ⇒ 当场红。
+  // 因此每条都写两件事：**为什么现在还不能改** + **下次收敛时怎么改**（不许变成永久豁免）。
+  const RADIUS_REGISTRY = {
+    2:  { n: 3, why: '图例/圆点/竖线等 2px 小色块：已是"看得出圆角"的下限',
+                next: '与 3px 同档；收敛时合并成 --r-2xs:3px，1px 差异需人眼过一遍' },
+    3:  { n: 4, why: '进度条(qbar)/圆点/坐标徽标：小控件',
+                next: '同上，与 2px 合并成一个 2xs 台阶' },
+    5:  { n: 5, why: '窄按钮/层开关/对比格：现场要点的**小控件**，圆角再大就不像按钮',
+                next: '试合并到 --r-sm:6px（6px 会让小控件更圆），需现场确认手感' },
+    7:  { n: 1, why: '读数框 .readout —— 与 --r-md(8px) 只差 1px，是整个文件里唯一一处 7px',
+                next: '直接并到 --r-md:8px；1px 差异需人眼看一眼（这是最好收的一处）' },
+    14: { n: 1, why: '摇杆按钮 .jogpad button[data-jog]（64px 方块）：大控件配大圆角',
+                next: '要么并到 --r-lg:10px，要么新增 --r-xl:14px 名正言顺地留着' },
+    20: { n: 1, why: '保持标签 .holdrow .tag（胶囊状徽标）',
+                next: '并到 --r-pill 会变成整颗圆头，得看实物；建议新增 --r-xl 后一起收' },
+  };
+  // 间距（只扫 padding）：同样按次数登记。两个**别顺手改掉**的已写明出处。
+  const PADDING_REGISTRY = {
+    1:  { n: 2,  why: '徽标类极紧内边距', next: '并到 2px' },
+    2:  { n: 15, why: '最常见的一档微内边距', next: '新增 --sp-0:2px 后统一走它' },
+    3:  { n: 5,  why: '小元素内边距', next: '与 2px/5px 一起收成 2 档' },
+    5:  { n: 6,  why: '控件纵向内边距', next: '与 --sp-1:4px 或 6px 合并' },
+    7:  { n: 2,  why: '.station-tools input 纵向；.stn.sel 的 padding-left:7px 是**选中站位 3px 左边框的位移补偿**（改了文字会跳）',
+                next: '前者可并到 --sp-3:8px；**后者必须保留**（位移补偿不是留白）' },
+    9:  { n: 3,  why: 'button / input / #opmsg 的纵向内边距 —— 与 44px 触控下限**一起算出来的**',
+                next: '要改先重新核 min-height:44px（触控目标下限有单独断言）' },
+    10: { n: 12, why: '输入框横向、KPI 内边距等：与 --sp-3/-4 混用的一档', next: '逐步并到 --sp-3:8px 或 --sp-4:12px' },
+    11: { n: 1,  why: '.navgrp button 横向（窄按钮）', next: '并到 --sp-4:12px，需看文字是否换行' },
+    14: { n: 2,  why: 'main>section 的栏内边距（整栏留白，不是控件）', next: '并到 --sp-5:16px 或保留为栏级 token' },
+    18: { n: 1,  why: '模态框横向留白', next: '并到 --sp-5:16px' },
+    42: { n: 1,  why: '.coord-field input 的 padding-left:**给单位徽标留位**，不是随手写的数',
+                next: '按徽标实际宽度算，不要"凑整"改掉' },
+  };
   const pxIn = decl => [...decl.matchAll(/([0-9]+)px/g)].map(m => Number(m[1]));
+  // 把"声明里出现的字面量"数成 {值: 次数}
+  const tally = decls => {
+    const t = {};
+    for (const d of decls) for (const n of pxIn(d)) t[n] = (t[n] || 0) + 1;
+    return t;
+  };
+  const registryMismatch = (t, reg, label) => {
+    const bad = [];
+    for (const [k, v] of Object.entries(t)) {
+      const r = reg[k];
+      // 没登记 ⇒ 新数值；次数变多 ⇒ 又漂了一处；次数变少 ⇒ 收敛了却没改登记数
+      if (!r) bad.push(label + k + 'px 未登记（新数值）');
+      else if (v > r.n) bad.push(label + k + 'px 出现 ' + v + ' 次 > 登记 ' + r.n + ' 次');
+      else if (v < r.n) bad.push(label + k + 'px 实际 ' + v + ' 次 < 登记 ' + r.n + ' 次（收敛了就改小登记数，别留冗余）');
+    }
+    for (const k of Object.keys(reg)) if (!t[k]) bad.push(label + k + 'px 登记了但已不存在（销账）');
+    return bad;
+  };
   const radiusDecls = [...styleCss.matchAll(/border-radius:\s*([^;}]+)/g)].map(m => m[1]);
-  const badRadius = [];
-  for (const d of radiusDecls) {
-    // 只挑 px 数字看：`var(--r-*)` 里没有 px，所以 token 化的声明天然通过；
-    // **不整条跳过含 var( 的声明**——否则 `border-radius:11px var(--r-sm)` 这种会被漏掉。
-    for (const n of pxIn(d)) if (!RADIUS_DEBT.includes(n)) badRadius.push(n);
-  }
-  check('圆角棘轮：新值必须是 token 或已登记的欠账（不许再漂一个新数值）',
-    badRadius.length === 0, badRadius.join(',') || 'ok');
+  const radBad = registryMismatch(tally(radiusDecls), RADIUS_REGISTRY, '圆角 ');
+  check('圆角棘轮：按**出现次数**登记（新数值、多写一处、或收敛不销账，都红）',
+    radBad.length === 0, radBad.join(' ; ') || 'ok');
   const radiusTokens = [...styleCss.matchAll(/(--r-[a-z]+)\s*:/g)].map(m => m[1]);
   const unusedRadiusTokens = radiusTokens.filter(t => !new RegExp('var\\(' + t + '\\)').test(styleCss));
   check('圆角 token 都被真的用上了（不留死 token）',
     radiusTokens.length >= 5 && unusedRadiusTokens.length === 0,
     '定义 ' + radiusTokens.length + ' 个，未使用：' + (unusedRadiusTokens.join(',') || '无'));
   const padDecls = [...styleCss.matchAll(/padding(?:-[a-z]+)?:\s*([^;}]+)/g)].map(m => m[1]);
-  const badPad = [];
-  for (const d of padDecls) {
-    // 同上：只看 px 数字，别整条跳过含 var( 的声明（否则坏值能藏在 token 旁边）
-    for (const n of pxIn(d)) if (!SPACING_DEBT.includes(n)) badPad.push(n);
-  }
-  check('间距棘轮：新值必须在登记的尺度内（间距 token 化留待下一批，但先挡新增）',
-    badPad.length === 0, [...new Set(badPad)].join(',') || 'ok');
+  const padBad = registryMismatch(tally(padDecls), PADDING_REGISTRY, '内边距 ');
+  check('间距棘轮：按**出现次数**登记（白名单不许变成"某个数值的永久豁免"）',
+    padBad.length === 0, padBad.join(' ; ') || 'ok');
   // 间距 token 真的用上了（否则就是"定义了没人用"的假收敛）
   const spTokens = [...styleCss.matchAll(/(--sp-[0-9]+)\s*:/g)].map(m => m[1]);
   const unusedSp = spTokens.filter(t => !new RegExp('var\\(' + t + '\\)').test(styleCss));
