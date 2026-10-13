@@ -910,6 +910,64 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
         latest = got.get("latest") if isinstance(got, dict) else None
         return {"ok": True, "box_id": box_id, "points": points, "latest": latest}
 
+    @app.get("/api/measurements")
+    def api_measurements(
+        box_id: str = "",
+        room_id: str = "",
+        ts_from: str = "",
+        ts_to: str = "",
+    ) -> dict:
+        """某个框的**原始测量行**（`measurements` 表行）——代理 prod 的 `/measurements`。
+
+        为什么页面需要它：`/api/growth` 给的是**派生量**（判词、速率、band），
+        它**没有绝对量**；而"这个框这几天多大"只能看绝对量。两者各有出处：
+        `/api/measurements` 给量，`/api/growth` 给判词——不要让一个端点对同一件事说两遍
+        （否则将来必然漂）。
+
+        ⚠️ 与 `spec.md:343` 的差异：spec 写了 `ts_from/ts_to`，但 prod 的
+        `analysis/api.py:155` 只接受 `room_id`/`box_id`（多余参数被 FastAPI 忽略）。
+        所以**窗口筛选在这里做**，并且如实按 `ts` 过滤；等 prod 支持了再下沉。
+
+        prod 不通时如实报错（`ok:false` + `error`），不返回空行顶替——
+        "还没有测量值"与"问不到 prod"在现场是两件完全不同的事（与 `/api/growth` 同一口径）。
+        返回**空 `rows` 是正常结果**：现役 `--measure` 默认关、`measurements` 表还没有行，
+        那是「还没测到」，不是错误。
+        """
+        if not box_id.strip() and not room_id.strip():
+            return {"ok": False, "error": "需要 box_id 或 room_id（测量是按框/库房读的）",
+                    "rows": []}
+        if deps.transport is None:
+            return {"ok": False, "error": "未接入 prod 分析服务（transport 未配置）", "rows": []}
+        params: dict[str, str] = {}
+        if box_id.strip():
+            params["box_id"] = box_id.strip()
+        if room_id.strip():
+            params["room_id"] = room_id.strip()
+        try:
+            got = deps.transport(f"{deps.analysis_url}/measurements?{urlencode(params)}")
+        except Exception as e:  # noqa: BLE001 - prod 不通不该让页面整页报错
+            return {"ok": False, "error": f"prod 查询失败：{e}", "rows": [], "box_id": box_id}
+        rows = got if isinstance(got, list) else (
+            got.get("rows", []) if isinstance(got, dict) else []
+        )
+        if not isinstance(rows, list):
+            rows = []
+        # 窗口筛选按 `ts` 前缀比（ISO8601 串可直接比大小）；解析不了的行不猜、原样留下
+        def in_window(row: dict) -> bool:
+            ts = str(row.get("ts") or "")
+            if not ts:
+                return True
+            if ts_from and ts < ts_from:
+                return False
+            if ts_to and ts > ts_to:
+                return False
+            return True
+
+        kept = [r for r in rows if isinstance(r, dict) and in_window(r)]
+        kept.sort(key=lambda r: str(r.get("ts") or ""), reverse=True)
+        return {"ok": True, "box_id": box_id, "room_id": room_id,
+                "rows": kept, "n": len(kept)}
+
     @app.get("/api/environment")
     def api_environment(
         zone: str = "",

@@ -131,6 +131,7 @@
   .cmpstrip .cmp-meta{display:flex;flex-direction:column;gap:1px;padding:4px 2px 0;font-size:11px}
   .cmpstrip .cmp-when{color:var(--fg);font-variant-numeric:tabular-nums}
   .cmpstrip .cmp-note{color:var(--dim);font-size:10.5px}
+  .cmpstrip .cmp-meas{color:var(--fg);font-size:10.5px;font-variant-numeric:tabular-nums}
   .cmpstrip .cmp-note.bad{color:var(--bad)}
   .cmpstrip .cmp-note.warn{color:var(--warn)}
   /* ---- 大图查看器 ---- */
@@ -2164,7 +2165,7 @@ const CMP_TOD_STEP_MIN = 20;   // 时段选择器的步长
 const CMP_TOD_TOLERANCE_MIN = 90;  // 偏离参考时段超过这么久就标"邻近时段"（如实标注，不假装准）
 
 let mode = 'realtime';
-const hist = { rows: [], rounds: [], growth: null, picked: null, zoom: 1, px: 0, py: 0,
+const hist = { rows: [], rounds: [], growth: null, measure: null, picked: null, zoom: 1, px: 0, py: 0,
                selectedRoundId: '', selectedBatchKey: '', focusedStationId: '',
   roundIndex: -1, roundCount: 0, hiddenRounds: 0,
                // 跨轮次对比（按天）：blocks = 每天一块（该天最接近参考时段的那一轮）；
@@ -2550,6 +2551,19 @@ function renderCompare(){
         ? `每天 ${todLabel(ref)} 前后一轮 · 共 ${shown.length} 天 · 每张都是原图（约 750 KB）· 缩略图服务到位后自动换源`
         : (angleFilter() ? `没有可对比的轮次（当前角度档 ${angleFilter()} 没有这个站位的帧）` : '没有可对比的轮次'));
   if(hist.compareLoading && !all.length){ strip.innerHTML = ''; note.textContent = ''; return; }
+  // 叠加用的两份数据：绝对量来自 /api/measurements（量），判词/速率来自 /api/growth（派生）
+  const measRows = (hist.measure && hist.measure.ok) ? (hist.measure.rows || []) : [];
+  const metric = pickGrowthMetric(measRows);
+  const deltas = growthDeltaByTs();
+  const measureLine = ts => {
+    if(!hist.measure) return '读取测量…';
+    if(!hist.measure.ok) return '测量查询失败';
+    if(!measRows.length) return '还没测到';           // 整框还没有测量行（等接线），不是 0
+    if(!metric) return '没有可用的长势量';
+    const one = measureRowNear(measRows, ts);
+    if(!one) return '这天还没测到';
+    return metric.label + ' ' + measureCellText(one, metric.key, metric.unit);
+  };
   strip.innerHTML = shown.map((row, i) => {
     const frame = row.frame;
     const url = frame ? imageUrlFor(frame) : '';
@@ -2564,6 +2578,18 @@ function renderCompare(){
     // 该天没有"参考时段"附近的轮次 ⇒ 取了更远的一轮：如实标出来，不假装准
     const drifted = Number.isFinite(row.driftMin) && row.driftMin > CMP_TOD_TOLERANCE_MIN;
     const badgeCls = (gone || failed || !url || angleMiss) ? 'bad' : (tag ? 'warn' : '');
+    // 判词 + 速率（速率必须带量纲；band 未定标只做弱提示，不当硬结论）
+    const one = metric ? measureRowNear(measRows, row.ts) : null;
+    const delta = one ? deltas.get(String(one.ts)) : null;
+    const verdict = delta ? (delta.verdict_text || delta.verdict || '') : '';
+    const rate = rateText(delta);
+    const weak = bandWeakHint(delta);
+    // `/growth` 那一路取不到时要说出来：只显示绝对量而不说"判词取不到"，
+    // 等于把"判定不可用"藏起来（与"取不到就直说"的既有口径一致）。
+    const growthBad = !!hist.growth && !hist.growth.ok;
+    const deltaLine = growthBad ? '判词/速率取不到'
+      : (verdict ? (verdict + (rate ? ' · ' + rate : '')) : '');
+    const measText = measureLine(row.ts);
     const inner = (url && !angleMiss)
       ? `<span class="cmp-shot"><img loading="lazy" decoding="async" src="${esc(url)}" alt=""></span>`
       : `<span class="cmp-shot"><span class="cmp-empty">${esc(tag || '无图')}</span></span>`;
@@ -2579,8 +2605,12 @@ function renderCompare(){
       ${inner}
       <span class="cmp-meta">
         <span class="cmp-when">${esc(when)}</span>
+        <span class="cmp-meas"${delta && typeof delta.rate_per_h === 'number'
+          ? ` title="判词与速率来自 /api/growth：rate_per_h=${esc(String(delta.rate_per_h))} ${esc(String(delta.unit || ''))}/h"` : ''}>${esc(measText)}</span>
+        ${deltaLine ? `<span class="cmp-note">${esc(deltaLine)}</span>` : ''}
         ${tag ? `<span class="cmp-note ${badgeCls}">${esc(tag)}</span>` : ''}
         ${drifted ? '<span class="cmp-note">邻近时段（这天没有更近的一轮）</span>' : ''}
+        ${weak ? `<span class="cmp-note">${esc(weak)}</span>` : ''}
       </span>
     </button>`;
   }).join('');
@@ -2619,7 +2649,7 @@ function normalCount(rows){
 function history_pick(id, url, stationId){
   const stationChanged = !!stationId && hist.focusedStationId !== stationId;
   if(stationId) hist.focusedStationId = stationId;
-  if(stationChanged){ hist.growth = null; growthRequestSeq++; }
+  if(stationChanged){ hist.growth = null; hist.measure = null; growthRequestSeq++; }
   hist.picked = id;
   const img = $('#bigimg');
   if(url){
@@ -2685,38 +2715,133 @@ function pickHistoryCell(el){
   // 对比条由 updateFrameInfo() 统一触发（幂等），这里不用再喊一次
 }
 
+/* ---- 长势量：绝对量来自 /api/measurements，判词/速率来自 /api/growth（2026-10-13）----
+   为什么分成两条路：**绝对量是"量"，判词与速率是"派生"**，各有出处才不会两边各说一遍。
+   以前页面把绝对量当成 `/api/growth` 的 `mean_len_mm/mean_cap_mm` 读——那两个字段在
+   `/growth` 的载荷里从来不存在（它给的是 delta 行），所以曲线在真机上一直是空的，
+   而假后端 fixture 照着设想的形状写，回归一直是绿的。
+
+   优先级（票 16 / 票 11 §9）：平视单档下杆长、菌盖直径**不可测**，可用的长势量依次是
+   菌簇面积(mm²) → 投影径(mm) → 杆长(mm) → 菌盖直径(mm)。取"第一条真的有数的"，
+   **绝不把两种量纲画进一条线**。 */
+const GROWTH_METRICS = [
+  { key: 'mean_len_mm', unit: 'mm', label: '杆长' },
+  { key: 'mean_projected_d_mm', unit: 'mm', label: '投影径' },
+  { key: 'mean_area_mm2', unit: 'mm²', label: '菌簇面积' },
+  { key: 'mean_cap_mm', unit: 'mm', label: '菌盖直径' },
+];
+// 顺序与 `analysis/growth.py:48 GROWTH_METRICS` 一致（杆长 > 投影径 > 面积），
+// 这样"画出来的那条线"和"判词用的那个量"不会是两个量。平视单档下杆长恒 NULL，
+// 自然落到投影径/面积；换角之后杆长有值就自动回到最高优先量。
+const QUALITY_NO_ANGLE = 'no_angle_profile';
+
+/** API 的量纲是 ASCII（`mm` / `mm2`，见 growth.py:48）；显示时换成排版形。 */
+function unitLabel(unit){
+  return unit === 'mm2' ? 'mm²' : String(unit || '');
+}
+
+function qualityHas(quality, flag){
+  return String(quality || '').split('+').map(s => s.trim()).includes(flag);
+}
+
+/** 这一批测量行里"真的有一条数"的最高优先长势量；都没有就返回 null（不猜）。 */
+function pickGrowthMetric(rows){
+  for(const metric of GROWTH_METRICS){
+    if((rows || []).some(r => r && typeof r[metric.key] === 'number')) return metric;
+  }
+  return null;
+}
+
+/** 测量行里某一列该显示什么（两条措辞别混，Chief 2026-10-13 钉的口径）：
+ *  有值 ⇒ 数 + 量纲；NULL 且 `quality` 带 `no_angle_profile` ⇒「不可测（无角度档）」
+ *  （现场不用等）；NULL 且没有那个标记 ⇒「本次未测出」。
+ *  **整个框一行都没有**才是「还没测到」（要等接线）——那是曲线级的空态，不在这。 */
+function measureCellText(row, key, unit){
+  const v = row ? row[key] : undefined;
+  if(typeof v === 'number') return v + ' ' + unit;
+  if(row && qualityHas(row.quality, QUALITY_NO_ANGLE)) return '不可测（无角度档）';
+  return '本次未测出';
+}
+
+/** 按天取一行测量（同一天可能有多行，取离这一轮时刻最近的那行）。 */
+function measureRowNear(rows, ts){
+  const date = rowDate({ ts });
+  const same = (rows || []).filter(r => r && rowDate(r) === date);
+  if(!same.length) return null;
+  const target = String(ts || '');
+  return same.reduce((best, r) =>
+    (Math.abs(String(r.ts).localeCompare(target)) < Math.abs(String(best.ts).localeCompare(target)))
+      ? r : best);
+}
+
+/** `/api/growth` 的 delta 行按 ts 建索引，用来给测量点配判词。 */
+function growthDeltaByTs(){
+  const map = new Map();
+  for(const p of ((hist.growth && hist.growth.points) || [])){
+    if(p && p.ts) map.set(String(p.ts), p);
+  }
+  return map;
+}
+
+/** 速率显示：`rate_per_h` **必须带单位**（"每天 +320 mm²" / "每天 +1.2 mm"）。
+ *  契约给的是每小时，这里折算成每天显示；原始值留在 title 里可追溯。 */
+function rateText(delta){
+  if(!delta || typeof delta.rate_per_h !== 'number' || !delta.unit) return '';
+  const perDay = delta.rate_per_h * 24;
+  const signed = (perDay >= 0 ? '+' : '') + (Math.round(perDay * 10) / 10);
+  return signed + ' ' + unitLabel(delta.unit) + '/天';
+}
+
+function bandWeakHint(delta){
+  const src = delta && delta.band_source;
+  if(typeof src !== 'string' || !src.startsWith('default_uncalibrated')) return '';
+  return '阈值未定标';
+}
+
 function drawCurve(){
   const box = $('#curve'), note = $('#growthnote');
-  const g = hist.growth;
+  const m = hist.measure;
   const stationId = mode === 'history' ? hist.focusedStationId : selected;
-  if(!stationId || !g){ box.className = 'empty'; box.textContent = '选一个站位，看它所在框的生长'; note.textContent = ''; return; }
-  if(!g.ok){
-    // prod 查不到 **与** 还没有测量值，必须分得开：前者要排障，后者只需等待
-    box.className = 'empty'; box.textContent = '查不到生长数据';
-    note.textContent = '⚠ ' + (g.error || '未知原因');
+  if(!stationId){ box.className = 'empty'; box.textContent = '选一个站位，看它所在框的生长'; note.textContent = ''; return; }
+  if(!m){
+    box.className = 'empty'; box.textContent = '读取测量数据…'; note.textContent = '';
     return;
   }
-  const pts = (g.points || []).filter(p => p && p.ts);
-  if(!pts.length){
+  if(!m.ok){
+    // "问不到 prod"要排障；"一行都没有"只需等待——两者必须分得开
+    box.className = 'empty'; box.textContent = '查不到测量数据';
+    note.textContent = '⚠ ' + (m.error || '未知原因');
+    return;
+  }
+  const rows = (m.rows || []).filter(r => r && r.ts)
+    .slice().sort((a, b) => String(a.ts).localeCompare(String(b.ts)));
+  if(!rows.length){
+    // 现役 `--measure` 默认关、measurements 表还没有行 ⇒ 这是「还没测到」，要等接线。
+    // **不许渲染成 0 / 零增长线**：把"没数据"画成一条平的线，比空白坏得多。
     box.className = 'empty';
-    box.textContent = '还没有测量值（measure_fn 未接）——接上之后这里会出现曲线';
-    note.textContent = '生长判断的逻辑与判词都已就绪，缺的是"每帧测出长度"那一步';
+    box.textContent = '还没测到——这个框还没有任何测量行';
+    note.textContent = '测量接线（--measure）默认关闭、现场阈值也未定标；接上之后这里会出现曲线。'
+      + '注意：「还没测到」不是 0——没有数据时这里不会画一条零增长线。';
     return;
   }
-  const W = 640, H = 170, padL = 46, padR = 12, padT = 12, padB = 24;
-  const vals = [];
-  for(const p of pts){
-    for(const k of ['mean_len_mm', 'mean_cap_mm']) if(typeof p[k] === 'number') vals.push(p[k]);
+  const metric = pickGrowthMetric(rows);
+  if(!metric){
+    box.className = 'empty';
+    box.textContent = '这批测量行里没有可用的长势量（菌簇面积/投影径/杆长都是空）';
+    note.textContent = '现役单档平视下杆长与菌盖直径不可测（无角度档）；菌簇量也空，'
+      + '说明这一批没有有效检出——不是 0。';
+    return;
   }
-  const lo = vals.length ? Math.min(...vals) : 0, hi = vals.length ? Math.max(...vals) : 1;
+  const pts = rows.filter(r => typeof r[metric.key] === 'number');
+  const deltas = growthDeltaByTs();
+  const W = 640, H = 170, padL = 46, padR = 12, padT = 12, padB = 24;
+  const vals = pts.map(r => r[metric.key]);
+  const lo = Math.min(...vals), hi = Math.max(...vals);
   const span = (hi - lo) || 1;
   const X = i => padL + (pts.length === 1 ? (W - padL - padR) / 2
                                           : i * (W - padL - padR) / (pts.length - 1));
   const Y = v => padT + (1 - (v - lo) / span) * (H - padT - padB);
-  const line = key => {
-    const seg = pts.map((p, i) => typeof p[key] === 'number' ? `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(p[key]).toFixed(1)}` : '').filter(Boolean).join(' ');
-    return seg;
-  };
+  const line = pts.map((r, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(r[metric.key]).toFixed(1)}`).join(' ');
   box.className = '';
   /* P0-1：曲线图整体改用浅色主题色（原来是暗色主题遗留的硬编码：深灰轴 #2a3340、
      中灰刻度 #8b98a5、蓝 #58a6ff / 浅绿 #7ee2a8——贴在白卡片上像一块补丁，
@@ -2728,18 +2853,47 @@ function drawCurve(){
     <text x="2" y="${Y(lo)+4}" fill="#6b7785" font-size="10">${lo.toFixed(1)}</text>
     <text x="${padL}" y="${H-6}" fill="#6b7785" font-size="10">${esc(String(pts[0].ts).slice(0,16))}</text>
     <text x="${W-padR}" y="${H-6}" text-anchor="end" fill="#6b7785" font-size="10">${esc(String(pts[pts.length-1].ts).slice(0,16))}</text>
-    <path d="${line('mean_len_mm')}" fill="none" stroke="#1f6feb" stroke-width="2"/>
-    <path d="${line('mean_cap_mm')}" fill="none" stroke="#18794e" stroke-width="2"/>
-    ${pts.map((p, i) => `<circle cx="${X(i).toFixed(1)}" cy="${Y(typeof p.mean_len_mm === 'number' ? p.mean_len_mm : lo).toFixed(1)}" r="3" fill="#1f6feb"><title>${esc(p.ts)} · 判词 ${esc(p.verdict || '—')}</title></circle>`).join('')}
+    <path d="${line}" fill="none" stroke="#1f6feb" stroke-width="2"/>
+    ${pts.map((r, i) => {
+      const d = deltas.get(String(r.ts));
+      return `<circle cx="${X(i).toFixed(1)}" cy="${Y(r[metric.key]).toFixed(1)}" r="3" fill="#1f6feb"><title>${esc(String(r.ts).replace('T',' '))} · ${esc(metric.label)} ${esc(String(r[metric.key]))} ${esc(metric.unit)} · 判词 ${esc((d && (d.verdict_text || d.verdict)) || '—')}</title></circle>`;
+    }).join('')}
   </svg>
-  <div class="legend"><span><i style="background:#1f6feb"></i>平均长度 mm</span>
-    <span><i style="background:#18794e"></i>平均伞盖 mm</span>
-    <span>最新判词：${esc((g.latest && g.latest.verdict_text) || (g.latest && g.latest.verdict) || '—')}</span></div>`;
-  const recent = pts.slice(-8).reverse();
-  note.innerHTML = `<table class="meas"><tr><th>时间</th><th>长度 mm</th><th>伞盖 mm</th><th>判词</th></tr>
-    ${recent.map(p => `<tr><td>${esc(String(p.ts).replace('T',' '))}</td>
-      <td>${esc(p.mean_len_mm ?? '—')}</td><td>${esc(p.mean_cap_mm ?? '—')}</td>
-      <td>${esc(p.verdict_text || p.verdict || '—')}</td></tr>`).join('')}</table>`;
+  <div class="legend"><span><i style="background:#1f6feb"></i>${esc(metric.label)} ${esc(metric.unit)}（绝对量）</span>
+    ${(() => {
+      if(hist.growth && !hist.growth.ok){
+        return '<span>判词/速率取不到（/api/growth 查询失败）</span>';
+      }
+      const last = deltas.get(String(pts[pts.length-1].ts));
+      const bits = [];
+      if(last) bits.push('最新判词：' + ((last.verdict_text || last.verdict) || '—'));
+      const rate = rateText(last);
+      if(rate) bits.push('速率 ' + rate);
+      const weak = bandWeakHint(last);
+      if(weak) bits.push(weak);
+      return bits.map(t => `<span>${esc(t)}</span>`).join('');
+    })()}</div>
+  <div class="empty" style="padding:4px 0 0">判词与速率来自 <code>/api/growth</code>（派生量）；
+    ${esc(metric.label)}等绝对量来自 <code>/api/measurements</code>（测量行）。
+    ${hist.growth && !hist.growth.ok
+      ? '<br><b>⚠ 判词/速率这一路取不到：' + esc(hist.growth.error || '未知原因')
+        + '</b>——绝对量照常显示，但不要把它当成"长势判定正常"。'
+      : ''}</div>`;
+  const recent = rows.slice(-8).reverse();
+  // 杆长/菌盖直径两列照实说：平视单档下它们**不可测**，不写 0、不写空格
+  note.innerHTML = `<table class="meas"><tr><th>时间</th><th>${esc(metric.label)} ${esc(metric.unit)}</th>
+      <th>杆长 mm</th><th>菌盖直径 mm</th><th>判词</th></tr>
+    ${recent.map(r => {
+      const d = deltas.get(String(r.ts));
+      return `<tr><td>${esc(String(r.ts).replace('T',' '))}</td>
+      <td>${esc(measureCellText(r, metric.key, metric.unit))}</td>
+      <td>${esc(measureCellText(r, 'mean_len_mm', 'mm'))}</td>
+      <td>${esc(measureCellText(r, 'mean_cap_mm', 'mm'))}</td>
+      <td>${esc((d && (d.verdict_text || d.verdict)) || '—')}</td></tr>`;
+    }).join('')}</table>
+    ${rows.some(r => qualityHas(r.quality, QUALITY_NO_ANGLE))
+      ? '<div class="empty" style="padding:4px 0 0">杆长 / 菌盖直径：<b>不可测（无角度档）</b>——现役单档平视，换角之前不画这两条曲线，也不按平视硬算。</div>'
+      : ''}`;
 }
 
 async function loadHistory(force){
@@ -2747,7 +2901,7 @@ async function loadHistory(force){
     const roundId = syncRoundOptions();
     return loadRoundImages(roundId);
   }
-  if(force){ hist.growth = null; growthRequestSeq++; hist.compareRows = []; hist.compareStationId = ''; }
+  if(force){ hist.growth = null; hist.measure = null; growthRequestSeq++; hist.compareRows = []; hist.compareStationId = ''; }
   const requestId = ++historyRequestSeq;
   hist.roundsLoading = true;
   $('#timeline').className = 'empty';
@@ -2978,17 +3132,26 @@ async function loadGrowth(){
   const stationId = mode === 'history' ? hist.focusedStationId : selected;
   const requestId = ++growthRequestSeq;
   const st = stationId ? stations.find(s => s.id === stationId) : null;
-  if(!st){ hist.growth = null; drawCurve(); return; }
-  let growth;
+  if(!st){ hist.growth = null; hist.measure = null; drawCurve(); renderCompare(); return; }
+  const boxId = st.box_id;
+  // 两条路各取各的：绝对量走 /api/measurements（量），判词/速率走 /api/growth（派生）。
+  let growth, measure;
   try{
-    growth = await jget('/api/growth?box_id=' + encodeURIComponent(st.box_id));
+    growth = await jget('/api/growth?box_id=' + encodeURIComponent(boxId));
   }catch(e){
     growth = {ok: false, error: '生长接口不可达：' + e.message, points: []};
+  }
+  try{
+    measure = await jget('/api/measurements?box_id=' + encodeURIComponent(boxId));
+  }catch(e){
+    measure = {ok: false, error: '测量接口不可达：' + e.message, rows: []};
   }
   const currentStationId = mode === 'history' ? hist.focusedStationId : selected;
   if(requestId !== growthRequestSeq || currentStationId !== stationId) return;
   hist.growth = growth;
+  hist.measure = measure;
   drawCurve();
+  renderCompare();     // 对比卡的量与判词都靠这两份数据，取回来要重绘一次
 }
 
 /* ---------- 环境模式：实测参数（小时曲线）＋窗口统计 ----------

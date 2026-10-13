@@ -79,12 +79,54 @@ const ROUNDS = [
   { round_id: 'round-20260911', ts: '2026-09-11T10:00:00', room_id: '611', entry_date: '2026-09-04',
     batch_no: 'BATCH-09', ok: true, n_results: 20, n_failures: 0 },
 ];
+// ⚠️ 2026-10-13 修正：`/growth` 的 `points` 是 **delta 行**（`analysis/api.py:204` 返回
+// `GrowthDelta.to_row()`），**没有** `mean_len_mm`/`mean_cap_mm`。这里以前写的是
+// `{ts, mean_len_mm, mean_cap_mm, ...}`——照"设想的形状"造的假件，于是"曲线画出来了"
+// 这条断言其实在测一个生产上不存在的载荷；真机上曲线一直是空的（页面读的字段不存在）。
+// 现在假件与真契约逐字段对齐，并有契约断言盯着（见文件末尾 CONTRACT_*）。
 const GROWTH = [
-  { ts: '2026-09-13T09:30:00', mean_len_mm: 28.4, mean_cap_mm: 12.1, verdict: 'no_prev',
-    verdict_text: '没有上一个时间点，先作为基线' },
-  { ts: '2026-09-14T09:30:00', mean_len_mm: 31.2, mean_cap_mm: 13.6, verdict: 'growing',
-    verdict_text: '比上一个时间点长 2.8 mm（+9.9%），在长' },
+  { ts: '2026-09-10T09:30:00', prev_ts: null, dt_h: null,
+    metric: null, unit: null, d_value: null, rate_per_h: null, band: null, band_source: null,
+    d_len_mm: null, d_cap_mm: null, rate_len_mm_per_h: null, rate_cap_mm_per_h: null,
+    verdict: 'no_prev', verdict_text: '没有上一个时间点',
+    note: '这是该框最早的一个时间点', n_now: 6, n_prev: null },
+  { ts: '2026-09-13T09:30:00', prev_ts: '2026-09-10T09:30:00', dt_h: 72.0,
+    metric: 'mean_projected_d_mm', unit: 'mm', d_value: 7.7, rate_per_h: 0.1069,
+    band: 0.1, band_source: 'default_uncalibrated',
+    d_len_mm: null, d_cap_mm: null, rate_len_mm_per_h: null, rate_cap_mm_per_h: null,
+    verdict: 'growing', verdict_text: '在长', note: '平均 +0.107 mm/h（72.0 小时内 +7.7 mm）',
+    n_now: 6, n_prev: 6 },
+  { ts: '2026-09-14T09:30:00', prev_ts: '2026-09-13T09:30:00', dt_h: 24.0,
+    metric: 'mean_projected_d_mm', unit: 'mm', d_value: 1.8, rate_per_h: 0.075,
+    band: 0.1, band_source: 'default_uncalibrated',
+    d_len_mm: null, d_cap_mm: null, rate_len_mm_per_h: null, rate_cap_mm_per_h: null,
+    verdict: 'stalled', verdict_text: '基本没长', note: '平均 +0.075 mm/h，落在 ±0.1 mm/h 内',
+    n_now: 6, n_prev: 6 },
 ];
+
+// `/api/measurements`（`measurements` 表行）：绝对量在这里。
+// 与 `analysis/db.py:400` 的列一致（`n/mean_len_mm/mean_cap_mm/p10_len/p90_len/quality`
+// ＋票 11 的菌簇四列）。平视单档下杆长/菌盖 NULL + `no_angle_profile` ⇒ 不可测；
+// **B101 故意一行都没有** ⇒ 用来验"还没测到"（不是 0、不是零增长线）。
+const MEASUREMENTS = {
+  B102: [
+    { ts: '2026-09-10T09:30:00', room_id: '611', box_id: 'B102', n: 6,
+      mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
+      quality: 'verified+no_angle_profile',
+      mean_cluster_w_mm: 58.0, mean_cluster_h_mm: 44.0,
+      mean_area_mm2: 3120.0, mean_projected_d_mm: 62.5 },
+    { ts: '2026-09-13T09:30:00', room_id: '611', box_id: 'B102', n: 6,
+      mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
+      quality: 'verified+no_angle_profile',
+      mean_cluster_w_mm: 64.0, mean_cluster_h_mm: 48.0,
+      mean_area_mm2: 3980.0, mean_projected_d_mm: 70.2 },
+    { ts: '2026-09-14T09:30:00', room_id: '611', box_id: 'B102', n: 6,
+      mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
+      quality: 'verified+no_angle_profile',
+      mean_cluster_w_mm: 66.0, mean_cluster_h_mm: 49.5,
+      mean_area_mm2: 4210.0, mean_projected_d_mm: 72.0 },
+  ],
+};
 
 // 环境模式用：两个小时点，补光一个是"停止"(2) 一个是"关闭"(3)。
 // 分类量走色带，不走折线——对它求平均没有意义（ADR-0021）。
@@ -142,6 +184,7 @@ const state = {
   patrol_active: false,
   reject_cmd: null,                           // 覆盖 POST /api/cmd 的状态码（测拒绝显示）
   growth_error: false,                        // 让 /api/growth 回"prod 查不到"
+  measure_error: false,                       // 让 /api/measurements 回"prod 查不到"
   env_error: false,                           // 让 /api/environment 回"prod 查不到"
   env_empty: false,                           // 让 /api/environment 回"窗口内没有数据"
   ops_error: false,                           // 让 /api/operations 回"prod 查不到"
@@ -273,6 +316,16 @@ function route(method, url, body) {
     if (state.growth_error) return json(200, { ok: false, error: 'prod 查询失败：不通', points: [] });
     return json(200, { ok: true, box_id: 'B102', points: GROWTH,
                        latest: GROWTH[GROWTH.length - 1] });
+  }
+  if (path === '/api/measurements') {
+    // 与 deploy/console.py 的 /api/measurements 同形状：{ok, box_id, rows, n}。
+    // **空 rows 是正常结果**（现役 --measure 默认关、表里还没有行）⇒ 页面必须说「还没测到」，
+    // 不能画一条零增长线。
+    if (state.measure_error) return json(200, { ok: false, error: 'prod 查询失败：不通', rows: [] });
+    const params = new URL('http://console.local' + url).searchParams;
+    const boxId = params.get('box_id') || '';
+    const rows = MEASUREMENTS[boxId] || [];
+    return json(200, { ok: true, box_id: boxId, rows, n: rows.length });
   }
   if (path === '/api/environment') {
     if (state.env_error) return json(200, { ok: false, error: 'prod 查询失败：不通', rows: [] });
@@ -1195,12 +1248,44 @@ await sleep(150);
   check('适应复位回 1×', ($('#bigimg').style.transform || '').includes('scale(1)'),
     $('#bigimg').style.transform);
 
-  check('生长曲线画出来了（两条线 + 点）',
-    !!$('#curve svg') && document.querySelectorAll('#curve svg path').length === 2,
+  // 曲线：绝对量来自 /api/measurements（量），判词/速率来自 /api/growth（派生）。
+  // 画的是**一条线**（最高优先可用长势量）；不再画"平均长度/平均伞盖"两条——
+  // 那两个量在平视单档下不可测，而且 `/growth` 里本来就没有这两列（2026-10-13 修正）。
+  check('生长曲线画出来了（一条线 + 点，量纲随数据选）',
+    !!$('#curve svg') && document.querySelectorAll('#curve svg path').length === 1,
     document.querySelectorAll('#curve svg path').length + ' 条');
-  check('曲线下方列出最近的测量值', T('#growthnote').includes('31.2') && T('#growthnote').includes('在长'),
-    T('#growthnote').slice(0, 60));
+  check('曲线画的是绝对量且带量纲（投影径 mm，不是裸数字）',
+    T('#curve').includes('投影径') && T('#curve').includes('mm'), T('#curve').slice(0, 90));
+  check('曲线下方列出最近的测量值（含判词）',
+    T('#growthnote').includes('70.2') && T('#growthnote').includes('在长'),
+    T('#growthnote').slice(0, 90));
+  // 平视单档：杆长/菌盖直径 NULL + no_angle_profile ⇒ 不可测，不是 0、不是空格
+  check('杆长/菌盖直径在表里标「不可测（无角度档）」，不写 0 也不留空',
+    T('#growthnote').includes('不可测（无角度档）')
+    && !/\b0\s*mm/.test(T('#growthnote')), T('#growthnote').slice(0, 120));
+  check('曲线区明说这两列不画曲线（换角之前）',
+    T('#growthnote').includes('不画这两条曲线'), T('#growthnote').slice(0, 140));
+  check('速率带量纲显示（"每天" + 单位），不是裸数字',
+    T('#curve').includes('/天') && /[+-]?\d+(\.\d+)? mm\/天/.test(T('#curve')),
+    T('#curve').slice(0, 160));
+  check('band_source 未定标只做弱提示（不是告警色、不是硬结论）',
+    T('#curve').includes('阈值未定标'), T('#curve').slice(0, 160));
   check('曲线标题带框号', T('#curvetitle').includes('B102'), T('#curvetitle'));
+
+  // 「还没测到」必须是**空态**，不是 0、不是零增长线（巡检手 2026-10-13 特意提醒）。
+  // 假件里 B101 一行测量都没有（真实现役 `--measure` 默认关、表里确实还没有行）。
+  await click('#timeline .mosaic-cell[data-station-id="S101"]');
+  await sleep(300);
+  check('这个框一行测量都没有时明说「还没测到」',
+    T('#curve').includes('还没测到'), T('#curve'));
+  check('没有测量数据时**不画零增长线**、不出现 0 值（空态 ≠ 0）',
+    !document.querySelector('#curve svg') && !/\b0(\.0+)?\s*(mm|mm²)/.test(T('#curve')),
+    T('#curve') + ' / svg=' + !!document.querySelector('#curve svg'));
+  check('空态说清为什么空（测量接线默认关、阈值未定标）',
+    T('#growthnote').includes('--measure') && T('#growthnote').includes('还没测到'),
+    T('#growthnote').slice(0, 120));
+  await click('#timeline .mosaic-cell[data-station-id="S102"]');
+  await sleep(300);
 
   // 日期与角度筛选作用于所选巡检轮次。
   $('#fromDate').value = '2026-09-15'; $('#fromDate').dispatchEvent(new window.Event('change'));
@@ -1309,6 +1394,14 @@ await sleep(150);
     Array.from(cmpSel()).map(cmpDate).join(' | '));
   check('对比卡如实标注"这是原图"（缩略图服务到位前不假装省带宽）',
     T('#cmphint').includes('原图'), T('#cmphint'));
+  // 叠加：绝对量（来自 /api/measurements）+ 判词/速率（来自 /api/growth 的 delta 行）
+  check('对比卡每天叠上绝对量且带量纲（投影径 72.0 mm）',
+    T('#cmpstrip').includes('投影径') && T('#cmpstrip').includes('72 mm'), T('#cmpstrip').slice(0, 140));
+  check('对比卡叠的判词带速率、速率带量纲（不是裸数字）',
+    /[+-]\d+(\.\d+)? mm\/天/.test(T('#cmpstrip')), T('#cmpstrip').slice(0, 180));
+  check('band_source 未定标在对比卡上只做弱提示（cmp-note，不是 bad）',
+    T('#cmpstrip').includes('阈值未定标')
+    && !document.querySelector('#cmpstrip .cmp-note.bad'), T('#cmpstrip').slice(0, 200));
 
   // 按天抽样必须真的"按时段挑"：把取样时段改到 23:20（假件里没有那一轮），
   // 断言三块都掉了"邻近时段"的标记——只堆轮次不挑时段的实现过不了这条。
@@ -1445,13 +1538,24 @@ await sleep(150);
   check('输入框聚焦时方向键不抢（不切站）', T('#frameinfo').includes('第 2 / 3 站位'), T('#frameinfo'));
   await click('#latestframe');
 
-  // prod 查不到 vs 还没有测量值：两件事，必须分开说
+  // 两条数据通路各有各的失败形态（2026-10-13 拆开之后）：
+  //   /api/measurements 挂了 ⇒ 没有绝对量 ⇒ "查不到测量数据"（要排障）；
+  //   /api/growth 挂了 ⇒ 绝对量照旧，但判词/速率**必须明说取不到**，不能静默省略。
   state.growth_error = true;
   await click('#reloadbtn');
   await sleep(300);
-  check('prod 查不到时如实报错（不是画一条空曲线）',
-    T('#curve').includes('查不到') && T('#growthnote').includes('prod'), T('#growthnote'));
+  check('/growth 挂了：绝对量照常画，但明说判词/速率取不到（不静默）',
+    !!document.querySelector('#curve svg') && T('#curve').includes('判词/速率取不到')
+    && T('#curve').includes('prod 查询失败'), T('#curve').slice(-160));
   state.growth_error = false;
+  state.measure_error = true;
+  await click('#reloadbtn');
+  await sleep(300);
+  check('/measurements 挂了：如实报错（不是画一条空曲线）',
+    T('#curve').includes('查不到测量数据') && T('#growthnote').includes('prod'), T('#growthnote'));
+  state.measure_error = false;
+  await click('#reloadbtn');
+  await sleep(300);
 
   // 快速切站时，慢返回的旧图像不能覆盖后选中的站位。
   await click('#modeSeg [data-mode="realtime"]');
@@ -1576,6 +1680,82 @@ await sleep(150);
   check('手动"看画面"又开起来', ($('#pvimg').getAttribute('src') || '').startsWith('/api/preview'),
     $('#pvimg').getAttribute('src') || '(无)');
   check('再打开后按钮又是"关闭画面"', T('#pvbtn') === '关闭画面', T('#pvbtn'));
+
+  // ---- 14. 契约断言：假后端的字段集必须与**真后端**的响应形状一致（2026-10-13 加）----
+  // 为什么非有不可：页面读 `p.mean_len_mm / p.mean_cap_mm` 读了很久，而 `/growth` 从来
+  // 没有这两列（它给的是 delta 行）——真机上曲线一直是空的、回归却一直绿，因为
+  // **fixture 照着"设想的形状"写**。断言看着对、其实在测别的东西，是回归里最贵的坑。
+  // 这里把三件事钉住：
+  //   (1) fixture 字段 ⊆ 真契约字段 —— **不许凭空造字段**（造出来的字段页面读得到、生产读不到）；
+  //   (2) 页面消费的字段 ⊆ 真契约字段 —— 页面不许读载荷里不存在的东西；
+  //   (3) "页面必需"的真契约字段 ⊆ fixture —— fixture 不许漏。
+  // 真契约出处逐条写在下面；**改后端形状时先改这里**，否则回归会红而不是静默变空。
+  const CONTRACT = {
+    // analysis/api.py:204 → growth.GrowthDelta.to_row()（growth.py:159-180）
+    '/api/growth': { q: '?box_id=B102', pick: 'points',
+      fields: ['box_id', 'ts', 'prev_ts', 'dt_h', 'd_len_mm', 'd_cap_mm', 'rate_len_mm_per_h',
+               'rate_cap_mm_per_h', 'metric', 'unit', 'd_value', 'rate_per_h', 'band',
+               'band_source', 'verdict', 'verdict_text', 'note', 'n_now', 'n_prev'],
+      required: ['ts', 'metric', 'unit', 'd_value', 'rate_per_h', 'band', 'band_source',
+                 'verdict', 'verdict_text'] },
+    // analysis/api.py:155 → analysis/db.py:38-57（measurements 表列）
+    '/api/measurements': { q: '?box_id=B102', pick: 'rows',
+      fields: ['ts', 'room_id', 'box_id', 'station_id', 'angle_profile', 'n', 'mean_len_mm',
+               'mean_cap_mm', 'mean_cluster_w_mm', 'mean_cluster_h_mm', 'mean_area_mm2',
+               'mean_projected_d_mm', 'p10_len', 'p90_len', 'quality'],
+      required: ['ts', 'quality', 'mean_len_mm', 'mean_cap_mm', 'mean_projected_d_mm',
+                 'mean_area_mm2', 'n'] },
+    // deploy/console.py api_rounds → analysis/db.py:59-71（rounds 表列）
+    '/api/rounds': { q: '?limit=2000', pick: 'rounds',
+      fields: ['ts', 'round_id', 'ok', 'n_results', 'n_failures', 'aborted', 'room_id',
+               'entry_date', 'batch_no'],
+      required: ['round_id', 'ts', 'ok', 'n_results', 'n_failures', 'room_id', 'entry_date',
+                 'batch_no'] },
+    // deploy/console.py api_environment → analysis/environment.py:28-32 FIELDS（小时聚合）
+    '/api/environment': { q: '?zone=611&granularity=hour', pick: 'rows',
+      fields: ['ts', 'zone', 'temp_c', 'temp_min', 'temp_max', 'rh_pct', 'rh_min', 'rh_max',
+               'co2_ppm', 'co2_min', 'co2_max', 'lamp_state', 'lamp_on_s', 'lamp_off_s',
+               'lamp_on_m', 'lamp_off_m', 'lamp_on_min', 'n'],
+      required: ['ts', 'zone', 'temp_c', 'rh_pct', 'co2_ppm', 'lamp_state', 'n'] },
+    // spec.md:341 /api/images（console 合并 local+prod，剥掉 cloud_url）
+    '/api/images': { q: '?round_id=round-20260914&limit=2000', pick: 'rows',
+      fields: ['ts', 'round_id', 'station_id', 'box_id', 'angle_profile', 'camera_ip', 'y', 'z',
+               'object_name', 'ok', 'error', 'room_id', 'entry_date', 'batch_no', 'source'],
+      required: ['ts', 'station_id', 'box_id', 'angle_profile', 'object_name', 'ok', 'source'] },
+  };
+  // 页面实际消费的字段（改页面时同步改这里；这是"页面不许读不存在的字段"的锚）
+  const PAGE_CONSUMES = {
+    '/api/growth': ['ts', 'metric', 'unit', 'd_value', 'rate_per_h', 'band_source',
+                    'verdict', 'verdict_text'],
+    '/api/measurements': ['ts', 'quality', 'mean_len_mm', 'mean_cap_mm', 'mean_projected_d_mm',
+                          'mean_area_mm2', 'n'],
+    '/api/rounds': ['round_id', 'ts', 'ok', 'n_results', 'n_failures', 'room_id', 'entry_date',
+                    'batch_no'],
+    '/api/environment': ['ts', 'zone', 'temp_c', 'rh_pct', 'co2_ppm', 'lamp_state', 'lamp_on_min',
+                         'lamp_on_s', 'lamp_off_s', 'n'],
+    '/api/images': ['ts', 'round_id', 'station_id', 'box_id', 'angle_profile', 'object_name',
+                    'ok', 'source'],
+  };
+  for (const [path, c] of Object.entries(CONTRACT)) {
+    const payload = await (await route('GET', path + c.q)).json();
+    const rows = payload[c.pick] || [];
+    const keys = new Set();
+    for (const r of rows) for (const k of Object.keys(r)) keys.add(k);
+    const fieldSet = new Set(c.fields);
+    const invented = [...keys].filter(k => !fieldSet.has(k));
+    const missing = c.required.filter(k => !keys.has(k));
+    const pageBad = (PAGE_CONSUMES[path] || []).filter(k => !fieldSet.has(k));
+    check(`契约 ${path}：fixture 字段全部来自真契约（不许凭空造字段）`,
+      invented.length === 0, invented.join(',') || 'ok');
+    check(`契约 ${path}：页面消费的字段都在真契约里`,
+      pageBad.length === 0, pageBad.join(',') || 'ok');
+    check(`契约 ${path}：fixture 含页面必需的字段`,
+      missing.length === 0, missing.join(',') || 'ok');
+  }
+  // 同一个 bug 的直接负向钉子：页面不许再把测量列当 `/growth` 的 delta 字段读
+  // （上一版就是 `p.mean_len_mm`，而 delta 行里根本没有这一列）。
+  check('页面不再把 mean_len_mm/mean_cap_mm 当 /growth 的字段读',
+    !/p\.mean_(len|cap)_mm/.test(html), (html.match(/p\.mean_(len|cap)_mm[^\n]*/) || ['ok'])[0]);
 
   console.log(out.join('\n'));
   console.log('\n运行期错误：' + (errors.length ? '\n  ' + errors.join('\n  ') : '无'));
