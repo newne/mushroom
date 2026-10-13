@@ -357,8 +357,10 @@ services:
       - ANALYSIS_DB=/opt/mushroom-analysis/mushrooms.db
       # 容器里的 127.0.0.1 不是宿主
       - TDENGINE_URL=http://172.17.0.1:6041
-      # 过渡期只开 audit（每 10 分钟）。ENV_INGEST_INTERVAL / BATCH_AT 等对应作业从 systemd
-      # 摘下来那天再设；不设就不跑（票 01 §4 / §4.1）。
+      # 作业开关：**不设就不跑**（`analysis/jobs.py` 的 default_jobs）。分批接管的阶段标记：
+      #   Step 1（2026-10-13 16:43）只开 audit；
+      #   Step 2（2026-10-13 17:0x）加上 env，batch 仍不设（票 13 直连落地后才设 BATCH_AT）。
+      - ENV_INGEST_INTERVAL=300
       - AUDIT_INTERVAL=600
     volumes:
       # 挂宿主原目录：DB 路径不变 ⇒ 回滚不用搬数据。⚠️ 不要设 PYTHONPATH 指到这里面的 src，
