@@ -159,6 +159,30 @@ cd D:\code\mushroom\patrol-workspace
 ——48 站、前 13 不同、之后 35 同字节 ⇒ `n_results=13`、`n_duplicate=35`、`n_frames_recorded=48`、
 `suspect_duplicate=true`、`n_failures=0`、**未中止**、48 帧全部入库（35 帧带 `frame_dup`）。
 
+### §3.3 `play_data_ready` **不是**"流死"信号（发版官现场实测更正，2026-10-13）
+
+发版官在 C1 镜像上生产后连抓两次**健康**帧：
+
+```
+{"image_sha256":"d532c628…","same_as_previous":false,"duplicate_streak":1,
+ "play_data_ready":false,"capture_time_ms":5202}
+{"image_sha256":"86199de7…","same_as_previous":false,"duplicate_streak":1,
+ "play_data_ready":false,"capture_time_ms":5200}
+```
+
+⇒ **健康抓拍时 `play_data_ready` 也是 false**（`capture_time_ms≈5200` ⇒ `wait_play_data`
+每次都在 5 s 上限超时，随后照样抓到好帧；`third_party/capture/.../capture.py:411` 取到、
+`:462` 只报不用）。**在 `/pool_capture` 池化路径上它不是"流死"信号**，拿它做判据会每次
+正常抓拍都误报。
+
+**结论（照此实现，已核对）**：轮次语义只用三件套
+`image_sha256` / `same_as_previous` / `duplicate_streak`；
+**`play_data_ready` 不进轮次语义、不进看门狗**（我这边也没把它写进索引行，避免有人当信号用）。
+
+**另供参考**：本次取证显示"周期性 `PLAY_INFO` 心跳缺失"比 SDK 自己的 `HeartBeat-Timeout`
+**早 22 秒**（18:22:13.952 停数据 vs 18:22:36.106 记超时）——将来要做"流中断"检测，
+那条信号比 `play_data_ready` 靠谱。证据与更正见发版官票 06 §F（提交 `74e4371`）。
+
 ### §3.2 需要 analysis 补的列（跨域，环境官）
 
 已有的列（`frame_dup`/`dup_group`/`content_sha256`/`suspect_duplicate`/`dup_groups`/
