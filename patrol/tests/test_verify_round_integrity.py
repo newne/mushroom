@@ -49,6 +49,34 @@ def test_incident_shape_round_is_flagged_but_the_books_balance(tmp_path):
     assert "可疑轮 suspect_duplicate 已置位" in names
 
 
+def test_accepts_rows_pulled_from_the_db_without_kind():
+    """库层的行没有 `kind`（`/rounds`+`/images` 直接拉回来）⇒ 也要能认出层与轮次。
+
+    并且 `dup_groups` 必须是**列表**（环境官 `_as_text`/`_as_list` 的写读成对），
+    读回来是 JSON 字符串就该 FAIL。
+    """
+    round_row = {"round_id": "r1", "ts": "2026-10-13T21:35:00", "ok": 1, "n_results": 13,
+                 "n_failures": 0, "aborted": 0, "n_frames_recorded": 48, "n_duplicate": 35,
+                 "suspect_duplicate": 1,
+                 "dup_groups": [{"sha256_12": "a" * 12, "n": 35, "stations": ["S211", "S401"]}]}
+    frames = [{"round_id": "r1", "ts": f"2026-10-13T21:28:{i:02d}", "station_id": f"S{i:03d}",
+               "content_sha256": "a" * 64, "frame_dup": 1, "dup_group": "a" * 12,
+               "duplicate_streak": i - 13, "same_as_previous": 1} for i in range(14, 49)]
+    frames += [{"round_id": "r1", "ts": f"2026-10-13T21:27:{i:02d}", "station_id": f"S{i:03d}",
+                "content_sha256": f"{i:064d}", "frame_dup": 0, "duplicate_streak": 1,
+                "same_as_previous": 0} for i in range(1, 14)]
+
+    checks = dict((name, ok) for name, ok, _ in verify([round_row, *frames]))
+    assert checks["n_results = 帧数 - 重复帧数"] is True
+    assert checks["dup_groups 读回来是列表（不是字符串）"] is True
+    assert checks["可疑轮 suspect_duplicate 已置位"] is True
+
+    # 读回来变成 JSON 字符串 ⇒ 明确 FAIL（写读没成对时就是这个症状）
+    round_row["dup_groups"] = json.dumps(round_row["dup_groups"], ensure_ascii=False)
+    checks = dict((name, ok) for name, ok, _ in verify([round_row, *frames]))
+    assert checks["dup_groups 读回来是列表（不是字符串）"] is False
+
+
 def test_wrong_counters_fail_loudly():
     """账错了必须 FAIL（比如 `n_results` 还按 48 报）。"""
     rows = [_round(n_results=48, n_duplicate=35)] + [

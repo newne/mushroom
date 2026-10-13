@@ -45,16 +45,36 @@ def load_rows(path: str) -> list[dict]:
     return out
 
 
+def _kind(row: dict) -> str | None:
+    """行是哪一层来的都能认：outbox 行自带 `kind`；库里拉出来的行没有 `kind`。
+
+    轮行有 `n_results`/`n_failures`；帧行有 `station_id`/`object_name`。认不出来就跳过，
+    不猜（宁少不假）。
+    """
+    if row.get("kind") in ("round", "image_index"):
+        return row["kind"]
+    if "n_results" in row or "n_failures" in row:
+        return "round"
+    if "station_id" in row or "object_name" in row or "box_id" in row:
+        return "image_index"
+    return None
+
+
 def verify(rows: list[dict], *, round_id: str | None = None) -> list[tuple[str, bool, str]]:
-    """返回 `[(检查名, 是否通过, 说明)]`；空行/没有轮行时给一条失败说明。"""
-    rounds = [r for r in rows if r.get("kind") == "round"]
+    """返回 `[(检查名, 是否通过, 说明)]`；空行/没有轮行时给一条失败说明。
+
+    三层通用：**outbox 行**（带 `kind`）、**库里 `/rounds`+`/images` 拉回来的行**（无 `kind`）、
+    以及两者混合。所以复验可以 outbox → 库 → 索引逐层跑同一条命令。
+    """
+    normalized = [(r, _kind(r)) for r in rows]
+    rounds = [r for r, k in normalized if k == "round"]
     if round_id:
         rounds = [r for r in rounds if str(r.get("round_id")) == round_id]
     if not rounds:
         return [("找到轮行", False, "没有 round 行（--round-id 可能写错）")]
     latest = sorted(rounds, key=lambda r: str(r.get("ts", "")))[-1]
     rid = latest.get("round_id")
-    frames = [r for r in rows if r.get("kind") == "image_index" and r.get("round_id") == rid]
+    frames = [r for r, k in normalized if k == "image_index" and r.get("round_id") == rid]
 
     checks: list[tuple[str, bool, str]] = []
     n_frames = len(frames)
@@ -63,6 +83,7 @@ def verify(rows: list[dict], *, round_id: str | None = None) -> list[tuple[str, 
     n_results = latest.get("n_results")
     n_dup = latest.get("n_duplicate")
     suspect = bool(latest.get("suspect_duplicate"))
+    dup_groups = latest.get("dup_groups")
 
     has_service = [f for f in frames
                    if f.get("content_sha256") or f.get("same_as_previous") is not None
@@ -97,8 +118,13 @@ def verify(rows: list[dict], *, round_id: str | None = None) -> list[tuple[str, 
         checks.append(("正常轮 suspect_duplicate 不出现", not suspect,
                        f"suspect_duplicate={suspect}"))
     else:
-        checks.append(("可疑轮 suspect_duplicate 已置位", suspect and bool(latest.get("dup_groups")),
-                       f"suspect_duplicate={suspect} dup_groups={len(latest.get('dup_groups') or [])} 组"))
+        checks.append(("可疑轮 suspect_duplicate 已置位", suspect and bool(dup_groups),
+                       f"suspect_duplicate={suspect} dup_groups={len(dup_groups or [])} 组"))
+
+    # 库层的写读成对（环境官 db.py 的 `_as_text`/`_as_list`）：读回来必须是**列表**，不是 JSON 字符串
+    if dup_groups is not None:
+        checks.append(("dup_groups 读回来是列表（不是字符串）", isinstance(dup_groups, list),
+                       f"类型={type(dup_groups).__name__}"))
     return checks
 
 

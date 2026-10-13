@@ -191,18 +191,17 @@ cd D:\code\mushroom\patrol-workspace
 **早 22 秒**（18:22:13.952 停数据 vs 18:22:36.106 记超时）——将来要做"流中断"检测，
 那条信号比 `play_data_ready` 靠谱。证据与更正见发版官票 06 §F（提交 `74e4371`）。
 
-### §3.2 需要 analysis 补的列（跨域，环境官）
+### §3.2 库侧落地（**已解**，环境官 `3c0a45b`）
 
-已有的列（`frame_dup`/`dup_group`/`content_sha256`/`suspect_duplicate`/`dup_groups`/
-`content_check_error`）够用；§3.1 新增的**三个审计字段**还没有列，现在发出去会被
-`IMAGE_FIELDS`/`ROUND_FIELDS` 静默忽略（不会报错，但库里看不到）：
+- **审计字段已有列**：`images.same_as_previous` / `images.duplicate_streak` /
+  `rounds.n_duplicate` / `rounds.n_frames_recorded`（DDL + `ADDED_COLUMNS` + 字段表都齐，
+  `analysis/src/analysis/db.py:78-79,99-100,193-194,206-207,491-494,512-513`）。
+- **`dup_groups` 列表绑定已修**：写读成对 —— `_as_text()` 写 JSON 文本、`_as_list()` 读回**列表**
+  （`db.py:585-658`，测试 `test_dup_groups_list_round_trips_as_json`）。
+- **未知键不再静默忽略**：会进 `/ingest` 响应的 `warnings` 并打日志（环境官那批测试钉住）。
 
-| 表 | 字段 | 含义 |
-| --- | --- | --- |
-| `images` | `same_as_previous` | 服务侧当场说"与上一张同字节" |
-| `images` | `duplicate_streak` | 连续第几份相同（事故那轮涨到 35） |
-| `rounds` | `n_duplicate` / `n_frames_recorded` | 单独计数：重复帧数 / 实际写盘帧数 |
-
-另外**一个阻塞仍未解**：`rounds.dup_groups` 是 TEXT 列而 ingest 原样绑定**列表** ⇒
-`sqlite3.ProgrammingError: type 'list' is not supported`（`analysis/src/analysis/api.py:139-146`、
-`db.py:507`）；建议对该列做 `json.dumps`。
+⇒ **复验改成三层**（Chief 2026-10-13 更正）：**outbox**（生产者到底发了什么）→ **库**
+（落没落、值是否相等、`dup_groups` 读回来**是列表不是字符串**）→ **索引**。
+工具 `patrol/tools/verify_round_integrity.py` 三层都能吃：outbox 行自带 `kind`，
+库里 `/rounds`+`/images` 拉回来的行没有 `kind`（按 `n_results`/`station_id` 认层）。
+**库里查不到才叫真问题**，不能拿"还没列"绕过。
