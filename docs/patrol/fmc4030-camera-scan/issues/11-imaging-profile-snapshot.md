@@ -23,7 +23,7 @@
      p20261013a:
        locked_at: "2026-10-13"
        camera_ip: 192.168.1.238
-       resolution: 2880x1616          # 以现场实测为准，不抄文档
+       resolution: 2880x1616          # 发版官 2026-10-13 线上实测：跨 12 天 25/25 帧可解码
        focus: manual                  # 手动对焦 + 是否锁紧
        exposure: manual
        gain: off
