@@ -109,3 +109,21 @@ L3（跨生长阶段）尤其敏感**：它正是"绝对阈值为什么不行"�
 - 现状基线：`measure/quality.py` 里 `blur_threshold=100` / `max_overexposed=0.05` /
   `dark_p99=0.12` 都是**占位常数**，已在 docstring 注明"不许拍脑袋"。票 13 负责用真实帧
   给它们定值，本票负责把"清晰度只相对判"这条结构性决定落下。
+
+- 2026-10-13 **Chief 已批**，并加两条约束（本次落进实现，提交 `a74f53f`）：
+  1. **`verified` 必须过"站位 × 时段"抽样验收**——不是逐行人工（成本不可接受），
+     也**不许**"统计正常就自动盖章"。指标：该站位该时段内人工判可用的帧中，
+     被自动门判低纹理的比例 ≤ 既定上限；样本来自票 13 的抽取。
+  2. **清晰度判据要保留绝对下限兜底**：否则相机整体失焦/镜头污染时，
+     所有帧相对自己的基线都"正常"，**系统性漂移会被相对判据吃掉**。
+     已落 `DEFAULT_ABS_LAPVAR_FLOOR`（占位 15.0，待票 13 定值）：
+     `relative_verdict()` 先判绝对下限 ⇒ 命中即 `reject`，不给相对判据机会。
+- 2026-10-13 **实现已落 `measure/src/measure/quality.py`**（纯函数）：
+  `FrameStats` / `StationBaseline` / `frame_stats()` / `station_baseline()` /
+  `relative_verdict()`，返回三级 `ok / low_confidence / reject`；判定顺序
+  **绝对兜底 → 基线不足（返回 low_confidence，不是 ok）→ 相对异常 → ok**；
+  MAD 为 0 时退回"只比中位数"避免误判。单测 6 条：基线不足不 ok、纹理塌但未到
+  绝对下限 = low_confidence、**绝对下限拦住系统性失焦**、近黑 = reject、
+  强晕影帧不误判 `no_light`；measure 87 passed。
+- `frame_quality()` 旧签名保留（现有调用方与 `deploy` 侧不破），相对判据走新函数，
+  装配侧两段调用；基线由装配侧每轮注入，**不进 measurements 契约**。
