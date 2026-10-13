@@ -55,16 +55,29 @@ const IMAGES = [
     ok: true, object_name: '20260913/B102_S102_top0_093000', source: 'local' },
   { round_id: 'round-20260913', ts: '2026-09-13T06:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
     ok: false, object_name: null, source: 'prod' },
+  // 第三轮（round-20260910）也有一帧，且是本地待同步：让它落进拼图，
+  // 好断言"下拉直接选到最早一轮后落点仍是拼图、且这一轮确实换上了新图"。
+  { round_id: 'round-20260910', ts: '2026-09-10T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top0',
+    ok: true, object_name: '20260910/B102_S102_top0_093000', source: 'local' },
 ];
 const ROUNDS = [
   { round_id: 'round-20260914', ts: '2026-09-14T10:00:00', room_id: '611', entry_date: '2026-09-04',
-    batch_no: 'BATCH-10', ok: false },
+    batch_no: 'BATCH-10', ok: false, n_results: 48, n_failures: 1 },
   { round_id: 'round-20260913', ts: '2026-09-13T10:00:00', room_id: '611', entry_date: '2026-09-04',
-    batch_no: 'BATCH-10', ok: false },
-  { round_id: null, ts: '2026-09-12T10:00:00', room_id: '611', entry_date: '2026-09-04',
-    batch_no: 'BATCH-10', ok: true },
+    batch_no: 'BATCH-10', ok: false, n_results: 48, n_failures: 2 },
+  // 巡检失败、48 张全空：这种轮次不该进列表（2026-10-13 用户口径），也不该被"上一轮"选中
+  { round_id: 'round-20260912', ts: '2026-09-12T10:00:00', room_id: '611', entry_date: '2026-09-04',
+    batch_no: 'BATCH-10', ok: false, n_results: 0, n_failures: 48 },
+  // 同一批次的第三轮（2026-10-13 补 fixture）：只有两轮时，按钮与"下拉直接选"的
+  // 新旧状态**恰好重合**（索引 0↔1，置灰与否都对），"下拉绕过 syncRoundOptions()"
+  // 这条 bug 就测不出来。加第三轮之后，从最新(0)切到最早(2) 时索引必须从 0 变 2，
+  // 否则"第 1 / 3 轮"和"上一轮置灰"两条断言都会红。
+  { round_id: 'round-20260910', ts: '2026-09-10T10:00:00', room_id: '611', entry_date: '2026-09-04',
+    batch_no: 'BATCH-10', ok: true, n_results: 48, n_failures: 0 },
+  { round_id: null, ts: '2026-09-12T08:00:00', room_id: '611', entry_date: '2026-09-04',
+    batch_no: 'BATCH-10', ok: true, n_results: 48, n_failures: 0 },
   { round_id: 'round-20260911', ts: '2026-09-11T10:00:00', room_id: '611', entry_date: '2026-09-04',
-    batch_no: 'BATCH-09', ok: true },
+    batch_no: 'BATCH-09', ok: true, n_results: 20, n_failures: 0 },
 ];
 const GROWTH = [
   { ts: '2026-09-13T09:30:00', mean_len_mm: 28.4, mean_cap_mm: 12.1, verdict: 'no_prev',
@@ -378,6 +391,11 @@ const dom = new JSDOM(html, {
 });
 
 const { window } = dom;
+
+// 换轮次 / 点格位会把目标卡 scrollIntoView 带到眼前；jsdom 没实现这个方法，
+// 这里做个探针，用来断言"落点"（换了轮次是不是落在拼图上）。
+const scrolls = [];
+window.Element.prototype.scrollIntoView = function(){ scrolls.push(this.id || this.tagName); };
 const { document } = window;
 const $ = s => document.querySelector(s);
 const T = s => ($(s) ? ($(s).textContent || '').replace(/\s+/g, ' ').trim() : '<缺失:' + s + '>');
@@ -600,6 +618,64 @@ const lastCmd = () => {
     document.querySelectorAll('#timeline .mosaic-cell').length === 48,
     document.querySelectorAll('#timeline .mosaic-cell').length + ' 格');
   check('未选站位时不画曲线', T('#curve').includes('选一个站位'), T('#curve'));
+  // 1b-2. 拼图格子尺寸跟着容器走（2026-10-13 补）：原来只在 renderHistory() 里算一次，
+  //       窗口缩放或从环境模式切回来之后格子保持旧尺寸（窄屏被撑出横向滚、宽屏浪费一栏）。
+  //       jsdom 没有布局（clientWidth 恒为 0），所以这里把容器宽度**钉死**再触发 resize，
+  //       断言的是"重算这条链还在"，不是像素绝对值（像素仍按 clientWidth 算，见 cellSizeFor）。
+  {
+    const tlEl = $('#timeline');
+    const mosaicEl = () => document.querySelector('#timeline .mosaic');
+    const styleNow = () => (mosaicEl() ? mosaicEl().style : null);
+    const widthOf = style => {
+      const m = style && /repeat\([^,]+,\s*(\d+)px\)/.exec(style.gridTemplateColumns || '');
+      return m ? Number(m[1]) : 0;
+    };
+    const before = widthOf(styleNow());
+
+    Object.defineProperty(tlEl, 'clientWidth', { value: 900, configurable: true });
+    Object.defineProperty(tlEl, 'clientHeight', { value: 500, configurable: true });
+    const observerCtor = window.ResizeObserver;
+    window.ResizeObserver = undefined;          // 不能真构造：jsdom 没有布局，observer 不回调
+    window.dispatchEvent(new window.Event('resize'));
+    await sleep(120);                            // rAF 是 16ms 节拍，给足一拍
+    const wide = widthOf(styleNow());
+    // 900px 栏位 → (900−20−62−11×2)/12 ≈ 66px。别写死 156：156 是**上限**，
+    // 要 ~1974px 栏位才够到；写死上限等于把"页面按容器算"错测成"页面按上限算"。
+    check('窗口变宽后拼图格子按新容器宽度重算（900px 栏位 → 约 66px，不再是 64px 兜底）',
+      wide !== before && wide >= 60 && wide <= 72, 'before=' + before + ' after=' + wide);
+
+    Object.defineProperty(tlEl, 'clientWidth', { value: 4000, configurable: true });
+    window.dispatchEvent(new window.Event('resize'));
+    await sleep(120);
+    check('极宽栏位置上限 156px（再大就得横向滚，反而看不全一屏）',
+      widthOf(styleNow()) === 156, String(widthOf(styleNow())));
+
+    Object.defineProperty(tlEl, 'clientWidth', { value: 560, configurable: true });
+    window.dispatchEvent(new window.Event('resize'));
+    await sleep(120);
+    const narrow = widthOf(styleNow());
+    check('窗口变窄后格子跟着收（560px 栏位 → 保底 56px），且网格列数与格数不变',
+      narrow === 56 && narrow !== wide
+      && (mosaicEl().style.gridTemplateColumns || '').includes('repeat(12,56px)')
+      && document.querySelectorAll('#timeline .mosaic-cell').length === 48,
+      'wide=' + wide + ' narrow=' + narrow + ' / ' + document.querySelectorAll('#timeline .mosaic-cell').length + ' 格');
+
+    // 让后面"选择格位"的用例不受这个钉死的宽度影响
+    delete tlEl.clientWidth; delete tlEl.clientHeight;
+    window.ResizeObserver = observerCtor;
+  }
+  // 1b-3. "换轮次后第一眼是拼图"要写成结构断言（2026-10-13）：
+  //       现在是靠 switchRound()→scrollToMosaic() 的副作用 + 注释保证的，一旦有人把详情区
+  //       挪出拼图卡，或往拼图卡前面插一张卡，这条口径就静默破掉。
+  {
+    const card = $('#mosaiccard');
+    const firstCard = document.querySelector('#hmain > .card');
+    check('拼图卡仍是历史模式第一张卡（换轮次的落点没被别的卡挤走）',
+      !!card && card === firstCard, (firstCard && (firstCard.id || firstCard.tagName)) || '(无)');
+    check('完整图像区在拼图卡**内部**（大图置顶之后口径仍成立：滚到卡顶 = 拼图在视口内）',
+      !!card && !!$('#detailpane') && card.contains($('#detailpane')),
+      card && $('#detailpane') ? (card.contains($('#detailpane')) ? '在卡内' : '跑到卡外了') : '(缺元素)');
+  }
   await click('#modeSeg [data-mode="realtime"]');
   check('切回实时模式：操作区回来', $('#rtcol').style.display === '' && $('#rtmain').style.display === '');
 
@@ -623,9 +699,20 @@ check('环境模式：三条实测曲线（温/湿/CO₂ 各一根轴；补光�
 check('环境模式：补光色带已去掉，改为卡片里的四个实际参数',
       T('#envlight').includes('OnSSet') && T('#envlight').includes('OffMSet'),
       T('#envlight').slice(0, 50));
-check('环境模式：统计面板给出分位数与样本数',
-      T('#envsummary').includes('19.8') && T('#envsummary').includes('120'),
-      T('#envsummary').slice(0, 50));
+check('环境模式：结论先行——KPI 磁贴给出温度/湿度/CO₂ 的中位与区间',
+      T('#envkpi').includes('温度') && T('#envkpi').includes('19.8')
+      && T('#envkpi').includes('92.5') && T('#envkpi').includes('采样'), T('#envkpi').slice(0, 120));
+check('环境模式：曲线高度收窄（车道 76 → 54，三个量仍各占一根轴）',
+      (() => { const svg = document.querySelector('#envchart svg');
+               return !!svg && svg.getAttribute('viewBox') === '0 0 920 204'; })(),
+      (document.querySelector('#envchart svg') || {}).getAttribute
+        ? document.querySelector('#envchart svg').getAttribute('viewBox') : '(无)');
+check('环境模式：统计面板一行一个参数（中位放大 + 区间 + IQR 条），不再是一张 6 列表',
+      T('#envsummary').includes('19.8') && T('#envsummary').includes('120')
+      && document.querySelectorAll('#envsummary .qrow').length === 3
+      && document.querySelectorAll('#envsummary .qbar i').length === 3,
+      document.querySelectorAll('#envsummary .qrow').length + ' 行 / '
+      + document.querySelectorAll('#envsummary .qbar i').length + ' 条');
 check('环境模式：补光状态显示成语义（2=停止、3=关闭），不显示裸数字',
       T('#envlight').includes('停止') && T('#envlight').includes('关闭'), T('#envlight'));
 check('环境模式：补光给出折算周期与点亮分钟（并标它是推算，不是照度）',
@@ -736,8 +823,10 @@ await sleep(150);
     && $('#stagelive').className.includes('sr-only'), $('#stagelive') ? $('#stagelive').className : '(缺失)');
   // 3d. 历史模式三张卡 DOM 顺序 = 视觉顺序（P1-2：原先 grid-row 重排，Tab 焦点与读屏大纲错位）
   const hmainFirst = document.querySelector('#hmain .card h2');
-  check('历史模式第一张卡是"大图"（DOM 顺序即视觉顺序）',
-    !!hmainFirst && hmainFirst.textContent.includes('大图'), hmainFirst ? hmainFirst.textContent : '(无)');
+  // 2026-10-13 用户口径：换轮次的落点是"整体生长情况"，所以拼图在前、大图在后；
+  // DOM 顺序仍然等于视觉顺序（这条没变）。
+  check('历史模式第一张卡是"巡检拼图"（换轮次先看整体，DOM 顺序即视觉顺序）',
+    !!hmainFirst && hmainFirst.textContent.includes('巡检拼图'), hmainFirst ? hmainFirst.textContent : '(无)');
 
   // 4. 定位：页内二次确认（P2-5，取代原生 confirm()）+ 载荷
   state.calls.length = 0;
@@ -1021,6 +1110,22 @@ await sleep(150);
   const slots = Array.from(document.querySelectorAll('#timeline .mosaic-cell'));
   const stationCells = Array.from(document.querySelectorAll('#timeline .mosaic-cell[data-station-id]'));
   check('拼图固定为 48 个拓扑槽位', slots.length === 48, slots.length + ' 格');
+  // 2026-10-13 用户：缩略图下面不挂位置和时间——格子就是那张图。
+  // 只在"图在、状态不正常"（采图失败/待同步）时才留一行小字，所以这里排掉那两类。
+  const plainCells = Array.from(document.querySelectorAll('#timeline .mosaic-cell img'))
+    .map(img => img.closest('.mosaic-cell'))
+    .filter(cell => !cell.classList.contains('fail') && !cell.classList.contains('local'));
+  check('缩略图下面不再挂位置与时间（正常帧一个字都没有）',
+    plainCells.length > 0 && plainCells.every(cell => cell.textContent.trim() === '')
+    && document.querySelectorAll('#timeline .mosaic-cell .mosaic-meta b').length === 0,
+    plainCells.length + ' 个正常帧，带字的 '
+    + plainCells.filter(cell => cell.textContent.trim()).length
+    + '，站名节点 ' + document.querySelectorAll('#timeline .mosaic-cell .mosaic-meta b').length);
+  check('状态不正常时仍有那行小字（采图失败/待同步要看得出来）',
+    Array.from(document.querySelectorAll('#timeline .mosaic-cell.fail, #timeline .mosaic-cell.local'))
+      .some(cell => cell.textContent.trim() !== ''),
+    Array.from(document.querySelectorAll('#timeline .mosaic-cell.fail, #timeline .mosaic-cell.local'))
+      .map(cell => cell.textContent.trim()).join('|') || '(无)');
   check('配置站位各占唯一 layer/col 槽位',
     stationCells.length === STATIONS.length &&
       new Set(stationCells.map(cell => cell.dataset.stationId)).size === STATIONS.length &&
@@ -1106,7 +1211,7 @@ await sleep(150);
   $('#roundSel').value = 'round-20260913'; $('#roundSel').dispatchEvent(new window.Event('change'));
   await sleep(150);
   check('同一批次可切换到前一轮', $('#roundSel').value === 'round-20260913', $('#roundSel').value);
-  check('前一輪本地原图有待同步标记', !!document.querySelector('#timeline .mosaic-cell.local'));
+  check('前一轮本地原图有待同步标记', !!document.querySelector('#timeline .mosaic-cell.local'));
   check('前一轮缺帧的站位保留为空',
     T('#timeline .mosaic-cell[data-station-id="S412"]').includes('本轮无帧'));
   check('图片请求按 round_id 精确筛选',
@@ -1122,6 +1227,94 @@ await sleep(150);
   $('#batchSel').dispatchEvent(new window.Event('change'));
   await sleep(150);
   check('切回当前批次后默认最新轮次', $('#roundSel').value === 'round-20260914', $('#roundSel').value);
+
+  // ---- 轮次切换（2026-10-13）：按钮在拼图卡上，空轮次不进列表也不占步 ----
+  check('巡检失败、全是空的轮次不进轮次列表',
+    !$('#roundSel').innerHTML.includes('round-20260912'), $('#roundSel').innerHTML.slice(0, 90));
+  // 注意别读成页头的 #roundinfo——那是实时模式的"第 N/M 站"（曾经撞过 id）
+  check('轮次导航说明跳过了几个空轮次',
+    T('#roundnavinfo').includes('已跳过 1 个空轮次'), T('#roundnavinfo'));
+  check('轮次导航给出"第几轮 / 共几轮"',
+    T('#roundnavinfo').includes('第 1 / 3 轮'), T('#roundnavinfo'));
+  check('轮次信息不会写进页头（页头那个是实时模式的"第 N/M 站"）',
+    !T('#roundinfo').includes('轮'), T('#roundinfo') || '(空)');
+  check('历史模式：站位（按层）那栏让位，中栏吃满',
+    document.querySelector('main').classList.contains('histmode'),
+    document.querySelector('main').className);
+  check('最新一轮时"下一轮"置灰', $('#nextround').disabled === true, String($('#nextround').disabled));
+  scrolls.length = 0;
+  await click('#prevround');
+  await sleep(300);
+  check('点"上一轮"切到更早一轮（跳过空轮次，直接到 09-13）',
+    $('#roundSel').value === 'round-20260913', $('#roundSel').value);
+  check('换轮次的落点是拼图（自动滚到拼图卡）',
+    scrolls.includes('mosaiccard'), JSON.stringify(scrolls));
+  check('换轮次后不沿用上一轮选中的站位（先看整体）',
+    T('#frameinfo').includes('未选'), T('#frameinfo'));
+  check('中间一轮时两侧按钮都可用（不是停在最新一轮的置灰状态）',
+    $('#prevround').disabled === false && $('#nextround').disabled === false,
+    'prev=' + $('#prevround').disabled + ' next=' + $('#nextround').disabled);
+  scrolls.length = 0;
+  await click('#timeline .mosaic-cell[data-station-id="S102"]');
+  await sleep(250);
+  // 完整图像在拼图**上面**（同一张卡里的 detailpane），不再单开"大图"卡、也不用滚
+  check('点拼图格位 → 上面的图像区显示完整图像（不跳卡、不滚动）',
+    !!$('#bigimg').getAttribute('src') && !!$('#detailpane').contains($('#bigimg'))
+    && scrolls.length === 0,
+    ($('#bigimg').getAttribute('src') || '(无)') + ' / 滚动 ' + JSON.stringify(scrolls));
+  check('图像区标出这是哪个位置',
+    T('#dpstation').includes('S102'), T('#dpstation'));
+  // 2026-10-13 用户：大图放预览图上面
+  check('完整图像区在拼图**之前**（DOM 顺序即视觉顺序）',
+    !!(document.querySelector('#mosaiccard #detailpane')
+       && document.querySelector('#mosaiccard #timeline')
+       && (document.querySelector('#mosaiccard #detailpane').compareDocumentPosition(
+             document.querySelector('#mosaiccard #timeline')) & window.Node.DOCUMENT_POSITION_FOLLOWING)),
+    'detailpane 在 timeline ' + (document.querySelector('#mosaiccard #detailpane')
+      .compareDocumentPosition(document.querySelector('#mosaiccard #timeline'))
+      & window.Node.DOCUMENT_POSITION_FOLLOWING ? '之前' : '之后'));
+  check('图像区给足高度（clamp 到 62vh，不是一条缝）',
+    /clamp\(260px,\s*62vh,\s*720px\)/.test(html),
+    (html.match(/clamp\([^)]*62vh[^)]*\)/) || ['(CSS 里没找到)'])[0]);
+  check('历史模式里不再有单独的"大图"卡',
+    !document.querySelector('#hmain #bigcard'), 'bigcard 存在');
+  await click('#nextround');
+  await sleep(300);
+  check('点"下一轮"回到最新一轮', $('#roundSel').value === 'round-20260914', $('#roundSel').value);
+
+  // ---- 下拉直接选轮次必须和按钮走同一条路（2026-10-13 修）----
+  // 原来 #roundSel.onchange 直接 loadRoundImages()，绕过 syncRoundOptions()：
+  // 导航状态与按钮置灰停在上一轮算出的值，也不清上一轮的选中站位。
+  // 先在最新一轮里选一个站位，再"下拉跳到最早一轮"——两条路行为必须一致。
+  await click('#timeline .mosaic-cell[data-station-id="S101"]');
+  check('下拉切轮次前：最新一轮的站位已选中（下面用它验"下拉不会沿用"）',
+    T('#dpstation').includes('S101'), T('#dpstation'));
+  $('#roundSel').value = 'round-20260910';
+  $('#roundSel').dispatchEvent(new window.Event('change'));
+  await sleep(400);
+  check('下拉直接选最早一轮：选中值与轮次导航都对（不是停在"第 1 / 3 轮"）',
+    $('#roundSel').value === 'round-20260910'
+    && T('#roundnavinfo').includes('第 3 / 3 轮'), $('#roundSel').value + ' / ' + T('#roundnavinfo'));
+  check('下拉换轮次也不沿用上一轮的站位（与按钮同一条路）',
+    T('#frameinfo').includes('未选'), T('#frameinfo'));
+  check('下拉落到最早一轮：最早端置灰、最新端可用',
+    $('#prevround').disabled === true && $('#nextround').disabled === false,
+    'prev=' + $('#prevround').disabled + ' next=' + $('#nextround').disabled);
+  check('下拉换轮次真的换了源（请求按新 round_id 发）',
+    state.calls.some(call => call.url.includes('round_id=round-20260910')));
+  check('下拉切到最早一轮后落点仍是拼图卡（不是详情区）',
+    scrolls.includes('mosaiccard'), JSON.stringify(scrolls));
+  $('#roundSel').value = 'round-20260914';
+  $('#roundSel').dispatchEvent(new window.Event('change'));
+  await sleep(400);
+  check('下拉切回最新一轮：导航状态与置灰同步复位',
+    $('#roundSel').value === 'round-20260914'
+    && T('#roundnavinfo').includes('第 1 / 3 轮')
+    && $('#nextround').disabled === true && $('#prevround').disabled === false,
+    T('#roundnavinfo') + ' / next=' + $('#nextround').disabled);
+  // 换轮次会清掉选中站位（先看整体），下面那条"帧计数"用例要有选中站点，这里补回来
+  await click('#latestframe');
+  await sleep(150);
 
   // 拓扑导航按 layer/col 顺序经过已配置站位，不会把空白格算成帧。
   check('帧计数指出当前配置站位', T('#frameinfo').includes('第 2 / 3 站位'), T('#frameinfo'));

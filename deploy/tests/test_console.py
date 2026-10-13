@@ -411,7 +411,7 @@ def test_station_summary_keeps_the_newest_frame_of_both_sources(tmp_path):
     with make_client(tmp_path, transport=transport) as c:
         got = c.get("/api/station_summary").json()
     assert got["ok"] is True and got["prod_error"] is None
-    # 一次全量拉取（60 站一次问完），不是每站一次请求
+    # 一次全量拉取（48 站一次问完），不是每站一次请求
     assert len(calls) == 1 and "station_id" not in calls[0]
     s101, s102 = got["summary"]["S101"], got["summary"]["S102"]
     assert s101["last_ts"] == "2026-09-14T09:30:00" and s101["last_ok"] is True
@@ -713,6 +713,12 @@ def test_eta_is_extrapolated_from_progress_then_falls_back():
     no_progress = {"started_at": started.isoformat()}
     assert round_eta_s(no_progress, now=NOW) == 0          # 已超过典型时长 ⇒ 不报负数
     assert eta_text({}, now=NOW) == "预计几分钟后可用"      # 连开始时间都没有，就别装精确
+
+    # 兜底值必须是 48 站时代的数：2026-10-13 生产只读实测三轮 470/462/457 s。
+    # 原先写 11*60（60 站时代），会把"预计还要等"说大约 40% 偏悲观。
+    early = {"started_at": (NOW.replace(hour=9, minute=54, second=20)).isoformat()}
+    assert round_eta_s(early, now=NOW) == 120             # 已跑 340 s ⇒ 460−340
+    assert "2 分钟后可用" in eta_text(early, now=NOW)
 
 
 def test_closing_the_session_queues_a_home_move(tmp_path):

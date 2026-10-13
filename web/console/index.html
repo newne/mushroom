@@ -557,8 +557,12 @@
   </section>
 
   <section id="hmain" style="display:none">
-    <!-- 拼图吃满栏位，完整图像就在它旁边（2026-10-13 用户口径：不要单独的预览大图卡，
-         点格位在旁边看整张就行）。换轮次的落点仍然是"整体生长情况"。 -->
+    <!-- 口径演进别记错（2026-10-13 四次改口，见 issues/06 §第二轮~第四轮）：
+         第二轮曾把完整图放在拼图**旁边**（#detailpane 是窄侧栏）；**第四轮已改为大图在上、
+         吃满整栏、object-fit:contain**（用户："图片还是太小…大图放预览图上面"）。
+         现在是同一张卡里 **#detailpane 在上、#timeline 拼图在下**，
+         点格位就地换图、不跳卡；换轮次的落点仍滚到这张卡的顶（拼图在视口内）。
+         ⚠️ 别再按"在拼图旁边"改回去——那会直接弄坏第四轮。 -->
     <div class="card" id="mosaiccard">
       <h2>巡检拼图 <span id="tltitle" style="color:var(--dim);font-weight:400"></span></h2>
       <div class="roundnav">
@@ -2143,6 +2147,10 @@ function setMode(m){
     if(!hist.focusedStationId) hist.focusedStationId = selected;
     stationRequestSeq++;
     renderHistory();
+    // 切回来时容器宽度与上一次渲染时可能不同（环境模式是单列），
+    // 而且防抖里可能还压着一次没跑的重算——这里直接落定，别等下一拍。
+    mosaicResizePending = false;
+    recalcMosaicCells();
     loadHistory(false);
   }else if(m === 'env'){
     historyRequestSeq++;          // 丢掉在飞的历史响应，别让它回来改状态
@@ -2259,20 +2267,80 @@ function renderHistory(){
   }
   // 拼图吃满当前栏位：按容器实际宽度算格子大小（jsdom 没布局 → clientWidth 为 0，退回 64）。
   // 上限 156px（2026-10-13 放大）：栏位宽时按宽度算，超出部分才横向滚。
-  const avail = (tl.clientWidth || 0) - 20;
-  const labelW = 62;
-  const cellSize = avail > 0
-    ? Math.max(56, Math.min(156, Math.floor((avail - labelW - (cols - 1) * 2) / cols)))
-    : 64;
+  // 尺寸算法与"缩放后重算"共用 cellSizeFor()/setCellSize()，别在这里另写一份。
+  const labelW = MOSAIC_LABEL_W;
+  const cellSize = cellSizeFor(tl, cols);
   tl.className = 'mosaic-scroll';
-  tl.innerHTML = `<div class="mosaic" style="--cellw:${cellSize}px;grid-template-columns:${labelW}px repeat(${cols},${cellSize}px);min-width:${labelW + cellSize * cols}px">${cells.join('')}</div>`;
+  tl.innerHTML = `<div class="mosaic" data-cols="${cols}" style="--cellw:${cellSize}px;grid-template-columns:${labelW}px repeat(${cols},${cellSize}px);min-width:${labelW + cellSize * cols}px">${cells.join('')}</div>`;
   wireShotFallbacks(tl);
   tl.querySelectorAll('[data-pick]').forEach(el => el.onclick = () => {
-    // 图像就在拼图旁边（同一张卡），点完不用滚——挪开视线看一眼就行
+    // 图像就在拼图上面（同一张卡），点完不用滚——挪开视线看一眼就行
     pickHistoryCell(el);
   });
   drawCurve();
   updateFrameInfo();
+}
+
+/* ---- 拼图格子尺寸：按容器实测宽度算；**窗口/栏位变化后要重算**（2026-10-13 补）----
+   原来只在 renderHistory() 里算一次，窗口缩放或从环境模式切回历史模式后，
+   格子保持旧尺寸（窄屏被撑出横向滚动、宽屏白白浪费一栏），看起来像"页面没跟上窗口"。 */
+const MOSAIC_LABEL_W = 62;     // 左侧"第 N 层"标签列
+const MOSAIC_MIN_CELL = 56;    // 保底：再小就看不清格位里的图
+const MOSAIC_MAX_CELL = 156;   // 上限：再大就要横向滚，反而看不全一屏
+let mosaicResizePending = false;
+
+function cellSizeFor(container, cols){
+  const avail = (container && container.clientWidth || 0) - 20;
+  if(!(avail > 0)) return 64;        // jsdom / 刚切进来还没布局：退回固定值，别算出负数
+  return Math.max(MOSAIC_MIN_CELL,
+    Math.min(MOSAIC_MAX_CELL, Math.floor((avail - MOSAIC_LABEL_W - (cols - 1) * 2) / cols)));
+}
+
+/** 把按当前容器宽度算出的格子尺寸写回已渲染的拼图（不重建 DOM，保持选中/滚动位置）。 */
+function setCellSize(container, cols){
+  if(!container || !cols || cols < 1) return 0;
+  const grid = container.querySelector ? container.querySelector('.mosaic') : null;
+  if(!grid) return 0;
+  const size = cellSizeFor(container, cols);
+  grid.style.setProperty('--cellw', size + 'px');
+  grid.style.gridTemplateColumns = `${MOSAIC_LABEL_W}px repeat(${cols},${size}px)`;
+  grid.style.minWidth = (MOSAIC_LABEL_W + size * cols) + 'px';
+  return size;
+}
+
+function recalcMosaicCells(){
+  const tl = $('#timeline');
+  if(!tl) return 0;
+  const grid = tl.querySelector ? tl.querySelector('.mosaic') : null;
+  const cols = Number(grid && grid.dataset ? grid.dataset.cols : 0);
+  return setCellSize(tl, cols);
+}
+
+/** 结构保证 > 注释约定：拼图卡必须仍然是历史模式第一张卡，且 #detailpane 在它**内部**
+ *  （大图置顶之后，若把详情区挪出卡外或挪到拼图后，换轮次就不再"先看到整体"）。 */
+function mosaicLandingIntact(){
+  const card = $('#mosaiccard'), first = document.querySelector('#hmain > .card');
+  if(!card || !first) return false;
+  if(card !== first) return false;
+  const pane = $('#detailpane');
+  return !!pane && card.contains(pane);
+}
+
+function wireMosaicResize(){
+  if(window.__mosaicResizeWired) return;   // 只挂一次，免得重复注册越挂越多
+  window.__mosaicResizeWired = true;
+  const schedule = () => {
+    if(mosaicResizePending) return;
+    mosaicResizePending = true;
+    const raf = window.requestAnimationFrame || (fn => setTimeout(fn, 16));
+    raf(() => { mosaicResizePending = false; recalcMosaicCells(); });
+  };
+  if(typeof window.ResizeObserver === 'function'){
+    // 中栏本身也可能变宽（进场/让位/媒体查询），所以观察容器而不只是 window
+    const tl = $('#timeline');
+    if(tl) new window.ResizeObserver(schedule).observe(tl);
+  }
+  window.addEventListener('resize', schedule);
 }
 
 function history_pick(id, url, stationId){
@@ -2525,7 +2593,23 @@ function syncRoundOptions(){
   return hist.selectedRoundId;
 }
 
-/** 换轮次：清掉上一轮选中的站位，落点在拼图（整体生长情况）。 */
+/** 切到某一轮：**按钮与下拉必须走同一条路**（2026-10-13 修）。
+ *
+ *  下拉原来直接调 loadRoundImages()，绕过了 syncRoundOptions()：`hist.roundIndex/roundCount`
+ *  与按钮置灰停在上一轮算出来的值（"第 N / M 轮"错位、到边界时按钮该灰不灰），
+ *  也不清上一轮选中的站位（"上一轮/下一轮"按钮与下拉两条路行为不一致）。这里把顺序钉死：
+ *  **先定位并同步导航状态，再加载图像，最后按"换轮次先看整体"清选中站位 + 滚到拼图。 */
+async function switchToRound(roundId, idx){
+  const { rounds } = visibleRounds();
+  const i = (typeof idx === 'number' && idx >= 0) ? idx
+    : rounds.findIndex(row => row.round_id === roundId);
+  hist.selectedRoundId = (i >= 0 && rounds[i]) ? rounds[i].round_id : '';
+  syncRoundOptions();
+  await loadRoundImages(hist.selectedRoundId, true);
+  scrollToMosaic();
+}
+
+/** 翻页式切换：索引 0 = 最新，"上一轮"= 更早（索引 +1）。 */
 async function switchRound(delta){
   const { rounds } = visibleRounds();
   if(rounds.length < 2){
@@ -2539,13 +2623,7 @@ async function switchRound(delta){
     opmsg(delta > 0 ? '已经是最早一轮' : '已经是最新轮', 'warn');
     return;
   }
-  const row = rounds[target];
-  hist.focusedStationId = '';
-  hist.growth = null; growthRequestSeq++;
-  $('#roundSel').value = row.round_id;
-  await loadRoundImages(row.round_id);
-  syncRoundOptions();
-  scrollToMosaic();
+  await switchToRound(rounds[target].round_id, target);
 }
 
 function scrollToMosaic(){
@@ -2554,17 +2632,23 @@ function scrollToMosaic(){
   if(card && card.scrollIntoView) card.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 
-async function loadRoundImages(roundId){
+/** 加载某一轮的图像。`viaSwitch` 表示这是"换轮次"（而不是首次装载/筛选刷新），
+ *  只有这种时候才保留"先看整体"的旧口径。 */
+async function loadRoundImages(roundId, viaSwitch){
   hist.selectedRoundId = roundId || '';
   const requestId = ++historyRequestSeq;
   hist.rows = [];
   hist.picked = null;
+  // 换轮次先看整体：清掉上一轮选中的站位。这里原来只有 switchRound() 做，
+  // 下拉直接选会沿用上一轮的站位——两条路行为不一致（2026-10-13 修）。
+  if(viaSwitch) hist.focusedStationId = '';
   hist.imagesProdError = '';
   hist.imageError = '';
   clearHistoryImage(roundId ? '读取本轮原图…' : '选择有轮次 ID 的巡检记录查看原图');
   if(!roundId){
     syncAngleOptions();
     renderHistory();
+    syncRoundOptions();      // 选到空值也要把导航状态刷新（不能留着上一轮的"第 N / M 轮"）
     return;
   }
   $('#timeline').className = 'empty';
@@ -2587,6 +2671,9 @@ async function loadRoundImages(roundId){
                  row ? imageUrlFor(row) : '', hist.focusedStationId);
     if(!hist.growth) await loadGrowth();
   }
+  // 兜底：多条入口（按钮/下拉/批次/日期/重新读取）都落到这里，
+  // 每次都按**已生效的** selectedRoundId 重新定位导航状态，别再出现"第 N/M 轮"错位。
+  syncRoundOptions();
 }
 
 function clearHistoryImage(message){
@@ -3036,7 +3123,10 @@ function wireHistory(){
     hist.selectedBatchKey = decodeURIComponent($('#batchSel').value || '');
     refreshFilteredRounds();
   };
-  $('#roundSel').onchange = () => loadRoundImages($('#roundSel').value);
+  // 下拉直接选轮次：走与"上一轮/下一轮"按钮**同一条路**（2026-10-13 修）。
+  // 原来这里直接 loadRoundImages()，绕过 syncRoundOptions()：导航状态与按钮置灰
+  // 停在上一轮的值，也不清选中站位。
+  $('#roundSel').onchange = () => switchToRound($('#roundSel').value);
   $('#fromDate').onchange = refreshFilteredRounds;
   $('#toDate').onchange = refreshFilteredRounds;
   $('#angleSel').onchange = renderHistory;
@@ -3160,6 +3250,7 @@ document.addEventListener('visibilitychange', () => {
   }
   wireOps();
   wireHistory();
+  wireMosaicResize();
   wireEnv();
   wirePreview();
   wireMap();

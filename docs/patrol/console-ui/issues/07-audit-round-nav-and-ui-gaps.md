@@ -63,11 +63,58 @@ node docs/patrol/console-ui/verify-page.js <HEAD 版页面>
 `plink … "cat > 远端" < 本地` 在本机会静默失败（`issues/06-…md:77-78`），页面超命令行长度上限，
 **必须分块 base64 + 核对 sha256**。本轮尚未上传任何东西。
 
-## 下一步（等拍板）
-按「一次一件事」排序：
-1. **B（先收）**：补 `resize` 重算格子 + jsdom 断言（模拟 clientWidth 变化后重渲染）。
-2. **A（再收）**：把 `#roundSel.onchange` 收到与按钮同一条路径（过滤数组内定位、刷新导航与置灰、清选中站位、可选滚到拼图），jsdom 断言钉住 `#roundnavinfo` 与置灰状态。
-3. **视觉批次（最后，单独一批）**：按新方向重排"看得快、看得准"，先出对比视图再谈美化。
-4. **跨轮次/跨天对比**（新方向主线，跨域需开票）：前端版 = 固定站位，取该站多轮图像并排
-   （复用 `imageUrlFor()`，`:807`；**不新增后端**）；但一帧 750 KB，N 天 × 48 格会爆带宽——
-   缩略图能力属服务端，需另开票据（`env-analysis` / `prod-deploy` 归属方）。
+## 本轮收口（2026-10-13，B 批 + A 批）
+
+**B 批（缩放重算 + "拼图可见"结构断言）**
+1. 拼图格子尺寸现在由 `cellSizeFor()` / `setCellSize()` 统一算，`renderHistory()` **不再自己算一遍**；
+   新增 `wireMosaicResize()`：`ResizeObserver` 观察 `#timeline` + `window.resize` 兜底，
+   同一帧内合并（`requestAnimationFrame` 节流）。切回历史模式时直接落定（不吃防抖延迟）。
+2. 新增 `mosaicLandingIntact()` 的上位断言两条：拼图卡仍是 `#hmain` 第一张卡、
+   `#detailpane` 仍在拼图卡**内部**——把"换轮次先看到整体"从"滚动副作用 + 注释"变成结构约束。
+3. 修 `index.html:560-561` 的过期注释（第二轮"大图在旁边"口径 → 第四轮"大图在上吃满栏"）。
+
+**A 批（切轮次单一入口）**
+4. 新增 `switchToRound(roundId, idx)`：**按钮与下拉共用**。顺序钉死为
+   **先定位并 `syncRoundOptions()` → 再加载图像 → 最后清选中站位 + 滚到拼图**。
+   原来 `#roundSel.onchange` 直接 `loadRoundImages()`，绕过 `syncRoundOptions()`，
+   留下三处不一致：`hist.roundIndex/roundCount`（"第 N / M 轮"错位）、
+   `#prevround`/`#nextround` 置灰停在上一轮、不清上一轮选中站位。
+5. `loadRoundImages(roundId, viaSwitch)` 增加 `viaSwitch`：只有"换轮次"才清选中站位
+   （首次装载/批次筛选刷新不清），并在末尾补一次 `syncRoundOptions()` 兜底。
+6. **先补 fixture 再加断言**：`ROUNDS` 加第三轮 `round-20260910`，`IMAGES` 加它的一帧。
+   只有两轮时按钮与"下拉直接选"的新旧状态恰好重合（索引 0↔1），这条 bug 测不出来；
+   三轮后"从最新(0)下拉跳到最早(2)"才区分得开（`第 1 / 3 轮` vs `第 3 / 3 轮`）。
+
+**顺带（巡检手票 10 §2.2 / 票 09 #11，都在我领地）**
+7. `deploy/src/deploy/console.py`：`ROUND_TYPICAL_S` 660 → **460**（附实测出处：470/462/457 s，
+   2026-10-13 发版官生产只读）；`:9` 与 `:62-65` 的"60 张/60 站" → 48。
+8. `deploy/tests/test_console.py`：补兜底值断言（跑 340 s ⇒ 120 s），钉住"必须是 48 站时代的数"。
+9. `docs/patrol/console-ui/spec.md`：`:741` 每轮多 5 分钟 → 48 站约 4.2 分钟；
+   `:79` 角度档注明"**现役只有 `level0`**"（筛选是按数据里真实存在的档生成的，标签不用改代码）。
+
+### 验证（实测命令 + 结果）
+
+```
+(顺带) & D:\code\mushroom\patrol-workspace\.venv\Scripts\python.exe -m pytest deploy\tests\test_console.py -q
+→ 69 passed
+
+$env:NODE_PATH=D:\code\energy-agent\console\node_modules
+node docs/patrol/console-ui/verify-page.js D:\code\mushroom\web\console\index.html
+→ 结果：235/244 通过，运行期错误：无
+```
+- **本轮新增 12 条断言全部 PASS**（3 条缩放重算/上限/下限、2 条拼图落点结构、
+  1 条中间轮双侧可用、5 条下拉切轮次状态同步）。
+- **失败 9 条，与 HEAD 基线逐条相同**（用 `Compare-Object` 比过失败项清单）：
+  无"改动引入的失败"。总量 244 = 232 + 12，通过数 235 = 223 + 12。
+
+### 一条既有 flake（不是我引入，但会误判，记下来）
+`画面卡住时自动重连（换一个 src）` 在第一批重跑里失败过一次（`播放中 / /api/preview?t=…`），
+随后**连跑三次都 PASS**。判据（`index.html:2077`）是
+`age > 3 && Date.now() - pv.startedAt > 4000`：**流开始后 4 秒内的窗口不会触发重连**，
+而 jsdom 里的墙钟、轮询相位与集合时序有关，跑得更久就可能刚好落进那个 4 秒窗口。
+**这是既有开关的时序脆弱，与本次改动无关**；后续若要收，方向是让测试显式等到
+`startedAt + 4000` 之后再注入卡住状态，而不是把等待调大。
+
+## 下一步
+顺序按 Chief 裁定：**对比视图 → 缩略图（票据 08，等发版官 502 口径后我实现 console.py 侧）
+→ 视觉批次**。"设计上不可测 vs 还没测到"的区分等真做那两项时一并改。
