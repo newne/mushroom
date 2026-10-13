@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import time
@@ -186,6 +187,31 @@ def _normalize_levels(file_path: Path) -> dict[str, Any]:
             pass
 
 
+#: 抓拍结果的"这一帧和上一帧是不是同一份字节"字段名。
+#: 只在**服务端**能算：patrol 侧是"库内零网络调用"，拿不到 MinIO 里的字节，
+#: 而客户端手上的 object_name 每站都不同（已核实：2026-10-09 那一轮 48 个站 48 个名字），
+#: 光看名字分不出"内容被复制"。
+FIELD_SHA256 = "image_sha256"
+FIELD_SAME_AS_PREVIOUS = "same_as_previous"
+FIELD_DUPLICATE_STREAK = "duplicate_streak"
+FIELD_PLAY_DATA_READY = "play_data_ready"
+
+
+def _sha256_of(path: Path) -> str | None:
+    """文件内容的 sha256；读不了返回 None（抓图本身不能因此失败）。
+
+    在**上传前**算，描述的就是入库那份字节（电平修正之后再算，否则算的是修正前的）。
+    """
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
 class CaptureService:
     def __init__(
         self,
@@ -204,9 +230,50 @@ class CaptureService:
         if enable_pool:
             self._pool = DeviceConnectionPool(sdk=sdk)
 
+        # 上一份成功抓拍的 sha256 与连续重复次数。两条抓拍路径都在 `self._lock()`
+        # 里跑（厂商 SDK 非线程安全，本来就是串行的），所以裸属性就够，不必另加锁。
+        # 清零只发生在进程重启——那正是想要的：跨轮次不记忆，只在一轮内连续重复时报警。
+        self._last_sha256: str | None = None
+        self._duplicate_streak = 0
+
     @property
     def pool(self) -> DeviceConnectionPool | None:
         return self._pool
+
+    # ---------- 帧级可信度：同一份字节被写给多个站位 ----------
+
+    def _note_frame(self, path: Path, object_name: str) -> dict[str, Any]:
+        """算这份字节的指纹，并和上一份比对；返回要并进响应的三个字段。
+
+        ## 为什么需要它（2026-10-09 的采集事故）
+
+        那一轮 18:22:05–18:27:16 有 **35 帧字节完全相同**（sha256 41685c09…、92364 B、
+        mean 2.31），横跨 S211→S401 历时 5 分 11 秒，**而轮次标记 ok=1 / 0 失败**。
+        同一台相机 10-08 的近黑帧却是各不相同的字节（89837/90493/92060/112448）——
+        那才是各站独立的真欠曝。两者性质不同：**字节相同 ⇒ 没有真的逐站取流**。
+
+        机制（代码路径已核）：`_pool_capture_locked` 把 `wait_play_data` 的返回值
+        **丢掉了**，于是底层视频一旦变黑/冻结，`MediaSnapImageEx` 只是把解码器里
+        那一帧反复写出来——每站都 `success=True`、文件就绪、上传成功。客户端看不出
+        问题：object_name 每站都不同（那一轮 48 个站 48 个名字），patrol 又是
+        "库内零网络调用"，拿不到字节。**只有服务侧能算这个指纹。**
+
+        这里**只标记、不改控制流**：不因为重复就判失败（那会把一次相机抽风变成整轮
+        中止，而现场真正需要的是"这些帧别进统计"）。判定与处置归调用方。
+        """
+        sha = _sha256_of(path)
+        if sha is None:
+            # 算不出指纹：不猜"是"也不猜"不是"，把streak 断掉
+            self._last_sha256, self._duplicate_streak = None, 0
+            return {FIELD_SHA256: None, FIELD_SAME_AS_PREVIOUS: False,
+                    FIELD_DUPLICATE_STREAK: 0}
+        if sha == self._last_sha256:
+            self._duplicate_streak += 1
+        else:
+            self._last_sha256, self._duplicate_streak = sha, 1
+        return {FIELD_SHA256: sha,
+                FIELD_SAME_AS_PREVIOUS: self._duplicate_streak > 1,
+                FIELD_DUPLICATE_STREAK: self._duplicate_streak}
 
     def _lock(self):
         import threading
@@ -387,7 +454,7 @@ class CaptureService:
             "file_exists": True,
             "display": display_env,
             **levels,
-            "x11_window_handle": hwnd,
+            **self._note_frame(file_path, object_name),
             "snap_result": snap_rc,
             "snap_method": snap_method,
             "timestamp": int(time.time()),
@@ -466,7 +533,8 @@ class CaptureService:
 
         t_capture_start = time.monotonic()
         self._sdk.make_keyframe(ip, channel=channel, stream_type=0)
-        self._sdk.wait_play_data(conn.play_handle, timeout_s=5.0)
+        play_data_ready, _pd_msg, _pd_p1, _pd_p2 = self._sdk.wait_play_data(
+            conn.play_handle, timeout_s=5.0)
 
         snap_method = "MediaSnapImageEx"
         snap_rc = self._sdk.snap_image_ex(conn.play_handle, str(file_path), channel_index=0, param="")
@@ -506,6 +574,11 @@ class CaptureService:
             "file_path": str(file_path),
             "file_exists": True,
             **levels,
+            **self._note_frame(file_path, object_name),
+            # 这条以前被丢掉了：底层视频冻结时它其实是唯一的线索（动态路径一直有报）。
+            # 仍然**不据此判失败**——它的语义是"有没有等到播放数据消息"，不等于
+            # "这一帧是新的"；报了让人能事后对齐，就是它此刻的全部职责。
+            FIELD_PLAY_DATA_READY: play_data_ready,
             "snap_result": snap_rc,
             "play_handle": conn.play_handle,
             "login_handle": conn.login_handle,
