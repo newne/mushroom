@@ -69,8 +69,12 @@
 - [ ] `patrol/framing.py` 里**不再出现**任何质量标记名与阈值常数（`grep` 可查）
 - [ ] `judge_frame` 的判定结果与 `frame_quality` 在同一帧上一致（含 `no_light` 命名）
 - [ ] `patrol/tests/test_framing.py` 覆盖"欠曝帧 → `no_light`"、"过曝帧 → `overexposed`"
-- [ ] `deploy/src/deploy/measure_wire.py` 的 `--measure-blur-threshold` 默认值由 **100.0 改 45.0**
-      （100 是**已被标定否掉**的旧值：实测拒 78.4% 正常帧；现在默认关，一开就会踩）
+- [ ] `deploy/src/deploy/measure_wire.py` / `m1.py` 的 `--measure-blur-threshold` 满足两条
+      （**钉的是链路，不是某个数字**——默认门的值是标定结论、以后还会变）：
+      1. **不给参数（默认 `None`）⇒ 走 `measure/quality.py` 的标定默认**（当前 45.0），
+         `deploy` 侧**不得自带第二份常数**（100.0 那类旧值实测拒 78.4% 正常帧，一开 `--measure` 就踩）；
+      2. **显式给了就按给的走**（覆盖生效），旋钮保留。
+      `--help` 需写明当前标定值与重算入口（`measure/tools/calibrate_quality_thresholds.py`）。
 
 ## Comments
 
@@ -78,3 +82,7 @@
   测量师侧已实现 `assess_exposure()`（唯一曝光判定入口，带出 p99/过曝占比供取景只读使用），
   `frame_quality()` 的曝光两端改为调用它，历史 `underexposed` 只在**读**时兼容、产出只写
   `no_light`；measure 93 passed。
+
+- 2026-10-13 验收改写（Chief）：不钉"阈值 = 45.0"这个**数字**，改钉**两条链路**——
+  ① 不给参数 ⇒ 走 `measure/quality.py` 的标定默认；② 给了就覆盖生效。
+  理由：默认门的值是标定结论、以后还会变（跨阶段复核、换角后重算），契约要稳的是链路。
