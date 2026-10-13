@@ -10,6 +10,7 @@ from typing import Any
 from .minio_uploader import MinIOUploader
 from .pool import DeviceConnectionPool
 from .sdk import XCloudSDK
+from .stream_watchdog import StreamWatchdog
 
 logger = logging.getLogger("xcloudsdk_py.capture")
 
@@ -220,6 +221,7 @@ class CaptureService:
         picture_dir: str | Path,
         minio: MinIOUploader | None = None,
         enable_pool: bool = True,
+        stream_watchdog: "StreamWatchdog | None" = None,
     ) -> None:
         self._sdk = sdk
         self._picture_dir = Path(picture_dir)
@@ -229,6 +231,10 @@ class CaptureService:
         self._pool: DeviceConnectionPool | None = None
         if enable_pool:
             self._pool = DeviceConnectionPool(sdk=sdk)
+
+        # 流中断看门狗（票 07 第一版：只报信号，不做控制动作）。
+        # 不传就按环境变量造一个默认的；测试里注入带临时日志目录的实例。
+        self._watchdog = stream_watchdog or StreamWatchdog()
 
         # 上一份成功抓拍的 sha256 与连续重复次数。两条抓拍路径都在 `self._lock()`
         # 里跑（厂商 SDK 非线程安全，本来就是串行的），所以裸属性就够，不必另加锁。
@@ -444,6 +450,9 @@ class CaptureService:
             }
 
         levels = _normalize_levels(file_path)
+        # 看门狗在这一步读日志（便宜：一次 stat + 少量增量读）。**只并字段，不改控制流**：
+        # 上面每一个 success/failure 判决都不看它，重拍与中止更不可能看它。
+        self._watchdog.observe()
 
         response: dict[str, Any] = {
             "success": True,
@@ -455,6 +464,7 @@ class CaptureService:
             "display": display_env,
             **levels,
             **self._note_frame(file_path, object_name),
+            **self._watchdog.fields(),
             "snap_result": snap_rc,
             "snap_method": snap_method,
             "timestamp": int(time.time()),
@@ -565,6 +575,9 @@ class CaptureService:
             }
 
         levels = _normalize_levels(file_path)
+        # 看门狗在这一步读日志（便宜：一次 stat + 少量增量读）。**只并字段，不改控制流**：
+        # 上面每一个 success/failure 判决都不看它，重拍与中止更不可能看它。
+        self._watchdog.observe()
 
         response: dict[str, Any] = {
             "success": True,
@@ -575,6 +588,7 @@ class CaptureService:
             "file_exists": True,
             **levels,
             **self._note_frame(file_path, object_name),
+            **self._watchdog.fields(),
             # 这条以前被丢掉了：底层视频冻结时它其实是唯一的线索（动态路径一直有报）。
             # 仍然**不据此判失败**——它的语义是"有没有等到播放数据消息"，不等于
             # "这一帧是新的"；报了让人能事后对齐，就是它此刻的全部职责。
