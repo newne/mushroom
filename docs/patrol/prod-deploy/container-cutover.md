@@ -48,6 +48,10 @@ compose 里的每个变量都有默认值，但**现场应当显式写下来**�
 ```ini
 PATROL_IMAGE=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0
 CONSOLE_WEB_IMAGE=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_console_web:0.1.0
+# preview 用**自己**的变量（2026-10-13 起）：它与 patrol/console 的 tag 不必同步。
+# 不填就回落 PATROL_IMAGE 的默认值；现场钉的是它当时实跑的 tag。
+# 原因与并回做法见 issues/04-preview-tag-drift.md。
+# PATROL_PREVIEW_IMAGE=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:<preview 自己的 tag>
 CONSOLE_WEB_PORT=8002          # 上位机访问的就是这个（对外只开这一个）
 CONSOLE_PORT=8001              # 后端：给前端容器与调度器用
 PATROL_CAPTURE_HOST=172.17.0.1:7003

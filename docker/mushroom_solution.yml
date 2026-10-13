@@ -70,7 +70,7 @@ services:
   # 业务应用服务
   mushroom_solution:
     <<: [*app-service, *db-deps]
-    image: "registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:0.1.0-20260224180854-e4d3a2f"
+    image: "registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_solution:0.1.0-20261006222420-121f1b9"
     container_name: mushroom_solution
     environment:
       - PYTHONUNBUFFERED=1
@@ -298,7 +298,15 @@ services:
   mushroom_preview:
     <<: *base
     profiles: ["patrol"]
-    image: "${PATROL_IMAGE:-registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0}"
+    # ⚠️ preview 用**自己**的变量，不再与 patrol/console 共用一个 PATROL_IMAGE。
+    # 原因（2026-10-13）：一个 PATROL_IMAGE 管三个容器，而现场三个容器的 tag 并不同步——
+    # patrol/console 在 `0.1.0-20261013144515-b64027b`，preview 还停在
+    # `station-calibration-20261008-l3z132-l4z155-c08y40`。共用一个变量意味着"发一次版"会
+    # 顺手把 preview 也换掉，而预览那次换与不换从来不是同一个决定（历史上多次 `--no-deps`
+    # 只重建 preview）。拆开之后，改 preview 只需要动它自己那一行。
+    # 未设置时回落 PATROL_IMAGE 的默认值（与拆分前行为一致）。
+    # 跟踪：docs/patrol/prod-deploy/issues/04-preview-tag-drift.md
+    image: "${PATROL_PREVIEW_IMAGE:-registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0}"
     container_name: mushroom_preview
     command: ["preview"]
     environment:
