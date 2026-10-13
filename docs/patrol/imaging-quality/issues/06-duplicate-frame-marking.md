@@ -285,3 +285,59 @@ docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate 
 ＋库侧对账，结论按"**已部署 / 未部署**"标注：FAIL 就是 FAIL，照实报。五点：
 实时指纹落帧、`n_frames_recorded`=帧数、`n_results`=帧数−重复帧数、`n_duplicate`=带 `frame_dup` 帧数、
 正常轮不出现 `suspect_duplicate`；外加 `dup_groups` 读回来必须是**列表**而非 JSON 字符串。
+
+**新增第 6 项验收（Chief 2026-10-13 补充）**：轮后查 `[ingest] 未知字段` 告警**必须是 0 行**。
+新 patrol 会发一批新键（`content_sha256`/`same_as_previous`/`duplicate_streak`/`frame_dup`/`dup_group`/
+`dup_groups`/`n_duplicate`/`n_frames_recorded`/`suspect_duplicate`/`content_check_error`/`imaging_profile`/
+`object_name_source`/`elapsed_s`），而环境官这次正好把未知键改成**进 `warnings` + 打日志** ⇒
+**出现任何一行就说明"生产者发了、消费者没列"，直接按未部署级别处理**。这条比逐列对账更省事也更硬。
+
+## K. 本次重建**实际生效**了哪些行为（从**运行态**读，不是从 compose 猜）
+
+规矩：**"生效"只能是运行态里的字节**。以下两条都是实测：
+
+**K.1 运行态的命令行（`docker inspect`）**
+
+| 容器 | ENTRYPOINT | CMD |
+| --- | --- | --- |
+| `mushroom_patrol` | `/usr/local/bin/patrol-entrypoint` | `["patrol-serve"]` |
+| `mushroom_analysis` | `/usr/local/bin/patrol-entrypoint` | `["api"]` |
+
+⇒ 命令行上**没有** `--measure` / `--framing` / `--verify-content`；这三个取**代码默认**（下面实测）。
+
+**K.2 入口脚本实际注入的参数（镜像内 `/usr/local/bin/patrol-entrypoint`，`patrol-serve` 分支）**
+
+```bash
+exec python3 -m deploy.patrol_serve \
+  --trigger-dir "${PATROL_TRIGGER_DIR:-/app/data/trigger}" \
+  --room … --stations … --outbox … --log … --capture-host … --ingest … "$@"
+```
+
+容器 env 里**没有** `PATROL_TRIGGER_DIR`（实测 env 只有 `PATROL_CAPTURE_HOST/ROOM/STATIONS/OUTBOX/LOG/INGEST`）
+⇒ 生效值 = 默认 **`/app/data/trigger`**；启动日志也印证：
+`巡检执行方就绪：轮询 /app/data/trigger（触发目录 + 手动通道，触发每 5 秒），单实例`。
+
+**K.3 实测的生效开关（镜像内 `deploy/m1.py` / `deploy/patrol_serve.py` 的默认值）**
+
+| 开关 | 生效值 | 依据（实测） | 判定 |
+| --- | --- | --- | --- |
+| `--measure` | **`off`** | `m1.py:251` `default="off"`；不在运行态 argv 里 | **必须仍为 off** ✅ |
+| `--framing` | **`off`** | `m1.py:236` `choices=("off","once","always") default="off"`；不在 argv | **必须仍为 off** ✅ |
+| `--verify-content` | **关（False）** | `m1.py:260` `action="store_true"`，无 `default=True`；不在 argv | **必须仍为 off** ✅ |
+| `--measure-emit-empty` | **关（False）** | `m1.py:258` `action="store_true"`，**无 `default=True`** ⇒ 失败帧**不产行** | 如实记录（与票 11"定 emit_empty=True"的表述**不一致**，见下） |
+| **`--trigger-dir`** | **`/app/data/trigger`（在生效命令行上）** | 入口脚本显式注入 + env 未设 ⇒ 默认 | ⚠️ **这是一条新增生效行为，单独标出** |
+| `--cmd-dir` | `/app/data/cmd` | `patrol_serve.py` 默认（入口未传、env 未设） | 手动通道目录，非新行为 |
+
+**⚠️ 单独标出：`--trigger-dir`（加湿保持的整轮避让）是一条随本次重建新生效的行为。**
+console 侧的 `hold.json` 早已在跑，但**daemon 侧按触发目录避让整轮是新上的**。
+**验收注明：这条"遇 hold 才可见"**——正常轮（无 hold）里它的存在与不存在无法区分，
+所以第 21:27 轮**验不到它**，不要因为"没看到避让"就判它没生效，也不要因此判本次重建失败。
+
+**顺带一条不一致要挂账**：票 11 记的是"定 `emit_empty=True`"，而本镜像（`89e4a54`）里
+`--measure-emit-empty` 仍是 `store_true` 且**无 `default=True`** ⇒ **实际是关的**。
+这与 `--measure` 默认关**互相自洽**（measure 都没开，emit_empty 无从生效），
+但"票里写的决定"与"镜像里的默认"不一致，归环境官核对；本次不擅自改。
+
+**本次重建的生效范围（Chief 反向核对）**：现役 `b64027b` → `89e4a54` 有 **17 个提交**随
+patrol 重建进生产；analysis 侧 `0a9893c` → `89e4a54` 有 **5 个**。落地判据以 §H 的镜像内自查
+＋本节 K.1–K.3 的运行态实测为准，**不以"仓库里有这些提交"为准**。
