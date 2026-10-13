@@ -309,7 +309,8 @@ def main() -> int:
             "round_ts": r.get("round_ts", ""),
             "layer": (st[1] if len(st) > 3 and st[0] == "S" else ""),
             "col": (st[2:] if len(st) > 3 and st[0] == "S" else ""),
-            **{k: m[k] for k in ("w", "h", "lapvar", "mean_lum", "p01", "p99", "over_frac", "dark_frac")},
+            **{k: m[k] for k in ("w", "h", "lapvar", "p01", "p99", "dark_frac",
+                                 "mean_luma", "overexposed_frac", "mean_lum", "over_frac")},
         })
 
     with open(os.path.join(args.out, "labels.csv"), "w", newline="", encoding="utf-8") as fh:
