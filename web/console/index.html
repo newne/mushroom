@@ -12,7 +12,7 @@
      深色补丁（缩略图底板、日志分隔线、进度条底槽、曲线图、时间轴失败标记）。
      现在只保留"浅色块没有重新定义、且自身不带颜色"的规则；两遍定义并存的维护陷阱解除。 */
   *{box-sizing:border-box}
-  .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 12px;border-radius:999px;font-size:13px;border:1px solid var(--line);font-weight:600;background:var(--soft);transition:all .2s ease}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 12px;border-radius:var(--r-pill);font-size:13px;border:1px solid var(--line);font-weight:600;background:var(--soft);transition:all .2s ease}
   .pill::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor;display:inline-block;opacity:.85}
   .pill.idle{color:var(--dim)} .pill.run{color:var(--accent);border-color:var(--accent)}
   .pill.run::before{animation:pill-pulse 1.4s infinite}
@@ -22,11 +22,11 @@
   .kv{display:grid;grid-template-columns:auto 1fr;gap:5px 12px;font-size:13.5px}
   .kv b{color:var(--dim);font-weight:500}
   .mono{font-family:ui-monospace,Consolas,monospace}
-  .stn{position:relative;display:grid;grid-template-columns:minmax(0,1fr);gap:3px;padding:8px 10px;border-radius:6px;cursor:pointer;
+  .stn{position:relative;display:grid;grid-template-columns:minmax(0,1fr);gap:3px;padding:8px 10px;border-radius:var(--r-sm);cursor:pointer;
       font-size:13px;border:1px solid transparent;text-align:left;transition:all .15s ease}
   .stn .cur{color:var(--accent);font-weight:700}
   .imgs{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
-  .im{background:var(--soft);border:1px solid var(--line);border-radius:6px;overflow:hidden;font-size:12px;box-shadow:0 1px 2px rgba(15,23,42,.03);transition:border-color .15s}
+  .im{background:var(--soft);border:1px solid var(--line);border-radius:var(--r-sm);overflow:hidden;font-size:12px;box-shadow:0 1px 2px rgba(15,23,42,.03);transition:border-color .15s}
   .im:hover{border-color:#b5ccdf}
   .im img{width:100%;height:110px;object-fit:cover;display:block;background:var(--soft)}
   .im .m{padding:6px 8px;color:var(--dim);line-height:1.4} .im .m b{color:var(--fg);font-weight:600}
@@ -48,27 +48,27 @@
   #log div.log-ok,#log2 div.log-ok{color:var(--ok)}
   .log-ts{color:var(--dim);opacity:.85;margin-right:4px}
   .empty{color:var(--dim);font-size:13px;padding:8px 0}
-  .bar{height:8px;background:var(--soft);border-radius:4px;overflow:hidden;margin-top:6px}
+  .bar{height:8px;background:var(--soft);border-radius:var(--r-xs);overflow:hidden;margin-top:6px}
   .bar i{display:block;height:100%;background:var(--accent);transition:width .3s ease}
   /* ---- 操作区（手动控制）：急停常驻右栏顶部，不随滚动隐藏（ADR-0004/0016）---- */
   .estopcard{position:sticky;z-index:4}
   /* 44px 最小点击高度是现场要求：只写在基础块里，浅色块不重复（重复两遍必漂移） */
-  button{font:inherit;padding:9px 12px;min-height:44px;cursor:pointer;border-radius:6px;transition:background .15s ease,border-color .15s ease,box-shadow .15s ease,transform .06s ease}
+  button{font:inherit;padding:9px 12px;min-height:44px;cursor:pointer;border-radius:var(--r-sm);transition:background .15s ease,border-color .15s ease,box-shadow .15s ease,transform .06s ease}
   button:active:not(:disabled){transform:translateY(1px)}
-  input,select{font:inherit;padding:9px 10px;min-height:44px;width:100%;border-radius:6px;transition:border-color .15s ease,box-shadow .15s ease}
+  input,select{font:inherit;padding:9px 10px;min-height:44px;width:100%;border-radius:var(--r-sm);transition:border-color .15s ease,box-shadow .15s ease}
   input.bad{border-color:var(--bad)!important;color:var(--bad)!important;background:#fff5f5}
   .row{display:flex;gap:8px;align-items:center;margin:6px 0}
   .row>*{flex:1}
   .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:6px 0}
   .grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin:6px 0}
   .lbl{color:var(--dim);font-size:12px;font-weight:500;margin:10px 0 3px;clear:both}
-  #opmsg{font-size:13px;padding:9px 12px;border-radius:6px;margin-top:8px;display:none;font-weight:500;line-height:1.45}
+  #opmsg{font-size:13px;padding:9px 12px;border-radius:var(--r-sm);margin-top:8px;display:none;font-weight:500;line-height:1.45}
   #sessionline{font-size:13px;color:var(--dim);line-height:1.45}
-  .tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;
+  .tag{display:inline-block;padding:2px 8px;border-radius:var(--r-pill);font-size:12px;
        border:1px solid var(--line);color:var(--dim)}
   .tag.on{color:var(--ok);border-color:var(--ok);background:var(--ok-soft)}
   .tag.bad{color:var(--bad);border-color:var(--bad);background:var(--bad-soft)}
-  .seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--soft);padding:2px;gap:2px}
+  .seg{display:inline-flex;border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden;background:var(--soft);padding:2px;gap:2px}
   .tlhead{padding:6px 0 2px;color:var(--dim);font-size:12px;border-bottom:1px solid var(--line)}
   .tl .im{cursor:pointer}
   .tl .im.sel{outline:2px solid var(--accent);outline-offset:1px}
@@ -77,7 +77,7 @@
      并用 tabular-nums 对齐数字——现场看的是"第几轮 / 多少帧"，晃动会读错。 */
   .roundnav{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:2px 0 8px}
   .navgrp{display:inline-flex;align-items:center;gap:6px;background:var(--soft);
-          border:1px solid var(--line);border-radius:10px;padding:4px 6px}
+          border:1px solid var(--line);border-radius:var(--r-lg);padding:4px 6px}
   .navlbl{font-size:11.5px;color:var(--dim);font-weight:600;letter-spacing:.04em}
   .navgrp button{min-height:34px;padding:5px 11px;font-size:12.5px;background:var(--panel)}
   .navgrp button:disabled{opacity:.45;cursor:not-allowed}
@@ -120,7 +120,7 @@
   .cmphead .cmpmeta{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
   .cmpstrip{display:grid;gap:8px;padding:2px 0 4px;
     grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
-  .cmpstrip .cmp{display:block;padding:4px;border:1px solid var(--line);border-radius:8px;
+  .cmpstrip .cmp{display:block;padding:4px;border:1px solid var(--line);border-radius:var(--r-md);
     background:var(--soft);cursor:pointer;text-align:left}
   .cmpstrip .cmp:hover{border-color:#b5ccdf;box-shadow:0 1px 4px rgba(15,23,42,.08)}
   .cmpstrip .cmp.sel{outline:2px solid var(--accent);outline-offset:-2px}
@@ -135,12 +135,12 @@
   .cmpstrip .cmp-note.bad{color:var(--bad)}
   .cmpstrip .cmp-note.warn{color:var(--warn)}
   /* ---- 大图查看器 ---- */
-  .viewer{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:8px;
+  .viewer{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:var(--r-md);
           display:flex;align-items:center;justify-content:center;cursor:grab}
   .viewer.dragging{cursor:grabbing}
   .viewer img{max-width:100%;max-height:100%;transition:transform .08s linear;
               transform-origin:center center;user-select:none;-webkit-user-drag:none}
-  .viewer .hint{position:absolute;left:10px;bottom:8px;font-size:12px;color:rgba(255,255,255,.8);background:rgba(15,23,42,.7);padding:2px 8px;border-radius:4px;backdrop-filter:blur(4px)}
+  .viewer .hint{position:absolute;left:10px;bottom:8px;font-size:12px;color:rgba(255,255,255,.8);background:rgba(15,23,42,.7);padding:2px 8px;border-radius:var(--r-xs);backdrop-filter:blur(4px)}
   table.meas{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px}
   table.meas th,table.meas td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left}
   table.meas th{color:var(--dim);font-weight:600;background:var(--soft)}
@@ -164,7 +164,7 @@
   @media (max-width:760px){ main.histmode{grid-template-columns:minmax(0,1fr)} }
   /* 完整图像在**拼图上面**、吃满整栏（2026-10-13 用户第二轮口径：里面/旁边都还是太小）。
      图像区给足高度：clamp 下限 260px、上限 62vh——现场要看清菌盖边缘的细节。 */
-  .detailpane{border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--panel);
+  .detailpane{border:1px solid var(--line);border-radius:var(--r-lg);padding:8px;background:var(--panel);
               margin:2px 0 12px}
   .detailpane .dphead{display:flex;justify-content:space-between;gap:8px;font-size:12px;
                       color:var(--dim);padding:0 2px 6px;font-variant-numeric:tabular-nums}
@@ -175,7 +175,7 @@
   /* 环境模式：先给结论（KPI 磁贴），再给曲线，最后才翻明细表——
      现场扫一眼要拿到"这段时间怎么样"，不该让人从表格里自己找（2026-10-13）。 */
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:8px;padding:2px 0 10px}
-  .kpi{border:1px solid var(--line);border-radius:10px;padding:8px 10px;
+  .kpi{border:1px solid var(--line);border-radius:var(--r-lg);padding:8px 10px;
        background:linear-gradient(180deg,var(--panel),var(--soft))}
   .kpi .k{font-size:11px;color:var(--dim);letter-spacing:.03em}
   .kpi .v{font-size:20px;font-weight:650;line-height:1.2;font-variant-numeric:tabular-nums}
@@ -222,7 +222,7 @@
       .pvbody{display:flex;flex-direction:column;align-items:center;gap:0}
       .pvleft{flex:0 0 auto;min-width:0;width:100%;display:flex;flex-direction:column;align-items:center}
       .pvwrap{position:relative;width:min(100%, var(--pv-max-w));aspect-ratio:var(--pv-k);
-          border:1px solid #c6d1dc;border-radius:8px;overflow:hidden;display:flex;
+          border:1px solid #c6d1dc;border-radius:var(--r-md);overflow:hidden;display:flex;
           align-items:center;justify-content:center;background:#141c26;box-shadow:inset 0 0 0 1px rgba(255,255,255,.05),0 2px 8px rgba(15,23,42,.06)}
   .pvwrap img{width:100%;height:100%;object-fit:contain;display:none}
   /* 未开流时的框内占位（状态写进画面框，别只留一块黑）。开流后 .pv-idle 被 hidden 掉。 */
@@ -263,6 +263,10 @@
         /* 键盘焦点环：只对键盘用户显示（鼠标点击不出现），深浅色都够醒目。
            `:focus-visible` 而不是 `:focus`——后者会在鼠标点按钮后也留一圈，现场反而像卡住。 */
         --focus-ring:0 0 0 3px rgba(31,111,235,.35);
+        /* 圆角尺度（2026-10-13 结构性批次）：只把**与原值完全相等**的台阶收进来，
+           所以这一批的渲染结果不变；2/3/5/7/9/14/20px 是历史欠账，登记在回归白名单里，
+           由棘轮断言挡住"再新增一个值"。 */
+        --r-xs:4px;--r-sm:6px;--r-md:8px;--r-lg:10px;--r-pill:999px;
         /* 实时画面：--pv-k = **预览流当前档位实际输出帧**的宽高比 1280/718
            （`PREVIEW_SCALE=1280`；`scale=1280:-2` 从相机原生 2880×1616 偶数取整得 718）。
            2026-09-21 试过"与档位解耦、恒写相机原生 2880/1616"——三档只差 <0.1% 不假，
@@ -308,7 +312,7 @@
   main>section:first-child>.card{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column}
   #list{flex:1 1 auto;min-height:0;overflow-y:auto;padding-right:2px}
   .station-tools{flex:0 0 auto;display:grid;gap:8px;padding:8px 0}
-  .station-tools input{min-height:44px;padding:7px 10px;border-radius:6px}
+  .station-tools input{min-height:44px;padding:7px 10px;border-radius:var(--r-sm)}
   .station-filters{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
   .station-filters button{min-height:44px;padding:4px 2px;font-size:11px;white-space:nowrap;border-radius:5px}
   .station-filters button[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--accent);
@@ -332,10 +336,10 @@
      层号会指在错误的带上。现在层带/层号/横线都由 mapLayerBands() 从实际坐标推导，
      图高也要足够分得出层界。 */
   #map{width:100%;height:auto;aspect-ratio:92/23.8;background:linear-gradient(180deg,#ffffff,#f9fbfd);border:1px solid var(--line);
-       border-radius:8px;cursor:crosshair;touch-action:manipulation;display:block;box-shadow:inset 0 1px 2px rgba(0,0,0,.02);transition:border-color .15s}
+       border-radius:var(--r-md);cursor:crosshair;touch-action:manipulation;display:block;box-shadow:inset 0 1px 2px rgba(0,0,0,.02);transition:border-color .15s}
   #map:hover{border-color:#b5ccdf}
   .mapcap{display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:12px;color:var(--dim);margin-top:8px}
-  .mapcap .mono{white-space:nowrap;padding:2px 8px;background:var(--soft);border-radius:4px;border:1px solid var(--line)}
+  .mapcap .mono{white-space:nowrap;padding:2px 8px;background:var(--soft);border-radius:var(--r-xs);border:1px solid var(--line)}
   /* 加湿保持：一行四个控件，按钮挤一点（min-height 44 的全局值在这里太占地方） */
   .holdrow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}
   .holdrow button{min-height:34px;padding:6px 10px;font-size:13px}
@@ -348,7 +352,7 @@
   .stn .stnsum{display:block;margin-top:1px;font-size:11px;color:var(--dim);font-weight:400}
   .stn .stnbadge{display:inline-block;padding:1px 5px;background:#fee2e2;border-radius:3px;color:var(--bad);font-weight:600;font-style:normal}
   .layer{font-weight:600;letter-spacing:.04em;color:var(--dim);padding-top:10px}
-  button{color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:6px;box-shadow:0 1px 1px rgba(24,38,52,.03)}
+  button{color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:var(--r-sm);box-shadow:0 1px 1px rgba(24,38,52,.03)}
   button:hover:not(:disabled){background:var(--soft);border-color:#b9c8d8}
   button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
   button.primary:hover:not(:disabled){background:#185fc7}
@@ -406,9 +410,9 @@
       background:radial-gradient(circle,var(--accent) 0 3px,transparent 4px),var(--soft);
       color:var(--accent);font:600 9px ui-monospace,Consolas,monospace;box-shadow:0 1px 3px rgba(0,0,0,.06)}
   /* 键盘提示里的按键（点动那行的 <kbd>） */
-  kbd{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:4px;padding:1px 5px;background:var(--soft);font-weight:500;box-shadow:0 1px 1px rgba(0,0,0,.05)}
+  kbd{font:inherit;font-size:12px;border:1px solid var(--line);border-radius:var(--r-xs);padding:1px 5px;background:var(--soft);font-weight:500;box-shadow:0 1px 1px rgba(0,0,0,.05)}
   .seg{background:var(--soft);border-color:var(--line);padding:2px}
-  .seg button{color:var(--dim);min-height:34px;border-radius:6px}
+  .seg button{color:var(--dim);min-height:34px;border-radius:var(--r-sm)}
   .seg button.on{background:var(--panel);color:var(--fg);font-weight:600;box-shadow:var(--shadow)}
   /* 历史模式三张卡按 DOM 顺序排（2026-09-20 review P1-2）：原先靠 grid-row 把"大图"提到
      第一行，于是 Tab 焦点先经过时间轴、读屏大纲顺序也和眼睛看到的相反。现在 DOM 顺序
@@ -431,7 +435,7 @@
   /* ---- 2026-09-20 review 新增组件 ---- */
   /* P2-5 页内确认（取代原生 confirm()：同样的二次确认语义，样式不割裂、不阻塞主线程） */
   .confirm-pop{position:fixed;left:50%;top:16%;transform:translateX(-50%);z-index:30;max-width:440px;
-               background:var(--panel);border:1px solid var(--line);border-radius:10px;
+               background:var(--panel);border:1px solid var(--line);border-radius:var(--r-lg);
                box-shadow:0 12px 40px rgba(24,38,52,.22);padding:16px 18px}
   .confirm-pop p{margin:0 0 14px;font-size:14px;line-height:1.55;white-space:pre-line;font-weight:500}
   .confirm-pop .row{margin:0}

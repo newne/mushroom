@@ -1803,6 +1803,39 @@ await sleep(150);
     (styleCss.match(/:root\{/g) || []).length === 1,
     String((styleCss.match(/:root\{/g) || []).length));
 
+  // ---- 13c. 尺度棘轮：只挡"再新增一个值"，不要求一次改完（2026-10-13 结构性批次）----
+  // 圆角/间距历史上各漂出过 12 种取值。这一批先把**与原值完全相等**的台阶收进 token
+  // （渲染结果不变），其余登记为白名单欠账；本断言的职责是**防止继续漂**——
+  // 谁再加一个 11px 圆角或 7px padding，就会红，而不是等到哪天没人看得出哪里不对。
+  const RADIUS_DEBT = [2, 3, 5, 7, 9, 14, 20];          // 尚未收敛的历史值（登记在案）
+  // 间距登记表。里面有两个**别顺手改掉**的：
+  //   `padding-left:7px`（选中站位的 3px 左边框位移补偿，改了文字会跳）、
+  //   `padding-left:42px`（坐标输入框给单位徽标留位，不是随手写的）。
+  // 余下的 11/18 是窄按钮与弹窗的横向/整体留白。
+  const SPACING_DEBT = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 14, 16, 18, 42];
+  const pxIn = decl => [...decl.matchAll(/([0-9]+)px/g)].map(m => Number(m[1]));
+  const radiusDecls = [...styleCss.matchAll(/border-radius:\s*([^;}]+)/g)].map(m => m[1]);
+  const badRadius = [];
+  for (const d of radiusDecls) {
+    if (/var\(--r-/.test(d)) continue;                    // 已 token 化
+    for (const n of pxIn(d)) if (!RADIUS_DEBT.includes(n)) badRadius.push(n);
+  }
+  check('圆角棘轮：新值必须是 token 或已登记的欠账（不许再漂一个新数值）',
+    badRadius.length === 0, badRadius.join(',') || 'ok');
+  const radiusTokens = [...styleCss.matchAll(/(--r-[a-z]+)\s*:/g)].map(m => m[1]);
+  const unusedRadiusTokens = radiusTokens.filter(t => !new RegExp('var\\(' + t + '\\)').test(styleCss));
+  check('圆角 token 都被真的用上了（不留死 token）',
+    radiusTokens.length >= 5 && unusedRadiusTokens.length === 0,
+    '定义 ' + radiusTokens.length + ' 个，未使用：' + (unusedRadiusTokens.join(',') || '无'));
+  const padDecls = [...styleCss.matchAll(/padding(?:-[a-z]+)?:\s*([^;}]+)/g)].map(m => m[1]);
+  const badPad = [];
+  for (const d of padDecls) {
+    if (/var\(/.test(d)) continue;                        // 用 token 的不管
+    for (const n of pxIn(d)) if (!SPACING_DEBT.includes(n)) badPad.push(n);
+  }
+  check('间距棘轮：新值必须在登记的尺度内（间距 token 化留待下一批，但先挡新增）',
+    badPad.length === 0, [...new Set(badPad)].join(',') || 'ok');
+
   // ---- 14. 契约断言：假后端的字段集必须与**真后端**的响应形状一致（2026-10-13 加）----
   // 为什么非有不可：页面读 `p.mean_len_mm / p.mean_cap_mm` 读了很久，而 `/growth` 从来
   // 没有这两列（它给的是 delta 行）——真机上曲线一直是空的、回归却一直绿，因为
