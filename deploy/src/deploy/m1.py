@@ -47,6 +47,8 @@ from patrol.sync import PROD_INGEST_URL, SyncClient
 
 from deploy.framing_wire import build as build_framing
 from deploy.framing_wire import make_apply_trim
+from deploy.measure_wire import build as build_measure
+from deploy.measure_wire import room_id_is_usable
 from deploy.manual import ManualChannel
 from deploy.transport import HttpxTransport, host_port, split_host_port
 
@@ -240,6 +242,16 @@ def build_parser() -> argparse.ArgumentParser:
                     choices=(1.0, -1.0),
                     help="图像 y 正方向对应的 Z 方向（默认按机器约定派生：本机 Z 向下为正 ⇒ +1）")
 
+    # 测量接线（票 12）：默认 off——这是改生产行为。开了之后每轮对每帧跑 baseline 检出，
+    # 产 `kind=measurement` 行（线格式与质量口径见 `measure/**` 与票 11/12）。
+    ap.add_argument("--measure", choices=("on", "off"), default="off",
+                    help="测量接线：on=每轮对每帧跑 baseline 检出并写 measurements 行")
+    ap.add_argument("--measure-blur-threshold", type=float, default=100.0,
+                    help="模糊门阈值（真机帧 S306 实测 lapvar=70.8 < 100 ⇒ 会拒真机帧；"
+                         "阈值标定前的临时旋钮，见票 12 Comments）")
+    ap.add_argument("--measure-emit-empty", action="store_true",
+                    help="失败帧也产一行 n=0 + no_detection（默认不产行）")
+
     ap.add_argument("--ip", default=CONTROLLER_IP, help="控制器 IP")
     ap.add_argument("--port", type=int, default=CONTROLLER_PORT, help="控制器端口")
     ap.add_argument("--device", type=int, default=DEVICE_ID, help="设备 ID")
@@ -333,6 +345,12 @@ def main(argv: list[str] | None = None) -> int:
     # 但**必须让 `--check` 也能看到结论**——否则运维以为开了，实际每轮都在走推导坐标。
     framing_wire = build_framing(args, log=log)
     log(framing_wire.reason)
+
+    # 测量接线（票 12）：和微调同一条判定路——起不来只记一行日志，不拦巡检。
+    # `room_id` 在**装配时固定**（`RoundReport` 里没有库房维度），与准入门禁同源。
+    measure_wire = build_measure(
+        args, room_id=(room.room_id if room is not None else ""), log=log)
+    log(measure_wire.reason)
     stations = [s.with_trim(clamp_trim((s.trim_y, s.trim_z))) for s in stations]
     apply_trim = make_apply_trim(stations, args.stations, log=log)
 
@@ -344,6 +362,13 @@ def main(argv: list[str] | None = None) -> int:
         log(f"预检通过（{len(stations)} 站位，摄入端点 {args.ingest}，"
             f"同步{'禁用' if args.no_sync else '启用'}；今日{gate}）")
         return 0
+
+    # 测量开了、但库房号不可用 ⇒ **拒绝启动**（票 12 §3，fail-closed）：缺 room_id 的行
+    # 会拿 `unset` 当幂等键，等于给数据贴了个假房间，污染整张区间表。宁可今天不测量。
+    if args.measure == "on" and not measure_wire.enabled and not room_id_is_usable(
+            room.room_id if room is not None else ""):
+        log("测量：--measure on 但 room.yaml 里没有可用的 room_id —— 拒绝启动（fail-closed）")
+        return 2
 
     # ---------- 装配依赖 ----------
     capture = make_capture(args)
@@ -367,6 +392,9 @@ def main(argv: list[str] | None = None) -> int:
         # 判定，天数是错的，而它自己不知道。
         room_state_path=args.room,
         framing=framing_wire.hook,
+        # 测量接线（票 12）：`measure_fn=None` 时 daemon 不写任何 measurement 行（daemon 判空）。
+        # 这里传的是**装配时造好一次**的闭包（`room_id`/`mm_per_px` 已固定），不是每轮重建。
+        measure_fn=measure_wire.fn,
         apply_trim=apply_trim,
         # 急停：console 按下 → 标志文件 → 这里每等一步看一眼 → 正在跑的那一轮被打断。
         abort=make_estop_check(args.cmd_dir, disabled=args.no_estop, log=log),
