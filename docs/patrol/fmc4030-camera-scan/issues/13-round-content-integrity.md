@@ -134,3 +134,43 @@ cd D:\code\mushroom\patrol-workspace
   代码与测试随本票一起提交。**未连生产、未改历史数据**。
 - 本票**修正**了"整轮抓到同一张"这个读法：正确说法是"**从第 14 帧（S211）起**开始复制"，
   前 13 帧（S101–S112、S212）是正常帧。
+- 2026-10-13 巡检手：**真因由 step code 挖出并已在服务侧实现**（`4196b66`，
+  票 `imaging-quality/issues/06-duplicate-frame-marking.md`）：`_pool_capture_locked`
+  丢了 `wait_play_data` 的返回值，而周期性的 `PLAY_INFO` 就能点亮它 ⇒ 返回 True
+  **不证明新帧到达**；底层视频冻结时 `MediaSnapImageEx` 把解码器里那一帧**反复写出来**，
+  文件就绪、上传成功、`success=True`，**客户端看不出来**（站位名各不相同、巡逻侧库内零网络调用）。
+  离线复现与线上形状一致（前 14 帧正常、之后同字节、`duplicate_streak` 涨到 35、48 站全 success）。
+  **两套指纹互补**：服务侧实时指纹（当场发现）+ 我这边事后复核（发现服务侧没报的）。
+
+### §3.1 轮次语义落地（Chief 2026-10-13 裁：票 06 的 B 方案 + 单独计数）
+
+| 项 | 实现 |
+| --- | --- |
+| 服务侧字段进元数据 | `orchestrator.service_integrity()`：`image_sha256` → **`content_sha256`**（与事后重算同义，**一个字段名**，不造第二套）；`same_as_previous` / `duplicate_streak` 原样带出；`same_as_previous` 为真时直接标 `frame_dup` + `dup_group` |
+| 手动抓拍 | `manual_exec` 同样带这三个字段，`same_as_previous` 为真时**当场打警告**（仍入库） |
+| `n_results` 语义 | = **成功取图** = 帧数 − 重复帧数 ⇒ `ok=1` 不再意味着"48 站都拍到了自己的图" |
+| 单独计数 | 轮行加 `n_duplicate` 与 `n_frames_recorded`（账说全，不藏东西） |
+| 不撞失败计数 | 重复帧**不**计入 `MAX_CONSECUTIVE_FAILURES`、**不中止**整轮（重复不是 `CaptureError`） |
+| 帧照旧入库 | 48 帧全落索引（留档 + 标记），由下游按 `frame_dup`/`suspect_duplicate` 排除 |
+| 判据 | 同一指纹出现在 **≥2 个不同站位**，或服务侧明说 `same_as_previous` |
+| 事后复核 | `--verify-content` 保留（默认关）；两组指纹合并成同一份 `dup_groups` |
+
+**验收回放**：`patrol/tests/test_daemon_sync.py::test_daemon_replays_the_1009_round_shape`
+——48 站、前 13 不同、之后 35 同字节 ⇒ `n_results=13`、`n_duplicate=35`、`n_frames_recorded=48`、
+`suspect_duplicate=true`、`n_failures=0`、**未中止**、48 帧全部入库（35 帧带 `frame_dup`）。
+
+### §3.2 需要 analysis 补的列（跨域，环境官）
+
+已有的列（`frame_dup`/`dup_group`/`content_sha256`/`suspect_duplicate`/`dup_groups`/
+`content_check_error`）够用；§3.1 新增的**三个审计字段**还没有列，现在发出去会被
+`IMAGE_FIELDS`/`ROUND_FIELDS` 静默忽略（不会报错，但库里看不到）：
+
+| 表 | 字段 | 含义 |
+| --- | --- | --- |
+| `images` | `same_as_previous` | 服务侧当场说"与上一张同字节" |
+| `images` | `duplicate_streak` | 连续第几份相同（事故那轮涨到 35） |
+| `rounds` | `n_duplicate` / `n_frames_recorded` | 单独计数：重复帧数 / 实际写盘帧数 |
+
+另外**一个阻塞仍未解**：`rounds.dup_groups` 是 TEXT 列而 ingest 原样绑定**列表** ⇒
+`sqlite3.ProgrammingError: type 'list' is not supported`（`analysis/src/analysis/api.py:139-146`、
+`db.py:507`）；建议对该列做 `json.dumps`。

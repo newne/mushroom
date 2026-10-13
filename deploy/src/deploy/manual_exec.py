@@ -44,6 +44,7 @@ from patrol.fmc import (
 from patrol.fmc.status import MachineStatus
 from patrol.framing import DEFAULT_MAX_TOTAL_MM
 from patrol.motion_profile import HOME_DIR_NEGATIVE, M1
+from patrol.orchestrator import service_integrity
 from patrol.stations import Station, image_object_name, nearest_station
 
 from deploy.manual import Command, ManualChannel, estop_allows
@@ -420,6 +421,14 @@ class ManualExecutor:
             self.log(f"{station.id} 警告：抓拍服务没回对象名，索引里是**请求名兜底**"
                      f"（MinIO 里可能没有这个 key）：{object_name}")
         cloud_url = _shot_field(shot, "cloud_url")
+        # 服务侧实时指纹（票 06）：`image_sha256` → `content_sha256`（同一件事）；
+        # `same_as_previous` 为真说明相机抽风/流冻结，这一张可能是**陈旧帧**——当场喊一声，
+        # 但**照旧入库**（留帧 + 标记，不静默丢）。
+        integrity = service_integrity(shot)
+        if integrity.get("same_as_previous"):
+            self.log(f"{station.id} 警告：抓拍服务回报**与上一张同字节**"
+                     f"（duplicate_streak={integrity.get('duplicate_streak')}）"
+                     f"——这一帧标 frame_dup，别当成本站的新图")
         self.append_index({
             "kind": "image_index",
             "ts": ts.isoformat(timespec="seconds"),
@@ -433,6 +442,7 @@ class ManualExecutor:
             "yz": [round(y, 3), round(z, 3)],
             "object_name": stored_name,
             "object_name_source": object_name_source,
+            **integrity,
             "cloud_url": cloud_url,
             "manual": True,     # 额外字段：prod 的 images 表只取约定列，多的会被忽略
             "lamp_on": not no_lamp,

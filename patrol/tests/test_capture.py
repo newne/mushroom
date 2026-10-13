@@ -256,6 +256,39 @@ def test_object_name_source_flags_the_request_name_fallback():
     assert any("警告" in line for line in logs), "兜底必须当场喊一声"
 
 
+def test_capture_meta_carries_the_service_side_fingerprint():
+    """票 06：服务侧**实时**指纹（`image_sha256`/`same_as_previous`/`duplicate_streak`）落元数据。
+
+    `image_sha256` 与部署侧事后重算的 `content_sha256` 同义 ⇒ 统一一个字段名，不造第二套。
+    """
+    def transport(url, *, params=None, body=None) -> dict:
+        return {"success": True, "filename": params["filename"] + ".jpg",
+                "cloud_url": "http://minio/x.jpg",
+                "image_sha256": "b" * 64, "same_as_previous": True,
+                "duplicate_streak": 7}
+
+    st = Station(id="S01", box_id="B01", y=0.0, z=0.0, camera_ip="1.2.3.4")
+    sc = StationCapture(ScriptedFmc(), CaptureClient(transport=transport),
+                        decay_s=0.0, settle_s=0.0, sleep=lambda s: None)
+    meta = sc.run(st, ts=datetime(2026, 8, 30, 8, 0, 0))
+
+    assert meta["content_sha256"] == "b" * 64
+    assert meta["same_as_previous"] is True and meta["duplicate_streak"] == 7
+    assert meta["frame_dup"] is True and meta["dup_group"] == "b" * 12
+
+
+def test_capture_meta_has_no_integrity_fields_when_service_does_not_report_them():
+    """旧版服务不上报这些字段 ⇒ 元数据里**不该凭空多出**（行为与从前一致）。"""
+    def transport(url, *, params=None, body=None) -> dict:
+        return ok_transport(url, params=params)
+
+    st = Station(id="S01", box_id="B01", y=0.0, z=0.0, camera_ip="1.2.3.4")
+    sc = StationCapture(ScriptedFmc(), CaptureClient(transport=transport),
+                        decay_s=0.0, settle_s=0.0, sleep=lambda s: None)
+    meta = sc.run(st, ts=datetime(2026, 8, 30, 8, 0, 0))
+    assert not {"content_sha256", "same_as_previous", "duplicate_streak", "frame_dup"} & set(meta)
+
+
 def test_capture_station_lamp_off_on_failure():
     fmc = ScriptedFmc()
 

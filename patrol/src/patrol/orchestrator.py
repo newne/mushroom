@@ -26,6 +26,31 @@ from patrol.motion_profile import M1
 from patrol.stations import Station, image_object_name
 
 
+def service_integrity(result) -> dict:
+    """采图服务响应里的**实时**内容指纹（票 06）→ 索引字段。
+
+    `image_sha256` 与部署侧事后重算的 `content_sha256` 是**同一件事**（入库字节的
+    sha256），所以统一用一个字段名，不造第二套；`same_as_previous` / `duplicate_streak`
+    是诊断线索，原样带出来。服务没上报这些字段（旧版服务）时返回空 dict —— 行为与从前一致。
+    """
+    raw = getattr(result, "raw", None)
+    raw = raw if isinstance(raw, dict) else {}
+    out: dict = {}
+    sha = str(raw.get("image_sha256") or "").strip()
+    if sha:
+        out["content_sha256"] = sha
+        if raw.get("same_as_previous"):
+            # 服务侧当场说"与上一张同一份字节" ⇒ 直接标重复（不必等事后复核）
+            out["frame_dup"] = True
+            out["dup_group"] = sha[:12]
+    if "same_as_previous" in raw:
+        out["same_as_previous"] = bool(raw.get("same_as_previous"))
+    streak = raw.get("duplicate_streak")
+    if isinstance(streak, (int, float)):
+        out["duplicate_streak"] = int(streak)
+    return out
+
+
 @dataclass
 class FramingHook:
     """把"图像 → 偏移"和"采图结果 → 像素"两件事注入进来。
@@ -167,6 +192,9 @@ class StationCapture:
             **({"imaging_profile": station.imaging_profile} if station.imaging_profile else {}),
             "object_name": result.object_name,
             "object_name_source": object_name_source,
+            # 服务侧实时指纹（票 06）：`image_sha256` → `content_sha256`（同一件事，
+            # 一个字段名）；`same_as_previous`/`duplicate_streak` 原样带出来供审计。
+            **service_integrity(result),
             "cloud_url": result.cloud_url,
             # 单站耗时是整轮时长的唯一可分解口径（采图实测 5.2 s 是大头）
             "elapsed_s": round(time.monotonic() - t0, 2),

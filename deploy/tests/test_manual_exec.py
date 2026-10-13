@@ -123,6 +123,19 @@ class NoNameCapture(FakeCapture):
                              raw={"success": True})
 
 
+class StaleFrameCapture(FakeCapture):
+    """服务侧**实话说**这一张与上一张同字节（票 06 的 `same_as_previous`）。"""
+
+    def capture(self, *, ip, user=None, pwd=None, filename):
+        self.shots.append({"ip": ip, "filename": filename})
+        return CaptureResult(
+            object_name=f"{filename}.jpg", file_path=None,
+            cloud_url=f"http://minio:9000/mogu/{filename}.jpg",
+            raw={"success": True, "filename": f"{filename}.jpg",
+                 "image_sha256": "c" * 64, "same_as_previous": True,
+                 "duplicate_streak": 35})
+
+
 def make(tmp_path, *, fmc=None, capture=None, stations=STATIONS, **kw):
     channel = ManualChannel(str(tmp_path), now=lambda: NOW)
     fmc = fmc if fmc is not None else FakeFmc()
@@ -404,6 +417,21 @@ def test_capture_index_flags_the_request_name_fallback(tmp_path):
     assert row["object_name_source"] == "request"
     assert row["object_name"].endswith("B105_S105_top45_100000"), "兜底用的是请求名"
     assert any("警告" in line for line in logs), "兜底必须当场喊一声"
+
+
+def test_capture_index_carries_the_service_fingerprint_and_warns(tmp_path):
+    """票 06：服务侧说"与上一张同字节" ⇒ 索引带指纹 + `frame_dup`，并**当场警告**（仍入库）。"""
+    capture = StaleFrameCapture()
+    channel, fmc, executor, rows, logs = make(tmp_path, capture=capture)
+    fmc.pos = (505.0, -50.0)
+    _cmd, res = run(channel, executor, "capture", {"station_id": "s105"})
+
+    assert res.ok is True
+    (row,) = rows
+    assert row["content_sha256"] == "c" * 64
+    assert row["same_as_previous"] is True and row["duplicate_streak"] == 35
+    assert row["frame_dup"] is True and row["dup_group"] == "c" * 12
+    assert any("同字节" in line for line in logs), "陈旧帧必须当场喊一声"
 
 
 def test_capture_index_keeps_the_key_and_url_the_service_returned(tmp_path):

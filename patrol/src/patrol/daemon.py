@@ -216,20 +216,29 @@ class PatrolDaemon:
             self.log(f"本轮异常（{type(e).__name__}: {e}）；急停{stopped}")
             return "failed"
 
+        # 帧内容复核（票 13 + 票 06）：`ok=1` 只证明"这一站取到了文件"，证不了"取到的是
+        # 它自己那份"。2026-10-09 那轮是反例：48 帧里 **35 帧字节完全相同**（同一张陈旧
+        # 近黑帧、p99=2.0、elapsed_s 与正常站无差别），而 round 行写着 ok=1 / 48 帧 / 0 失败。
+        # 复核放在**写索引之前**，标记才跟着帧走。服务侧实时指纹与部署侧事后复核互补。
+        dup_groups, content_error = self._check_content(report.results)
+        # 轮次语义（Chief 2026-10-13 裁：票 06 的 B 方案 + 单独计数）：
+        # * 重复帧**不撞**连续失败计数、**不中止整轮**（一次链路冻结废掉整轮比坏帧更糟）；
+        # * 但**不计入"成功取图"**（`n_results`），另给 `n_duplicate`/`n_frames_recorded`
+        #   把账说全——`ok=1` 从此不再意味着"48 站都拍到了自己的图"；
+        # * 帧照旧入库（留档 + 标记），由下游按 `frame_dup`/`suspect_duplicate` 排除。
+        dup_count = sum(1 for meta in report.results if meta.get("frame_dup"))
+        n_recorded = len(report.results)
+        n_ok = n_recorded - dup_count
+
         if journal:
+            if dup_groups:
+                journal.append({"event": "content_duplicate", "groups": dup_groups})
             journal.end(
                 status="ok" if report.ok else "partial",
-                n_results=len(report.results),
+                n_results=n_ok,
                 n_failures=len(report.failures),
                 aborted=report.aborted,
             )
-
-        # 帧内容复核（票 13）：`ok=1` 只证明"这一站取到了文件"，证不了"取到的是它自己那份"。
-        # 2026-10-09 那轮是反例：48 帧里 **35 帧字节完全相同**（同一张陈旧近黑帧、p99=2.0），
-        # 而 round 行写着 ok=1 / 48 帧 / 0 失败。复核放在**写索引之前**，标记才跟着帧走。
-        dup_groups, content_error = self._check_content(report.results)
-        if journal and dup_groups:
-            journal.append({"event": "content_duplicate", "groups": dup_groups})
 
         self.store.append(
             {
@@ -237,7 +246,10 @@ class PatrolDaemon:
                 "round_id": round_id,
                 "ts": self.now().isoformat(timespec="seconds"),
                 "ok": report.ok,
-                "n_results": len(report.results),
+                # `n_results` = **成功取图**（重复帧不计入）；另两列把账补齐，不藏东西
+                "n_results": n_ok,
+                "n_duplicate": dup_count,
+                "n_frames_recorded": n_recorded,
                 "n_failures": len(report.failures),
                 "aborted": report.aborted,
             # 主动避让（如加湿保持）与故障（急停/运动失败）都置 aborted，但**原因不同**：
@@ -281,40 +293,59 @@ class PatrolDaemon:
         return "ok" if report.ok else "partial"
 
     def _check_content(self, results: list[dict]) -> tuple[list[dict], str | None]:
-        """逐帧取内容指纹，标出"同一份字节发给多个站位"（**留帧 + 标记，绝不丢帧**）。
+        """标出"同一份字节发给多个站位"（**留帧 + 标记，绝不丢帧**）。
 
-        返回 `(重复组, 错误原因)`；`content_hash is None` 时返回 `([], None)`——不查时
-        行为与从前完全一致。指纹写进帧行（`content_sha256`），命中重复的帧另加
-        `frame_dup` + `dup_group`；**判据是"同一指纹出现在 ≥2 个不同站位"**（同一站位
-        重试得到同一张不算跨站复制）。
+        两组指纹**互补，别互相替代**（票 06 结论）：
+
+        * **服务侧实时**：抓拍响应里的 `image_sha256`（落到行里的 `content_sha256`）与
+          `same_as_previous` / `duplicate_streak` —— 当场就能报，零额外网络；
+        * **部署侧事后**：`content_hash` 注入（`--verify-content` 取回重算）——
+          能发现服务侧没报的。
+
+        返回 `(重复组, 错误原因)`；没有服务侧指纹、也没注入 `content_hash` 时返回 `([], None)`。
+        判据：同一指纹出现在 **≥2 个不同站位**，或服务侧明说 `same_as_previous`。
         """
-        if self.content_hash is None or not results:
-            return [], None
-        by_hash: dict[str, list[dict]] = {}
-        for meta in results:
-            try:
-                digest = self.content_hash(meta)
-            except Exception as e:  # noqa: BLE001 - 复核失败不该毁掉一轮，但必须显式记下来
-                reason = f"{type(e).__name__}: {e}"
-                self.log(f"⚠️ 帧内容复核中断（{reason}）——本轮不做重复判定")
-                return [], reason
-            if not digest:
-                continue
-            meta["content_sha256"] = digest
-            by_hash.setdefault(digest, []).append(meta)
+        buckets: dict[str, list[dict]] = {}
+        placed: set[tuple[int, str]] = set()
+        forced = {id(m) for m in results if m.get("same_as_previous")}
+
+        def bucket(digest: str, meta: dict) -> None:
+            key = (id(meta), digest)
+            if key not in placed:
+                placed.add(key)
+                buckets.setdefault(digest, []).append(meta)
+
+        for meta in results:                      # 服务侧：行里已经带了 content_sha256
+            sha = str(meta.get("content_sha256") or "").strip()
+            if sha:
+                bucket(sha, meta)
+
+        if self.content_hash is not None:         # 部署侧事后复核
+            for meta in results:
+                try:
+                    digest = self.content_hash(meta)
+                except Exception as e:  # noqa: BLE001 - 复核失败不该毁一轮，但必须显式记下来
+                    reason = f"{type(e).__name__}: {e}"
+                    self.log(f"⚠️ 帧内容复核中断（{reason}）——本轮不做重复判定")
+                    return [], reason
+                if not digest:
+                    continue
+                meta.setdefault("content_sha256", digest)
+                bucket(digest, meta)
 
         groups: list[dict] = []
-        for digest, metas in by_hash.items():
+        for digest, metas in buckets.items():
             stations = sorted({str(m.get("station_id") or m.get("box_id") or "?") for m in metas})
-            if len(stations) < 2:
+            if len(stations) < 2 and not any(id(m) in forced for m in metas):
                 continue
             for m in metas:
                 m["frame_dup"] = True
                 m["dup_group"] = digest[:12]
             groups.append({"sha256_12": digest[:12], "n": len(metas), "stations": stations})
+
         if groups:
             self.log(f"⚠️ 本轮有 {len(groups)} 组重复帧内容（同一份字节发给多个站位）"
-                     f"——已标 frame_dup/dup_group，**不得进入长势与质量统计**")
+                     f"——已标 frame_dup/dup_group：**不计入成功取图、不得进入长势与质量统计**")
         return groups, None
 
     def _learn_trims(self, report) -> None:

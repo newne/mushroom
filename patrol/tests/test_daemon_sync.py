@@ -381,6 +381,67 @@ def test_daemon_writes_failed_station_index_row(tmp_path):
     assert "相机不在线" in idx["error"]
 
 
+class ScriptedIntegrityCapture:
+    """按服务侧实时指纹回放的假采图：前 13 站各不相同，之后同一份（10-09 事故形状）。"""
+
+    def __init__(self, *, normal: int = 13, total: int = 48):
+        self.normal, self.total, self.i = normal, total, 0
+
+    def capture(self, *, ip, user=None, pwd=None, filename):
+        from patrol.capture_client import CaptureResult
+
+        self.i += 1
+        if self.i <= self.normal:
+            sha, same, streak = f"{self.i:064d}", False, 0
+        else:
+            sha, same, streak = "a" * 64, True, self.i - self.normal
+        return CaptureResult(
+            object_name=f"{filename}.jpg", file_path=None,
+            cloud_url=f"http://minio/mogu/{filename}.jpg",
+            raw={"success": True, "filename": f"{filename}.jpg",
+                 "image_sha256": sha, "same_as_previous": same,
+                 "duplicate_streak": streak})
+
+
+def test_daemon_replays_the_1009_round_shape(tmp_path):
+    """票 06 验收：回放"前 13 站不同、之后 35 站同一份"⇒ 打标、**不丢帧、不中止整轮**。
+
+    轮次语义（Chief 2026-10-13 裁：B 方案 + 单独计数）：重复帧不计入 `n_results`（成功取图），
+    另给 `n_duplicate`/`n_frames_recorded`；**不撞** `MAX_CONSECUTIVE_FAILURES`、**不中止**整轮。
+    """
+    store = JsonlStore(str(tmp_path / "outbox.jsonl"))
+    sent: list = []
+    stations = [Station(id=f"S{i:03d}", box_id=f"B{i:03d}", y=float(i), z=0.0)
+                for i in range(1, 49)]
+
+    daemon = PatrolDaemon(
+        room_state=ALLOWED_ROOM,
+        now=_allowed_now,
+        open_fmc=lambda: commissioned_client(),
+        stations=stations,
+        capture_client=ScriptedIntegrityCapture(),
+        store=store,
+        sync=SyncClient(transport=lambda url, body=None: sent.append(body["rows"])),
+        log=lambda msg: None,
+    )
+    assert daemon.run_cycle() == "ok", "重复帧不该把整轮判成失败/中止"
+
+    rows = [r for batch in sent for r in batch]
+    idx = [r for r in rows if r["kind"] == "image_index"]
+    assert len(idx) == 48, "帧照旧入库（留档 + 标记），绝不静默丢弃"
+    assert sum(1 for r in idx if r.get("frame_dup")) == 35
+    assert sum(1 for r in idx if not r.get("frame_dup")) == 13
+
+    round_row = next(r for r in rows if r["kind"] == "round")
+    assert round_row["ok"] is True and round_row["aborted"] is False
+    assert round_row["n_failures"] == 0, "重复不是失败——不撞连续失败计数"
+    assert round_row["n_results"] == 13, "成功取图 = 48 − 35"
+    assert round_row["n_duplicate"] == 35 and round_row["n_frames_recorded"] == 48
+    assert round_row["suspect_duplicate"] is True
+    (group,) = round_row["dup_groups"]
+    assert group["n"] == 35 and len(group["stations"]) == 35
+
+
 def test_daemon_flags_frames_that_share_one_content_hash(tmp_path):
     """票 13：同一份字节发给多个站位 ⇒ 帧标 `frame_dup`、轮标 `suspect_duplicate`，**留帧不丢**。
 
