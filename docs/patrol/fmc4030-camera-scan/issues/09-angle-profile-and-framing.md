@@ -90,6 +90,20 @@ step code 的成像票 `docs/patrol/imaging-quality/issues/01-camera-imaging-qua
 
 ## Comments
 
+- 2026-10-13 巡检手：**调度侧"整轮避让"已落地**（票 09 §4 的第 1/2 条之外，Chief 批准的分工）：
+  - `patrol/src/patrol/round.py`：`PatrolRound(should_stop=…)` —— 返回非空字符串即**本轮就地停下**
+    （后面站位不再动机构），已拍到的帧保留、报告记 `aborted=True` + `abort_reason`，
+    仍安全回原位但**不再"停到第一个格点"**；逐站心跳带 `abort="hold"`。
+  - `patrol/src/patrol/daemon.py`：`should_stop` 透传；`round` 行在有原因时加 `abort_reason`
+    （区分"策略性提前收尾"与"急停/运动失败"）。
+  - `deploy/src/deploy/m1.py`：新增 `--trigger-dir`（默认读 `PATROL_TRIGGER_DIR`），
+    接到就每站读一次 `hold.json`；`patrol_serve` 把该目录透给 m1。
+    **判定读的是 console 写下的同一份保持状态**，不另造一套湿度判定。
+  - 测试：`patrol/tests/test_round.py::test_round_stops_early_on_an_avoid_signal_and_says_why`
+    （第 3 站前收到信号 ⇒ 只拍两站、回原位、不停格点）。全量 `pytest` **883 passed**。
+  - 未做（等 step code 的票）：**帧级**坏帧标记的落库与剔除（判定规则/标记生成归他，
+    落库与"坏帧不进积累数据"的执行归我）。
+
 - 2026-10-13 巡检手：**第三版**（现版）。
   - 第一版（同日早）："默认 45° 单档（定位销双位支架）"——**已作废**（那是为"同时量盖径与杆长"
     定的，用户改口径后不再成立）。
