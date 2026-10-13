@@ -159,6 +159,34 @@ def test_clean_batch_has_no_warnings(tmp_path):
     assert got["warnings"] == []
 
 
+def test_rounds_and_images_endpoints_expose_the_integrity_fields(tmp_path):
+    """出口也要有（只增不改）：库里能查、**接口能出**、页面才能标。
+
+    `dup_groups` 必须是 **list**（不是 JSON 字符串）——否则界面拿到一坨文本没法用。
+    """
+    rnd = round_row(room_id="611", suspect_duplicate=1, dup_groups=["a1b2c3d4"],
+                    n_duplicate=35, n_frames_recorded=48,
+                    content_check_error=None)
+    img = image_row(frame_dup=1, dup_group="a1b2c3d4", content_sha256="b" * 64,
+                    same_as_previous=1, duplicate_streak=35)
+    with client(tmp_path) as c:
+        c.post("/ingest", json={"rows": [rnd, img]})
+        round_out = c.get("/rounds").json()[0]
+        image_out = c.get("/images").json()[0]
+
+    assert round_out["suspect_duplicate"] == 1
+    assert round_out["dup_groups"] == ["a1b2c3d4"] and isinstance(round_out["dup_groups"], list)
+    assert round_out["n_duplicate"] == 35
+    assert round_out["n_frames_recorded"] == 48
+    assert round_out["content_check_error"] is None
+
+    assert image_out["frame_dup"] == 1
+    assert image_out["same_as_previous"] == 1
+    assert image_out["duplicate_streak"] == 35
+    assert image_out["dup_group"] == "a1b2c3d4"
+    assert image_out["content_sha256"] == "b" * 64
+
+
 # ---------- 老库就地升级 ----------
 
 
