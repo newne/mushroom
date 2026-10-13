@@ -125,12 +125,19 @@ const MEASUREMENTS = {
       quality: 'verified+no_angle_profile',
       mean_cluster_w_mm: 66.0, mean_cluster_h_mm: 49.5,
       mean_area_mm2: 4210.0, mean_projected_d_mm: 72.0 },
-    // 这一行是给「不可测 ≠ 不可用」造的例子（CONTEXT.md:62）：
-    // 近黑帧 ⇒ 菌簇量列「不可用（近黑）」；同一行的盖径/杆长列仍然是「不可测（无角度档）」
-    // —— 两个词指两件事，不能互换，也**不能整行一个说法**。
+    // 两行是给三种"空"造的对照（环境官 2026-10-13 定的优先序：先判"这帧怎么了"，
+    // 再判"这个量在角度档下不可测"——平视下几乎每行都带 no_angle_profile，
+    // 先判它会盖掉更准确的原因）：
+    //   09-11：被门拒（近黑）⇒ 所有列都该说「该帧被判不可用（近黑）」
+    //   09-12：没检出（no_detection）⇒ 所有列都该说「没检出」
     { ts: '2026-09-11T09:30:00', room_id: '611', box_id: 'B102', n: 0,
       mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
       quality: 'no_light+no_angle_profile',
+      mean_cluster_w_mm: null, mean_cluster_h_mm: null,
+      mean_area_mm2: null, mean_projected_d_mm: null },
+    { ts: '2026-09-12T09:30:00', room_id: '611', box_id: 'B102', n: 0,
+      mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
+      quality: 'no_detection+no_angle_profile',
       mean_cluster_w_mm: null, mean_cluster_h_mm: null,
       mean_area_mm2: null, mean_projected_d_mm: null },
   ],
@@ -1289,19 +1296,31 @@ await sleep(150);
     && !/\b0\s*mm/.test(T('#growthnote')), T('#growthnote').slice(0, 120));
   check('曲线区明说这两列不画曲线（换角之前）',
     T('#growthnote').includes('不画这两条曲线'), T('#growthnote').slice(0, 140));
-  // 「不可测」≠「不可用」，而且**按列判**不是按行判（CONTEXT.md:62 归一）：
-  // 假件里 09-11 那行是 no_light+no_angle_profile、所有列 NULL——
-  // 杆长列要说「不可测（无角度档）」（这个量不存在），
-  // 当天的菌簇量列要说「不可用（近黑）」（这一帧不可信）。
+  // 「不可测」≠「不可用」≠「没检出」，三种"空"必须分得开，且**优先序**由环境官钉死：
+  // ① 门拒（近黑/模糊/过曝）与 ② 没检出 排在 ③ 无角度档**之前**——平视下几乎每行都带
+  // `no_angle_profile`，先判它会盖掉"这帧到底怎么了"这个更准确的原因。
   {
-    const badRow = Array.from(document.querySelectorAll('#growthnote tr'))
-      .find(tr => (tr.textContent || '').includes('2026-09-11'));
-    check('同一行里「不可测」与「不可用」分开：杆长列不可测、菌簇量列不可用',
-      !!badRow && badRow.children[2].textContent.includes('不可测（无角度档）')
-      && badRow.children[1].textContent.includes('不可用（近黑）')
-      && !badRow.children[1].textContent.includes('不可测'),
-      badRow ? Array.from(badRow.children).map(td => td.textContent.trim()).join(' | ')
-             : '(没有 2026-09-11 那一行)');
+    const rowOf = d => Array.from(document.querySelectorAll('#growthnote tr'))
+      .find(tr => (tr.textContent || '').includes(d));
+    const cells = tr => Array.from(tr.children).map(td => td.textContent.trim());
+
+    const okRow = rowOf('2026-09-13');
+    check('有检出 + 无角度档：菌簇量列有数、杆长列「不可测（无角度档）」',
+      !!okRow && okRow.children[1].textContent.includes('70.2')
+      && okRow.children[2].textContent.includes('不可测（无角度档）'),
+      okRow ? cells(okRow).join(' | ') : '(没有 09-13 那一行)');
+
+    const gatedRow = rowOf('2026-09-11');
+    check('被门拒的帧：每一列都说「该帧被判不可用（近黑）」，不说"不可测"',
+      !!gatedRow && cells(gatedRow).slice(1, 4).every(c => c.includes('该帧被判不可用（近黑）'))
+      && !gatedRow.textContent.includes('不可测'),
+      gatedRow ? cells(gatedRow).join(' | ') : '(没有 09-11 那一行)');
+
+    const nodetRow = rowOf('2026-09-12');
+    check('没检出的帧：每一列都说「没检出」，不说"不可测"也不说"无角度档"',
+      !!nodetRow && cells(nodetRow).slice(1, 4).every(c => c === '没检出')
+      && !nodetRow.textContent.includes('不可测'),
+      nodetRow ? cells(nodetRow).join(' | ') : '(没有 09-12 那一行)');
   }
   check('速率带量纲显示（"每天" + 单位），不是裸数字',
     T('#curve').includes('/天') && /[+-]?\d+(\.\d+)? mm\/天/.test(T('#curve')),

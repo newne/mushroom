@@ -2781,6 +2781,9 @@ function unusableReason(quality){
   return bad.map(f => FLAG_TEXT[f] || f).join('、');
 }
 
+//: "被门拒"的标记：整帧没有信息量（近黑/模糊/过曝）⇒ 该帧判不可用，不是降权。
+const GATE_FLAGS = ['no_light', 'blurry', 'overexposed'];
+
 function qualityHas(quality, flag){
   return String(quality || '').split('+').map(s => s.trim()).includes(flag);
 }
@@ -2793,18 +2796,29 @@ function pickGrowthMetric(rows){
   return null;
 }
 
-/** 测量行里某一列该显示什么（两条措辞别混，Chief 2026-10-13 钉的口径）：
- *  有值 ⇒ 数 + 量纲；
- *  该列是**角度相关**的（盖径/杆长）且 `quality` 带 `no_angle_profile` ⇒「不可测（无角度档）」（不用等）；
- *  其余 NULL：带不可用标记 ⇒「不可用（近黑/未检出…）」；都没有 ⇒「本次未测出」。
+/** 测量行里某一列该显示什么。**优先序由环境官 2026-10-13 定，别按直觉反着写**：
+ *  ① 有值 ⇒ 数 + 量纲；
+ *  ② 这一行含 `no_detection` ⇒「没检出」；含门拒标记（`no_light`/`blurry`/`overexposed`）
+ *     ⇒「该帧被判不可用（近黑…）」；
+ *  ③ 有检出、但这一列是**角度相关**的（盖径/杆长）且带 `no_angle_profile` ⇒「不可测（无角度档）」；
+ *  ④ 其余不可用标记（如 `low_confidence`）⇒「不可用（原因）」；都没有 ⇒「本次未测出」。
+ *
+ *  ⚠️ **②必须排在③前面**：平视下几乎每行都带 `no_angle_profile`，先判它会盖掉
+ *  "这帧根本没检出 / 被门拒"这个**更准确**的原因（环境官给的例子：被拒样例行应显示
+ *  "没检出/不可用"，而不是"无角度档"）。
  *  **整个框一行都没有**才是「还没测到」（要等接线）——那是曲线级的空态，不在这。 */
 function measureCellText(row, key, unit){
   const v = row ? row[key] : undefined;
   if(typeof v === 'number') return v + ' ' + unit;
-  if(row && ANGLE_BOUND_KEYS.has(key) && qualityHas(row.quality, QUALITY_NO_ANGLE)){
+  if(!row) return '本次未测出';
+  const flags = qualityFlags(row.quality);
+  if(flags.includes('no_detection')) return '没检出';
+  const gated = flags.filter(f => GATE_FLAGS.includes(f));
+  if(gated.length) return '该帧被判不可用（' + gated.map(f => FLAG_TEXT[f] || f).join('、') + '）';
+  if(ANGLE_BOUND_KEYS.has(key) && flags.includes(QUALITY_NO_ANGLE)){
     return '不可测（无角度档）';
   }
-  const why = row ? unusableReason(row.quality) : '';
+  const why = unusableReason(row.quality);
   if(why) return '不可用（' + why + '）';
   return '本次未测出';
 }
