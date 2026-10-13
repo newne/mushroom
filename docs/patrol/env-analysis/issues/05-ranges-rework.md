@@ -16,8 +16,19 @@
 > 所以"生长速率"**不能再用杆长差分**（`align.hourly_rates` 现在吃 `mean_len_mm`，
 > 平视下会全空）。改用**菌簇范围**的小时增量：`mean_area_mm2`（mm²/h）或
 > `mean_projected_d_mm`（mm/h），见票 11 §1 新增的四列。
-> `ranges.rate_mm_per_h` 字段名保留兼容，但**语义 = 所选长势量的增量**，
-> 必须在 `/ranges` 响应里带一个 `metric` 字段说明用的是哪个量（别让下游把 mm²/h 当 mm/h）。
+
+> **量纲铁律（Chief 2026-10-13 加，硬要求）：** "面积/小时"和"毫米/小时"**不能共用一个字段名**。
+> `ranges` 加三列，缺一不可：
+> - `metric TEXT` —— 速率来自哪个测量列（`mean_area_mm2` / `mean_projected_d_mm` / …），
+>   **由它唯一决定量纲**；
+> - `unit TEXT` —— 显式单位（`mm2/h` / `mm/h`）；
+> - `rate_per_h REAL` —— 速率数值。
+>
+> 旧的 `rate_mm_per_h` **保留兼容**，但**只在 `unit='mm/h'` 时等于 `rate_per_h`，否则必须为 NULL**
+> （不许把 mm²/h 塞进一个叫 `_mm_` 的字段）。
+> **区间表与建议层引用速率时必须显示量纲**（写"每天 +320 mm²"或"每天 +1.2 mm"，
+> 不许只写"每天长 320"）——否则会被读成毫米。`CONTEXT.md` 的"长势"词条已按同一口径改，
+> 本票与它对齐。
 
 **Status:** ready-for-agent
 
