@@ -70,7 +70,7 @@ def build(args, *, room_id: str | None = None,
         log(f"测量：解码器自检返回 {type(e).__name__}（正常，Pillow 已就位）")
 
     from measure.production import make_measure_fn
-    from measure.quality import frame_quality
+    from measure.quality import DEFAULT_ABS_LAPVAR_FLOOR, frame_quality
 
     # 模糊门阈值：**不给就用 `measure.quality` 的标定默认**（那是唯一尺度，Chief 裁定）。
     # `deploy` 侧不再自带一个常数——它曾经是 100.0，而 2026-10-13 用 218 张线上 ok 帧标定出
@@ -83,7 +83,11 @@ def build(args, *, room_id: str | None = None,
             return frame_quality(gray)
         return frame_quality(gray, blur_threshold=float(blur_threshold))
 
-    blur_note = "标定默认" if blur_threshold is None else f"{float(blur_threshold):g}"
+    # 日志要打**实际生效值**：运维不能把"没设参数"读成"没有门"。
+    if blur_threshold is None:
+        blur_note = f"{float(DEFAULT_ABS_LAPVAR_FLOOR):g}（measure.quality 标定默认）"
+    else:
+        blur_note = f"{float(blur_threshold):g}（命令行指定）"
     fn = make_measure_fn(
         room_id=str(room_id).strip(),
         mm_per_px=mm_per_px,

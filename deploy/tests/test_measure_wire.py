@@ -110,11 +110,14 @@ def test_blur_threshold_defaults_to_the_calibrated_one_in_measure_quality():
     `deploy` 侧曾自带常数 100.0（未标定时的临时值）；2026-10-13 用 218 张线上 ok 帧标定
     出中位 71.3、下限 45.0（误杀 0/218），旧常数会拒 78.4% 的正常帧。
     """
-    from measure.quality import frame_quality
+    from measure.quality import DEFAULT_ABS_LAPVAR_FLOOR, frame_quality
 
     w = build(args(measure="on", mm_per_px=0.25, measure_emit_empty=True),
               room_id="611", fetch=lambda _url: b"jpeg", decode=lambda _b: _gray())
-    assert w.enabled is True and "标定默认" in w.reason, "日志要说清阈值来自标定默认"
+    assert w.enabled is True
+    # 日志打的是**实际生效值**（从 measure.quality 取，不在 deploy 侧再抄一个数）
+    assert f"{float(DEFAULT_ABS_LAPVAR_FLOOR):g}" in w.reason
+    assert "标定默认" in w.reason
 
     # 显式给了就按给的走（旋钮仍在，只是默认不再是那个旧常数）
     strict = build(args(measure="on", mm_per_px=0.25, measure_emit_empty=True,
