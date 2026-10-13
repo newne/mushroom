@@ -108,6 +108,10 @@
     white-space:nowrap;text-overflow:clip}
   .mosaic-cell.sel{outline:2px solid var(--accent);outline-offset:-2px}
   .mosaic-cell.fail{border-color:var(--bad)}
+  /* 重复帧（票 12）：**不是"失败"也不是"欠曝/过曝"**——图拍到了、内容却没换。
+     用虚线边 + warn 色，与 fail 的实线红明显区分（红留给"没拍到"）。 */
+  .mosaic-cell.dup{border-style:dashed;border-color:var(--warn)}
+  .mosaic-cell.dup .mosaic-meta small{color:var(--warn)}
   .mosaic-cell.local .mosaic-meta small{color:var(--warn)}
   .mosaic-cell.vacant{cursor:default;background:transparent;border-style:dashed;color:var(--dim)}
   /* ---- 同一站位跨轮次对比（2026-10-13，积累期主线）----
@@ -620,7 +624,9 @@
       <!-- 完整图像在上、吃满整栏；拼图在下。点格位上方就换成那张图。 -->
       <aside class="detailpane" id="detailpane" aria-label="所选位置的完整图像">
         <div class="dphead"><span id="dpstation">未选位置</span><span id="zoomlabel"></span></div>
-        <div class="viewer" id="viewer">
+        <!-- 内容可信度（票 12）：只在该帧**不可信**时显示指纹/重复信息，正常帧零痕迹 -->
+      <div id="dpdup" class="empty" style="display:none;padding:2px 0 0"></div>
+      <div class="viewer" id="viewer">
           <img id="bigimg" alt="" style="display:none">
           <span class="hint" id="viewhint">点下面拼图里的格位，这里显示那张完整图像</span>
         </div>
@@ -2234,6 +2240,54 @@ function setMode(m){
 
 function rowDate(r){ return String(r.ts || '').slice(0, 10); }
 function rowOk(r){ return r.ok !== false && r.ok !== 0; }
+
+/* ---- 可疑轮 / 重复帧（票 12，Chief 2026-10-13 批）--------------------------------
+   10-09 那轮 48 帧里 35 帧是同一张陈旧近黑帧，轮行却 `ok=1`、页面上看不出异常。
+   三种状态**必须分开说**，而且**正常轮零痕迹**（一个字都不加）：
+     ok        : 字段有值且干净 ⇒ 不加角标、不改文案、不改颜色
+     suspect   : `suspect_duplicate=1` 或 `n_duplicate>0` ⇒ 中性标记「重复 35/48」
+     unchecked : `content_check_error` 非空 ⇒「未核查（核查失败：原因）」
+     legacy    : 相关键**缺失或值为 NULL** ⇒「未核查（那时没有内容核查）」
+   **NULL / 缺键 ≠ 干净**——不知道就说不知道，这正是 10-09"看不出异常"的根治。 */
+function integrityOfRound(round){
+  if(!round) return { level: 'ok', label: '', detail: '' };
+  const dup = round.n_duplicate;
+  const suspect = round.suspect_duplicate === 1 || (typeof dup === 'number' && dup > 0);
+  if(suspect){
+    const recorded = (typeof round.n_frames_recorded === 'number') ? round.n_frames_recorded : null;
+    const groups = Array.isArray(round.dup_groups) ? round.dup_groups : [];
+    return { level: 'suspect',
+             label: '重复 ' + (typeof dup === 'number' ? dup : '?') + ' 张'
+                    + (recorded ? '（记录 ' + recorded + ' 张）' : ''),
+             detail: groups.length ? ('重复组：' + groups.join('、')) : '' };
+  }
+  const err = round.content_check_error;
+  if(typeof err === 'string' && err.trim()){
+    return { level: 'unchecked', label: '未核查（核查失败：' + err.trim() + '）', detail: '' };
+  }
+  // "根本没查过"：四个键一个都没带，或全都为 NULL（旧数据/旧镜像都走这条）
+  const allAbsent = (round.suspect_duplicate == null && round.n_duplicate == null
+                     && round.n_frames_recorded == null && round.content_check_error == null);
+  if(allAbsent) return { level: 'unchecked', label: '未核查（那时没有内容核查）', detail: '' };
+  return { level: 'ok', label: '', detail: '' };
+}
+
+/** 一帧的内容可信度（票 12）。判据与环境官聚合侧同口径：
+ *  `frame_dup=1` 或 `duplicate_streak>0` ⇒ 不可信。**NULL/缺键不是"干净"**，
+ *  但帧级没有"未核查"这个档（轮级才有）——所以这里只认显式标记。 */
+function frameDupInfo(row){
+  const streak = (row && typeof row.duplicate_streak === 'number') ? row.duplicate_streak : null;
+  const flagged = !!row && (row.frame_dup === 1 || (streak !== null && streak > 0));
+  if(!flagged) return { dup: false, label: '', detail: '' };
+  const label = (streak !== null && streak > 0) ? ('连续重复 ' + streak + ' 张') : '重复帧';
+  const detail = [
+    row.dup_group ? ('重复组 ' + row.dup_group) : '',
+    row.content_sha256 ? ('内容指纹 ' + String(row.content_sha256).slice(0, 12)) : '',
+    row.same_as_previous === 1 ? '与上一张相同' : '',
+  ].filter(Boolean).join(' · ');
+  return { dup: true, label, detail };
+}
+
 /** 当前角度档筛选值（'' = 全部）。对比条必须和拼图/原图用**同一个**筛选口径，
  *  否则会出现"拼图里筛 top0、对比条却拿到 top45"这种自相矛盾的画面。 */
 function angleFilter(){ return $('#angleSel') ? $('#angleSel').value : ''; }
@@ -2319,12 +2373,18 @@ function renderHistory(){
       const status = !row ? '本轮无帧' : !rowOk(row) ? '采图失败' : url ? time || '可查看' : '图取不到';
       // 缩略图下面**不挂位置和时间**（2026-10-13 用户口径）：格子就是那张图。
       // 只有"图在、状态却不正常"时才留一行小字——采图失败 / 本地待同步要看得出来。
+      // 票 12 再加一类：**这一帧内容不可信**（重复帧/连续重复）——它是"拍到了但没换内容"，
+      // 与"采图失败"（没拍到）、"欠曝/过曝"（拍坏了）都不是同一件事，文案与配色都要分开。
       const normal = !!row && rowOk(row) && row.source !== 'local';
-      const badge = (url && !normal)
-        ? (row && row.source === 'local' ? '本地待同步' : status) : '';
+      const dupInfo = frameDupInfo(row);
+      const statusParts = [];
+      if(url && !normal) statusParts.push(row && row.source === 'local' ? '本地待同步' : status);
+      if(dupInfo.dup) statusParts.push(dupInfo.label);
+      const badge = statusParts.join(' · ');
       const classes = ['mosaic-cell'];
       if(row && !rowOk(row)) classes.push('fail');
       if(row?.source === 'local') classes.push('local');
+      if(dupInfo.dup) classes.push('dup');
         if(station.id === hist.focusedStationId) classes.push('sel');
       cells.push(`<button type="button" class="${classes.join(' ')}"
           data-pick="${esc(encodeURIComponent(id))}" data-url="${esc(url)}"
@@ -2716,6 +2776,15 @@ function updateFrameInfo(){
   // 拼图格、对比条、"上一站/下一站"、"选最新帧"、方向键全都经过这个函数，挂一处就全覆盖。
   // loadCompare() 自己幂等，所以同一次点击里被调用两次也只逐轮取一遍。
   loadCompare();
+  // 详情区的内容可信度一行：**只在该帧不可信时显示**（正常帧零痕迹，票 12 附条件 1）。
+  const dupBox = $('#dpdup');
+  if(dupBox){
+    const row = hist.focusedStationId
+      ? (hist.rows || []).find(r => r.station_id === hist.focusedStationId) : null;
+    const info = frameDupInfo(row);
+    dupBox.textContent = info.detail || (info.dup ? info.label : '');
+    dupBox.style.display = info.dup ? '' : 'none';
+  }
 }
 function pickRelative(delta){
   const els = timelineFrames();
@@ -3067,11 +3136,22 @@ function updateRoundNav(){
   if(!hist.selectedRoundId){
     info.textContent = total ? '没有可切换的轮次' : '暂无带轮次 ID 的巡检记录';
   }else{
+    const integ = integrityOfRound(round);
     const bits = ['第 ' + (hist.roundIndex + 1) + ' / ' + total + ' 轮'];
     if(round && round.ts) bits.push(String(round.ts).replace('T', ' '));
-    if(hist.rows && hist.rows.length) bits.push(hist.rows.length + ' 帧');
+    if(integ.level === 'ok'){
+      // **正常轮：这句话与现状逐字一致，一个字都不改**（票 12 附条件 3）。
+      if(hist.rows && hist.rows.length) bits.push(hist.rows.length + ' 帧');
+    }else{
+      // 只有可疑/未核查轮才换说法：两个数分开写，避免被读成"48 张都拍到了"。
+      const recorded = (round && typeof round.n_frames_recorded === 'number') ? round.n_frames_recorded : null;
+      if(recorded !== null) bits.push('记录 ' + recorded + ' 张');
+      if(hist.rows && hist.rows.length) bits.push('成功 ' + hist.rows.length + ' 站');
+      bits.push(integ.label);
+    }
     if(hist.hiddenRounds) bits.push('已跳过 ' + hist.hiddenRounds + ' 个空轮次');
     info.textContent = bits.join(' · ');
+    info.title = integ.detail || '';
   }
   // 索引 0 = 最新；"上一轮"= 更早（索引 +1）
   const prev = $('#prevround'), next = $('#nextround');

@@ -47,12 +47,19 @@ const GRID = { cols: 12, layers: 4, y_pitch: 4492.0 / 12, z_pitch: 212.0 / 4,
 // （它是控制网地址，浏览器够不着）。谁要是又改回"页面直接用 cloud_url 当 <img src>"，
 // 这个假件不会喂给它任何地址 → 用例当场红。
 const IMAGES = [
+  // 09-14：S102 是**干净的正常帧**（很多断言拿它当基准、详情区零痕迹也用它）
   { round_id: 'round-20260914', ts: '2026-09-14T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
     ok: true, object_name: '20260914/B102_S102_top45_093000', source: 'prod' },
   { round_id: 'round-20260914', ts: '2026-09-14T06:30:00', station_id: 'S101', box_id: 'B101', angle_profile: 'top0',
     ok: false, object_name: null, source: 'prod' },
+  // 09-13：S102 那一帧是"重复帧"的例子（票 12）——挂在**已存在**的帧上，
+  // 这样 `station_summary`／站位集合都不受影响（早先挂在新增的 S412 上，
+  // 把实时区"无帧站位""层开关"几条不相干的断言一起搞挂了：fixture 副作用）。
   { round_id: 'round-20260913', ts: '2026-09-13T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top0',
-    ok: true, object_name: '20260913/B102_S102_top0_093000', source: 'local' },
+    ok: true, object_name: '20260913/B102_S102_top0_093000', source: 'local',
+    frame_dup: 1, dup_group: '41685c09a1b2',
+    content_sha256: '41685c09a1b2c3d4e5f60718293a4b5c6d7e8f9012345678abcdef0123456789',
+    same_as_previous: 1, duplicate_streak: 5, elapsed_s: 5.2 },
   { round_id: 'round-20260913', ts: '2026-09-13T06:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
     ok: false, object_name: null, source: 'prod' },
   // 第三轮（round-20260910）也有一帧，且是本地待同步：让它落进拼图，
@@ -61,10 +68,16 @@ const IMAGES = [
     ok: true, object_name: '20260910/B102_S102_top0_093000', source: 'local' },
 ];
 const ROUNDS = [
+  // 正常轮（票 12 附条件 1）：字段有值且干净 ⇒ 页面必须**零痕迹**
   { round_id: 'round-20260914', ts: '2026-09-14T10:00:00', room_id: '611', entry_date: '2026-09-04',
-    batch_no: 'BATCH-10', ok: false, n_results: 48, n_failures: 1 },
+    batch_no: 'BATCH-10', ok: false, n_results: 48, n_failures: 1,
+    suspect_duplicate: 0, n_duplicate: 0, n_frames_recorded: 48, content_check_error: '',
+    dup_groups: [] },
+  // 可疑轮：复刻 10-09 那种"ok=1 但 35 帧同一份字节"（数字必须能数出来，不许写死）
   { round_id: 'round-20260913', ts: '2026-09-13T10:00:00', room_id: '611', entry_date: '2026-09-04',
-    batch_no: 'BATCH-10', ok: false, n_results: 48, n_failures: 2 },
+    batch_no: 'BATCH-10', ok: false, n_results: 48, n_failures: 2,
+    suspect_duplicate: 1, n_duplicate: 35, n_frames_recorded: 48, content_check_error: '',
+    dup_groups: ['41685c091234'] },
   // 巡检失败、48 张全空：这种轮次不该进列表（2026-10-13 用户口径），也不该被"上一轮"选中
   { round_id: 'round-20260912', ts: '2026-09-12T10:00:00', room_id: '611', entry_date: '2026-09-04',
     batch_no: 'BATCH-10', ok: false, n_results: 0, n_failures: 48 },
@@ -74,6 +87,7 @@ const ROUNDS = [
   // 否则"第 1 / 3 轮"和"上一轮置灰"两条断言都会红。
   { round_id: 'round-20260910', ts: '2026-09-10T10:00:00', room_id: '611', entry_date: '2026-09-04',
     batch_no: 'BATCH-10', ok: true, n_results: 48, n_failures: 0 },
+  // 无 round_id 的旧轮次（用来钉"未被猜测归组"那条断言）
   { round_id: null, ts: '2026-09-12T08:00:00', room_id: '611', entry_date: '2026-09-04',
     batch_no: 'BATCH-10', ok: true, n_results: 48, n_failures: 0 },
   { round_id: 'round-20260911', ts: '2026-09-11T10:00:00', room_id: '611', entry_date: '2026-09-04',
@@ -1205,10 +1219,11 @@ await sleep(150);
   const stationCells = Array.from(document.querySelectorAll('#timeline .mosaic-cell[data-station-id]'));
   check('拼图固定为 48 个拓扑槽位', slots.length === 48, slots.length + ' 格');
   // 2026-10-13 用户：缩略图下面不挂位置和时间——格子就是那张图。
-  // 只在"图在、状态不正常"（采图失败/待同步）时才留一行小字，所以这里排掉那两类。
+  // 只在"图在、状态不正常"（采图失败/待同步）或**内容不可信（重复帧，票 12）**时才留一行小字。
   const plainCells = Array.from(document.querySelectorAll('#timeline .mosaic-cell img'))
     .map(img => img.closest('.mosaic-cell'))
-    .filter(cell => !cell.classList.contains('fail') && !cell.classList.contains('local'));
+    .filter(cell => !cell.classList.contains('fail') && !cell.classList.contains('local')
+                    && !cell.classList.contains('dup'));
   check('缩略图下面不再挂位置与时间（正常帧一个字都没有）',
     plainCells.length > 0 && plainCells.every(cell => cell.textContent.trim() === '')
     && document.querySelectorAll('#timeline .mosaic-cell .mosaic-meta b').length === 0,
@@ -1348,8 +1363,10 @@ await sleep(150);
 
   // 「还没测到」必须是**空态**，不是 0、不是零增长线（巡检手 2026-10-13 特意提醒）。
   // 假件里 B101 一行测量都没有（真实现役 `--measure` 默认关、表里确实还没有行）。
+  let realEmptyText = '';
   await click('#timeline .mosaic-cell[data-station-id="S101"]');
   await sleep(300);
+  realEmptyText = T('#curve');
   check('这个框一行测量都没有时明说「还没测到」',
     T('#curve').includes('还没测到'), T('#curve'));
   check('没有测量数据时**不画零增长线**、不出现 0 值（空态 ≠ 0）',
@@ -1598,6 +1615,85 @@ await sleep(150);
     && T('#roundnavinfo').includes('第 1 / 3 轮')
     && $('#nextround').disabled === true && $('#prevround').disabled === false,
     T('#roundnavinfo') + ' / next=' + $('#nextround').disabled);
+
+  // ---- 票 12：可疑轮 / 重复帧的显示（Chief 2026-10-13 批，四条附条件）----
+  // ① 正常轮**零痕迹**且「N 帧」逐字不变；② 缺键与 NULL 都落「未核查」、绝不显示成干净；
+  // ③ 只有可疑/未核查轮才换那句话；④ 历史数据不回填——legacy 显示"那时没有内容核查"就是对的。
+  check('① 正常轮零痕迹：导航不出现"重复/可疑/未核查"，且「N 帧」那句话逐字不变',
+    (() => { const t = T('#roundnavinfo');
+             return t.includes('2 帧') && !/重复|可疑|未核查/.test(t); })(),
+    T('#roundnavinfo'));
+  check('① 正常轮的格子上没有 dup 角标（零痕迹）',
+    !document.querySelector('#timeline .mosaic-cell.dup'),
+    document.querySelectorAll('#timeline .mosaic-cell.dup').length + ' 个');
+
+  // ⚠️ 切轮次后**要等拼图重绘完**再取格子：`syncRoundOptions()` 先更新导航文字，
+  // 图像是另一条异步请求回来才画的——只等文字会拿到"读取本轮图像…"的过渡态（踩过）。
+  const waitCell = id => waitFor(
+    () => !!document.querySelector('#timeline .mosaic-cell[data-station-id="' + id + '"]'), 6000, 100);
+
+  await click('#prevround');                       // → 可疑轮 09-13（重复帧 S102 在这一轮）
+  await waitCell('S102');
+  check('② 可疑轮标出来且**能数出 35**（数字来自字段，不写死）',
+    T('#roundnavinfo').includes('重复 35 张') && T('#roundnavinfo').includes('记录 48 张'),
+    T('#roundnavinfo'));
+  check('② 可疑轮的 tooltip 给出重复组（可追溯）',
+    (($('#roundnavinfo').title) || '').includes('41685c091234'), $('#roundnavinfo').title || '(无)');
+  check('③ 只有可疑轮才换说法：两个数分开写「记录 48 张 · 成功 N 站」',
+    T('#roundnavinfo').includes('记录 48 张') && T('#roundnavinfo').includes('成功 '),
+    T('#roundnavinfo'));
+
+  // 帧级（⑥）：这一帧 `ok:true`、图也有，但内容没换 ⇒ dup 类（虚线+中性色），**不是**"采图失败"
+  const dupCell = document.querySelector('#timeline .mosaic-cell[data-station-id="S102"]');
+  check('⑥ 重复帧的格子：dup 类（虚线+中性色）且不是"采图失败"',
+    !!dupCell && dupCell.classList.contains('dup') && !dupCell.classList.contains('fail')
+    && T('#timeline .mosaic-cell[data-station-id="S102"]').includes('连续重复 5 张'),
+    dupCell ? (dupCell.className + ' / ' + JSON.stringify(dupCell.textContent.trim())) : '(无)');
+  await click('#timeline .mosaic-cell[data-station-id="S102"]');
+  await sleep(250);
+  check('⑥ 详情区在不可信帧上给内容指纹/重复信息（可追溯）',
+    T('#dpdup').includes('内容指纹 41685c09a1b2') && T('#dpdup').includes('与上一张相同')
+    && T('#dpdup').includes('重复组'), T('#dpdup'));
+
+  await click('#prevround');                       // → 缺键轮 09-10（fixture 里没有内容核查字段）
+  await sleep(300);
+  check('④ 键不存在 ⇒「未核查（那时没有内容核查）」，绝不显示成干净',
+    T('#roundnavinfo').includes('未核查（那时没有内容核查）')
+    && !/无重复|正常|干净|已核查/.test(T('#roundnavinfo')), T('#roundnavinfo'));
+
+  // "没查成"：`content_check_error` 非空（运行时给那一轮补字段，再重读轮次）
+  const legacyRound = ROUNDS.find(r => r.round_id === 'round-20260910');
+  legacyRound.content_check_error = '内容核查读取失败';
+  await click('#reloadbtn');
+  await sleep(300);
+  $('#roundSel').value = 'round-20260910';
+  $('#roundSel').dispatchEvent(new window.Event('change'));
+  await waitFor(() => T('#roundnavinfo').includes('未核查'), 4000);
+  check('⑤ "没查成"与"查了、干净"是两种文案：「未核查（核查失败：…）」',
+    T('#roundnavinfo').includes('未核查（核查失败：内容核查读取失败）')
+    && !T('#roundnavinfo').includes('那时没有'), T('#roundnavinfo'));
+  delete legacyRound.content_check_error;           // 复原 fixture
+  await click('#reloadbtn');
+  await sleep(300);
+  $('#roundSel').value = 'round-20260914';
+  $('#roundSel').dispatchEvent(new window.Event('change'));
+  await waitCell('S102');
+
+  // 正常轮零痕迹（⑥ 的另一半）：失败格只说失败、不含"重复"；整轮没有任何 dup 角标
+  check('⑥ 重复帧与"采图失败"是两回事：失败格只说失败、不含"重复"',
+    T('#timeline .mosaic-cell[data-station-id="S101"]').includes('采图失败')
+    && !T('#timeline .mosaic-cell[data-station-id="S101"]').includes('重复'),
+    T('#timeline .mosaic-cell[data-station-id="S101"]'));
+  check('① 正常轮整轮没有 dup 角标（零痕迹，回到最新一轮后复核）',
+    !document.querySelector('#timeline .mosaic-cell.dup'),
+    document.querySelectorAll('#timeline .mosaic-cell.dup').length + ' 个');
+
+  // 正常帧的详情区零痕迹：最新一轮的 S102 是一帧干净帧（没有内容标记）→ #dpdup 隐藏
+  await click('#timeline .mosaic-cell[data-station-id="S102"]');
+  await sleep(250);
+  check('⑥ 正常帧的详情区零痕迹（#dpdup 隐藏、无任何内容）',
+    $('#dpdup').style.display === 'none' && T('#dpdup') === '',
+    ($('#dpdup').style.display || '(空)') + ' / ' + JSON.stringify(T('#dpdup')));
   // 换轮次会清掉选中站位（先看整体），下面那条"帧计数"用例要有选中站点，这里补回来
   await click('#latestframe');
   await sleep(150);
@@ -1638,6 +1734,16 @@ await sleep(150);
   await sleep(300);
   check('/measurements 挂了：如实报错（不是画一条空曲线）',
     T('#curve').includes('查不到测量数据') && T('#growthnote').includes('prod'), T('#growthnote'));
+  // 验收（Chief）：修完之后曲线**仍然会是空的**（生产 measurements 0 行、--measure 默认关），
+  // 但那时的空必须是"真的空"（200 + rows: []），不是"读错字段"造成的假空——
+  // 两者在页面上必须**能区分**。这里把三种状态放在一条断言里对照：
+  //   真的空 ⇒「还没测到」；问不到 prod ⇒「查不到测量数据」；读错字段 ⇒ 契约断言 + 负向钉子会红。
+  check('验收：三种"空"互不相同——真的空「还没测到」≠ 问不到「查不到测量数据」≠ 不画零线',
+    realEmptyText.includes('还没测到')
+    && !realEmptyText.includes('查不到')
+    && T('#curve').includes('查不到测量数据')
+    && !T('#curve').includes('还没测到'),
+    '真空=' + realEmptyText.slice(0, 24) + ' / 问不到=' + T('#curve').slice(0, 24));
   state.measure_error = false;
   await click('#reloadbtn');
   await sleep(300);
@@ -1914,10 +2020,14 @@ await sleep(150);
                'mean_projected_d_mm', 'p10_len', 'p90_len', 'quality'],
       required: ['ts', 'quality', 'mean_len_mm', 'mean_cap_mm', 'mean_projected_d_mm',
                  'mean_area_mm2', 'n'] },
-    // deploy/console.py api_rounds → analysis/db.py:59-71（rounds 表列）
+    // deploy/console.py api_rounds → analysis/db.py:59-71（rounds 表列）+ 票 17 的内容可信度列
     '/api/rounds': { q: '?limit=2000', pick: 'rounds',
       fields: ['ts', 'round_id', 'ok', 'n_results', 'n_failures', 'aborted', 'room_id',
-               'entry_date', 'batch_no'],
+               'entry_date', 'batch_no',
+               // 票 12/17：**这几列可以缺失或为 NULL**（旧数据/旧镜像），所以只登记形状、
+               // 不放进 required——"键不存在"与"值为 NULL"都合法，页面都要显示成"未核查"。
+               'suspect_duplicate', 'dup_groups', 'content_check_error', 'n_duplicate',
+               'n_frames_recorded'],
       required: ['round_id', 'ts', 'ok', 'n_results', 'n_failures', 'room_id', 'entry_date',
                  'batch_no'] },
     // deploy/console.py api_environment → analysis/environment.py:28-32 FIELDS（小时聚合）
@@ -1926,10 +2036,13 @@ await sleep(150);
                'co2_ppm', 'co2_min', 'co2_max', 'lamp_state', 'lamp_on_s', 'lamp_off_s',
                'lamp_on_m', 'lamp_off_m', 'lamp_on_min', 'n'],
       required: ['ts', 'zone', 'temp_c', 'rh_pct', 'co2_ppm', 'lamp_state', 'n'] },
-    // spec.md:341 /api/images（console 合并 local+prod，剥掉 cloud_url）
+    // spec.md:341 /api/images（console 合并 local+prod，剥掉 cloud_url）+ 票 17 的帧级内容列
     '/api/images': { q: '?round_id=round-20260914&limit=2000', pick: 'rows',
       fields: ['ts', 'round_id', 'station_id', 'box_id', 'angle_profile', 'camera_ip', 'y', 'z',
-               'object_name', 'ok', 'error', 'room_id', 'entry_date', 'batch_no', 'source'],
+               'object_name', 'ok', 'error', 'room_id', 'entry_date', 'batch_no', 'source',
+               // 票 12/17：帧级内容可信度（同样可缺失/可 NULL）
+               'frame_dup', 'dup_group', 'content_sha256', 'same_as_previous',
+               'duplicate_streak', 'elapsed_s'],
       required: ['ts', 'station_id', 'box_id', 'angle_profile', 'object_name', 'ok', 'source'] },
     // deploy/console.py compute_status（`:399-419`）：trigger/envelope 是**总有**的两块
     '/api/status': { q: '', pick: 'top', fields: ['ts', 'machine', 'patrol', 'room', 'trigger',
@@ -1965,11 +2078,13 @@ await sleep(150);
     '/api/measurements': ['ts', 'quality', 'mean_len_mm', 'mean_cap_mm', 'mean_projected_d_mm',
                           'mean_area_mm2', 'n'],
     '/api/rounds': ['round_id', 'ts', 'ok', 'n_results', 'n_failures', 'room_id', 'entry_date',
-                    'batch_no'],
+                    'batch_no', 'suspect_duplicate', 'dup_groups', 'content_check_error',
+                    'n_duplicate', 'n_frames_recorded'],
     '/api/environment': ['ts', 'zone', 'temp_c', 'rh_pct', 'co2_ppm', 'lamp_state', 'lamp_on_min',
                          'lamp_on_s', 'lamp_off_s', 'n'],
     '/api/images': ['ts', 'round_id', 'station_id', 'box_id', 'angle_profile', 'object_name',
-                    'ok', 'source'],
+                    'ok', 'source', 'frame_dup', 'dup_group', 'content_sha256', 'same_as_previous',
+                    'duplicate_streak', 'elapsed_s'],
     '/api/status': ['ts', 'machine', 'patrol', 'room', 'trigger', 'events'],
     '/api/cmd': ['inflight', 'result', 'progress', 'estop', 'session_active'],
     '/api/cmd POST': ['command', 'detail', 'session'],
