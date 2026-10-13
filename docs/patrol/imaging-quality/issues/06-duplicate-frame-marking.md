@@ -292,6 +292,42 @@ docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate 
 `object_name_source`/`elapsed_s`），而环境官这次正好把未知键改成**进 `warnings` + 打日志** ⇒
 **出现任何一行就说明"生产者发了、消费者没列"，直接按未部署级别处理**。这条比逐列对账更省事也更硬。
 
+### J.1 21:27 那轮的结果（发版官，2026-10-13 21:4x）——**已部署，端到端跑通**
+
+轮次：`round_id=73dd304c5c4341ec961b137b5723c0b4`、`ts=2026-10-13T21:27:52`、
+**`ok=1` / `n_results=48` / `n_failures=0` / `aborted=0`** ⇒ **没有被加湿保持就地避让**（正常轮）。
+
+**三层校验**（`patrol/tools/verify_round_integrity.py`，`--producer/--consumer` 均填
+`mushroom_patrol:0.1.0-20261013204311-89e4a54`）：
+
+| 层 | 结果 |
+| --- | --- |
+| **outbox** | **不可得**：`outbox.jsonl` = **0 B**（mtime 21:27）＝成功同步后被 flush **清空**，这是正常行为，不是丢数据。改由生产者自己的日志佐证：`已同步 49 条记录到 prod`（48 帧 + 1 轮行）、`单轮结束：ok，耗时 467.6 s` |
+| **库**（analysis 直连 `:8000`） | **6/6 PASS**（exit 0） |
+| **索引**（console `:8002`，合并 local+prod） | **6/6 PASS**（exit 0） |
+
+两层各自的六条：服务侧实时指纹落在帧上 `48/48` ✓、48 帧全入库 `n_frames_recorded=48`=`48` ✓、
+`n_results=48`=`48−0` ✓、`n_duplicate=0`=`frame_dup 帧 0` ✓、重复帧与实时指纹一致（跨站同指纹组 0）✓、
+正常轮 `suspect_duplicate` 不出现 ✓。
+
+**库侧对账（逐字）**：`n_frames_recorded=48`＝帧行 48；`n_results=48`＝48−0；`n_duplicate=0`＝0；
+`suspect_duplicate` 为 False/None；`content_check_error`=NULL。
+
+**帧级指纹（48 帧全部）**：`content_sha256` 非空 **48/48**、**去重后 48 ⇒ 48 张各不相同**；
+`duplicate_streak` 全 = **1**（每张新帧都复位）；`same_as_previous` 全 = **0**；`frame_dup` 全 = NULL；
+`object_name_source` 全 = `service`；`elapsed_s` 8.9–14.11。
+⇒ 与巡检手单测里"健康流形状"**逐项一致**，且证明**生产者确实发了这批新键**（否则这些列会是 NULL）。
+
+**`[ingest] 未知字段` = 0 行** ✓（条件 3 达标）。
+
+⚠️ **一处如实标注：`dup_groups` 的"读回来是 list 不是字符串"本轮验不到。**
+正常轮的 `dup_groups` 是 **NULL（NoneType）** —— 只有真出现跨站重复时才会写它。
+所以第 3 条里那个"list 而非 JSON 字符串"的往返**本轮未被触发**，**不能记成 PASS**；
+要验它需要**一个真含重复帧的轮次**，或离线单测（环境官 `3c0a45b` 侧）。
+
+⚠️ **`--trigger-dir` 的避让本轮不可见**（预期）：该轮是正常轮、48 站逐个跑完，
+所以"遇 hold 避让整轮"这条新增行为**没有触发机会**，**不得**据此判它没生效。
+
 ## K. 本次重建**实际生效**了哪些行为（从**运行态**读，不是从 compose 猜）
 
 规矩：**"生效"只能是运行态里的字节**。以下两条都是实测：
