@@ -38,6 +38,7 @@
 3. **证据**：每个改动要带测试或可复验证据（命令 + 结果）。没验证过的不许说已验证；不确定的必须标"不确定"。
 4. **票据**：跨域需求与新增工作写 `docs/patrol/<feature>/issues/NN-*.md`（编号先看目录，避免撞号）。
 5. **汇报**：在群里一句话说结论（做了什么 / 证据 / 下一步 / 卡在哪）；跨域冲突 @Chief。
+6. **提交（2026-10-13 两次事故后加固）**：一律用**路径限定提交**——`git commit -m "…" -- <你的路径>`；**只 `git add` 具体文件**（禁止目录/glob）；**add 完立刻提交**，中途要停就先 `git restore --staged`（不留暂存）；提交前 `git diff --cached --name-only` 核一眼 index 里有没有别人的东西。**共享分支上禁止 `reset` / `rebase` / `commit --amend`**，回退找发版官用 `revert`。事故记录：① 有人先 `git add` 后没提交，留下的暂存文件被下一个人 `git commit` 一起带走（`dce88d8` 带走 3 个别人的文件），随后又出现一次 `reset HEAD~1`，靠再提交才捞回；② 5 个域共用一个 index，"谁 add 谁被顺走"——`5658570` 扫走了巡检手的票、`2502574` 扫走了测量师的 spec 段（内容一字未改）。若第三次再犯，改用每人一个 `git worktree`。**并发 `index.lock` 会让 `git commit` 返回非 0**——撞锁必须**重试到成功**，绝不"提交失败就放着不管"（2026-10-13 那次暂存被顺走，起因之一就是一个被锁撞失败的 commit 被搁下了）。`dce88d8` 是**悬空提交**（不在 HEAD 祖先链上），内容已被其它提交覆盖：**任何人不要 cherry-pick，也不要 gc**。
 
 ## 当前优先级（2026-10-13 用户口径）
 
@@ -69,7 +70,7 @@
 - **setpoints**：`/setpoints/changes` 砍掉（wontfix），只做 `/setpoints/daily`（每日设定末态）。变更频次/幅度读已有的 `/operations`——权威源是命令审计，`device_setpoint_changes` 仅作交叉验证。
 - **对齐**：`align.py` 按 `(zone, hour)` 分组，分箱口径换成 spec §2.7 的 D 分档（图像 4 阶段作第二切片）。
 - **测量口径**：主口径 = 每站位 `--mm-per-px`；`src/segmentation/geometry.py` 的菌袋外接框只作旁证。
-- **角度档**：取舍依据改为「**看清各阶段长势**」（2026-10-13 用户口径）——此前「为同时量盖径与杆长而默认 45°」的论证**作废**。第 13 天菇刚长出菌袋表面、矮且无帽：现在要看清菌袋表面与刚冒出的菇，长高后看整体形态；level0 保留为人工按需切换的形态档。**换角生效日 = 数据口径分界，跨角不可比**。
+- **角度档（2026-10-13 15:12 用户裁定 A：维持单档平视）**：不做支架改造、不加转轴/云台，`GRID_ANGLES` 维持 `("level0",)`，顶拍与 45° 侧斜**不实现**。因此**菌盖直径、菌杆长度在现机械下不可测**：必须显式标「**不可测（无角度档）**」——**这是全库唯一措辞，没有"对应"二字，与「不可用」严格区分、两者绝不共用一个词**（NULL + `no_angle_profile`），禁止写 0、禁止按平视硬算；**按列判不按行判**：`no_angle_profile` 只让盖径/杆长两列不可测，同一行里菌簇量若为 NULL 则是**整帧不可用**（`no_light`/`low_confidence`/`no_detection`），页面写「不可用（近黑/未检出/置信度不足…）」；区间表与建议层**不得引用**这两列（无角度档下该量不进统计，也不得用「不可用」描述它）。取舍依据仍为「**看清各阶段长势**」（此前「为同时量盖径与杆长而默认 45°」的论证作废）。若日后现场重做支架再换角，**换角生效日 = 数据口径分界，跨角不可比**。
 - **建议层 v1**：只输出「建议 + 依据 + 样本是否不足」，不写任何设备端点位。
 
 ## 已核事实（发版官只读盘点，2026-10-13 14:50，全部为实测）
@@ -82,16 +83,18 @@
 - **`mushroom-audit-ingest.service` 有缺陷**：`Type=simple` + `--once` + `Restart=always` ⇒ 每 60 s 跑一次（24 h 内 2466 次），设计是每 10 分钟；持续打环控平台鉴权接口。
 - **analysis 现役代码未纳入 git**：`analysis/src/analysis/{batch_ingest,batches,audit,audit_ingest,env/tdengine,environment}.py` 与 `analysis/uv.lock` 未跟踪。
 - **prod venv 无 pandas/numpy**（Python 3.12.3，只有 fastapi/uvicorn）：发往 prod 的模块不许在模块级 `import pandas`。
-- **14:48 有第三方在生产上重建发布**（新镜像 `0.1.0-20261013144515-b64027b`，页面被换成 HEAD 版），机上另有 `root pts/3 ← 10.77.77.47` 长期会话。**在对方收工前，任何人不许对生产写**（判据：`docker events` 静默 ≥30 min 且该会话消失）。
+- **14:48 的生产重建是外部协作者 step code 做的**（新镜像 `0.1.0-20261013144515-b64027b`，页面被换成 HEAD 版）；`root pts/3 ← 10.77.77.47` 就是它的会话。**冻结已解除**（2026-10-13 16:0x，用户确认它已完成发版、不再动容器与代码）。生产访问**含只读**仍全部归发版官。
+- **`.env` 的 tag 漂移已修**（2026-10-13 16:33）：`PATROL_IMAGE` 对齐实跑值 `0.1.0-20261013144515-b64027b`，preview 拆出独立变量 `PATROL_PREVIEW_IMAGE`；现场 compose 与仓库逐字节一致，只 `compose config` 解析、未重建（五容器 uptime 未归零）。
+- **迁移用镜像已构建并推送**：`0.1.0-20261013163437-52f6c03`，由干净 HEAD 的 `git archive` 构建（不含任何在飞改动），镜像内 `analysis/jobs.py` + `api.py` lifespan 自查通过。迁移时序见 `docs/patrol/prod-deploy/issues/01-analysis-compose-migration.md` §4 —— **Step 1 必须 API 与 audit 同步进容器**（`:8000` 独占，无法只迁 audit），env 留到 Step 2，batch 等直连只读账号落地。
 
 ## 当前开放问题（2026-10-13 只读侦察结论，待复核后逐条定）
 
-1. **测量 0 行的根因是接线缺口**：`patrol/src/patrol/daemon.py:78,251` 的 `measure_fn` 默认 None 且判空才写测量行，生产装配 `deploy/src/deploy/m1.py:359-374` 未传；表 / 传输 / 消费侧（`analysis/src/analysis/db.py:31-41`、`api.py:67-97`）已就绪。缺口在**生产者**一处。
-2. **mm/px 两套口径未互通**：`src/segmentation/geometry.py:47-70`（菌袋外接框反推 + 二阶矩主轴）与 spec §5.1 的**每站位棋盘格标定**（`docs/patrol/fmc4030-camera-scan/spec.md:257-259`）；仓库内没有任何标定数据文件。这是架构决策，先定口径再补代码。
-3. **角度档机械未装**：现场支架只有平视 `level0`（`CONTEXT.md:20`），而菌盖直径要顶拍、菌杆长度要侧斜 45°——算法补不了。归巡检手，与测量师对齐需求。
+1. ✅ **测量 0 行的根因（接线缺口）已解决**（2026-10-13）：`measure_fn` 已接上，真机帧产出 3 行测量并入库、同键重发仍是 3 行（幂等成立）、两个库房同 `box_id` 不互相覆盖（主键 `(ts, room_id, box_id)` 生效）。
+2. ✅ **mm/px 口径已定**（ADR-0024）：主口径 = 每站位 `--mm-per-px`；`src/segmentation/geometry.py` 的菌袋外接框反推只作**旁证**。仓库内仍无标定数据文件——每站位 mm/px 待现场给，不阻塞接线。
+3. ✅ **角度档已裁定**（2026-10-13 15:12 用户裁定 A：维持单档平视）：不做支架改造、不加转轴/云台，`GRID_ANGLES` 维持 `("level0",)`。现役单档平视 ⇒ **菌盖直径 / 菌杆长度明确缺测**，必须显式报（NULL + `no_angle_profile`），**禁止按平视硬算**。换角（机械活）不做；若日后现场重做支架再换角，**换角生效日 = 数据口径分界**（ADR-0024、票 09）。取景按「看清各阶段长势」重排（当前第 13 天：菌袋表面 + 刚冒出的菇）。
 4. **现役 vs 归档口径冲突**：CLIP + LLaMA-VL 图文链路**仍在生产调度里跑**（`src/scheduling/tasks/register_vision_jobs.py:22-35`），而用户口径是"老链路归档不做考虑"。需用户裁定后再动代码。
 5. **写通道不存在**：仓库唯一的设定值写接口 `src/utils/get_data.py:475-479` → `settings.toml:16` 的 `edge/device/point/cmd/private` **零调用者**；`decision_analysis_dynamic_result` 的 `apply_time/apply_result/rollback` 只有列定义。这就是 v1 只出建议的原因。
-6. **测量侧缺件**：无分割 / 实例分割权重与 GT（`src/segmentation/` 无测试、无权重）、`measure/pipeline.py` 只有 `DummyDetector`、菌簇范围无定义、日聚合增长量未实现（`analysis/src/analysis/growth.py:12,42-53` 只有相邻两点差分）。
+6. **测量侧仍缺**：无分割 / 实例分割权重与 GT；**菌簇范围尚无列**（待环境官 DDL）；日聚合增长量未实现（`analysis/src/analysis/growth.py:12,42-53` 只有相邻两点差分）。检测器已落到 baseline（`measure/src/measure/baseline.py`），**不追精度**（用户口径：等菇长高再迭代）。混跑才失败的 2 条 analysis 测试（`ranges` 物化状态污染）待环境官修。
 7. **第 3 条的准确化：换角是机械活**。没有云台/PTZ，也没有电动换角——相机固定在双轴导轨滑块上，spec 明确"不做电动变角"（`docs/patrol/fmc4030-camera-scan/spec.md:65,209`）。换角 = 现场重新固定支架并重扫 z（`station-retarget.md` §10.2/§10.3）。归巡检手，产出是**机械改动清单 + 代价 + 现场配合项**，不能承诺软件换角。
 8. **没有服务端拼接图，也没有缩略图**：`mosaic` 是前端 `layer×col` 缩略图网格（`web/console/index.html:2224-2268`，`docs/patrol/console-ui/spec.md:193-197`）；巡检帧 1080×648、约 750–766 KB/帧（`container-cutover.md:596,677`），一屏 48 格 30+ MB 是已知欠账。缩略图/服务端拼图属新增能力，须开票据。
 9. **没有"按站运动"接口**：只有 `/api/cmd` 的 goto 绝对坐标（`deploy/src/deploy/manual_exec.py:371`），页面"上一站/下一站"只是历史图翻页（`index.html:587-589`）。无独立位置反馈（`patrol/src/patrol/fmc/client.py:83-88`，`real_pos` 是脉冲自述）。
