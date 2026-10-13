@@ -48,6 +48,7 @@ import io
 import json
 import os
 import sys
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
@@ -87,15 +88,20 @@ def metrics(jpeg: bytes) -> dict:
     # roll 会把对侧边界绕过来，掐掉 1 像素边框
     lap = lap[1:-1, 1:-1]
     p01, p99 = np.percentile(a, [1, 99])
+    ml = round(float(a.mean()), 1)
+    of = round(float((a >= 250).mean()), 4)
     return {
         "w": im.width,
         "h": im.height,
         "lapvar": round(float(lap.var()), 2),
-        "mean_lum": round(float(a.mean()), 1),
         "p01": round(float(p01), 1),
         "p99": round(float(p99), 1),
-        "over_frac": round(float((a >= 250).mean()), 4),   # 过曝占比
-        "dark_frac": round(float((a <= 16).mean()), 4),    # 近黑占比
+        "dark_frac": round(float((a <= 16).mean()), 4),   # 近黑占比
+        # 测量师统一命名（2026-10-13）；下面两个旧名是同一列的别名，两套都在，谁都不用改解析。
+        "mean_luma": ml,
+        "overexposed_frac": of,
+        "mean_lum": ml,
+        "over_frac": of,
     }
 
 
@@ -168,6 +174,7 @@ def main() -> int:
     ap.add_argument("--base", default="http://10.77.77.39:8002")
     ap.add_argument("--out", required=True)
     ap.add_argument("--max-frames", type=int, default=220, help="总帧数上限")
+    ap.add_argument("--preview-frames", type=int, default=10, help="预览类取几帧（测量师要求 ≥10）")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -209,19 +216,20 @@ def main() -> int:
                     str(r.get("station_id", ""))[-2:] == col.rjust(2, "0")]
             l4 += pick(cand, lambda x: True, 3)
 
-    # ---- 成对样本：同站位同一天两轮各 3 帧
+    # ---- 成对样本：同站位同一天两轮，**每轮每站位至少 1 帧**（测量师复核用）
     pairs = []
     seen = {}
     for r in ok_rows:
         seen.setdefault((day_of(r), r.get("station_id")), set()).add(r["round_key"])
-    for (d, st), keys in sorted(seen.items()):
-        if len(keys) >= 2:
-            ks = sorted(keys)[:2]
-            for k in ks:
-                pairs += pick([r for r in ok_rows if day_of(r) == d and r.get("station_id") == st
-                               and r["round_key"] == k], lambda x: True, 3)
-        if len(pairs) >= 24:
-            break
+    paired = [(k, v) for k, v in sorted(seen.items()) if len(v) >= 2]
+    # 先保证覆盖面：优先取"同一轮里出现过的站位"两轮各 3 帧，最多 12 个站位
+    for (d, st), keys in paired[:12]:
+        ks = sorted(keys)[:2]
+        for k in ks:
+            group_rows = [r for r in ok_rows if day_of(r) == d and r.get("station_id") == st
+                          and r["round_key"] == k]
+            pairs += pick(group_rows, lambda x: True, max(3, 5 if len(group_rows) >= 5 else 3))
+    print(f"  成对样本 {len(pairs)} 帧（{min(len(paired), 12)} 个站位 × 2 轮）")
 
     # ---- 合并（去重，保序）
     selected, seen_nm = [], set()
@@ -245,14 +253,19 @@ def main() -> int:
     add("fill", ok_rows, args.max_frames)
     print(f"  选中 {len(selected)} 帧")
 
-    # ---- 预览流帧（不进历史，但必须能被拦下）
+    # ---- 预览流帧（不进历史，但必须能被拦下）：**≥10 帧**（测量师 2026-10-13：1 帧说明不了问题）
     preview_frames = []
-    try:
-        jpg = get(f"{args.base}/api/preview/frame.jpg", timeout=30)
-        preview_frames.append(("preview", {"object_name": None, "ts": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-                                           "station_id": "PREVIEW", "angle_profile": "preview"}, jpg))
-    except Exception as exc:  # noqa: BLE001 - 预览挂了不该毁掉整批
-        print(f"  ⚠️ 预览取帧失败（跳过 preview 类）：{exc}")
+    for i in range(args.preview_frames):
+        try:
+            jpg = get(f"{args.base}/api/preview/frame.jpg", timeout=30)
+            ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")[:23]
+            preview_frames.append(("preview", {"object_name": None, "ts": ts,
+                                               "station_id": "PREVIEW", "angle_profile": "preview"}, jpg))
+        except Exception as exc:  # noqa: BLE001 - 预览挂了不该毁掉整批
+            print(f"  ⚠️ 预览取帧失败（第 {i + 1} 张，跳过）：{exc}")
+            break
+        time.sleep(1.0)          # 拉开一点，别拿 10 张同一瞬间的近似重复帧充数
+    print(f"  预览帧 {len(preview_frames)} 张")
 
     # ---- 下载 + 度量
     records = []
@@ -305,6 +318,54 @@ def main() -> int:
         w.writerows(labels)
     with open(os.path.join(args.out, "index.json"), "w", encoding="utf-8") as fh:
         json.dump({"rounds": rounds, "n_rows": len(rows)}, fh, ensure_ascii=False, indent=1)
+
+    # ---- 原始统计（Chief 2026-10-13：要**分位数**不只均值；按层/按站位，供相对化基线）
+    def _pct(vals, q):
+        return round(float(np.percentile(vals, q)), 2) if vals else None
+
+    def _quad(rs):
+        def trip(key):
+            v = [r[key] for r in rs]
+            return f"{_pct(v, 10)} / {_pct(v, 50)} / {_pct(v, 90)}"
+        return trip("lapvar"), trip("p99"), trip("mean_luma"), trip("overexposed_frac")
+
+    sl = ["# 原始统计（分位数 p10 / p50 / p90）\n",
+          f"抽取时间：{datetime.now().isoformat(timespec='seconds')}；总帧 {len(labels)}\n",
+          "## 按 label_auto\n",
+          "| label | n | lapvar | p99 | mean_luma | overexposed_frac |",
+          "| --- | --- | --- | --- | --- | --- |"]
+    for lab in sorted({r["label_auto"] for r in labels}):
+        rs = [r for r in labels if r["label_auto"] == lab]
+        a, b, c, d = _quad(rs)
+        sl.append(f"| {lab} | {len(rs)} | {a} | {b} | {c} | {d} |")
+    sl += ["\n## 按 stratum（分层，不混池）\n",
+           "| stratum | n | lapvar | p99 | mean_luma | overexposed_frac |",
+           "| --- | --- | --- | --- | --- | --- |"]
+    for st in sorted({r["stratum"] for r in labels}):
+        rs = [r for r in labels if r["stratum"] == st]
+        a, b, c, d = _quad(rs)
+        sl.append(f"| {st} | {len(rs)} | {a} | {b} | {c} | {d} |")
+    sl += ["\n## 按站位（lapvar 与 mean_luma 的 p50，供相对化基线）\n",
+           "| station | layer | col | n | lapvar p10/p50/p90 | mean_luma p10/p50/p90 |",
+           "| --- | --- | --- | --- | --- | --- |"]
+    for st in sorted({r["station_id"] for r in labels}):
+        rs = [r for r in labels if r["station_id"] == st]
+        lap = [r["lapvar"] for r in rs]
+        lum = [r["mean_luma"] for r in rs]
+        sl.append(f"| {st} | {rs[0]['layer']} | {rs[0]['col']} | {len(rs)} | "
+                  f"{_pct(lap, 10)} / {_pct(lap, 50)} / {_pct(lap, 90)} | "
+                  f"{_pct(lum, 10)} / {_pct(lum, 50)} / {_pct(lum, 90)} |")
+    sl += ["\n## 每格样本量（L1–L4 是否凑够；**凑不满如实记数**）\n",
+           "| stratum | 条数 | 目标 | 达标 |", "| --- | --- | --- | --- |"]
+    targets = [("L1_round", "3 轮 × ≥10", 30, 30), ("L2_day", "3 天 × ≥10", 30, 30),
+               ("L3_stage", "当前阶段 ≥20", 20, 20), ("L4_station", "4 层 × 3 列 × ≥3", 36, 20),
+               ("pair", "同站同天两轮各 ≥3", 24, 20), ("preview", "≥10", 10, 10)]
+    for st, tgt, want, floor in targets:
+        n = sum(1 for r in labels if r["stratum"] == st)
+        okflag = "✓" if n >= floor else "✗（如实记数，不用别的类充数）"
+        sl.append(f"| {st} | {n} | {tgt} | {okflag} |")
+    with open(os.path.join(args.out, "stats.md"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(sl) + "\n")
 
     # ---- README（含每层/每类实际条数，凑不满的如实写）
     from collections import Counter
