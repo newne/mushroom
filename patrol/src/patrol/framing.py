@@ -40,12 +40,8 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 from patrol.motion_profile import M1, MotionProfile
-
-if TYPE_CHECKING:                     # 只为注解存在：patrol 不依赖 numpy（见 judge_frame）
-    import numpy as np
 
 
 def default_sign_z(profile: MotionProfile = M1) -> float:
@@ -73,158 +69,43 @@ DEFAULT_MIN_CONFIDENCE = 0.5
 DEFAULT_MIN_GAIN = 0.15        # 新位置至少要比历史最好位置好 15%，否则算"没进步"
 
 
-# ---------- 可用帧判定（imaging-quality 票 01 第 2 项：加湿期坏帧） ----------
+# ---------- 可用帧判定：只提供"缝"，不提供尺度 ----------
 #
-# 判据只回答一件事：**这一帧能不能用来判断长势**。它不判断"有没有蘑菇"（那是检测器的事），
-# 也不做静默丢弃——结果是一串标记，由调用方决定记到哪儿（票据 02 交给图像索引侧）。
+# **阈值不在这本模块**。Chief 2026-10-13 裁定：`measure.quality` 是帧级可用性的
+# **唯一尺度**（清晰度 / 近黑 `no_light` / 过曝，阈值由票 13 用 218 张线上真机帧定标），
+# 任何别处再定一套阈值就是第二套尺度。本模块只做一件不涉及刻度的事：把"这一帧能不能用"
+# 包在检测器外面，让坏帧不走定位（`gated_evaluate`）；尺度由部署侧接上来
+# （`deploy.framing_wire` 用 `measure.quality.frame_quality` 造 assess）。
 #
-# ## 为什么只有两个轴
-#
-# 阈值全部从**已存历史帧**的人群统计推出来（可复算：`/api/images?station_id=…&limit=200`
-# 拉帧，逐帧算下面这几个量）。人群 = 20 张巡检帧（10-12/10-13，四个轮次）+ 10 张老系统
-# sweep 帧 + 4 张仓库 fixture，全部 2880×1616：
-#
-# | 统计量 | 正常帧人群 | 坏帧人群 | 可分？ |
-# | --- | --- | --- | --- |
-# | ≤16 像素占比 | 0.000 – 0.476% | 2.781 – 10.83% | ✅ 5.8 倍空档 |
-# | ≥250 像素占比 | 0.000 – 2.580% | （本地无样本，沿用测量师 5%） | — 继承 |
-# | p99 | 183 – 247 | 99（sweep_236c） | ✅ 单样本 + 物理理由 |
-# | σ（对比度） | 22.5 – 46.1 | 31.2 – 37.0 | ❌ **完全重叠** |
-# | p99−p1（幅宽） | 79 – 224 | 128 – 155 | ❌ **完全重叠** |
-# | 上下半幅亮度差 | 1.5 – 41.0 | 1.5 – 14.9 | ❌ 场景相关，非雾相关 |
-#
-# ⇒ **"低对比度"做不了单帧门控**：加湿雾气的签名是"均值 +33%、σ −32%"（同站位跨天实测：
-# S107 均值 100.6→125.6、σ 37.4→31.2），但 σ≈30 对这台相机是**正常值**（老系统健康帧
-# σ 22.5–46.1），任何绝对阈值都会误杀正常帧。所以雾只能**相对判**（同站位的历史基线），
-# 配方见票据 02；预防则靠加湿保持（hold）。
-#
-# ## 与 hold、补光灯窗的对应关系
-#
-# * **hold（加湿保持）**是预防：加湿段根本不拍，坏帧不会产生。票据 02 的相对判据是补救：
-#   没设 hold 又撞上加湿时，用"同站位统计量漂移"把它认出来。
-# * **补光灯窗**是曝光轴的来源：巡检抓拍会开 OUT0，所以帧的曝光由灯 + 相机决定。
-#   仓库里早有"补光灯实测无效 / 照不到视野"的记录（station-retarget.md §1）——灯没进
-#   画面时，曝光只能靠菇房蓝光，于是随环控漂。近黑帧（≤16 占比高）大多是这条路径的产物。
-
-#: 近黑电平：取 limited-range 的黑电平 16，与采图侧 `capture.LEVELS_LOW` 同一个数
-#: （别造第二套尺度）。
-NEAR_BLACK_LEVEL = 16
-#: 近黑占比上限。证据：正常巡检帧最高 0.476%，坏帧最低 2.781%（10-12 09:27 那轮），
-#: 阈值落在 5.8 倍的空档中间；取 1.5% 而不是几何中点 1.15%，是为了给"略微压黑"留余量。
-MAX_NEAR_BLACK = 0.015
-#: 过曝判据**原样沿用测量师**（`measure.quality.is_overexposed` 的默认参数），
-#: 不另立尺度；本地人群最高 2.580%，无一触发，故此项只作对齐不作新建。
-OVEREXPOSED_LEVEL = 250
-MAX_OVEREXPOSED = 0.05
-#: "整帧没有亮内容"：p99 低于它说明连高光都摸不到。正常人群 p99 = 183–247，
-#: 唯一的暗帧（sweep_236c，均值 42.6）p99 = 99。物理理由：红外 + 补光灯窗内，
-#: 曝光正确的帧必然有亮内容；摸不到亮内容与场景明暗无关，只与曝光有关。
-MIN_P99 = 150.0
-
-#: 标记名。与测量师 `measure.quality.frame_quality` 的 `blurry`/`overexposed`
-#: 同一层（检测级、逗号分隔）；`underexposed` 与 `overexposed` 成对，同一个曝光轴。
-FLAG_UNDEREXPOSED = "underexposed"
-FLAG_OVEREXPOSED = "overexposed"
-
-
-@dataclass(frozen=True)
-class FrameQuality:
-    """一帧的可用性判定 + 它的统计指纹。
-
-    `flags` 顺序固定（先曝光不足、后过曝），空元组 = 可用。`flag_string` 与
-    `measure.quality.frame_quality` 的返回值同形（逗号分隔），下游要拼
-    `measurements.quality` 枚举串时再按 `measure.contract.JOINER`（`+`）接。
-
-    统计量一并带回是有意的：票据 02 的"同站位相对判据"需要逐帧的 mean/std/p99，
-    在那儿重算一遍等于把 2880×1616 的图再解码一次。
-    """
-
-    ok: bool
-    flags: tuple[str, ...] = ()
-    mean: float = 0.0
-    std: float = 0.0
-    p99: float = 0.0
-    near_black: float = 0.0
-    overexposed: float = 0.0
-
-    @property
-    def flag_string(self) -> str:
-        return ",".join(self.flags)
-
-
-def judge_frame(gray: np.ndarray) -> FrameQuality:
-    """灰度图 → 可用性判定（纯函数；numpy 缺了明确报错，不静默返回"可用"）。
-
-    阈值与理由见上面那张人群表。**故意不做模糊判定**：测量师的
-    `measure.quality.frame_quality` 已占那一轴，且其 LapVar<100 的门槛在
-    2880×1616 上会把 19/20 张正常巡检帧判成 blurry——那是刻度没按分辨率归一，
-    归测量师修（票据 03），不在这里另立一个数。
-    """
-    try:
-        import numpy as np
-    except ImportError as e:      # patrol 不依赖 numpy：缺了要说得明白
-        raise RuntimeError(
-            "可用帧判定需要 numpy（patrol 本体不依赖它，由部署侧环境提供）"
-        ) from e
-
-    g = np.asarray(gray, dtype=float)
-    if g.ndim != 2 or g.shape[0] < 3 or g.shape[1] < 3:
-        raise ValueError("需要 2D 灰度图且尺寸 ≥3×3")
-
-    near_black = float((g <= NEAR_BLACK_LEVEL).mean())
-    over = float((g >= OVEREXPOSED_LEVEL).mean())
-    p99 = float(np.percentile(g, 99))
-    flags: list[str] = []
-    if near_black > MAX_NEAR_BLACK or p99 < MIN_P99:
-        flags.append(FLAG_UNDEREXPOSED)
-    if over > MAX_OVEREXPOSED:
-        flags.append(FLAG_OVEREXPOSED)
-    return FrameQuality(
-        ok=not flags,
-        flags=tuple(flags),
-        mean=float(g.mean()),
-        std=float(g.std()),
-        p99=p99,
-        near_black=near_black,
-        overexposed=over,
-    )
-
-
-def frame_quality_gate(imread: Callable[[bytes], np.ndarray]) -> Callable[[bytes], FrameQuality]:
-    """把"字节 → 灰度数组"的解码器包成可用帧判定的字节版（给部署侧接线用）。
-
-    与 `evaluate` 同形：都吃 JPEG 字节。单独一个函数而不是塞进 `judge_frame`，
-    是因为 patrol 不依赖 Pillow/numpy——解码必须由部署侧注入（与
-    `deploy.framing_wire` 的 `_imread` 同一个来源）。
-    """
-    def gate(pixels: bytes) -> FrameQuality:
-        return judge_frame(imread(pixels))
-
-    return gate
+# 曾经这里自带一套阈值（近黑 >1.5% / p99<150 / ≥250>5%），当天按裁定拆掉；人群证据与
+# 拆断过程记在 `docs/patrol/imaging-quality/issues/01` 的 Comments。
 
 
 def gated_evaluate(
     evaluate: Callable[[bytes], FramingError],
-    gate: Callable[[bytes], FrameQuality],
+    assess: Callable[[bytes], tuple[bool, str]],
 ) -> Callable[[bytes], FramingError]:
-    """把可用帧判定包在检测器外面：坏帧 ⇒ ``found=False`` + 原因。
+    """把"这一帧能不能用"包在检测器外面：坏帧 ⇒ ``found=False`` + 原因。
 
-    **为什么走这个缝**：`fine_tune` 的调用点在 `patrol.orchestrator`（不在本票的
+    **为什么走这个缝**：`fine_tune` 的调用点在 `patrol.orchestrator`（不在成像质量票的
     文件边界内），而 `FramingHook.evaluate` 是部署侧造的——包一层就能让坏帧走
     "没找到目标就不挪"这条**既有**路径：帧照旧交差、不丢图，只是不拿它当定位依据
     （加湿期的雾会造出假的亮区质心，追着它挪只会把 trim 学歪）。
 
-    代价是**多解一次码**（2880×1616 约 0.3–0.5 s/帧）。微调本身只在标定/排障时开
-    （`--framing`），不是常规轮次的路径，所以不为它去改 orchestrator。
+    `assess(pixels) -> (ok, flags)` 由调用方提供，**必须来自 `measure.quality`**
+    （唯一尺度，见模块顶部）。本函数不解释 flags 的语义，只把它原样拼进原因里——
+    现场最想知道的是"为什么没挪"，而那串标记就是答案。
+
+    坏帧**不会**再喂给检测器：省一次解码（2880×1616 约 0.3–0.5 s），也避免检测器
+    在雾帧上算出个好看的质心、让人以为"其实是好的"。
     """
     def evaluate_gated(pixels: bytes) -> FramingError:
-        q = gate(pixels)
-        if not q.ok:
+        ok, flags = assess(pixels)
+        if not ok:
             return FramingError(
                 found=False,
                 confidence=0.0,
-                reason=(f"本帧不可用（{q.flag_string}）：均值 {q.mean:.1f} "
-                        f"σ {q.std:.1f} p99 {q.p99:.0f}"),
+                reason=f"本帧不可用（{flags or '未报标记'}）——不据此微调",
             )
         return evaluate(pixels)
 

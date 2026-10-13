@@ -82,7 +82,8 @@ def build(args, *, fetch: Callable[[bytes], bytes] | None = None,
         log(f"图像微调：解码器自检返回 {type(e).__name__}（正常，Pillow 已就位）")
 
     from measure.framing import bright_region_offset
-    from patrol.framing import frame_quality_gate, gated_evaluate
+    from measure.quality import frame_quality
+    from patrol.framing import gated_evaluate
 
     recipe = FramingRecipe(
         mm_per_px_y=args.mm_per_px,
@@ -100,20 +101,29 @@ def build(args, *, fetch: Callable[[bytes], bytes] | None = None,
         已是数组就原样返回——`deploy` 的既有用例直接喂灰度数组，那是**测试口径**，
         与生产契约（字节）相反。兼容分支只为让那个用例继续绿；票据 04 把它改成正交
         契约后，这个 `isinstance` 就可以删掉。
+
+        **刻度**：返回 0–255（`measure.framing.to_gray` 的口径）。`measure.quality` 的
+        清晰度阈值按 0–255 定标（票 13），喂 0–1 会小 65025 倍、绝对下限失效。
         """
         return imread(pixels) if isinstance(pixels, (bytes, bytearray)) else pixels
 
     def detect(pixels):
         return bright_region_offset(to_gray(pixels))
 
+    def assess(pixels):
+        """这一帧能不能用——**唯一尺度在 `measure.quality`**（Chief 2026-10-13 裁定）。
+
+        阈值不在这里、也不在 `patrol.framing`：票 13 用 218 张线上真机帧定标
+        （清晰度 45.0 / 近黑 p99<0.12 / 过曝 5%）。要改阈值写票据给测量师。
+        """
+        return frame_quality(to_gray(pixels))
+
     # 可用帧判定（imaging-quality 票 01 第 2 项）：默认开——坏帧不该驱动微调。
-    # 阈值与人群证据在 `patrol.framing.judge_frame` 的 docstring 里，可复算。
     evaluate = detect
     gate_note = "可用帧判定：关（PATROL_FRAME_QUALITY=0）"
     if os.environ.get("PATROL_FRAME_QUALITY", "1").strip().lower() not in ("0", "false", "no", "off"):
-        evaluate = gated_evaluate(detect, frame_quality_gate(to_gray))
-        gate_note = ("可用帧判定：开（近黑 >1.5% 或 p99<150 ⇒ underexposed；"
-                     "≥250 >5% ⇒ overexposed）")
+        evaluate = gated_evaluate(detect, assess)
+        gate_note = "可用帧判定：开（尺度取 measure.quality：清晰度/近黑/过曝，票 13 定标）"
     log(gate_note)
 
     return WireResult(

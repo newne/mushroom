@@ -178,3 +178,44 @@ bright_region_offset(b"\xff\xd8\xff\xe0jpeg-bytes")
 - 判定接进 `fine_tune` 的路径只有单测覆盖，**没有上机跑过**（`--framing` 需要先标定
   `--mm-per-px`，而它至今没标定——`station-retarget.md` §2）。
 - 生产访问已按 Chief 要求全部停止，本轮没有任何线上读取。
+
+---
+
+### 2026-10-13（晚）step code · 按 Chief 裁定拆掉"第二套尺度"——过程与边界
+
+Chief 2026-10-13 裁定：**`measure.quality` 是帧级可用性的唯一尺度**，任何别处的
+"这帧能不能用"判定都必须对齐它，不许造第二套。我上午提交的 `patrol.framing.judge_frame`
+（自带近黑 >1.5% / p99<150 / ≥250>5%）正是第二套，当天拆掉。
+
+**拆法**：`patrol.framing` 只保留不涉及刻度的部分——
+
+- `gated_evaluate(evaluate, assess)`：把"这一帧能不能用"包在检测器外面，坏帧 ⇒
+  `found=False` + 原因，且**不再喂给检测器**（省一次解码，也避免雾帧算出好看质心）；
+- 尺度由部署侧接上来：`deploy.framing_wire` 用 `measure.quality.frame_quality` 造
+  `assess`（唯一尺度：清晰度 45.0 / 近黑 `no_light` p99<0.12 / 过曝 5%，票 13 定标）；
+- `patrol.framing` 里**一个阈值常数都不剩**；`judge_frame` / `FrameQuality` /
+  五个阈值常量 / `frame_quality_gate` 全部删除。
+
+**保留的部分**（不涉及刻度，仍在我的文件边界内）：
+
+- 坏帧不走定位的缝（`gated_evaluate`）+ 6 条单测；
+- `deploy.framing_wire` 的解码层（见下条真 bug）；
+- 跨包对接检查：仓库内 3 张已归档真实帧必须通过唯一尺度（误杀比漏杀贵——它会让微调
+  永远学不到东西，而现场只看到"没挪"）。
+
+**顺带修正了我自己的一处错**：`m0_S101_20260913_004820.jpg` 曾被我的旧尺度判"通过"
+（我的 p99<150 太松），但按票 13 的清晰度下限 45.0 它是 `blurry`（lapvar=44）。
+那不是误杀——它是 2026-09-13 的帧，不在 218 张标定人群（当前单档平视 + 矮菇 + 这批
+光照）的覆盖范围内。已从"必须通过"列表摘出，边界记在测试注释里。
+
+**单测现状**：`patrol/tests/test_framing.py` 里可用帧判定从 14 项变成 7 项——少的 7 项
+原本在断言我自己的阈值（那正是第二套尺度的单测，不该存在）。尺度的单测归测量师
+（`measure/tests/` + `measure/tools/calibrate_quality_thresholds.py`）。
+
+**没验证的**（同上午，另加两条）：
+
+- `gated_evaluate` 接上 `measure.quality` 的路径**没有上机跑过**（`--framing` 需要先标定
+  `--mm-per-px`，至今没标定）；
+- 唯一尺度与"取景微调"的交互没人验过：清晰度下限 45.0 会不会把**本该微调**的帧
+  （例如略微失焦但亮区可判）也拦掉？这要等 `--framing` 真开起来才知道——已请测量师
+  在票 14 的抽样验收里带上这一项。

@@ -12,15 +12,11 @@ from pathlib import Path
 import pytest
 from patrol.framing import (
     DEFAULT_MAX_TRIM_MM,
-    FLAG_OVEREXPOSED,
-    FLAG_UNDEREXPOSED,
-    FrameQuality,
     FramingError,
     FramingRecipe,
     clamp_trim,
     fine_tune,
     gated_evaluate,
-    judge_frame,
 )
 
 LIMITS = (0.0, 4492.0, -212.0, 0.0)
@@ -244,164 +240,85 @@ def test_outcome_row_is_serialisable_for_the_index():
     assert row["history"][0]["step_mm"] == [15.0, 10.0]
 
 
-# ---------- 可用帧判定（imaging-quality 票 01 第 2 项：加湿期坏帧） ----------
+# ---------- 可用帧判定：只测"缝"，不测尺度 ----------
 #
-# 阈值不是拍脑袋：全部从已存历史帧的人群统计推出来，判据是"阈值落在正常帧与坏帧之间
-# 的空档里"。人群与复算方式见 patrol.framing.judge_frame 的 docstring。
+# 阈值归 `measure.quality`（Chief 2026-10-13 裁定的唯一尺度，票 13 用 218 张线上真机帧
+# 定标）。本文件只测 `patrol.framing` 自己的那部分：坏帧 ⇒ 检测器报"没找到目标"，
+# 且**不再喂给检测器**。尺度的单测在 measure 侧，不在这里重复造。
 
 
-def _np():
-    numpy = pytest.importorskip("numpy")
-    return numpy
+def _assess(result):
+    """造一个 assess：返回给定的 (ok, flags)，并记录被问过几次。"""
+    calls = []
+
+    def assess(pixels):
+        calls.append(pixels)
+        return result
+
+    return assess, calls
 
 
-def _flat(value: float, size=(120, 160)) -> "object":
-    """一张确定性灰度图（无随机：同一目标两次调用必须逐像素相同）。"""
-    np = _np()
-    return np.full(size, float(value))
-
-
-def _with_block(value: float, *, frac: float, size=(1000, 100)) -> "object":
-    """底图 + 一块压死的像素，占比精确到 0.01%。"""
-    np = _np()
-    g = np.full(size, float(value))
-    n = int(round(frac * size[0] * size[1]))
-    g.flat[:n] = 5.0                     # ≤16 ⇒ 近黑
-    return g
-
-
-def test_healthy_frame_passes_and_carries_its_fingerprint():
-    """正常帧必须通过，并且把统计指纹带回来。
-
-    指纹不是装饰：票据 02 的"同站位相对判据"要逐帧的 mean/std/p99，在那儿重算等于
-    把 2880×1616 再解码一次。
-    """
-    np = _np()
-    g = np.clip(np.linspace(40, 220, num=120 * 160).reshape(120, 160), 0, 255)
-    q = judge_frame(g)
-    assert q.ok is True and q.flags == () and q.flag_string == ""
-    assert 100 < q.mean < 160 and q.p99 > 200 and q.near_black == 0.0
-
-
-def test_near_black_frame_is_flagged_underexposed():
-    """近黑帧：≥1.5% 的像素压死 ⇒ underexposed。
-
-    对齐实测：正常巡检帧最高 0.476%，10-12 09:27 那轮最低 2.781%。
-    """
-    q = judge_frame(_with_block(200.0, frac=0.03))
-    assert q.ok is False
-    assert q.flags == (FLAG_UNDEREXPOSED,)
-    assert q.near_black == pytest.approx(0.03)
-
-
-def test_threshold_sits_inside_the_population_gap():
-    """阈值必须落在空档里——这是"可复算"的判据，不是选出来的数。
-
-    空档：正常帧 ≤0.476% / 坏帧 ≥2.781%（5.8 倍）。取 1.5% 而非几何中点 1.15%，
-    是为了给"略微压黑"留余量；这条用例把边界两侧都钉住。
-    """
-    assert judge_frame(_with_block(200.0, frac=0.004)).ok is True     # 0.4%：正常人群上限内
-    assert judge_frame(_with_block(200.0, frac=0.016)).ok is False    # 1.6%：已进坏帧区间
-
-
-def test_dim_frame_without_bright_content_is_flagged():
-    """整帧摸不到亮内容（p99 < 150）⇒ 同样算 underexposed。
-
-    证据是单帧 + 物理理由：正常人群 p99 = 183–247，唯一的暗帧 p99 = 99；红外 +
-    补光灯窗内曝光正确的帧必然有亮内容，摸不到亮内容与场景明暗无关。
-    """
-    np = _np()
-    g = np.full((120, 160), 60.0)
-    g[:, ::2] = 95.0                       # 峰值 95 < 150，且没有近黑像素
-    q = judge_frame(g)
-    assert q.near_black == 0.0, "这条只该由 p99 触发，不能被近黑规则抢先"
-    assert q.ok is False and q.flags == (FLAG_UNDEREXPOSED,)
-    assert q.p99 < 150.0
-
-
-def test_overexposed_uses_the_measurers_scale():
-    """过曝阈值**原样沿用测量师**（≥250 且占比 >5%），不另立尺度。"""
-    np = _np()
-    g = np.full((1000, 100), 120.0)
-    g.flat[:6000] = 255.0                  # 6% > 5%
-    q = judge_frame(g)
-    assert q.ok is False and q.flags == (FLAG_OVEREXPOSED,)
-    assert q.overexposed == pytest.approx(0.06)
-
-
-def test_both_flags_can_fire_together():
-    np = _np()
-    g = np.full((1000, 100), 120.0)
-    g.flat[:6000] = 255.0                  # 6% 过曝
-    g.flat[6000:9000] = 5.0                # 3% 近黑
-    q = judge_frame(g)
-    assert q.flags == (FLAG_UNDEREXPOSED, FLAG_OVEREXPOSED)   # 顺序固定
-    assert q.flag_string == "underexposed,overexposed"
-
-
-def test_flags_are_comma_joined_like_the_measurers():
-    """与 `measure.quality.frame_quality` 同形（逗号分隔）——下游要拼
-    `measurements.quality` 枚举串时再按 `measure.contract.JOINER`（`+`）接。"""
-    q = FrameQuality(ok=False, flags=(FLAG_UNDEREXPOSED,))
-    assert q.flag_string == "underexposed"
-    assert FrameQuality(ok=True).flag_string == ""
-
-
-def test_judge_frame_rejects_non_gray():
-    np = _np()
-    with pytest.raises(ValueError, match="2D 灰度图"):
-        judge_frame(np.zeros((4, 4, 3)))
-
-
-# ---------- 包在检测器外面：坏帧不驱动微调 ----------
-
-
-def test_gated_evaluate_turns_a_bad_frame_into_not_found():
-    """坏帧 ⇒ 检测器报"没找到目标" ⇒ 微调不挪。
-
-    走这条既有路径是有意的：帧照旧交差、不丢图，只是不拿它当定位依据——加湿期的雾
-    会造出假的亮区质心，追着它挪只会把 trim 学歪。
-    """
-    bad = FrameQuality(ok=False, flags=(FLAG_UNDEREXPOSED,),
-                       mean=70.0, std=50.0, p99=200.0)
+def test_bad_frame_becomes_not_found_and_never_reaches_the_detector():
+    """坏帧 ⇒ `found=False`，且不喂检测器（省一次解码，也避免雾帧算出好看质心）。"""
     inner_calls = []
+    assess, assess_calls = _assess((False, "no_light"))
 
     def inner(pixels):
         inner_calls.append(pixels)
         return FramingError(dx_px=5.0, dy_px=5.0)
 
-    got = gated_evaluate(inner, lambda _pixels: bad)(b"jpeg")
+    got = gated_evaluate(inner, assess)(b"jpeg")
     assert got.found is False and got.confidence == 0.0
-    assert "underexposed" in got.reason and "70.0" in got.reason
-    assert inner_calls == [], "坏帧不该再喂给检测器（省一次解码）"
+    assert "no_light" in got.reason
+    assert len(assess_calls) == 1 and inner_calls == []
 
 
-def test_gated_evaluate_passes_good_frames_through():
+def test_good_frame_reaches_the_detector_unchanged():
+    assess, _ = _assess((True, ""))
+
     def inner(pixels):
         return FramingError(dx_px=5.0, dy_px=5.0)
 
-    got = gated_evaluate(inner, lambda _pixels: FrameQuality(ok=True))(b"jpeg")
+    got = gated_evaluate(inner, assess)(b"jpeg")
     assert got.found is True and got.dx_px == 5.0
 
 
-# ---------- 真实帧：仓库里已归档的相机帧必须全部通过（不许误杀） ----------
+def test_missing_flags_still_say_something_useful():
+    """assess 只说"不可用"不给标记时，原因里不许出现空括号。"""
+    assess, _ = _assess((False, ""))
+    got = gated_evaluate(lambda _p: FramingError(), assess)(b"jpeg")
+    assert got.found is False and "未报标记" in got.reason
+
+
+def test_flags_from_the_single_scale_are_passed_through_verbatim():
+    """标记串原样透传——本模块不解释语义，现场要看到的就是测量师那串名字。"""
+    assess, _ = _assess((False, "blurry+no_light"))
+    got = gated_evaluate(lambda _p: FramingError(), assess)(b"jpeg")
+    assert "blurry+no_light" in got.reason
+
+
+# ---------- 与唯一尺度（measure.quality）的对接：真实帧必须全部通过 ----------
 #
-# 人群证据在 judge_frame 的 docstring：正常巡检帧 ≤16 占比 0.000–0.476%、p99 183–247。
-# 这里用**仓库内已归档**的真实相机帧做回归——它们一张都不该被判坏。
+# `deploy.framing_wire` 用 `measure.quality.frame_quality` 造 assess。这里用仓库内
+# 已归档的真实相机帧做一次跨包对接检查：**一张都不该被拒**（误杀会比漏杀更贵——
+# 它会让微调永远学不到东西，而现场只会看到"没挪"）。
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REAL_FRAMES = [
     REPO_ROOT / "docs/patrol/prod-deploy/lampcheck/lampcheck_off.jpg",
     REPO_ROOT / "docs/patrol/prod-deploy/lampcheck/lampcheck_on.jpg",
-    REPO_ROOT / "docs/patrol/prod-deploy/captures/m0_S101_20260913_004820.jpg",
     REPO_ROOT / "data/S306-candidate-Y2058.833-Z117.5-20261008.jpg",
 ]
+# ⚠️ `m0_S101_20260913_004820.jpg` **不在**上面的列表里，原因是实测的：它的
+# `lapvar = 44`，低于票 13 标定的清晰度绝对下限 45.0 ⇒ 被唯一尺度判 `blurry`。
+# 那不是误杀——它是 2026-09-13 的帧（标定人群 218 张之前：5 层、旧锚点、另一批光照），
+# 本就不在标定覆盖范围内。这条边界记在票 01 的 Comments；要动它找测量师，别在这儿改。
 
 
 @pytest.mark.parametrize("path", REAL_FRAMES, ids=lambda p: p.name)
-def test_real_committed_frames_pass_the_gate(path):
-    """已归档真实帧必须通过；缺文件/缺 Pillow 时跳过而不是失败。"""
+def test_real_committed_frames_pass_the_single_scale(path):
     pytest.importorskip("PIL")
+    pytest.importorskip("measure.quality")
     if not path.exists():
         pytest.skip(f"仓库里没有 {path.name}")
     from io import BytesIO
@@ -409,11 +326,14 @@ def test_real_committed_frames_pass_the_gate(path):
     from PIL import Image
 
     with Image.open(path) as im:
-        gray = _to_gray(im)
-    q = judge_frame(gray)
-    assert q.ok, f"{path.name} 被误判：{q.flag_string}（均值 {q.mean:.1f} p99 {q.p99:.0f}）"
+        gray = np_asarray(im)
+    from measure.quality import frame_quality
+
+    ok, flags = frame_quality(gray)
+    assert ok, f"{path.name} 被唯一尺度拒了：{flags}"
 
 
-def _to_gray(im):
-    """PIL → 灰度 numpy 数组。"""
-    return _np().asarray(im.convert("L"), dtype=float)
+def np_asarray(im):
+    """PIL → 0–255 灰度 numpy 数组（`measure.quality` 的刻度约定）。"""
+    np = pytest.importorskip("numpy")
+    return np.asarray(im.convert("L"), dtype=float)

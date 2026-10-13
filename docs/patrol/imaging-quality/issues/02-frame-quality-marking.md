@@ -1,6 +1,7 @@
 # 02 把"可用帧"标记落到图像索引，并补一条同站位相对判据
 
 - 提出：**step code**（外部协作者）　执行：**巡检手**（仓库侧）　状态：ready-for-agent
+- 2026-10-13 更新：范围收窄为「加列 + 逐帧写」；相对判据已由测量师在票 14 落地
 - 立项：2026-10-13　来源：`01-camera-imaging-quality.md` 第 2/4 项
 
 ## 为什么要做
@@ -21,12 +22,12 @@ docstring），但**判定结果现在没有落点**——不落点就只有两�
    标记串是**逗号分隔**（与 `measure.quality.frame_quality` 同形）；要写进
    `measurements.quality` 枚举时按 `measure.contract.JOINER`（`+`）接，并先找测量师
    登记枚举值（见票 03 的联系方式）。
-3. **相对判据（雾的补救）**：单帧门控抓不到加湿雾——人群证据：正常帧 σ 22.5–46.1、
-   雾帧 σ 31.2–37.0，**完全重叠**，任何绝对阈值都会误杀正常帧。所以雾要**相对判**：
-   按 `(station_id, angle_profile)` 取最近 N 帧（建议 N=6，跨 3 天）的 mean/std/p99 中位数，
-   当 |Δmean| > 20% 或 std 低于基线 25% 时，给该帧打 `low_contrast`。
-   基线数据来自 `judge_frame` 已经带回的统计指纹（`FrameQuality.mean/std/p99`），
-   **不要二次解码**。
+3. **相对判据：已由测量师做好，本票不再重复**（2026-10-13：`measure.quality` 的
+   `relative_verdict` / `station_baseline` / `frame_stats`，票 14；含绝对兜底
+   `DEFAULT_ABS_LAPVAR_FLOOR=45.0` 与 `MIN_BASELINE_FRAMES=10`）。
+   本票只剩第 1、2 条：**把判定结果落到 `images` 表并逐帧写**。
+   注意尺度唯一：`patrol.framing` 已按 Chief 2026-10-13 裁定拆掉自带阈值，
+   标记名以 `measure.quality` 为准（`no_light`/`overexposed`/`blurry`，`+` 分隔）。
 4. **与 hold 的分工写进文档**：hold 是预防（加湿段不拍），相对判据是补救（没设 hold
    又撞上）。两者都在 `CONTEXT.md` 的「加湿保持」词条里说清楚。
 
