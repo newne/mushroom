@@ -136,3 +136,64 @@
 - 不新增 service / 端口 / 挂载；不改 compose、不动 `docker/**`。
 - 不改 `wait_play_data` 的常规超时（5s 是抓拍节拍的一部分）；诊断性长超时只作为
   一次性排障脚本，不进轮次。
+
+---
+
+# 5. 现场只读回填（发版官，2026-10-13 21:0x）——三处"未知"的实测答案
+
+每条都标了**实测**还是**推定**；实测有可复算的命令与数字。
+
+## 5.1 文件：`/app/log` 里到底有哪些（**实测**）
+
+容器内 `docker exec <capture> ls -l /app/log`（宿主侧同目录 `.../xcloudsdk_py_offline_20260120_175307/log`，
+bind-mount rw，内容一致）：
+
+| 文件 | 大小/时间（实测） | 说明 |
+| --- | --- | --- |
+| `xcloudsdk.log` + `.1` `.2` `.3` | current 9 279 584 B；历史 3 个 ≈10 MiB | SDK 主日志（`device_access_manager` / `NetDevice` / `SubSystem` / **`HeartBeat-Timeout`** / **`Login success`** 都在这一族） |
+| `mediacodec.log` + `.1` `.2` `.3` | current 7 706 189 B；历史 3 个 ≈10 MiB | **心跳就在这一族**：`play_msg_pusher.cpp:95 notifyPlayInfo`，带 `relativeTime`——**看门狗要 tail 的首选** |
+| `app_log.log` | 3 791 B，mtime **＝本次重建时刻**（20:18） | 每次容器启动**重建**，生命周期＝容器 |
+| `xvfb.log` | **0 B**，mtime ＝重建时刻 | entrypoint `Xvfb … >/app/log/xvfb.log` 每次启动**截断** |
+
+**⚠️ 更正 §2.2 的一处推定**：票里写"具体文件名由宿主 `XCloudSDKTest_config.ini` 决定"——**实测否证**。
+该 config 全文是
+`{"CFG_KEY_Language":"cn","ConfigPath":"./","InitType":0,"Language":"cn","LoginTimeout":15000,"LoginType":100,"PlatAppKey":"","PlatAppSecret":"","PlatMovedCard":0,"PlatUUID":"","SaveFileType":"mp4","ServerIP":"","ServerPort":34567,"TempPath":"./"}`
+——**没有任何日志文件名/级别/大小项**。entrypoint 也只 `mkdir -p /app/log`（第 34 行）与写 `xvfb.log`（第 106 行）。
+⇒ 日志名与轮转是**厂商 SDK `.so` 内置**，**读配置读不出来**，只能实测。
+
+## 5.2 轮转策略（**实测 4 条 + 推定 1 条**）
+
+**实测**：
+
+1. **按大小轮转，阈值 ≈ 10 MiB**：6 个历史文件大小全落在 **10 485 568–10 485 697 B**（10 MiB = 10 485 760 B），
+   即刚过 10 MiB 就切（数字见 `ls -l` 输出）。
+2. **每流 4 个文件**（current + `.1`/`.2`/`.3`）⇒ **按数量保留 3 个历史**，每流上限 ≈ 40 MiB。
+3. **不压缩**：全是纯文本 `.log`，没有 `.gz`。
+4. **经验保留 ≈ 6 天**：`xcloudsdk.3` Oct 8 09:01 → `.2` Oct 10 04:00 → `.1` Oct 12 05:02 → current Oct 13 21:04，
+   约 2 天/10 MiB。⚠️ **这是由产生速率决定的，不是"按天保留"**——轮次密度一变，保留时长跟着变。
+
+**推定（未实测到一次轮转，标推定）**：轮转方式最可能是 **rename**（`current→.1`、`.1→.2`、`.2→.3`、`.3` 删除），
+因此 **current 的 inode 会变**；但**不能排除 copy-truncate**（同 inode、size 归零）。
+⇒ 票里"inode 变化或 size 变小就重开"这条要求**必须照做**，两种都要处理。
+**补一条**：`app_log.log` / `xvfb.log` 会在**容器重启**时归零/重建，tail 逻辑别把它们当 `xcloudsdk/mediacodec` 那一族的续写。
+
+## 5.3 时间戳时区（**实测**）：`18:22:13.952` 是 **CST（Asia/Shanghai，UTC+8）**，不是 UTC
+
+三条实测证据：
+
+1. 容器内 `date` → `Tue Oct 13 21:05:03 **CST** 2026`；容器 env **`TZ=Asia/Shanghai`**（compose 覆盖层设的）。
+2. **与服务自身时钟对拍**（最硬的一条）：docker 的访问日志是 UTC，S101 那次 `pool_capture` 响应完成于
+   `10:20:14.232Z`；SDK 日志里**同一次抓拍**的 `CatchPicture` 在 `18:20:13.892` ⇒
+   18:20:13.892 CST ＝ 10:20:13.892Z，比响应早 0.34 s，**差正好 8 小时**。
+3. 事故时段一致：`HeartBeat-Timeout` 记 `18:22:36.106`，同一时段 docker 侧请求在 `10:22:23Z`/`10:22:32Z` 的节奏上。
+
+⇒ `age = now(容器时钟) − 最后一条心跳的时间戳` **可以直接相减**（同源同时区）。
+补两条：**Asia/Shanghai 无 DST**（不存在跳变）；解析仍**不要假设时区**——用容器 `time.time()`
+与日志时间戳同源比较，别引入 UTC 假设。
+
+## 5.4 给实现的三个具体锚点（供 step code）
+
+- tail 目标：`/app/log/mediacodec*.log`，锚点字符串 **`notifyPlayInfo`**；行首格式 `[YYYY-MM-DD HH:MM:SS.mmm]`。
+- 心跳"活着"的判断建议看 **`relativeTime` 是否在推进**，而不是只看行数（事故前它每秒 +1000，实测）。
+- `xcloudsdk*.log` 里 `HeartBeat-Timeout`(18:22:36.106) → `device disconnect, result: -99991`(18:23:10.051) 是
+  **SDK 自己的**判定，比真实停流晚 **22 秒**——只作旁证，别当第一信号。
