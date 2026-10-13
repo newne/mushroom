@@ -24,15 +24,24 @@ from dataclasses import dataclass
 
 import numpy as np
 
-#: 占位阈值（等票 13 用真实帧分布替换；改动必须留回归帧与理由）
+#: 阈值标定：2026-10-13 用 218 张线上真机帧（2880×1616，`.scratch/frame-quality-samples/`）
+#: 的分布定的，不是拍脑袋。**刻度约定：`lapvar` 必须在 0–255 灰度上算**
+#: （`np.asarray(img).mean(axis=2)`），在 0–1 上算会小 65025 倍，绝对下限会失效。
+#: 该批实测：`lapvar` min 48.0 / p10 53.7 / p50 71.3 / p90 114.3；
+#: ⇒ 旧的默认 100 会拒掉 **78.4%** 的正常帧（中位数本身就低于它）。
+#: ⚠️ 这是**当前现场（单档平视 + 矮菇 + 这批光照）**的分布：换角/换灯/相机参数变更后
+#: 必须用同一脚本重算（`measure/tools/calibrate_quality_thresholds.py`）。
 DEFAULT_BLUR_THRESHOLD = 100.0
 DEFAULT_MAX_OVEREXPOSED = 0.05
-#: 近黑：p99 亮度低于此值（[0,1] 归一化）= 整帧几乎没有亮区
+#: 近黑：p99 亮度低于此值（[0,1] 归一化）。ok 帧实测 p99 min = 0.722、
+#: 两张真暗帧 p99 = 0.008/0.012 ⇒ 0.12 落在巨大的空隙里，两侧都有 6 倍以上余量。
 DEFAULT_DARK_P99 = 0.12
 #: **清晰度绝对下限**（票 14，Chief 2026-10-13 加的约束）：相对基线判"塌了"之前，
 #: 先看绝对清晰度。没有它，相机**整体**失焦/镜头被污染时，每帧相对自己的基线都
-#: "正常"，系统性漂移会被相对判据吃掉。占位值待票 13 用样本定。
-DEFAULT_ABS_LAPVAR_FLOOR = 15.0
+#: "正常"，系统性漂移会被相对判据吃掉。
+#: 定标：ok 帧 min = 48.0、p05 = 52.6 ⇒ 取 **45.0**（紧贴正常下限之下，
+#: 误杀 0/218），只拦"连正常下限都没到"的帧。判"纹理塌了"主要靠相对判据。
+DEFAULT_ABS_LAPVAR_FLOOR = 45.0
 
 
 def _as_unit(gray: np.ndarray) -> np.ndarray:
@@ -44,7 +53,11 @@ def _as_unit(gray: np.ndarray) -> np.ndarray:
 
 
 def laplacian_variance(gray: np.ndarray) -> float:
-    """拉普拉斯方差——经典清晰度指标，越低越模糊。"""
+    """拉普拉斯方差——经典清晰度指标，越低越模糊。
+
+    **刻度**：请传 0–255 的灰度（`np.asarray(img).mean(axis=2)`）。传 0–1 归一化图会
+    小 65025 倍，`DEFAULT_ABS_LAPVAR_FLOOR` 这类绝对阈值就失去意义。
+    """
     g = gray.astype(float)
     if g.ndim != 2 or g.shape[0] < 3 or g.shape[1] < 3:
         raise ValueError("需要 2D 灰度图且尺寸 ≥3×3")
