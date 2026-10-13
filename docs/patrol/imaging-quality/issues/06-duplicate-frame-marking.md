@@ -181,3 +181,53 @@ docker compose up -d --force-recreate
 
 另：**服务侧实时指纹与巡检侧事后复核（`content_sha256`/`--verify-content`）互补，不许互相替代**；
 `--verify-content` 默认关**维持到服务侧上生产之后**。
+
+## E. 现场生效记录（发版官，2026-10-13 20:18）——**已上线**
+
+| 步 | 动作 | 证据 |
+| --- | --- | --- |
+| 1 | 备份宿主覆盖层 | `docker-compose.override.yml.bak-20261013-201609`（3653 B，＝改前 sha `58a0d7de…`） |
+| 2 | 上传新覆盖层 | 本地 sha256 ＝ 远端 sha256 ＝ **`ffadef915115b94fe1c696f96390e62e59244b2cc69ea40944b6d749ad9e4a26`**（传输无静默失败） |
+| 3 | 解析校验 | `docker compose config` **CONFIG_OK**；解析出的 image ＝ 新 tag；**`levels-fix` 挂载与 `PYTHONPATH` 均已消失** |
+| 4 | 预拉镜像 | prod `docker pull` 成功，digest **`sha256:750f4e42…`** ＝ 推送时的 digest |
+| 5 | 重建 | `docker compose up -d --force-recreate`（**不带 `-f`**），20:18:11 |
+| 6 | 动手前 | `Up 4 days (healthy)` / 旧 image `xcloudsdk-py:0.1.0` / `healthz=200` |
+| 7 | 动手后 | `Up About a minute (healthy)` / **新 image** / `healthz=200` |
+| 8 | 容器内自查 | 运行中容器里 `capture.py` sha256 ＝ **`1ac2310d…`**（＝仓库版） |
+| 9 | 挂载复核 | `docker inspect .Mounts` 里**已无 `levels-fix`**（宿主目录保留不删，备回滚） |
+
+**验收（Chief 修订口径）第 1 条：通过。** 两次现场抓拍响应：
+
+```
+{"success":true, ..., "levels_normalized":true,
+ "image_sha256":"d532c628e8b9ae8110246f72819ad53567e7a88d05da0b3196cbdb1a6dd5bbfc",
+ "same_as_previous":false, "duplicate_streak":1, "play_data_ready":false,
+ "capture_time_ms":5202, "total_time_ms":5492}
+{"success":true, ...,
+ "image_sha256":"86199de7ea2bfbc4a761c5106bb310ebf31cbf19771ac5b069d8d18be6ea1f38",
+ "same_as_previous":false, "duplicate_streak":1, "play_data_ready":false,
+ "capture_time_ms":5200, "total_time_ms":5200}
+```
+
+⇒ `image_sha256` 为 64 位十六进制、`same_as_previous` 布尔、`duplicate_streak` 整数、`play_data_ready` 有值；两次抓拍 sha 不同（**正常流里两次都是新帧**，印证 Chief 关于"不能拿 `same_as_previous:true` 当硬验收"的判断）。
+
+## F. ⚠️ 一处必须更正的判断：**`play_data_ready` 不能当"流死"的判据**
+
+发版官先前推断"冻结期间 `play_data_ready` 会一路 False ⇒ 在第一帧就能抓住"。
+**现场实测否证了它**：两次**健康**抓拍的 `play_data_ready` **都是 `false`**，而 `capture_time_ms` 5200/5202 ms
+说明 `wait_play_data` **每次都在 5 s 上限超时**、随后 `MediaSnapImageEx` 照样抓到了好帧。
+
+代码也印证：`third_party/capture/src/xcloudsdk_py/capture.py:411` 取到它、`:462`/`:440` **只报不用**
+（不参与控制流）。⇒ 在 `/pool_capture` 这条池化路径上，该返回值**健康时也是 False**，
+拿它做"流中断"信号会**每次正常抓拍都误报**。
+
+**结论**：真正可用的检测是 **`image_sha256` / `same_as_previous` / `duplicate_streak`**（本次已实测形状正确、正常流里 streak 复位为 1）；
+`play_data_ready` 只作诊断留痕，**不要接看门狗**。若要"流死"信号，用**周期性 PLAY_INFO 心跳缺失**
+（本次取证证明它 22 秒早于 SDK 自己的掉线报错），那是另一张票的事。
+
+## G. 验收口径（发版官，现场记录）
+
+- 现场记录的是**服务侧**（快照 A–F + 第 1 条验收）；**巡检侧**两条——字段落进索引、
+  帧照常入库且 `n_frames_recorded` 等于帧数——**只能等下一轮巡检**（上轮 18:27 结束）才能观测，
+  属**发版后复验**，由发版官在下一轮结束后补。
+- 回滚（§C）未执行；`levels-fix/` 与备份文件都在原处。
