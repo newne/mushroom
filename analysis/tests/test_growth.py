@@ -16,14 +16,20 @@ from analysis.growth import (
 )
 
 
-def point(ts, mean_len, *, box="B101", n=6, cap=None, quality=None):
+def point(ts, mean_len, *, box="B101", n=6, cap=None, quality="verified", **cluster):
     return GrowthPoint(ts=ts, box_id=box, n=n, mean_len_mm=mean_len, mean_cap_mm=cap,
-                       quality=quality)
+                       quality=quality, **cluster)
 
 
-def row(ts, mean_len, *, box="B101", n=6, cap=None, quality=None):
+def row(ts, mean_len, *, box="B101", n=6, cap=None, quality="verified", **cluster):
     return {"ts": ts, "box_id": box, "n": n, "mean_len_mm": mean_len,
-            "mean_cap_mm": cap, "quality": quality}
+            "mean_cap_mm": cap, "quality": quality, **cluster}
+
+
+def flat_point(ts, *, box="B101", n=6, area=None, projected=None, quality="verified"):
+    """平视单档的真实形状：杆长恒 NULL，只有菌簇量（票 11 §9）。"""
+    return GrowthPoint(ts=ts, box_id=box, n=n, mean_len_mm=None, mean_cap_mm=None,
+                       quality=quality, mean_area_mm2=area, mean_projected_d_mm=projected)
 
 
 # ---------- 基本判定 ----------
@@ -81,10 +87,59 @@ def test_too_few_detections_is_not_comparable():
     assert "检出朵数不足" in d.note
 
 
-def test_missing_length_is_not_comparable():
-    d = compare(point("2026-09-13T08:00:00", None), point("2026-09-13T20:00:00", 46.0))
+def test_missing_every_metric_is_not_comparable():
+    """一个长势量都没有才叫不可比；平视下"没有杆长"本身**不是**不可比的理由。"""
+    d = compare(point("2026-09-13T08:00:00", None), point("2026-09-13T20:00:00", None))
     assert d.verdict == "not_comparable"
-    assert "没测到长度" in d.note
+    assert "没有同一个可用的长势量" in d.note
+
+
+def test_not_verified_is_not_comparable():
+    """整簇不可分时那些值是估出来的：质量标记里没有 `verified` 就不给判词。"""
+    d = compare(point("2026-09-13T08:00:00", 40.0, quality="low_confidence"),
+                point("2026-09-13T20:00:00", 46.0))
+    assert d.verdict == "not_comparable"
+    assert "质量标记不可用" in d.note
+
+
+def test_two_different_metrics_are_never_subtracted():
+    """一边只有杆长、一边只有面积 —— 相减就是拿两个量纲凑数，必须拒。"""
+    d = compare(point("2026-09-13T08:00:00", 40.0),
+                flat_point("2026-09-13T20:00:00", area=133124.0))
+    assert d.verdict == "not_comparable"
+    assert "没有同一个可用的长势量" in d.note
+
+
+# ---------- 平视单档：改用菌簇量（票 05 / 票 11 §9） ----------
+
+
+def test_flat_view_growth_uses_projected_diameter_and_carries_units():
+    d = compare(flat_point("2026-10-13T08:00:00", projected=400.0),
+                flat_point("2026-10-13T20:00:00", projected=412.0))
+    assert d.verdict == "growing"
+    assert d.metric == "mean_projected_d_mm"
+    assert d.unit == "mm"
+    assert d.rate_per_h == pytest.approx(1.0)
+    assert d.rate_len_mm_per_h is None, "没量杆长就不许往 _mm_ 的旧字段里塞数"
+    assert "mm/h" in d.note
+
+
+def test_flat_view_area_falls_back_and_is_marked_uncalibrated():
+    d = compare(flat_point("2026-10-13T08:00:00", area=100000.0),
+                flat_point("2026-10-13T20:00:00", area=130000.0))
+    assert d.verdict == "growing"
+    assert (d.metric, d.unit) == ("mean_area_mm2", "mm2")
+    assert d.band_source == "default_uncalibrated_relative"
+    assert "mm2/h" in d.note and d.rate_per_h == pytest.approx(2500.0)
+
+
+def test_flat_view_note_does_not_claim_the_mushroom_shrank():
+    """面积变小不等于"菇变短"：先说是检出/遮挡/视角问题。"""
+    d = compare(flat_point("2026-10-13T08:00:00", area=130000.0),
+                flat_point("2026-10-13T20:00:00", area=100000.0))
+    assert d.verdict == "shrinking"
+    assert "菇不会变短" not in d.note
+    assert "先看图核对" in d.note
 
 
 def test_unparsable_timestamp_says_so():
