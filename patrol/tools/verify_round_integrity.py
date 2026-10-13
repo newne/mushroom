@@ -24,6 +24,20 @@ from collections import defaultdict
 from pathlib import Path
 
 
+#: 帧上没有服务侧指纹时，**先怀疑版本**——仓库有 ≠ 生产有（Chief 2026-10-13 更正：
+#: 那一轮 `mushroom_analysis` 是旧镜像、`mushroom_patrol` 是没有新字段的 `b64027b`）。
+_DEPLOY_NOTE = ("未部署/版本不符：帧上没有服务侧实时指纹字段 ⇒ **先确认生产跑的是哪一版**"
+                "（仓库有 ≠ 生产有），不要把这条 FAIL 读成「采图坏了」")
+
+
+def classify(checks: list[tuple[str, bool, str]]) -> str:
+    """给报告一句"这堆 FAIL 该怎么读"。缺服务侧指纹 ⇒ 未部署，不是采集故障。"""
+    verdict = {name: ok for name, ok, _ in checks}
+    if not verdict.get("服务侧实时指纹落在帧上", True):
+        return _DEPLOY_NOTE
+    return ""
+
+
 def load_rows(path: str) -> list[dict]:
     """读 JSONL（outbox 行）；也接受一个 JSON 数组（接口响应）。坏行跳过。"""
     text = Path(path).read_text(encoding="utf-8")
@@ -132,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="只读校验一轮巡检的内容完整性（票 06/13）")
     ap.add_argument("rows", help="outbox JSONL 路径，或一个 JSON 数组文件")
     ap.add_argument("--round-id", default=None, help="指定轮次（默认取最新一轮）")
+    ap.add_argument("--producer", default="", help="本轮生产侧版本/镜像（如 mushroom_patrol:b64027b）")
+    ap.add_argument("--consumer", default="", help="analysis 侧版本/镜像（加列的消费者）")
     args = ap.parse_args(argv)
 
     # 现场是 Linux，但本机（Windows/GBK 控制台）跑时别因为一个非 GBK 字符崩掉：能重配就重配，
@@ -143,9 +159,15 @@ def main(argv: list[str] | None = None) -> int:
             pass
 
     checks = verify(load_rows(args.rows), round_id=args.round_id)
+    # 版本先摆出来：**先确认生产跑的是哪一版，再解释库里有没有**。
+    print(f"生产版本/部署状态  producer={args.producer or '(未填写)'}  "
+          f"consumer={args.consumer or '(未填写)'}")
     width = max(len(name) for name, _, _ in checks)
     for name, ok, detail in checks:
         print(f"{'PASS' if ok else 'FAIL'}  {name.ljust(width)}  {detail}")
+    note = classify(checks)
+    if note:
+        print(f"NOTE  {note}")
     return 0 if all(ok for _, ok, _ in checks) else 1
 
 

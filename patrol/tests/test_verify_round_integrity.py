@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from verify_round_integrity import main, verify  # noqa: E402  (路径在上一行注入)
+from verify_round_integrity import classify, main, verify  # noqa: E402  (路径在上一行注入)
 
 
 def _frame(i: int, *, sha: str, dup: bool = False, same: bool = False, streak: int = 0) -> dict:
@@ -75,6 +75,19 @@ def test_accepts_rows_pulled_from_the_db_without_kind():
     round_row["dup_groups"] = json.dumps(round_row["dup_groups"], ensure_ascii=False)
     checks = dict((name, ok) for name, ok, _ in verify([round_row, *frames]))
     assert checks["dup_groups 读回来是列表（不是字符串）"] is False
+
+
+def test_old_version_output_is_classified_as_not_deployed():
+    """生产跑旧版（帧上没有服务侧指纹）⇒ 报告必须标"未部署/版本不符"，不是"采图坏了"。"""
+    old_frames = [{"kind": "image_index", "round_id": "r1", "ts": f"2026-10-13T21:27:{i:02d}",
+                   "station_id": f"S{i:03d}", "object_name": f"x/{i}.jpg"} for i in range(1, 4)]
+    old_round = {"kind": "round", "round_id": "r1", "ts": "2026-10-13T21:35:00",
+                 "ok": True, "n_results": 3, "n_failures": 0, "aborted": False}
+
+    checks = verify([old_round, *old_frames])
+    assert dict((n, ok) for n, ok, _ in checks)["服务侧实时指纹落在帧上"] is False
+    assert "未部署" in classify(checks)
+    assert classify([("服务侧实时指纹落在帧上", True, ""), ("48 帧全入库", True, "")]) == ""
 
 
 def test_wrong_counters_fail_loudly():

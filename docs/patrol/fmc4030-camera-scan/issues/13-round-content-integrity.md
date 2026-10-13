@@ -204,4 +204,12 @@ cd D:\code\mushroom\patrol-workspace
 （落没落、值是否相等、`dup_groups` 读回来**是列表不是字符串**）→ **索引**。
 工具 `patrol/tools/verify_round_integrity.py` 三层都能吃：outbox 行自带 `kind`，
 库里 `/rounds`+`/images` 拉回来的行没有 `kind`（按 `n_results`/`station_id` 认层）。
-**库里查不到才叫真问题**，不能拿"还没列"绕过。
+
+⚠️ **顺序不能再反（Chief 2026-10-13 第二次更正）**：**仓库有 ≠ 生产有**。
+发版官 20:36 实测：消费者 `mushroom_analysis` 是 16:56:44 起的**旧镜像**（早于加列提交
+`3c0a45b`），生产库 `images` 17 列 / `rounds` 9 列，新列**一个都没有**；生产者
+`mushroom_patrol` 是 14:48 的 `b64027b`，容器内 `orchestrator.py` 里 `image_sha256` **0 命中**。
+⇒ 所以：**先确认生产跑的是哪一版，再解释库里有没有**；那五点若 FAIL，报告必须标成
+"**未部署**"，不是"采图坏了"；`suspect_duplicate` 不出现同理，**不许被读成"正常"**。
+工具为此加了 `--producer` / `--consumer` 两个参数（报告头一行摆出版本）与一条
+`classify()` 判定：帧上没有服务侧指纹 ⇒ 输出 `NOTE 未部署/版本不符`。
