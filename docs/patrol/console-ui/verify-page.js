@@ -2052,7 +2052,9 @@ await sleep(150);
   // 圆角/间距历史上各漂出过 12 种取值。这一批先把**与原值完全相等**的台阶收进 token
   // （渲染结果不变），其余登记为白名单欠账；本断言的职责是**防止继续漂**——
   // 谁再加一个 11px 圆角或 7px padding，就会红，而不是等到哪天没人看得出哪里不对。
-  const RADIUS_DEBT = [2, 3, 5, 7, 9, 14, 20];          // 尚未收敛的历史值（登记在案）
+  const RADIUS_DEBT = [2, 3, 5, 7, 14, 20];             // 尚未收敛的历史值（登记在案）
+  // 2026-10-13 结构性批次：`.card` 的 9px 已改为 `var(--card-radius)`（= `--r-lg`，10px），
+  // 所以 **9 从欠账表销掉**——它要是回来（哪怕写在别的选择器里），棘轮就会红。
   // 间距登记表。里面有两个**别顺手改掉**的：
   //   `padding-left:7px`（选中站位的 3px 左边框位移补偿，改了文字会跳）、
   //   `padding-left:42px`（坐标输入框给单位徽标留位，不是随手写的）。
@@ -2087,6 +2089,45 @@ await sleep(150);
   check('间距 token 都被真的用上了（不留死 token）',
     spTokens.length >= 5 && unusedSp.length === 0,
     '定义 ' + spTokens.length + ' 个，未使用：' + (unusedSp.join(',') || '无'));
+
+  // ---- 13d. 卡片系规格：**卡片只有一套圆角/内边距/标题字号**（2026-10-13 结构性批次）----
+  // 起因：同屏里 `.card` 是 9px 圆角、KPI 磁贴是 10px，肉眼说不清但看着就是不齐；
+  // 内边距也是 `var(--sp-4) 14px`（常规）与 `10px var(--sp-4)`（矮屏）各写一份。
+  // 这一批把它们收到 `--card-*` token 上（圆角顺带统一到 10px）。下面三条是**幂等护栏**：
+  // 谁再写一个卡片圆角数值、或给卡片另写一套内边距，就会红。
+  const ruleBlocks = sel => {                       // 取所有 `sel{...}` 块（媒体查询里可能再来一次）
+    const out = []; let i = 0;
+    while((i = styleCss.indexOf(sel, i)) >= 0){
+      const open = i + sel.length - 1, end = styleCss.indexOf('}', open);
+      out.push(styleCss.slice(open + 1, end)); i = open + 1;
+    }
+    return out;
+  };
+  const cardBadRadius = [], cardBadPad = [];
+  for(const sel of ['.card{', '.kpi{', '.detailpane{']){
+    for(const body of ruleBlocks(sel)){
+      const r = body.match(/border-radius:\s*([^;}]+)/);
+      if(r && r[1].trim() !== 'var(--card-radius)') cardBadRadius.push(sel + r[1].trim());
+    }
+  }
+  for(const body of ruleBlocks('.card{')){          // 内边距：只准用 --card-pad-*，不准出现 px 字面量
+    const p = body.match(/padding:\s*([^;}]+)/);
+    if(!p) continue;
+    if(!/var\(--card-pad-[a-z-]+\)/.test(p[1]) || /[0-9]+px/.test(p[1])) cardBadPad.push(p[1].trim());
+  }
+  check('卡片系圆角只走一个 token（`.card`/KPI/大图面板不许各写一个值）',
+    cardBadRadius.length === 0, cardBadRadius.join(' , ') || 'ok');
+  check('卡片内边距只走 `--card-pad-*`（常规/矮屏两档不许各写一套数值）',
+    cardBadPad.length === 0, cardBadPad.join(' , ') || 'ok');
+  check('卡片系标题只走一个字号 token（`.card h2` 与 KPI 标签同号）',
+    (ruleBlocks('.card h2{')[0] || '').includes('font-size:var(--card-title)')
+    && (ruleBlocks('.kpi .k{')[0] || '').includes('font-size:var(--card-title)'),
+    (ruleBlocks('.card h2{')[0] || '(无)').slice(0, 60));
+  const cardTokens = [...styleCss.matchAll(/(--card-[a-z-]+)\s*:/g)].map(m => m[1]);
+  const unusedCardTokens = cardTokens.filter(t => !new RegExp('var\\(' + t + '\\)').test(styleCss));
+  check('卡片系 token（5 个）都定义了、且都被用上（不留死 token）',
+    cardTokens.length === 5 && unusedCardTokens.length === 0,
+    '定义 ' + cardTokens.length + ' 个，未使用：' + (unusedCardTokens.join(',') || '无'));
 
   // ---- 14. 契约断言：假后端的字段集必须与**真后端**的响应形状一致（2026-10-13 加）----
   // 为什么非有不可：页面读 `p.mean_len_mm / p.mean_cap_mm` 读了很久，而 `/growth` 从来

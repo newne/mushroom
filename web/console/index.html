@@ -168,7 +168,7 @@
   @media (max-width:760px){ main.histmode{grid-template-columns:minmax(0,1fr)} }
   /* 完整图像在**拼图上面**、吃满整栏（2026-10-13 用户第二轮口径：里面/旁边都还是太小）。
      图像区给足高度：clamp 下限 260px、上限 62vh——现场要看清菌盖边缘的细节。 */
-  .detailpane{border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--sp-3);background:var(--panel);
+  .detailpane{border:1px solid var(--line);border-radius:var(--card-radius);padding:var(--sp-3);background:var(--panel);
               margin:2px 0 var(--sp-4)}
   .detailpane .dphead{display:flex;justify-content:space-between;gap:var(--sp-3);font-size:12px;
                       color:var(--dim);padding:0 2px var(--sp-2);font-variant-numeric:tabular-nums}
@@ -179,9 +179,9 @@
   /* 环境模式：先给结论（KPI 磁贴），再给曲线，最后才翻明细表——
      现场扫一眼要拿到"这段时间怎么样"，不该让人从表格里自己找（2026-10-13）。 */
   .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:var(--sp-3);padding:2px 0 10px}
-  .kpi{border:1px solid var(--line);border-radius:var(--r-lg);padding:var(--sp-3) 10px;
+  .kpi{border:1px solid var(--line);border-radius:var(--card-radius);padding:var(--sp-3) 10px;
        background:linear-gradient(180deg,var(--panel),var(--soft))}
-  .kpi .k{font-size:11px;color:var(--dim);letter-spacing:.03em}
+  .kpi .k{font-size:var(--card-title);color:var(--dim);letter-spacing:.03em}
   .kpi .v{font-size:20px;font-weight:650;line-height:1.2;font-variant-numeric:tabular-nums}
   .kpi .u{font-size:11.5px;color:var(--dim);font-weight:500;margin-left:2px}
   .kpi .s{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}
@@ -274,6 +274,16 @@
         /* 间距尺度（2026-10-13 第二批·下半年）：同样只收**与原值完全相等**的台阶，
            所以渲染不变；5/7/9/10/11/14/18/42px 是欠账，登记在回归白名单里。 */
         --sp-1:4px;--sp-2:6px;--sp-3:8px;--sp-4:12px;--sp-5:16px;
+        /* 卡片系（2026-10-13 结构性批次）：**卡片只有一套规格**——`.card`、KPI 磁贴、
+           大图面板共用同一个圆角/内边距/标题字号。此前 `.card` 是 9px 圆角而 KPI 是 10px
+           （同一屏里两种卡片圆角，肉眼说不清但看着就是不齐），这里收到一个 token 上，
+           9px 从欠账表里销掉（回归棘轮会挡住它再回来）。
+           窄屏的纵向内边距单列一个 token：窄屏要省高度，但横向留白不减（否则字贴着边框）。 */
+        --card-radius:var(--r-lg);
+        --card-pad-x:14px;
+        --card-pad-y:var(--sp-4);
+        --card-pad-y-sm:10px;
+        --card-title:11px;
         /* 实时画面：--pv-k = **预览流当前档位实际输出帧**的宽高比 1280/718
            （`PREVIEW_SCALE=1280`；`scale=1280:-2` 从相机原生 2880×1616 偶数取整得 718）。
            2026-09-21 试过"与档位解耦、恒写相机原生 2880/1616"——三档只差 <0.1% 不假，
@@ -313,8 +323,8 @@
   main>section:first-child{display:flex;flex-direction:column;overflow:hidden;padding:14px var(--sp-4);background:var(--panel);border-right:1px solid var(--line)}
   #rtmain,#hmain{scrollbar-gutter:stable}
   #rtcol,#hcol{background:var(--soft);border-left:1px solid var(--line)}
-  .card{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:var(--sp-4) 14px;margin-bottom:var(--sp-4);box-shadow:var(--shadow);transition:border-color .15s}
-  .card h2{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--dim);display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--card-radius);padding:var(--card-pad-y) var(--card-pad-x);margin-bottom:var(--sp-4);box-shadow:var(--shadow);transition:border-color .15s}
+  .card h2{font-size:var(--card-title);text-transform:uppercase;letter-spacing:.08em;color:var(--dim);display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
   /* 左栏只剩站位列表一张卡（导轨图 2026-09-17 移去中栏放大）：它吃满整列、#list 自己滚 */
   main>section:first-child>.card{flex:1;min-height:0;overflow:hidden;display:flex;flex-direction:column}
   #list{flex:1 1 auto;min-height:0;overflow-y:auto;padding-right:2px}
@@ -480,7 +490,9 @@
      ⚠️ **不要**在这里改画面比例（改前那版写的是 `aspect-ratio:16/8.5`）—— 比例一改，
      框就和画面不一致，黑边立刻回来。 */
   @media (max-height:820px){
-    .card{padding:10px var(--sp-4);margin-bottom:9px}
+    /* 矮屏只收**纵向**留白（卡片系规格的窄屏档），横向留白与常规一致——
+       否则窄屏/矮屏的字会贴到卡片边框上（这两档此前各写一份数值，正是要收掉的那种漂）。 */
+    .card{padding:var(--card-pad-y-sm) var(--card-pad-x);margin-bottom:9px}
     .readout{padding:var(--sp-2) var(--sp-3)}
   }
   @media (prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;transition:none!important}}
