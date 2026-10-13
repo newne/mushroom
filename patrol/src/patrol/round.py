@@ -1,8 +1,12 @@
 """一轮巡检的完整生命周期（架构评审 #2 的 deep module）。
 
-回零 → 站位循环 → 回原位 → RoundReport，全部收在一个 interface（run()）后面。
-daemon 只负责何时触发、重连与 outbox；per-station 时序（orchestrator）是其
-implementation 的内部缝。
+回零 → 站位循环 → 回原位 → **停在第一个格点** → RoundReport，全部收在一个 interface
+（run()）后面。daemon 只负责何时触发、重连与 outbox；per-station 时序（orchestrator）
+是其 implementation 的内部缝。
+
+末尾那一步"停在第一个格点"不是美观问题：回原位落在导轨尽头，画面里是货架端头与顶棚，
+操作者打开预览什么都看不见；停在第一个格点则是一个**有蘑菇的位置**，打开画面就能看长势
+（2026-10-13 现场口径）。
 """
 
 from __future__ import annotations
@@ -61,18 +65,25 @@ class PatrolRound:
         *,
         max_consecutive_failures: int = MAX_CONSECUTIVE_FAILURES,
         return_home: bool = True,
+        #: 回原位之后**继续走到第一个格点**停着，让"打开预览"直接看到蘑菇而不是
+        #: 导轨尽头的货架端头/顶棚。见模块 docstring。
+        park_at_first: bool = True,
         station_capture: StationCapture | None = None,  # 内部缝：测试注入
         framing: FramingHook | None = None,             # 图像微调（第二步定位）
         abort: Callable[[], bool] | None = None,        # 急停请求：透给每一次运动
         sleep=time.sleep,
         log: Callable[[str], None] | None = None,
         on_station: Callable[..., None] | None = None,  # 逐站心跳（结构化，供取证）
+        #: 停在第一个格点之后回调一次（取证用：轮次结束后"机器现在在哪"）。
+        #: 与 on_station 分开：那是**逐站**心跳，会被数进"已过站"；停车是一次性事实。
+        on_park: Callable[..., None] | None = None,
     ) -> None:
         self.fmc = fmc
         self.capture_client = capture_client
         self.stations = stations
         self.max_consecutive_failures = max_consecutive_failures
         self.return_home = return_home
+        self.park_at_first = park_at_first
         self._station_capture = station_capture
         # 微调钩子原样透给 StationCapture：不传 = 只走"第一步"（推导坐标），
         # 行为与没有这个功能时完全一致。
@@ -81,7 +92,7 @@ class PatrolRound:
         self._sleep = sleep
         self._log_sink = log
         self._on_station = on_station
-
+        self._on_park = on_park
     def run(self) -> RoundReport:
         """执行一轮：回零 → 逐站采图 → 回原位。
 
@@ -198,6 +209,21 @@ class PatrolRound:
             # 回原位同样可被打断：急停之后**不能**再往原点走——那正是"要求停下"的
             # 反面。abort 会在下发前就抛，不会有半段运动。
             self.fmc.goto(0.0, 0.0, abort=self.abort)
+            # 回原位的落点是导轨尽头，画面里只有货架端头与顶棚——操作者打开预览
+            # 什么都看不见。于是回原位之后**继续走到第一个格点**停着：那是一个有蘑菇
+            # 的位置，打开画面就能看长势（2026-10-13 现场口径）。
+            # 只在本轮**正常跑完**时停过去：中途急停/运动失败之后机器状态不明，
+            # 不该再自作主张多动一次。也不在 return_home=False 时停——那条路是
+            # "这一轮不要收尾"（测试与排障用），停到格点去同样多余。
+            if self.park_at_first and not report.aborted and self.stations:
+                first = self.stations[0]
+                ty, tz = first.target
+                self.fmc.goto(ty, tz, abort=self.abort)
+                self._log(f"本轮结束：停到第一个格点 {first.id}"
+                          f"（Y={ty:.1f} Z={tz:.1f}）——打开预览即可看长势")
+                if self._on_park is not None:
+                    self._on_park(station_id=first.id, box_id=first.box_id,
+                                  y=ty, z=tz)
         report.ended_at = datetime.now()
         return report
 

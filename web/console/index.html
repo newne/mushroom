@@ -73,24 +73,39 @@
   .tl .im{cursor:pointer}
   .tl .im.sel{outline:2px solid var(--accent);outline-offset:1px}
   .tl .im.gone{opacity:.55}
+  /* 轮次导航（2026-10-13）：换轮次是历史模式的主操作，与"站内翻页"分开摆，
+     并用 tabular-nums 对齐数字——现场看的是"第几轮 / 多少帧"，晃动会读错。 */
+  .roundnav{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:2px 0 8px}
+  .navgrp{display:inline-flex;align-items:center;gap:6px;background:var(--soft);
+          border:1px solid var(--line);border-radius:10px;padding:4px 6px}
+  .navlbl{font-size:11.5px;color:var(--dim);font-weight:600;letter-spacing:.04em}
+  .navgrp button{min-height:34px;padding:5px 11px;font-size:12.5px;background:var(--panel)}
+  .navgrp button:disabled{opacity:.45;cursor:not-allowed}
+  .navinfo{font-size:12px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .navhint{font-size:11.5px;color:var(--dim);padding-top:6px}
   .mosaic-scroll{overflow-x:auto;padding:4px 0 8px}
+  #timeline .mosaic{gap:2px}
   .mosaic{display:grid;gap:3px;align-items:stretch}
   .mosaic-axis,.mosaic-col,.mosaic-layer{display:flex;align-items:center;justify-content:center;
     min-width:0;color:var(--dim);font-size:11px;text-align:center}
   .mosaic-axis,.mosaic-col{height:28px;font-weight:600}
-  .mosaic-layer{min-height:76px;border-right:1px solid var(--line)}
-  .mosaic-cell{width:64px;min-width:64px;min-height:76px;padding:3px;display:grid;
-    grid-template-rows:42px minmax(0,1fr);gap:2px;overflow:hidden;border:1px solid var(--line);
+  .mosaic-layer{border-right:1px solid var(--line)}
+  /* 格子大小由 JS 按栏位宽度算好写进 --cellw（jsdom 没有布局时退回 64px）。
+     2026-10-13 用户：缩略图下面不再挂位置和时间——格子就是那张图本身。 */
+  .mosaic-cell{width:var(--cellw,64px);min-width:var(--cellw,64px);
+    padding:2px;display:grid;align-content:start;gap:2px;overflow:hidden;border:1px solid var(--line);
     border-radius:5px;background:var(--soft);color:var(--fg);text-align:center;transition:border-color .15s,box-shadow .15s}
   .mosaic-cell:hover:not(.vacant){border-color:#b5ccdf;box-shadow:0 1px 4px rgba(15,23,42,.08)}
   .mosaic-cell .mosaic-thumb{display:flex;align-items:center;justify-content:center;min-width:0;
-    width:100%;height:42px;overflow:hidden;background:var(--panel);color:var(--dim);font-size:10px}
+    width:100%;aspect-ratio:16/9;overflow:hidden;background:var(--panel);
+  color:var(--dim);font-size:10px}
   .mosaic-cell .mosaic-thumb img{display:block;width:100%;height:100%;object-fit:contain;background:var(--panel)}
   .mosaic-cell .mosaic-empty{display:flex;align-items:center;justify-content:center;width:100%;height:100%}
-  .mosaic-cell .mosaic-meta{display:grid;min-width:0;align-content:center;line-height:1.15}
-  .mosaic-cell .mosaic-meta b,.mosaic-cell .mosaic-meta small{overflow:hidden;white-space:nowrap;text-overflow:clip}
-  .mosaic-cell .mosaic-meta b{font-size:10px;font-weight:600}
-  .mosaic-cell .mosaic-meta small{font-size:9px;color:var(--dim)}
+  /* 只在"图在、但状态本身有话要说"时才有一行小字（采图失败/待同步）；
+     正常帧一个字都不挂。位置与时间由 aria-label 承载，读屏仍然拿得到。 */
+  .mosaic-cell .mosaic-meta{display:block;min-width:0;line-height:1.1}
+  .mosaic-cell .mosaic-meta small{font-size:9px;color:var(--dim);overflow:hidden;
+    white-space:nowrap;text-overflow:clip}
   .mosaic-cell.sel{outline:2px solid var(--accent);outline-offset:-2px}
   .mosaic-cell.fail{border-color:var(--bad)}
   .mosaic-cell.local .mosaic-meta small{color:var(--warn)}
@@ -118,6 +133,47 @@
   main.envmode #envcol{background:var(--bg);border-left:0;padding-top:0;
     display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:12px;align-items:start}
   main.envmode #envcol>.card{margin-bottom:0}
+  /* 历史模式：站位表让位，中栏吃满——拼图要尽可能大（2026-10-13 用户口径）。
+     ⚠️ main.histmode 的特异性高于任何 main{...}，所以窄屏必须自己再收一次。 */
+  main.histmode{grid-template-columns:minmax(0,1fr) minmax(280px,320px)}
+  main.histmode>section:first-child{display:none}
+  @media (max-width:760px){ main.histmode{grid-template-columns:minmax(0,1fr)} }
+  /* 完整图像在**拼图上面**、吃满整栏（2026-10-13 用户第二轮口径：里面/旁边都还是太小）。
+     图像区给足高度：clamp 下限 260px、上限 62vh——现场要看清菌盖边缘的细节。 */
+  .detailpane{border:1px solid var(--line);border-radius:10px;padding:8px;background:var(--panel);
+              margin:2px 0 12px}
+  .detailpane .dphead{display:flex;justify-content:space-between;gap:8px;font-size:12px;
+                      color:var(--dim);padding:0 2px 6px;font-variant-numeric:tabular-nums}
+  .detailpane .viewer{height:clamp(260px,62vh,720px);display:flex;align-items:center;
+                      justify-content:center}
+  .detailpane .viewer img{max-width:100%;max-height:100%;object-fit:contain;margin:auto}
+  .detailpane .framenav{flex-wrap:wrap}
+  /* 环境模式：先给结论（KPI 磁贴），再给曲线，最后才翻明细表——
+     现场扫一眼要拿到"这段时间怎么样"，不该让人从表格里自己找（2026-10-13）。 */
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(128px,1fr));gap:8px;padding:2px 0 10px}
+  .kpi{border:1px solid var(--line);border-radius:10px;padding:8px 10px;
+       background:linear-gradient(180deg,var(--panel),var(--soft))}
+  .kpi .k{font-size:11px;color:var(--dim);letter-spacing:.03em}
+  .kpi .v{font-size:20px;font-weight:650;line-height:1.2;font-variant-numeric:tabular-nums}
+  .kpi .u{font-size:11.5px;color:var(--dim);font-weight:500;margin-left:2px}
+  .kpi .s{font-size:11px;color:var(--dim);font-variant-numeric:tabular-nums}
+  .kpi.warn{border-color:#ecc57a;background:linear-gradient(180deg,#fffdf7,#fff6e5)}
+  .kpi.bad{border-color:#e2a9a9;background:linear-gradient(180deg,#fffafa,#ffeeee)}
+  /* 每张卡的标题给一道竖线，扫读时知道每一段的起点（重点从这里开始） */
+  main.envmode .card>h2::before{content:"";display:inline-block;width:3px;height:13px;
+    background:var(--accent);border-radius:2px;margin-right:7px;vertical-align:-1px}
+  /* 参数行：中位值放大加粗，区间退到次要位置，再用一条 IQR 条表示离散程度 */
+  .qrows{display:grid;gap:6px}
+  .qrow{display:grid;grid-template-columns:46px 62px 26px 1fr 92px;align-items:center;gap:6px;
+        font-variant-numeric:tabular-nums}
+  .qrow .qn{font-size:12px;color:var(--dim);font-weight:600}
+  .qrow .qv{font-size:17px;font-weight:650}
+  .qrow .qv.dim{color:var(--dim);font-weight:500}
+  .qrow .qu{font-size:11px;color:var(--dim)}
+  .qrow .qr{font-size:11.5px;color:var(--dim)}
+  .qrow .qbar{position:relative;height:6px;border-radius:3px;background:var(--soft);
+              border:1px solid var(--line);overflow:hidden}
+  .qrow .qbar i{position:absolute;top:0;bottom:0;background:var(--accent);opacity:.75;border-radius:3px}
   #envchart .lanelbl{font-size:10.5px;fill:#6b7785}
   #envchart .laneval{font-size:10.5px;fill:#24292f;font-weight:600}
   .dot{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:6px;vertical-align:middle}
@@ -501,30 +557,43 @@
   </section>
 
   <section id="hmain" style="display:none">
-    <div class="card">
-      <h2>大图 <span id="zoomlabel" style="color:var(--dim);font-weight:400"></span></h2>
-      <div class="viewer" id="viewer">
-        <img id="bigimg" alt="" style="display:none">
-        <span class="hint" id="viewhint">滚轮或按钮缩放，放大后可拖拽平移</span>
-      </div>
-      <div class="grid4">
-        <button data-zoom="1">1×</button><button data-zoom="2">2×</button>
-        <button data-zoom="4">4×</button><button id="fitbtn">适应</button>
-      </div>
-      <!-- 在拓扑网格中逐站选择；方向键也沿网格顺序移动。 -->
-      <div class="framenav">
-        <button type="button" id="prevframe">‹ 上一站</button>
-        <span id="frameinfo">未选站位</span>
-        <button type="button" id="nextframe">下一站 ›</button>
-        <button type="button" id="latestframe">选最新帧</button>
-      </div>
-    </div>
-    <div class="card">
+    <!-- 拼图吃满栏位，完整图像就在它旁边（2026-10-13 用户口径：不要单独的预览大图卡，
+         点格位在旁边看整张就行）。换轮次的落点仍然是"整体生长情况"。 -->
+    <div class="card" id="mosaiccard">
       <h2>巡检拼图 <span id="tltitle" style="color:var(--dim);font-weight:400"></span></h2>
+      <div class="roundnav">
+        <div class="navgrp">
+          <span class="navlbl">轮次</span>
+          <button type="button" id="prevround" title="更早一轮（自动跳过没有图的轮次）">‹ 上一轮</button>
+          <button type="button" id="nextround" title="更新一轮（自动跳过没有图的轮次）">下一轮 ›</button>
+        </div>
+        <span id="roundnavinfo" class="navinfo">—</span>
+      </div>
       <div id="roundnote" class="empty" style="padding:2px 0"></div>
+      <!-- 完整图像在上、吃满整栏；拼图在下。点格位上方就换成那张图。 -->
+      <aside class="detailpane" id="detailpane" aria-label="所选位置的完整图像">
+        <div class="dphead"><span id="dpstation">未选位置</span><span id="zoomlabel"></span></div>
+        <div class="viewer" id="viewer">
+          <img id="bigimg" alt="" style="display:none">
+          <span class="hint" id="viewhint">点下面拼图里的格位，这里显示那张完整图像</span>
+        </div>
+        <div class="grid4">
+          <button data-zoom="1">1×</button><button data-zoom="2">2×</button>
+          <button data-zoom="4">4×</button><button id="fitbtn">适应</button>
+        </div>
+        <!-- 在拓扑网格中逐站选择；方向键也沿网格顺序移动。 -->
+        <div class="framenav">
+          <span class="navlbl">站位</span>
+          <button type="button" id="prevframe">‹ 上一站</button>
+          <span id="frameinfo">未选站位</span>
+          <button type="button" id="nextframe">下一站 ›</button>
+          <button type="button" id="latestframe">选最新帧</button>
+        </div>
+      </aside>
       <div id="timeline" class="empty" role="group" aria-label="巡检拓扑拼图，Y 向右，层从上到下">
         读取巡检轮次…
       </div>
+      <div class="navhint">点任意格位，上面显示那张完整图像</div>
     </div>
     <div class="card">
       <h2>生长曲线 <span id="curvetitle" style="color:var(--dim);font-weight:400"></span></h2>
@@ -549,6 +618,7 @@
         <button type="button" id="envReload">重新读取</button>
         <span id="envrange" style="color:var(--dim);font-size:11.5px"></span>
       </div>
+      <div id="envkpi" class="kpis"></div>
       <div id="envchart" class="empty">读取环境数据…</div>
       <div id="envnote" class="empty"></div>
     </div>
@@ -836,7 +906,11 @@ function positionState(){
   if(validPosition(m.real_pos) && m.pos_source === 'station'){
     return {value:[Number(m.real_pos[0]), Number(m.real_pos[1])], source:'patrol'};
   }
-  const patrol = lastStatus?.patrol || {};
+  // 轮次收尾停在第一个格点（2026-10-13）：后端以 pos_source='parked' 报回来，
+  // 页面要认——否则操作者看着预览里的蘑菇，却读到"位置未知"。
+  if(validPosition(m.real_pos) && m.pos_source === 'parked'){
+    return {value:[Number(m.real_pos[0]), Number(m.real_pos[1])], source:'parked'};
+  }  const patrol = lastStatus?.patrol || {};
   const patrolStation = stations.find(st => st.id === patrol.current_station);
   const patrolTarget = stationTarget(patrolStation);
   if(patrol.active && patrolTarget) return {value:patrolTarget, source:'patrol'};
@@ -862,7 +936,8 @@ function positionText(state){
   if(!state.value) return '位置未知';
   const source = state.source === 'live' ? '控制器实时'
     : state.source === 'controller' ? '控制器实读'
-    : state.source === 'patrol' ? '巡检站位推定' : '最后成功目标';
+    : state.source === 'patrol' ? '巡检站位推定'
+    : state.source === 'parked' ? '停在格点（预览看的就是它）' : '最后成功目标';
   return `Y=${state.value[0].toFixed(2)} Z=${state.value[1].toFixed(2)} · ${source}`;
 }
 
@@ -2043,6 +2118,7 @@ function wirePreview(){
 let mode = 'realtime';
 const hist = { rows: [], rounds: [], growth: null, picked: null, zoom: 1, px: 0, py: 0,
                selectedRoundId: '', selectedBatchKey: '', focusedStationId: '',
+  roundIndex: -1, roundCount: 0, hiddenRounds: 0,
                roundsLoading: false, roundsLoaded: false };
 
 function setMode(m){
@@ -2056,7 +2132,11 @@ function setMode(m){
   $('#envcol').style.display = m === 'env' ? '' : 'none';
   // 环境模式走单列：站位表与右栏都让位，卡片铺在中栏（见 CSS main.envmode）
   const mainEl = document.querySelector('main');
-  if(mainEl) mainEl.classList.toggle('envmode', m === 'env');
+  if(mainEl){
+    mainEl.classList.toggle('envmode', m === 'env');
+    // 历史模式：站位表让位，中栏吃满（拼图要尽可能大）
+    mainEl.classList.toggle('histmode', m === 'history');
+  }
   // 历史/环境模式下画面所在的整列是隐藏的：留着也看不见，纯属白占相机一路
   if(m !== 'realtime') closePreview('切到' + (m === 'env' ? '环境' : '历史') + '模式时已关闭');
   if(m === 'history'){
@@ -2111,6 +2191,7 @@ function renderHistory(){
   if(hist.legacyRounds) notes.push(`${hist.legacyRounds} 条旧轮次没有唯一关联 ID，未拼入本轮`);
   if(hist.rows.length && !rows.length) notes.push('当前日期/角度筛选没有匹配帧');
   $('#roundnote').textContent = notes.join(' · ');
+  updateRoundNav();
 
   if(!round){
     tl.className = 'empty';
@@ -2155,6 +2236,11 @@ function renderHistory(){
       const id = String(row?.object_name ?? row?.ts ?? station.id);
       const time = String(row?.ts || '').slice(11, 16);
       const status = !row ? '本轮无帧' : !rowOk(row) ? '采图失败' : url ? time || '可查看' : '图取不到';
+      // 缩略图下面**不挂位置和时间**（2026-10-13 用户口径）：格子就是那张图。
+      // 只有"图在、状态却不正常"时才留一行小字——采图失败 / 本地待同步要看得出来。
+      const normal = !!row && rowOk(row) && row.source !== 'local';
+      const badge = (url && !normal)
+        ? (row && row.source === 'local' ? '本地待同步' : status) : '';
       const classes = ['mosaic-cell'];
       if(row && !rowOk(row)) classes.push('fail');
       if(row?.source === 'local') classes.push('local');
@@ -2167,15 +2253,22 @@ function renderHistory(){
         <span class="mosaic-thumb">${url
           ? `<img loading="lazy" decoding="async" src="${esc(url)}" alt="">`
           : `<span class="mosaic-empty">${esc(status)}</span>`}</span>
-        <span class="mosaic-meta"><b>${esc(station.id)}</b>
-          <small>${esc(row?.source === 'local' ? '本地待同步' : status)}</small></span>
+        ${badge ? `<span class="mosaic-meta"><small>${esc(badge)}</small></span>` : ''}
       </button>`);
     }
   }
+  // 拼图吃满当前栏位：按容器实际宽度算格子大小（jsdom 没布局 → clientWidth 为 0，退回 64）。
+  // 上限 156px（2026-10-13 放大）：栏位宽时按宽度算，超出部分才横向滚。
+  const avail = (tl.clientWidth || 0) - 20;
+  const labelW = 62;
+  const cellSize = avail > 0
+    ? Math.max(56, Math.min(156, Math.floor((avail - labelW - (cols - 1) * 2) / cols)))
+    : 64;
   tl.className = 'mosaic-scroll';
-  tl.innerHTML = `<div class="mosaic" style="grid-template-columns:64px repeat(${cols},64px);min-width:${64 * (cols + 1)}px">${cells.join('')}</div>`;
+  tl.innerHTML = `<div class="mosaic" style="--cellw:${cellSize}px;grid-template-columns:${labelW}px repeat(${cols},${cellSize}px);min-width:${labelW + cellSize * cols}px">${cells.join('')}</div>`;
   wireShotFallbacks(tl);
   tl.querySelectorAll('[data-pick]').forEach(el => el.onclick = () => {
+    // 图像就在拼图旁边（同一张卡），点完不用滚——挪开视线看一眼就行
     pickHistoryCell(el);
   });
   drawCurve();
@@ -2219,6 +2312,10 @@ function timelineFrames(){
   return Array.from(document.querySelectorAll('#timeline .mosaic-cell[data-pick][data-station-id]'));
 }
 function updateFrameInfo(){
+  const st = hist.focusedStationId
+    ? stations.find(item => item.id === hist.focusedStationId) : null;
+  const dp = $('#dpstation');
+  if(dp) dp.textContent = st ? (st.id + (st.box_id ? ' · ' + st.box_id : '')) : '未选位置';
   const els = timelineFrames();
   const i = els.findIndex(el => el.dataset.stationId === hist.focusedStationId);
   $('#frameinfo').textContent = els.length
@@ -2356,26 +2453,105 @@ function syncBatchOptions(){
   $('#batchSel').value = hist.selectedBatchKey ? encodeURIComponent(hist.selectedBatchKey) : '';
 }
 
-function syncRoundOptions(){
+/** "巡检失败、48 张全空"的轮次不进列表（2026-10-13 用户口径）。
+ *
+ *  判据是 n_results <= 0；**字段缺失当作"不知道"，不当成空**——老轮次没有这个字段，
+ *  不能因为查不到数字就把它们全藏起来（那样会静默丢掉历史）。
+ */
+function roundHasImages(row){
+  const n = row && row.n_results;
+  if(n === null || n === undefined || n === '') return true;
+  const v = Number(n);
+  return !Number.isFinite(v) || v > 0;
+}
+
+/** 当前批次 + 日期筛选下**可拼图**的轮次，外加被跳过的空轮次数。最新在前。 */
+function visibleRounds(){
   const from = $('#fromDate').value, to = $('#toDate').value;
   const batchRounds = hist.rounds.filter(row => batchKey(row) === hist.selectedBatchKey);
-  const legacyRounds = batchRounds.filter(row => !row.round_id).length;
-  const rounds = batchRounds.filter(row => {
+  const legacy = batchRounds.filter(row => !row.round_id).length;
+  const inWindow = batchRounds.filter(row => {
     if(!row.round_id) return false;
     const date = rowDate(row);
     return (!from || !date || date >= from) && (!to || !date || date <= to);
   });
+  return {
+    rounds: inWindow.filter(roundHasImages),
+    hidden: inWindow.filter(row => !roundHasImages(row)).length,
+    legacy,
+  };
+}
+
+function updateRoundNav(){
+  // 注意：页头另有一个 #roundinfo（实时模式的"第 N/M 站"），别用同一个 id，
+  // 否则 $() 取到的是页头那个，轮次信息会写进页头（2026-10-13 修）。
+  const info = $('#roundnavinfo');
+  if(!info) return;
+  const total = hist.roundCount || 0;
+  const round = hist.rounds.find(row => row.round_id === hist.selectedRoundId);
+  if(!hist.selectedRoundId){
+    info.textContent = total ? '没有可切换的轮次' : '暂无带轮次 ID 的巡检记录';
+  }else{
+    const bits = ['第 ' + (hist.roundIndex + 1) + ' / ' + total + ' 轮'];
+    if(round && round.ts) bits.push(String(round.ts).replace('T', ' '));
+    if(hist.rows && hist.rows.length) bits.push(hist.rows.length + ' 帧');
+    if(hist.hiddenRounds) bits.push('已跳过 ' + hist.hiddenRounds + ' 个空轮次');
+    info.textContent = bits.join(' · ');
+  }
+  // 索引 0 = 最新；"上一轮"= 更早（索引 +1）
+  const prev = $('#prevround'), next = $('#nextround');
+  if(prev) prev.disabled = !(total > 1 && hist.roundIndex >= 0 && hist.roundIndex < total - 1);
+  if(next) next.disabled = !(total > 1 && hist.roundIndex > 0);
+}
+
+function syncRoundOptions(){
+  const { rounds, legacy, hidden } = visibleRounds();
   $('#roundSel').innerHTML = rounds.length
     ? rounds.map(row => {
         const status = rowOk(row) ? '完成' : '有失败';
-        return `<option value="${esc(row.round_id)}">${esc(String(row.ts || '').replace('T', ' '))} · ${status}</option>`;
+        const frames = (row.n_results === null || row.n_results === undefined)
+          ? '' : ' · ' + row.n_results + ' 帧';
+        return `<option value="${esc(row.round_id)}">${esc(String(row.ts || '').replace('T', ' '))} · ${status}${frames}</option>`;
       }).join('')
     : '<option value="">当前筛选没有可拼图轮次</option>';
   const selected = rounds.find(row => row.round_id === hist.selectedRoundId) || rounds[0] || null;
   hist.selectedRoundId = selected ? selected.round_id : '';
   $('#roundSel').value = hist.selectedRoundId;
-  hist.legacyRounds = legacyRounds;
+  hist.legacyRounds = legacy;
+  hist.hiddenRounds = hidden;
+  hist.roundCount = rounds.length;
+  hist.roundIndex = selected ? rounds.indexOf(selected) : -1;
+  updateRoundNav();
   return hist.selectedRoundId;
+}
+
+/** 换轮次：清掉上一轮选中的站位，落点在拼图（整体生长情况）。 */
+async function switchRound(delta){
+  const { rounds } = visibleRounds();
+  if(rounds.length < 2){
+    opmsg('只有一轮有图的巡检记录，没有可切换的轮次', 'warn');
+    return;
+  }
+  const idx = rounds.findIndex(row => row.round_id === hist.selectedRoundId);
+  const from = idx < 0 ? 0 : idx;
+  const target = Math.min(rounds.length - 1, Math.max(0, from + delta));
+  if(target === from){
+    opmsg(delta > 0 ? '已经是最早一轮' : '已经是最新轮', 'warn');
+    return;
+  }
+  const row = rounds[target];
+  hist.focusedStationId = '';
+  hist.growth = null; growthRequestSeq++;
+  $('#roundSel').value = row.round_id;
+  await loadRoundImages(row.round_id);
+  syncRoundOptions();
+  scrollToMosaic();
+}
+
+function scrollToMosaic(){
+  const el = $('#timeline');
+  const card = el && el.closest ? el.closest('.card') : null;
+  if(card && card.scrollIntoView) card.scrollIntoView({ block: 'start', behavior: 'smooth' });
 }
 
 async function loadRoundImages(roundId){
@@ -2533,6 +2709,7 @@ async function loadEnv(){
     }else{
       drawEnvChart();
     }
+    drawEnvKpi();
     drawEnvPanels();
     drawOps();
     drawBatches();
@@ -2543,6 +2720,8 @@ async function loadEnv(){
     env.ops = { ok: false, error: env.error };
     box.className = 'empty'; box.textContent = '查不到环境数据';
     note.textContent = '⚠ ' + env.error + '（页面→console→prod 这条链断在哪一段，看 console 日志）';
+    if($('#envkpi')) $('#envkpi').innerHTML = '';
+    drawEnvKpi();
     drawEnvPanels();
     drawOps();
     drawBatches();
@@ -2572,7 +2751,9 @@ function drawEnvChart(){
     note.textContent = '入库是每分钟一条、这里按小时汇总；若长期为空，先确认 ingest 有没有在跑';
     return;
   }
-  const W = 920, laneH = 76, padT = 24, padB = 28, padL = 58, padR = 118;
+  // 2026-10-13 用户："图太大"。车道 76 → 54、上下留白收紧，同样的信息少占约 1/4 高度；
+  // 三个量的量级仍各占一根轴（不共用纵轴），所以缩的是高度不是信息。
+  const W = 920, laneH = 54, padT = 20, padB = 22, padL = 46, padR = 104;
   // 补光的**设备状态色带**已去掉（2026-10-12 用户：开几秒、停约两小时，色带基本看不出东西）。
   // 补光的四个实际参数放在「补光」卡里按原值显示。band 分支保留给将来真需要色带的量。
   const lanes = ENV_PARAMS;
@@ -2582,7 +2763,7 @@ function drawEnvChart(){
   const X = t => padL + ((t - t0) / spanT) * (W - padL - padR);
   const barW = Math.max(1.5, (W - padL - padR) / Math.max(rows.length, 1));
 
-  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="环境参数小时曲线：温度、湿度、CO₂ 与补光状态">';
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="环境参数小时曲线：温度、湿度、CO₂ 各占一根轴">';
   lanes.forEach((lane, i) => {
     const yTop = padT + i * laneH, yBase = yTop + laneH - 26;
     svg += '<line x1="' + padL + '" y1="' + yBase + '" x2="' + (W-padR) + '" y2="' + yBase + '" stroke="#d8e0e8"/>';
@@ -2635,6 +2816,40 @@ function drawEnvChart(){
   note.textContent = '每小时一个均值点；补光是设备状态色带，缺数据的小时不画。';
 }
 
+/** 结论先行：这一段"怎么样"，用磁贴给出来；明细在下面的卡里。 */
+function drawEnvKpi(){
+  const box = $('#envkpi');
+  if(!box) return;
+  const s = env.summary;
+  if(!s || s.error || s.ok === false){ box.innerHTML = ''; return; }
+  const p = s.params || {};
+  const one = v => (v === null || v === undefined) ? '—' : (Math.round(Number(v) * 10) / 10);
+  const unitOf = { temp_c: '°C', rh_pct: '%', co2_ppm: 'ppm' };
+  const tile = (k, v, unit, sub, cls) => '<div class="kpi' + (cls ? ' ' + cls : '') + '">'
+    + '<div class="k">' + esc(k) + '</div>'
+    + '<div class="v">' + esc(String(v)) + (unit ? '<span class="u">' + esc(unit) + '</span>' : '') + '</div>'
+    + (sub ? '<div class="s">' + esc(sub) + '</div>' : '') + '</div>';
+  const tiles = ['temp_c','rh_pct','co2_ppm'].map(k => {
+    const q = p[k];
+    if(!q) return tile(ENV_LABEL[k], '—', '', '无数据源', 'bad');
+    const range = (q.min === null || q.min === undefined) ? '' : one(q.min) + '–' + one(q.max);
+    return tile(ENV_LABEL[k], one(q.median), unitOf[k], range);
+  });
+  tiles.push(tile('采样', (s.n === undefined || s.n === null) ? '—' : s.n, '点',
+                  (s.hours || 0) + ' 个小时点'));
+  const gapN = (s.gaps || []).length;
+  tiles.push(tile('断档', gapN, '处', gapN ? '有整小时缺采样' : '逐小时连续', gapN ? 'warn' : ''));
+  const missing = (s.sources_missing || []).length;
+  if(missing) tiles.push(tile('无数据源', missing, '项', '整列是空的', 'bad'));
+  const lamp = s.lamp || {};
+  if(lamp.on_min_per_hour !== null && lamp.on_min_per_hour !== undefined){
+    tiles.push(tile('补光折算', lamp.on_min_per_hour, '分/时',
+                    lamp.on_effective_s === null || lamp.on_effective_s === undefined
+                      ? '循环参数未配置' : '按设定周期推算'));
+  }
+  box.innerHTML = tiles.join('');
+}
+
 function drawEnvPanels(){
   const s = env.summary;
   const sum = $('#envsummary'), light = $('#envlight'), gaps = $('#envgaps');
@@ -2644,15 +2859,29 @@ function drawEnvPanels(){
     gaps.className = 'empty'; gaps.textContent = '—';
     return;
   }
-  const cells = ['temp_c','rh_pct','co2_ppm'].map(k => {
-    const p = (s.params || {})[k];
-    if(!p) return '<tr><td>' + ENV_LABEL[k] + '</td><td colspan="5" style="color:var(--dim)">无数据源</td></tr>';
-    return '<tr><td>' + ENV_LABEL[k] + '</td><td>' + p.min + '</td><td>' + p.q25 + '</td><td>'
-         + p.median + '</td><td>' + p.q75 + '</td><td>' + p.max + '</td></tr>';
+  // 一张 6 列的分位数表没人看得进去（2026-10-13："文字窗格布局没有重点"）。
+  // 改成"一行一个参数"：中位值放大 = 重点，区间退后 = 背景，IQR 条 = 离散程度。
+  const unitOf = { temp_c: '°C', rh_pct: '%', co2_ppm: 'ppm' };
+  const qrows = ['temp_c','rh_pct','co2_ppm'].map(k => {
+    const q = (s.params || {})[k];
+    if(!q){
+      return '<div class="qrow"><span class="qn">' + esc(ENV_LABEL[k]) + '</span>'
+           + '<span class="qv dim">—</span><span class="qu"></span>'
+           + '<span class="qr">整列没有数据源</span><span class="qbar"></span></div>';
+    }
+    const lo = Number(q.min), hi = Number(q.max), span = (hi - lo) || 1;
+    const left = Math.max(0, Math.min(100, ((Number(q.q25) - lo) / span) * 100));
+    const right = Math.max(0, Math.min(100, ((Number(q.q75) - lo) / span) * 100));
+    return '<div class="qrow"><span class="qn">' + esc(ENV_LABEL[k]) + '</span>'
+      + '<span class="qv">' + esc(q.median) + '</span>'
+      + '<span class="qu">' + esc(unitOf[k] || '') + '</span>'
+      + '<span class="qr">' + esc(q.min) + ' – ' + esc(q.max) + '</span>'
+      + '<span class="qbar" title="粗段是 Q25–Q75，两端是本窗口的最小/最大值"><i style="left:'
+      + left.toFixed(1) + '%;width:' + Math.max(2, right - left).toFixed(1) + '%"></i></span></div>';
   }).join('');
   sum.className = '';
-  sum.innerHTML = '<table class="meas"><tr><th>参数</th><th>最小</th><th>Q25</th><th>中位</th><th>Q75</th><th>最大</th></tr>'
-    + cells + '</table><div class="empty" style="padding:6px 0 0">' + (s.n || 0) + ' 个采样 · '
+  sum.innerHTML = '<div class="qrows">' + qrows + '</div>'
+    + '<div class="empty" style="padding:8px 0 0">' + (s.n || 0) + ' 个采样 · '
     + esc(String(s.first_ts || '—').replace('T',' ')) + ' → ' + esc(String(s.last_ts || '—').replace('T',' ')) + '</div>';
 
   const states = s.lamp_states || {};
@@ -2821,6 +3050,9 @@ function wireHistory(){
   });
   $('#fitbtn').onclick = () => { hist.zoom = 1; hist.px = hist.py = 0; applyZoom(); };
   // P2-3：逐帧导航（按钮 + 左右方向键；输入框聚焦时不抢键）
+  // 索引 0 = 最新，所以"上一轮"= 索引 +1（更早）
+  if($('#prevround')) $('#prevround').onclick = () => switchRound(1);
+  if($('#nextround')) $('#nextround').onclick = () => switchRound(-1);
   $('#prevframe').onclick = () => pickRelative(-1);
   $('#nextframe').onclick = () => pickRelative(1);
   $('#latestframe').onclick = () => {

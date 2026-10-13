@@ -229,7 +229,8 @@ def patrol_state(runs_dir: str) -> dict:
     fresh = summary["age_s"] < HEARTBEAT_STALE_S
 
     if end is not None:
-        return {
+        parked = next((e for e in reversed(events) if e.get("event") == "parked"), None)
+        out = {
             "active": False, "known": True, "file": summary["file"],
             "started_at": _first(events, "start", "ts"),
             "ended_at": end.get("ts") or summary["mtime"],
@@ -239,6 +240,12 @@ def patrol_state(runs_dir: str) -> dict:
             "n_stations_seen": len(stations),
             "reason": f"上一轮已结束（{end.get('status')}）",
         }
+        # 轮次收尾会**停在第一个格点**（让操作者打开预览就能看蘑菇）。这是个一次性事实，
+        # 单独一个事件记着——不能塞进 station 心跳，那会被数进"已过站"。
+        # 页面据此把位置从"未知"改成"停在 S101"，否则人看着画面却不知道机器在哪。
+        if parked:
+            out["parked"] = {k: parked.get(k) for k in ("station_id", "box_id", "y", "z")}
+        return out
     if fresh:
         total = last_hb.get("total") if last_hb else None
         return {
@@ -373,6 +380,12 @@ class Console:
             hit = next((s for s in st["stations"] if s["id"] == current), None)
             if hit:
                 pos, source = [hit["target_y"], hit["target_z"]], "station"
+        # 轮次结束后机器**停在第一个格点**（不是原点）：控制台该照实说，否则操作者
+        # 看着预览里的蘑菇，却读到"位置未知"。
+        if pos is None:
+            parked = patrol.get("parked") or {}
+            if parked.get("station_id") and parked.get("y") is not None:
+                pos, source = [parked["y"], parked["z"]], "parked"
 
         if patrol.get("active"):
             state = "PATROLLING"

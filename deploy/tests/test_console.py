@@ -138,6 +138,40 @@ def test_finished_round_reports_result(tmp_path):
     assert st["status"] == "ok" and st["n_results"] == 60
 
 
+def test_finished_round_reports_where_it_parked(tmp_path):
+    """轮次收尾停在第一个格点（2026-10-13）：位置不能再报"未知"。
+
+    操作者打开预览看的就是那一格，控制台却不知道机器在哪，是最容易误判的一种骗。
+    """
+    write_run(tmp_path / "runs", "20261013-100000-1.jsonl", [
+        {"event": "start", "ts": "2026-10-13T10:00:00", "stations": 48},
+        {"event": "station", "index": 48, "total": 48, "station_id": "S412"},
+        {"event": "parked", "ts": "2026-10-13T10:07:40", "station_id": "S101",
+         "box_id": "B101", "y": 187.17, "z": -40.0},
+        {"event": "end", "ts": "2026-10-13T10:07:41", "status": "ok",
+         "n_results": 48, "n_failures": 0, "aborted": False},
+    ])
+    st = patrol_state(str(tmp_path / "runs"))
+    assert st["parked"]["station_id"] == "S101" and st["parked"]["z"] == -40.0
+    assert st["n_stations_seen"] == 1, "parked 不是站位心跳，不许数进已过站"
+
+    with make_client(tmp_path) as c:
+        m = c.get("/api/status").json()["machine"]
+    assert m["real_pos"] == [187.17, -40.0] and m["pos_source"] == "parked"
+
+
+def test_finished_round_without_park_reports_no_position(tmp_path):
+    """老轮次没有 parked 事件（功能上线前跑的）：照实报"不知道"，不拿最后一站顶替。"""
+    write_run(tmp_path / "runs", "20260914-100000-1.jsonl", [
+        {"event": "start", "ts": "2026-09-14T09:50:00", "stations": 60},
+        {"event": "station", "index": 60, "total": 60, "station_id": "S560"},
+        {"event": "end", "ts": "2026-09-14T09:59:00", "status": "ok",
+         "n_results": 60, "n_failures": 0, "aborted": False},
+    ])
+    st = patrol_state(str(tmp_path / "runs"))
+    assert "parked" not in st
+
+
 def test_running_round_is_active_with_progress(tmp_path):
     write_run(tmp_path / "runs", "20260914-100000-2.jsonl", [
         {"event": "start", "ts": "2026-09-14T09:58:00", "stations": 60},

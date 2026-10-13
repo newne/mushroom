@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 from fmc_fakes import FakeFmcLib
 from patrol.capture_client import CaptureError
@@ -62,8 +64,57 @@ def test_round_success_home_first_and_last():
     assert not report.aborted
     assert report.ok
     assert fmc.events[0] == ("home",)             # 生命周期从回零开始
-    assert fmc.events[-1] == ("goto", 0.0, 0.0)   # 以回原位结束
+    # 收尾是"回原位 → 停在第一个格点"：最后一条 goto 是格点，不是原点
+    assert fmc.events[-2] == ("goto", 0.0, 0.0)
+    assert fmc.events[-1] == ("goto", 100.0, 0.0)   # 第一个站位（含 trim）
     assert report.ended_at is not None
+
+
+def test_round_parks_at_the_first_station_so_the_preview_shows_mushrooms():
+    """回原位的落点是导轨尽头，画面里只有货架端头与顶棚；停在第一个格点才有蘑菇看。
+
+    现场口径（2026-10-13）：巡检完成回零后移动到第一个格点位置，打开画面即可直观
+    看到蘑菇生长情况。
+    """
+    stations = [replace(s, trim_y=1.5, trim_z=-0.5) for s in make_stations(3)]
+    fmc = FakeFmc()
+    PatrolRound(fmc, None, stations, station_capture=FakeStationCapture()).run()
+    assert fmc.events[-1] == ("goto", 101.5, -0.5), "停在第一个格点要用**含 trim** 的坐标"
+
+
+def test_round_reports_the_park_so_the_console_knows_where_it_is():
+    """停车是一次性事实，单独一个回调——不能塞进逐站心跳（那会被数进"已过站"）。"""
+    seen = []
+    fmc = FakeFmc()
+    PatrolRound(fmc, None, make_stations(3), station_capture=FakeStationCapture(),
+                on_park=lambda **kw: seen.append(kw)).run()
+    assert seen == [{"station_id": "S01", "box_id": "B01", "y": 100.0, "z": 0.0}]
+
+
+def test_round_does_not_report_a_park_when_aborted():
+    seen = []
+    cap = FakeStationCapture(fail_box_ids={"B02", "B03", "B04"})
+    PatrolRound(FakeFmc(), None, make_stations(4), station_capture=cap,
+                max_consecutive_failures=3,
+                on_park=lambda **kw: seen.append(kw)).run()
+    assert seen == []
+
+
+def test_round_park_can_be_switched_off():
+    fmc = FakeFmc()
+    PatrolRound(fmc, None, make_stations(2), station_capture=FakeStationCapture(),
+                park_at_first=False).run()
+    assert fmc.events[-1] == ("goto", 0.0, 0.0), "关掉就该老实停在原点"
+
+
+def test_round_does_not_park_when_the_round_was_aborted():
+    """中途急停/运动失败后机器状态不明，不该再自作主张多动一次。"""
+    cap = FakeStationCapture(fail_box_ids={"B02", "B03", "B04"})
+    fmc = FakeFmc()
+    report = PatrolRound(fmc, None, make_stations(4), station_capture=cap,
+                         max_consecutive_failures=3).run()
+    assert report.aborted
+    assert fmc.events[-1] == ("goto", 0.0, 0.0), "中止的轮次只回原位，不停格点"
 
 
 def test_round_skips_failing_station():

@@ -171,12 +171,19 @@ class PatrolDaemon:
             if journal is not None:
                 journal.station(index, total, **fields)
 
+        def on_park(**fields) -> None:
+            # 轮次收尾停在第一个格点：这是一次性事实，**不能**走 station()——
+            # 那会被数进"已过站"，把 48 站说成 49 站。
+            if journal is not None:
+                journal.append({"event": "parked", "ts": datetime.now().isoformat(
+                    timespec="seconds"), **fields})
+
         try:
             if journal is not None:
                 journal.start(stations=len(self.stations), extra=self._room_fields())
             report = PatrolRound(
                 fmc, self.capture_client, self.stations, log=note, on_station=heartbeat,
-                framing=self.framing, abort=self.abort,
+                framing=self.framing, abort=self.abort, on_park=on_park,
             ).run()
         except BaseException as e:  # noqa: BLE001 - 分类后转 failed，绝不静默
             stopped = self._emergency_stop(fmc)
