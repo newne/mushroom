@@ -72,12 +72,18 @@ def build(args, *, room_id: str | None = None,
     from measure.production import make_measure_fn
     from measure.quality import frame_quality
 
-    blur_threshold = float(getattr(args, "measure_blur_threshold", 100.0))
+    # 模糊门阈值：**不给就用 `measure.quality` 的标定默认**（那是唯一尺度，Chief 裁定）。
+    # `deploy` 侧不再自带一个常数——它曾经是 100.0，而 2026-10-13 用 218 张线上 ok 帧标定出
+    # 的中位数是 71.3，旧常数会拒掉 78.4% 的正常帧（"不是没接线，是被门拒"）。
+    blur_threshold = getattr(args, "measure_blur_threshold", None)
     mm_per_px = float(args.mm_per_px)
 
     def quality_gate(gray):
-        return frame_quality(gray, blur_threshold=blur_threshold)
+        if blur_threshold is None:
+            return frame_quality(gray)
+        return frame_quality(gray, blur_threshold=float(blur_threshold))
 
+    blur_note = "标定默认" if blur_threshold is None else f"{float(blur_threshold):g}"
     fn = make_measure_fn(
         room_id=str(room_id).strip(),
         mm_per_px=mm_per_px,
@@ -89,6 +95,6 @@ def build(args, *, room_id: str | None = None,
     )
     return MeasureWire(
         fn,
-        f"测量：开启（{mm_per_px:.4f} mm/px，房间 {room_id}，模糊门 {blur_threshold:g}"
+        f"测量：开启（{mm_per_px:.4f} mm/px，房间 {room_id}，模糊门 {blur_note}"
         f"{'，失败帧也产行' if getattr(args, 'measure_emit_empty', False) else ''}）",
     )

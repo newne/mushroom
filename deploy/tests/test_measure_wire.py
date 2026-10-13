@@ -13,7 +13,7 @@ from deploy.m1 import build_parser
 
 
 def args(**kw) -> SimpleNamespace:
-    base = dict(measure="off", mm_per_px=None, measure_blur_threshold=100.0,
+    base = dict(measure="off", mm_per_px=None, measure_blur_threshold=None,
                 measure_emit_empty=False)
     base.update(kw)
     return SimpleNamespace(**base)
@@ -104,10 +104,30 @@ def test_real_decoder_path_with_a_real_jpeg():
     assert rows and rows[0]["kind"] == "measurement" and rows[0]["room_id"] == "611"
 
 
+def test_blur_threshold_defaults_to_the_calibrated_one_in_measure_quality():
+    """不给 `--measure-blur-threshold` ⇒ **不覆盖**：走 `measure.quality` 的标定默认。
+
+    `deploy` 侧曾自带常数 100.0（未标定时的临时值）；2026-10-13 用 218 张线上 ok 帧标定
+    出中位 71.3、下限 45.0（误杀 0/218），旧常数会拒 78.4% 的正常帧。
+    """
+    from measure.quality import frame_quality
+
+    w = build(args(measure="on", mm_per_px=0.25, measure_emit_empty=True),
+              room_id="611", fetch=lambda _url: b"jpeg", decode=lambda _b: _gray())
+    assert w.enabled is True and "标定默认" in w.reason, "日志要说清阈值来自标定默认"
+
+    # 显式给了就按给的走（旋钮仍在，只是默认不再是那个旧常数）
+    strict = build(args(measure="on", mm_per_px=0.25, measure_emit_empty=True,
+                        measure_blur_threshold=1e9),
+                   room_id="611", fetch=lambda _url: b"jpeg", decode=lambda _b: _gray())
+    assert "1e+09" in strict.reason or "1000000000" in strict.reason
+
+
 def test_cli_defaults_and_flags_exist():
-    """命令行默认 off；三个旋钮都能被 argparse 接住（现场按这个开）。"""
+    """命令行默认 off + **模糊门默认不覆盖标定值**；三个旋钮都能被 argparse 接住。"""
     ap = build_parser()
-    assert ap.parse_args([]).measure == "off"
+    parsed = ap.parse_args([])
+    assert parsed.measure == "off" and parsed.measure_blur_threshold is None
     got = ap.parse_args(["--measure", "on", "--mm-per-px", "0.25",
                          "--measure-blur-threshold", "70.8", "--measure-emit-empty"])
     assert got.measure == "on" and got.mm_per_px == 0.25

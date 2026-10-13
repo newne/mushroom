@@ -249,9 +249,11 @@ def build_parser() -> argparse.ArgumentParser:
     # 产 `kind=measurement` 行（线格式与质量口径见 `measure/**` 与票 11/12）。
     ap.add_argument("--measure", choices=("on", "off"), default="off",
                     help="测量接线：on=每轮对每帧跑 baseline 检出并写 measurements 行")
-    ap.add_argument("--measure-blur-threshold", type=float, default=100.0,
-                    help="模糊门阈值（真机帧 S306 实测 lapvar=70.8 < 100 ⇒ 会拒真机帧；"
-                         "阈值标定前的临时旋钮，见票 12 Comments）")
+    ap.add_argument("--measure-blur-threshold", type=float, default=None,
+                    help="模糊门阈值：**不给就用 measure.quality 的标定默认**（2026-10-13 用 218 张"
+                         "线上 ok 帧标定：中位 lapvar 71.3、绝对下限 45.0、误杀 0/218；旧的 100.0 "
+                         "会拒 78.4%% 的正常帧）。换角/换灯后用 "
+                         "`measure/tools/calibrate_quality_thresholds.py` 重算")
     ap.add_argument("--measure-emit-empty", action="store_true",
                     help="失败帧也产一行 n=0 + no_detection（默认不产行）")
 
