@@ -3,7 +3,7 @@
 日期：2026-10-13
 状态：建议（Chief 已批 A1/A2/A3，待环境官与巡检手复核）
 相关：`fmc4030-camera-scan/spec.md` §5/§6、`env-analysis/issues/11-measurements-contract.md`、
-`fmc4030-camera-scan/issues/09-angle-profile-45-default.md`、ADR-0020
+`fmc4030-camera-scan/issues/09-angle-profile-and-framing.md`、ADR-0020
 
 ## 背景
 
