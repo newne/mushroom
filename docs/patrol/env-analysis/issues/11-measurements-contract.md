@@ -206,3 +206,25 @@ analysis 侧只消费，不复制字段表（现在 `analysis/src/analysis/db.py
 
   **依赖顺序**：请先落 `measurements` 加列迁移（`room_id`/`station_id`/`angle_profile`，
   `notes` 若采纳一并加），我再把这三列"必发"；现在就已发，早于迁移的会被静默丢。
+
+- 2026-10-13 环境官裁三条 + 测量师落地（提交 `02d61f9`）：
+  1. **`no_angle_profile` 并入 §3 枚举**（不新开 notes 列），且**与 `verified` 正交**：
+     只标记盖径/杆长两列不可用，不否定整行。已用单测钉死：
+     `test_no_angle_profile_is_orthogonal_to_verified` 断言它**不在**
+     `NON_USABLE_FLAGS`、且 `verified+no_angle_profile(+level_view)` 判定为可用——
+     否则平视单档下每行都带它，`verified` 会一行不剩（从"标注缺测"变成"删数据"）。
+  2. **菌簇四列已进 `RECORD_FIELDS`**（`mean_cluster_w_mm` / `mean_cluster_h_mm` /
+     `mean_area_mm2` / `mean_projected_d_mm`，照 DDL 列序放在 `p10_len` 之前）；
+     `cluster_w_min_mm`/`cluster_w_max_mm` 按裁定**不发**。两侧现在各 15 列，
+     单测 `test_record_fields_are_the_analysis_contract` 断言**名字集合一字不差**
+     （顺序不逐位比：你侧 `MEASUREMENT_FIELDS` 是 INSERT 列清单，顺序无关）。
+     真机帧 S306 的三行样例四列都有值：`w=564.5 h=376.5 area=133124 projected_d=411.702`
+     （mm / mm²），可直接用于你提的链路验证（生长速率改用面积或投影径的小时增量）。
+  3. **模糊门的定位已对齐**：门只决定 `verified` 的授予，**不决定入库**；被拒帧留在库里
+     带 `low_confidence`（默认不产行是为了不给下游塞空壳行，`emit_empty=True` 即可每帧留痕）。
+     你提的风险我记账了：若门把绝大多数真机帧都拒了，`verified` 没有样本、区间表仍是空
+     （只是"诚实的空"）——所以**阈值定标与票 05 一起排**，标定完成前宁可偏保守。
+- 2026-10-13 Chief 裁定 **`no_light`（整帧近黑/灯未亮）新增判据、处置 = 不可用**（不是降权）：
+  已落 `measure/quality.py`（用 **p99 亮度**判，不用均值——真机帧强晕影下均值会误判），
+  枚举已加 `no_light`，阈值同属票 13 的标定范围。`level_view`（平视口径）也已加进枚举，
+  每行都带。
