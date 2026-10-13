@@ -197,3 +197,18 @@ step code 的"帧级可用帧判定"必须对齐这一份，不许造第二套�
 - `L3 阶段` 的"长高后"批次：帧还不存在，按天滚动补齐；
 - **本期样本 = 当前现场形态**：换角/换灯/相机参数变更后，阈值必须用同一脚本重算，
   **换角生效日 = 口径分界**。
+
+### 统一裁定（Chief 2026-10-13，裁定 ①）
+
+帧级曝光判定**统一到 `measure/quality.py`**：`patrol/framing.py::judge_frame` 的
+`underexposed` 轴并进来，**只有一套名字与常数**。已实现（`assess_exposure()` 为唯一曝光
+判定入口，同时带出逐帧 `p99` / 过曝占比供取景判断只读使用；历史 `underexposed` 仅在
+**读**时兼容，产出只写 `no_light`），落地票见
+`../../imaging-quality/issues/05-unify-frame-quality-single-source.md`。
+
+**唯一名字**：欠曝端 = `no_light`，过曝端 = `overexposed`（同一曝光轴两侧）。
+**`MIN_P99=150` 不得沿用**：218 帧实测正常帧 p99 最低 184，它会造成误杀。
+
+**限制（Chief 要求写明）**：218 帧是**单批次、单生长阶段**样本 ⇒ 本票阈值只作初值，
+**待跨阶段样本复核**；换角/换灯/相机参数变更后必须用
+`measure/tools/calibrate_quality_thresholds.py` 重算，**换角生效日 = 口径分界**。
