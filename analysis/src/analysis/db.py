@@ -67,7 +67,12 @@ CREATE TABLE IF NOT EXISTS rounds (
   -- 于是"这一轮是哪间库房、哪批蘑菇"在 /ingest 这一跳被静默丢掉。
   room_id    TEXT,
   entry_date TEXT,
-  batch_no   TEXT
+  batch_no   TEXT,
+  -- 轮内容完整性（巡检手票 13）：整轮疑似复制 ⇒ `suspect_duplicate=1` + `dup_groups`；
+  -- **复核没查成** ⇒ 写 `content_check_error`（原因），**不许当成"已确认无重复"**。
+  suspect_duplicate   INTEGER,
+  dup_groups          TEXT,
+  content_check_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS images (
@@ -79,6 +84,12 @@ CREATE TABLE IF NOT EXISTS images (
   -- 成像参数快照 id（2026-10-13，巡检手票 11）：指向归档的 `configs/imaging-profile.yaml`
   -- 里某个快照，**只存 id，不塞参数全文**。老行 NULL = "那时还没记"，不编。
   imaging_profile TEXT,
+  -- 轮内容完整性（2026-10-13，巡检手票 13）：一张陈旧帧被复制到多个站位时，
+  -- 帧行标 `frame_dup=1` + 同指纹组 `dup_group`；`content_sha256` 复核到就写。
+  -- 聚合统计（区间表/生长曲线）**不得吃**这些帧（见 analysis/integrity.py）。
+  frame_dup      INTEGER,
+  dup_group      TEXT,
+  content_sha256 TEXT,
   camera_ip     TEXT,
   y             REAL,
   z             REAL,
@@ -164,12 +175,20 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "imaging_profile": "TEXT",
         # object_name 的来源（service / request）：兜底名与 MinIO 实际 key 可能不一致。
         "object_name_source": "TEXT",
+        # 帧级内容完整性（巡检手票 13）：陈旧重复帧不得进聚合统计。
+        "frame_dup": "INTEGER",
+        "dup_group": "TEXT",
+        "content_sha256": "TEXT",
     },
     "rounds": {
         "round_id": "TEXT",
         "room_id": "TEXT",
         "entry_date": "TEXT",
         "batch_no": "TEXT",
+        # 轮级内容完整性（巡检手票 13）。
+        "suspect_duplicate": "INTEGER",
+        "dup_groups": "TEXT",
+        "content_check_error": "TEXT",
     },
     # 循环补光（2026-10-12）：加列即可，不用重建——老行这三列留空表示"那时还没采这个量"，
     # 比编一个 0 诚实（0 会被读成"补光为零"）。
@@ -451,6 +470,10 @@ ROUND_FIELDS = (
     "room_id",
     "entry_date",
     "batch_no",
+    # 内容完整性（票 13）：聚合侧靠这三列决定"这一轮的帧要不要排除"
+    "suspect_duplicate",
+    "dup_groups",
+    "content_check_error",
 )
 
 IMAGE_FIELDS = (
@@ -465,6 +488,9 @@ IMAGE_FIELDS = (
     "z",
     "object_name",
     "object_name_source",
+    "frame_dup",
+    "dup_group",
+    "content_sha256",
     "cloud_url",
     "ok",
     "error",

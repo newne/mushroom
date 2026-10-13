@@ -135,19 +135,28 @@ def best_ranges(merged: pd.DataFrame, *, n_bins: int = 4) -> list[dict]:
 
 
 def run_from_db(db_path: str) -> list[dict]:
-    """从 SQLite 读两表跑全流程（保留：只读式计算，不落表）。"""
-    from analysis.db import connect
+    """从 SQLite 读两表跑全流程（保留：只读式计算，不落表）。
+
+    **先过滤**（票 13）：可疑轮/复制帧内的测量行不进统计 —— 复制帧会让长势曲线
+    看起来正常，那种错误比缺数据更难发现。
+    """
+    from analysis.db import connect, fetch_measurements, fetch_rounds
+    from analysis.integrity import partition
 
     conn = connect(db_path)
-    measurements = pd.read_sql(
-        "SELECT ts, room_id, box_id, mean_len_mm, quality FROM measurements", conn
-    )
+    measurements = pd.DataFrame(fetch_measurements(conn))
     environment = pd.read_sql(
         "SELECT ts, zone, temp_c, rh_pct, co2_ppm, lamp_on_min FROM environment", conn
     )
     if measurements.empty or environment.empty:
         return []
-    return best_ranges(align(hourly_rates(measurements), environment))
+
+    kept, dropped = partition(measurements.to_dict("records"), fetch_rounds(conn))
+    if dropped:
+        print(f"[ranges] 排除 {len(dropped)} 条落在可疑轮窗口内的测量行（票 13）")
+    if not kept:
+        return []
+    return best_ranges(align(hourly_rates(pd.DataFrame(kept)), environment))
 
 
 def refresh_ranges(db_path: str, *, computed_at: str | None = None) -> int:

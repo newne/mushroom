@@ -152,14 +152,20 @@ def test_migrate_adds_missing_room_columns(tmp_path):
         "images.batch_no",
         "images.imaging_profile",
         "images.object_name_source",
+        "images.frame_dup",
+        "images.dup_group",
+        "images.content_sha256",
         "rounds.round_id",
         "rounds.room_id",
         "rounds.entry_date",
         "rounds.batch_no",
+        "rounds.suspect_duplicate",
+        "rounds.dup_groups",
+        "rounds.content_check_error",
     }
     cols = {r[1] for r in conn.execute("PRAGMA table_info(images)")}
     assert {"round_id", "room_id", "entry_date", "batch_no", "imaging_profile",
-            "object_name_source"} <= cols
+            "object_name_source", "frame_dup", "dup_group", "content_sha256"} <= cols
     rounds_cols = {r[1] for r in conn.execute("PRAGMA table_info(rounds)")}
     assert {"round_id", "room_id", "entry_date", "batch_no"} <= rounds_cols
 
