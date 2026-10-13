@@ -230,9 +230,30 @@ def test_capture_station_sequence_and_metadata():
 
     assert fmc.events == [("goto", 10.0, -20.0), ("lamp", True, 0), ("lamp", False, 0)]
     assert meta["object_name"] == "20260830/B01_S01_level0_080000.jpg"
+    assert meta["object_name_source"] == "service", "服务回了 key ⇒ 来源是 service"
     assert meta["yz"] == [10.0, -20.0]
     assert seen_params[0]["ip"] == "192.168.1.231"
     assert meta["cloud_url"].endswith(".jpg")
+
+
+def test_object_name_source_flags_the_request_name_fallback():
+    """服务没回 filename ⇒ 索引里的名字是**请求名兜底**：来源记 `request` + 当场警告。
+
+    2026-10-13 环境官口径：枚举只有 `service`/`request`；日志是即时信号，库里那列是事后考古。
+    """
+    def transport(url, *, params=None, body=None) -> dict:
+        return {"success": True, "message": "ok", "cloud_url": "http://minio/x.jpg"}
+
+    logs: list[str] = []
+    st = Station(id="S01", box_id="B01", y=0.0, z=0.0, camera_ip="1.2.3.4")
+    sc = StationCapture(ScriptedFmc(), CaptureClient(transport=transport),
+                        decay_s=0.0, settle_s=0.0, sleep=lambda s: None, log=logs.append)
+    meta = sc.run(st, ts=datetime(2026, 8, 30, 8, 0, 0))
+
+    assert meta["object_name_source"] == "request"
+    # 客户端按请求名兜底（不带 .jpg —— 那正是"服务没回 key"的证据）
+    assert meta["object_name"] == "20260830/B01_S01_level0_080000"
+    assert any("警告" in line for line in logs), "兜底必须当场喊一声"
 
 
 def test_capture_station_lamp_off_on_failure():

@@ -145,6 +145,15 @@ class StationCapture:
         finally:
             self.fmc.lamp(False, io=self.lamp_io)
 
+        # 图像名是**抓拍服务回的 key** 还是**我们请求时生成的名字兜底**：
+        # 口径只有两个值 `service` / `request`（票 11/环境官 2026-10-13）。
+        # 服务没回名字时必须**当场**打一行警告：库里那列是事后考古，日志是即时信号。
+        raw = getattr(result, "raw", None)
+        raw = raw if isinstance(raw, dict) else {}
+        object_name_source = "service" if str(raw.get("filename") or "").strip() else "request"
+        if object_name_source == "request":
+            self.log(f"{station.id} 警告：抓拍服务没回对象名，索引里是**请求名兜底**"
+                     f"（MinIO 里可能没有这个 key）：{getattr(result, 'object_name', None)}")
         meta = {
             "ts": ts.isoformat(timespec="seconds"),
             "ok": True,
@@ -157,6 +166,7 @@ class StationCapture:
             # （与 analysis 的加列迁移同口径，不编值）。images 是一帧一行，存 id 不存全文。
             **({"imaging_profile": station.imaging_profile} if station.imaging_profile else {}),
             "object_name": result.object_name,
+            "object_name_source": object_name_source,
             "cloud_url": result.cloud_url,
             # 单站耗时是整轮时长的唯一可分解口径（采图实测 5.2 s 是大头）
             "elapsed_s": round(time.monotonic() - t0, 2),

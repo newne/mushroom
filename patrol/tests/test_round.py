@@ -82,6 +82,31 @@ def test_round_parks_at_the_first_station_so_the_preview_shows_mushrooms():
     assert fmc.events[-1] == ("goto", 101.5, -0.5), "停在第一个格点要用**含 trim** 的坐标"
 
 
+def test_round_stops_early_on_an_avoid_signal_and_says_why():
+    """「整轮避让」：保持生效时本轮就地停下——已拍到的帧留下，后面站位不再动机构。
+
+    2026-10-13 分工：判定在部署侧（读 hold.json），执行在这里。
+    收尾仍然回原位，但不"停到第一个格点"（那要求本轮是正常跑完）。
+    """
+    cap = FakeStationCapture()
+    fmc = FakeFmc()
+    seen = {"n": 0}
+
+    def should_stop():
+        seen["n"] += 1
+        return "加湿保持至 2026-10-13T17:00:00" if seen["n"] >= 3 else None
+
+    report = PatrolRound(fmc, None, make_stations(4), station_capture=cap,
+                         should_stop=should_stop).run()
+
+    assert cap.ran == ["S01", "S02"], "第 3 站之前收到信号 ⇒ 只拍了两站"
+    assert len(report.results) == 2
+    assert report.aborted is True and not report.ok
+    assert "加湿保持" in report.abort_reason
+    assert fmc.events[-1] == ("goto", 0.0, 0.0), "避让后仍要安全回原位"
+    assert ("goto", 100.0, 0.0) not in fmc.events, "中止的一轮不该再停到格点"
+
+
 def test_round_reports_the_park_so_the_console_knows_where_it_is():
     """停车是一次性事实，单独一个回调——不能塞进逐站心跳（那会被数进"已过站"）。"""
     seen = []

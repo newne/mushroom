@@ -50,6 +50,10 @@ class RoundReport:
     results: list[dict] = field(default_factory=list)
     failures: list[dict] = field(default_factory=list)
     aborted: bool = False
+    #: 中止的**原因**（人读一句话，如"加湿保持至 …"）。空串 = 正常结束或旧字段没记。
+    #: 单独一列是为了让下游能区分"急停/运动失败"与"我们主动避让"——前者是故障，
+    #: 后者是策略，混在一个 `aborted` 里现场会去修不该修的东西。
+    abort_reason: str = ""
 
     @property
     def ok(self) -> bool:
@@ -71,6 +75,10 @@ class PatrolRound:
         station_capture: StationCapture | None = None,  # 内部缝：测试注入
         framing: FramingHook | None = None,             # 图像微调（第二步定位）
         abort: Callable[[], bool] | None = None,        # 急停请求：透给每一次运动
+        #: 「整轮避让」策略：返回非空字符串 = **本轮就此停下**（后面站位不再动机构），
+        #: 返回 None = 继续。用于加湿保持这类"现在不该拍"——判断在调用方（deploy 侧读
+        #: hold.json），这里只执行。已经拍到的帧留在报告里：它们是停止**之前**的事实。
+        should_stop: Callable[[], str | None] | None = None,
         sleep=time.sleep,
         log: Callable[[str], None] | None = None,
         on_station: Callable[..., None] | None = None,  # 逐站心跳（结构化，供取证）
@@ -89,6 +97,7 @@ class PatrolRound:
         # 行为与没有这个功能时完全一致。
         self.framing = framing
         self.abort = abort
+        self.should_stop = should_stop
         self._sleep = sleep
         self._log_sink = log
         self._on_station = on_station
@@ -117,6 +126,20 @@ class PatrolRound:
         consecutive = 0
         total = len(self.stations)
         for i, st in enumerate(self.stations, 1):
+            # 「整轮避让」（分工：判定在调用方、执行在这里）：保持生效时**不再动机构**——
+            # 加湿期的帧过曝、对比度塌（§12），拍完整轮只是白动机架 8 分钟。
+            # 已经拍到的帧留在报告里：它们是停止之前的事实，不是坏数据。
+            hold = self.should_stop() if self.should_stop is not None else None
+            if hold:
+                report.aborted = True
+                report.abort_reason = str(hold)
+                self._log(f"[{i}/{total}] 收到避让信号（{hold}）——本轮就此停下，"
+                          f"后面 {total - i + 1} 站不再动机构")
+                self._heartbeat(
+                    i, total, station_id=st.id, box_id=st.box_id, ok=False,
+                    elapsed_s=0.0, object_name=None, error=str(hold), abort="hold",
+                )
+                break
             t0 = time.monotonic()
             try:
                 meta = cap.run(st)

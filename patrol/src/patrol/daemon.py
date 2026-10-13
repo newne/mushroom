@@ -82,6 +82,9 @@ class PatrolDaemon:
         apply_trim: Callable[[dict[str, tuple[float, float]]], None] | None = None,
         framing: FramingHook | None = None,
         abort: Callable[[], bool] | None = None,
+        #: 「整轮避让」：返回非空字符串 = 本轮就此停下（加湿保持这类"现在不该拍"）。
+        #: 判定在调用方（deploy 侧读 hold.json），这里只透给 PatrolRound。
+        should_stop: Callable[[], str | None] | None = None,
         now: Callable[[], datetime] = datetime.now,
         sleep: Callable[[float], None] = time.sleep,
         log: Callable[[str], None] = print,
@@ -111,6 +114,7 @@ class PatrolDaemon:
         # 急停请求（可选）：为真时**正在跑的这一轮会被打断**（等待原语抛 MotionAborted）。
         # patrol 不知道它从哪来（console 写下的标志文件？某个按钮？），只知道"该停了"。
         self.abort = abort
+        self.should_stop = should_stop
         # 默认：outbox 旁边的 runs/；要关掉必须显式传 JOURNAL_DISABLED
         if journal_dir is JOURNAL_DISABLED:
             self.journal_dir: Path | None = None
@@ -184,6 +188,7 @@ class PatrolDaemon:
             report = PatrolRound(
                 fmc, self.capture_client, self.stations, log=note, on_station=heartbeat,
                 framing=self.framing, abort=self.abort, on_park=on_park,
+                should_stop=self.should_stop,
             ).run()
         except BaseException as e:  # noqa: BLE001 - 分类后转 failed，绝不静默
             stopped = self._emergency_stop(fmc)
@@ -223,6 +228,9 @@ class PatrolDaemon:
                 "n_results": len(report.results),
                 "n_failures": len(report.failures),
                 "aborted": report.aborted,
+            # 主动避让（如加湿保持）与故障（急停/运动失败）都置 aborted，但**原因不同**：
+            # 下游按这个字段区分"策略性提前收尾"与"出事了"，不让人去修不该修的东西。
+            **({"abort_reason": report.abort_reason} if report.abort_reason else {}),
                 **self._room_fields(),
             }
         )

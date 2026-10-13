@@ -114,6 +114,15 @@ class FakeCapture:
         )
 
 
+class NoNameCapture(FakeCapture):
+    """抓拍"成功"但**没回对象名**：索引只能用请求名兜底（`object_name_source=request`）。"""
+
+    def capture(self, *, ip, user=None, pwd=None, filename):
+        self.shots.append({"ip": ip, "filename": filename})
+        return CaptureResult(object_name="", file_path=None, cloud_url=None,
+                             raw={"success": True})
+
+
 def make(tmp_path, *, fmc=None, capture=None, stations=STATIONS, **kw):
     channel = ManualChannel(str(tmp_path), now=lambda: NOW)
     fmc = fmc if fmc is not None else FakeFmc()
@@ -323,6 +332,7 @@ def test_capture_writes_index_with_actual_position(tmp_path):
     (row,) = rows
     assert row["kind"] == "image_index" and row["manual"] is True
     assert row["station_id"] == "S105" and row["box_id"] == "B105"
+    assert row["object_name_source"] == "service", "服务回了 key ⇒ 来源是 service"
     assert row["yz"] == [505.0, -50.0]           # 记的是**实际位置**，不是站位坐标
 
 
@@ -376,6 +386,24 @@ def test_capture_index_omits_the_imaging_profile_when_not_recorded(tmp_path):
     assert res.ok is True
     (row,) = rows
     assert "imaging_profile" not in row
+
+
+def test_capture_index_flags_the_request_name_fallback(tmp_path):
+    """服务没回对象名 ⇒ 索引名字是请求名兜底：记 `request` + **当场**打警告。
+
+    2026-10-13 环境官口径：枚举只有 `service`/`request`；两条一起才有用——
+    警告让人当场发现，`object_name_source` 列让人三个月后还能查。
+    """
+    capture = NoNameCapture()
+    channel, fmc, executor, rows, logs = make(tmp_path, capture=capture)
+    fmc.pos = (505.0, -50.0)
+    _cmd, res = run(channel, executor, "capture", {"station_id": "s105"})
+
+    assert res.ok is True and res.data["object_name_source"] == "request"
+    (row,) = rows
+    assert row["object_name_source"] == "request"
+    assert row["object_name"].endswith("B105_S105_top45_100000"), "兜底用的是请求名"
+    assert any("警告" in line for line in logs), "兜底必须当场喊一声"
 
 
 def test_capture_index_keeps_the_key_and_url_the_service_returned(tmp_path):

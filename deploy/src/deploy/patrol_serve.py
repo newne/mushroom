@@ -232,6 +232,10 @@ def main(argv: list[str] | None = None) -> int:
     m1_args = list(args.m1_args)
     if "--cmd-dir" not in m1_args:
         m1_args += ["--cmd-dir", args.cmd_dir]
+    # 保持目录同样要带过去：**整轮避让**的判定发生在 m1 那一轮里（读 hold.json），
+    # 执行方这边只知道"到点该跑"，不知道跑的中途有人设了加湿保持。
+    if "--trigger-dir" not in m1_args:
+        m1_args += ["--trigger-dir", args.trigger_dir]
 
     rounds = serve_forever(
         store=store,

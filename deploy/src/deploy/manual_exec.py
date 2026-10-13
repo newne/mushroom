@@ -411,7 +411,14 @@ class ManualExecutor:
         # 回的是它真正写进 MinIO 的那个 key。拿请求值去落索引，库里就存了个 MinIO 里并
         # 不存在的名字；`cloud_url` 一起丢掉之后，历史页那一格连"图在哪"都不知道了——
         # 2026-09-17 现场"抓拍完不显示"就是这条路径。
-        stored_name = _shot_field(shot, "object_name") or object_name
+        returned_name = _shot_field(shot, "object_name")
+        stored_name = returned_name or object_name
+        # 名字的来源：`service` = 抓拍服务回的 key；`request` = 服务没回、用请求名兜底。
+        # 兜底时**当场**打警告（库里那列是事后考古），见环境官 2026-10-13 的口径。
+        object_name_source = "service" if returned_name else "request"
+        if object_name_source == "request":
+            self.log(f"{station.id} 警告：抓拍服务没回对象名，索引里是**请求名兜底**"
+                     f"（MinIO 里可能没有这个 key）：{object_name}")
         cloud_url = _shot_field(shot, "cloud_url")
         self.append_index({
             "kind": "image_index",
@@ -425,6 +432,7 @@ class ManualExecutor:
             "camera_ip": station.camera_ip,
             "yz": [round(y, 3), round(z, 3)],
             "object_name": stored_name,
+            "object_name_source": object_name_source,
             "cloud_url": cloud_url,
             "manual": True,     # 额外字段：prod 的 images 表只取约定列，多的会被忽略
             "lamp_on": not no_lamp,
@@ -443,6 +451,7 @@ class ManualExecutor:
             {
                 "station_id": station.id,
                 "object_name": stored_name,
+                "object_name_source": object_name_source,
                 "cloud_url": cloud_url,
                 "position_yz": [round(y, 3), round(z, 3)],
                 "auto_station": auto,

@@ -204,6 +204,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     ap.add_argument("--room", default=DEFAULT_ROOM_PATH,
                     help="库房在库状态 YAML（入库日期 ⇒ 巡检准入门禁）")
+    ap.add_argument("--trigger-dir", default=os.environ.get("PATROL_TRIGGER_DIR") or None,
+                    help="触发/保持目录（默认读 PATROL_TRIGGER_DIR）：给了它，**保持生效时"
+                         "整轮避让**——读到 hold.json 就停下、不再动机构（加湿期不拍）")
     ap.add_argument("--at-minute", type=int, default=DEFAULT_AT_MINUTE,
                     help="常驻模式：每小时的第几分钟启动（避开老系统采图窗口）")
     ap.add_argument("--interval", type=float, default=None,
@@ -351,6 +354,23 @@ def main(argv: list[str] | None = None) -> int:
     measure_wire = build_measure(
         args, room_id=(room.room_id if room is not None else ""), log=log)
     log(measure_wire.reason)
+
+    # 「整轮避让」（调度侧，票 09 分工）：保持（加湿）生效时**本轮就此停下**，不再动机构。
+    # 判定读的是 console 写下的 hold.json —— 与触发偏置同一份状态，谁都不另造一套。
+    should_stop = None
+    if args.trigger_dir:
+        from deploy.patrol_trigger import TriggerStore
+
+        hold_store = TriggerStore(dir_path=args.trigger_dir)
+
+        def should_stop() -> str | None:      # noqa: F811 - 有意遮蔽：下面按可调用对象用
+            hold = hold_store.hold()
+            if not hold:
+                return None
+            return f"加湿保持至 {hold.get('until', '?')}" + (
+                f"（{hold['reason']}）" if hold.get("reason") else "")
+
+        log(f"整轮避让：已接保持目录 {args.trigger_dir}（保持生效时本轮停下不动机构）")
     stations = [s.with_trim(clamp_trim((s.trim_y, s.trim_z))) for s in stations]
     apply_trim = make_apply_trim(stations, args.stations, log=log)
 
@@ -395,6 +415,8 @@ def main(argv: list[str] | None = None) -> int:
         # 测量接线（票 12）：`measure_fn=None` 时 daemon 不写任何 measurement 行（daemon 判空）。
         # 这里传的是**装配时造好一次**的闭包（`room_id`/`mm_per_px` 已固定），不是每轮重建。
         measure_fn=measure_wire.fn,
+        # 整轮避让（读者：hold.json；None = 没接保持目录，行为与从前一致）
+        should_stop=should_stop,
         apply_trim=apply_trim,
         # 急停：console 按下 → 标志文件 → 这里每等一步看一眼 → 正在跑的那一轮被打断。
         abort=make_estop_check(args.cmd_dir, disabled=args.no_estop, log=log),
