@@ -2279,10 +2279,21 @@ function integrityOfRound(round){
   if(typeof err === 'string' && err.trim()){
     return { level: 'unchecked', label: '未核查（核查失败：' + err.trim() + '）', detail: '' };
   }
+  // 「干净」必须有**正面证据**，不能因为"字段没报异常"就算干净（Chief 附条件 2）。
+  // 真机形状（巡检手 2026-10-14 给的 21:27 实测）：正常轮的 `suspect_duplicate`/`dup_groups`/
+  // `content_check_error` **全是 NULL**——生产者在没有重复时根本不发这些键——唯一的正面证据是
+  // `n_duplicate = 0`（明确记了"0 张重复"）。所以"干净"= 明确说了 0 张、或明确说了不可疑；
+  // 只有 `n_frames_recorded`（甚至什么都没有）**不构成**干净，那是"没记"，要如实说未核查。
+  const dupCounted = (typeof round.n_duplicate === 'number');
+  const explicitClean = (dupCounted && round.n_duplicate === 0)
+                        || round.suspect_duplicate === 0 || round.suspect_duplicate === false
+                        || round.suspect_duplicate === '0';
   // "根本没查过"：四个键一个都没带，或全都为 NULL（旧数据/旧镜像都走这条）
   const allAbsent = (round.suspect_duplicate == null && round.n_duplicate == null
                      && round.n_frames_recorded == null && round.content_check_error == null);
   if(allAbsent) return { level: 'unchecked', label: '未核查（那时没有内容核查）', detail: '' };
+  // 有帧数、但没有"查过重复"的正面记录 ⇒ 仍然是未核查，措辞不能套用"那时没有"（那时是有核查的）
+  if(!explicitClean) return { level: 'unchecked', label: '未核查（没有内容核查记录）', detail: '' };
   return { level: 'ok', label: '', detail: '' };
 }
 

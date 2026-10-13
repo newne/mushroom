@@ -1780,6 +1780,51 @@ await sleep(150);
     !document.querySelector('#timeline .mosaic-cell.dup'),
     document.querySelectorAll('#timeline .mosaic-cell.dup').length + ' 个');
 
+  // ---- ① 生产实际形状的"正常轮"（2026-10-14，巡检手给的 21:27 真机实测）----
+  // 真机上正常轮长这样：`suspect_duplicate`/`dup_groups`/`content_check_error` **全是 NULL**
+  // （生产者在**没有重复时根本不发这些键**），`n_duplicate=0`、`n_frames_recorded=48`。
+  // 也就是说"干净"在真机上**没有**我 fixture 那套 `0`/`''`/`[]` 的形状，
+  // 唯一的正面证据是 `n_duplicate=0`。这条把它钉住：搬运真值进来，页面仍必须**零痕迹**。
+  const normalRound = ROUNDS.find(r => r.round_id === 'round-20260914');
+  const cleanShape = { suspect_duplicate: normalRound.suspect_duplicate, dup_groups: normalRound.dup_groups,
+                       content_check_error: normalRound.content_check_error,
+                       n_duplicate: normalRound.n_duplicate };
+  normalRound.suspect_duplicate = null;
+  normalRound.dup_groups = null;
+  normalRound.content_check_error = null;
+  normalRound.n_duplicate = 0;
+  normalRound.n_frames_recorded = 48;
+  await click('#reloadbtn');
+  await sleep(300);
+  $('#roundSel').value = 'round-20260914';
+  $('#roundSel').dispatchEvent(new window.Event('change'));
+  await waitCell('S102');
+  check('① 生产形状的正常轮（三个键 NULL + `n_duplicate=0`）必须仍是**零痕迹**',
+    !/重复|可疑|未核查/.test(T('#roundnavinfo')) && T('#roundnavinfo').includes('2 帧'),
+    T('#roundnavinfo'));
+
+  // 反面：把唯一的正面证据（`n_duplicate=0`）也拿掉 ⇒ **不许**再显示成干净。
+  // 剩下的键都只是"没记"（NULL 的语义），按 Chief 附条件 2 必须落到「未核查」，
+  // 而且措辞不能套用 legacy 那句"那时没有内容核查"（那时其实是有核查的，只是没记）。
+  delete normalRound.n_duplicate;
+  await click('#reloadbtn');
+  await sleep(300);
+  $('#roundSel').value = 'round-20260914';
+  $('#roundSel').dispatchEvent(new window.Event('change'));
+  await waitCell('S102');
+  check('① 没有正面证据（`n_duplicate` 也没记）⇒ 落「未核查」，不许显示成干净',
+    T('#roundnavinfo').includes('未核查（没有内容核查记录）')
+    && !/无重复|正常|干净|已核查/.test(T('#roundnavinfo')), T('#roundnavinfo'));
+  normalRound.suspect_duplicate = cleanShape.suspect_duplicate;   // 复原 fixture
+  normalRound.dup_groups = cleanShape.dup_groups;
+  normalRound.content_check_error = cleanShape.content_check_error;
+  normalRound.n_duplicate = cleanShape.n_duplicate;
+  await click('#reloadbtn');
+  await sleep(300);
+  $('#roundSel').value = 'round-20260914';
+  $('#roundSel').dispatchEvent(new window.Event('change'));
+  await waitCell('S102');
+
   // 正常帧的详情区零痕迹：最新一轮的 S102 是一帧干净帧（没有内容标记）→ #dpdup 隐藏
   await click('#timeline .mosaic-cell[data-station-id="S102"]');
   await sleep(250);
