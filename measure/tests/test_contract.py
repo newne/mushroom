@@ -31,14 +31,21 @@ def test_is_usable_gates_on_no_detection():
 
 def test_verified_and_level_view_are_registered():
     assert "verified" in contract.QUALITY_FLAGS
-    # 平视口径必须是一个显式标记（Chief 2026-10-13：平视能算的量也要标清口径）
+    # 平视口径是一个**描述性**标记（Chief：平视能算的量要标清口径）
     assert "level_view" in contract.QUALITY_FLAGS
 
 
-def test_level_view_does_not_block_usability():
-    """`level_view` 是口径标记，不是"不可用"标记。"""
+def test_level_view_never_decides_behavior():
+    """票 11 §3：**能决定行为的只有 `angle_profile`**；`level_view` 只是它的旁白。
+
+    所以它既不进不可用集合，也不该被任何门控当作判据——这里把"加不加它、判定都一样"
+    钉成断言。
+    """
+    assert "level_view" not in contract.NON_USABLE_FLAGS
     assert contract.is_usable("baseline+level_view+no_angle_profile")
+    assert contract.is_usable("baseline+no_angle_profile")          # 去掉它，判定不变
     assert not contract.is_usable("baseline+level_view+low_confidence")
+    assert not contract.is_usable("baseline+low_confidence")        # 同上
 
 
 def test_no_angle_profile_is_orthogonal_to_verified():
