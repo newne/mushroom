@@ -20,6 +20,8 @@ from analysis.audit import summarize_operations
 from analysis.batches import window_of
 from analysis.jobs import default_jobs, run_job
 from analysis.db import (
+    IMAGE_FIELDS,
+    MEASUREMENT_FIELDS,
     ROUND_FIELDS,
     connect,
     fetch_batches as db_fetch_batches,
@@ -31,6 +33,7 @@ from analysis.db import (
     fetch_rounds,
     insert_images,
     insert_measurements,
+    insert_rounds,
 )
 from analysis.environment import (
     batches as env_batches,
@@ -117,8 +120,20 @@ def create_app(
         """
         measurements, rounds, images = [], [], []
         skipped_measurements = 0
+        # 每种 kind 允许的键。**收到表外的键不能静默忽略**：那样发送方以为已经落库，
+        # 实际库里没有这一列（巡检手票 13 §3.2 的四个字段就是这样被吞过一次）。
+        known = {
+            "measurement": set(MEASUREMENT_FIELDS),
+            "round": set(ROUND_FIELDS),
+            # `yz` 是 patrol 的坐标列表，由 `flatten_image` 摊平成 y/z，不是表列。
+            "image_index": set(IMAGE_FIELDS) | {"yz"},
+        }
+        unknown: set[tuple[str, str]] = set()
         for row in body.rows:
             kind = row.get("kind")
+            if kind in known:
+                for key in set(row) - known[kind] - {"kind"}:
+                    unknown.add((str(kind), str(key)))
             if kind == "measurement":
                 # 票 11：测量行必须带库房与框。缺库房的行不入库（主键是
                 # (ts, room_id, box_id)，且它会污染某个库房的区间表），
@@ -132,23 +147,24 @@ def create_app(
                 rounds.append(row)
             elif kind == "image_index" and row.get("ts"):
                 images.append(row)
+        warnings = [
+            f"{kind}.{key} 没有对应列，**会被忽略**（先加列再发字段）"
+            for kind, key in sorted(unknown)
+        ]
+        for text in warnings:
+            print(f"[ingest] 未知字段：{text}")
         if measurements:
             insert_measurements(conn, measurements)
         if images:
             insert_images(conn, images)
         if rounds:
-            cols = ", ".join(ROUND_FIELDS)
-            marks = ", ".join(f":{f}" for f in ROUND_FIELDS)
-            conn.executemany(
-                f"INSERT OR REPLACE INTO rounds ({cols}) VALUES ({marks})",
-                [{f: r.get(f) for f in ROUND_FIELDS} for r in rounds],
-            )
-            conn.commit()
+            insert_rounds(conn, rounds)
         return {
             "inserted_measurements": len(measurements),
             "skipped_measurements": skipped_measurements,
             "inserted_rounds": len(rounds),
             "inserted_images": len(images),
+            "warnings": warnings,
         }
 
     @app.get("/measurements")

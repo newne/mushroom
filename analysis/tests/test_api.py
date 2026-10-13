@@ -62,7 +62,7 @@ def test_ingest_measurements_and_rounds(client):
     assert resp.status_code == 200
     assert resp.json() == {
         "inserted_measurements": 1, "skipped_measurements": 0,
-        "inserted_rounds": 1, "inserted_images": 1,
+        "inserted_rounds": 1, "inserted_images": 1, "warnings": [],
     }
 
     ms = client.get("/measurements").json()

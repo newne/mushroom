@@ -82,7 +82,7 @@ def test_mixed_batch_ingests_every_kind(tmp_path):
     with client(tmp_path) as c:
         got = c.post("/ingest", json={"rows": rows}).json()
         assert got == {"inserted_measurements": 1, "skipped_measurements": 0,
-                       "inserted_rounds": 1, "inserted_images": 2}
+                       "inserted_rounds": 1, "inserted_images": 2, "warnings": []}
         assert c.get("/images").json()[0]["room_id"] == "611"
         assert c.get("/rounds").json()[0]["room_id"] == "611"
         assert c.get("/measurements").json()[0]["mean_len_mm"] == 42.5
@@ -113,6 +113,50 @@ def test_images_can_be_filtered_by_room_and_box(tmp_path):
         assert len(c.get("/images?box_id=B201").json()) == 1
         assert len(c.get("/images?limit=1").json()) == 1
         assert len(c.get("/images").json()) == 2
+
+
+# ---------- 票 13 §3.2：新字段与"静默忽略"护栏 ----------
+
+
+def test_dup_groups_list_round_trips_as_json(tmp_path):
+    """列表不能直接绑进 TEXT 列（`type 'list' is not supported`）：写入序列化、读取解回。"""
+    row = round_row(room_id="611", suspect_duplicate=1, dup_groups=["a1b2c3d4", "ff00aa11"],
+                    n_duplicate=35, n_frames_recorded=48, content_check_error=None)
+    with client(tmp_path) as c:
+        assert c.post("/ingest", json={"rows": [row]}).status_code == 200
+        got = c.get("/rounds").json()[0]
+    assert got["dup_groups"] == ["a1b2c3d4", "ff00aa11"], "读回来必须还是列表"
+    assert got["n_duplicate"] == 35
+    assert got["n_frames_recorded"] == 48
+
+
+def test_frame_level_dup_columns_land(tmp_path):
+    rows = [image_row(frame_dup=1, dup_group="a1b2c3d4", content_sha256="a" * 64,
+                      same_as_previous=1, duplicate_streak=35, elapsed_s=13.1)]
+    with client(tmp_path) as c:
+        c.post("/ingest", json={"rows": rows})
+        got = c.get("/images").json()[0]
+    assert got["frame_dup"] == 1
+    assert got["dup_group"] == "a1b2c3d4"
+    assert got["same_as_previous"] == 1
+    assert got["duplicate_streak"] == 35
+    assert got["elapsed_s"] == pytest.approx(13.1)
+
+
+def test_unknown_key_is_reported_not_swallowed(tmp_path):
+    """发出去没有列的键**必须**在响应里点名：静默忽略是这类错误唯一的藏身处。"""
+    row = image_row()
+    row["brand_new_field"] = "2026"
+    with client(tmp_path) as c:
+        got = c.post("/ingest", json={"rows": [row]}).json()
+    assert got["warnings"] == ["image_index.brand_new_field 没有对应列，**会被忽略**（先加列再发字段）"]
+    assert got["inserted_images"] == 1, "警告归警告，别的字段照常落库"
+
+
+def test_clean_batch_has_no_warnings(tmp_path):
+    with client(tmp_path) as c:
+        got = c.post("/ingest", json={"rows": [image_row(), round_row()]}).json()
+    assert got["warnings"] == []
 
 
 # ---------- 老库就地升级 ----------
@@ -155,6 +199,9 @@ def test_migrate_adds_missing_room_columns(tmp_path):
         "images.frame_dup",
         "images.dup_group",
         "images.content_sha256",
+        "images.same_as_previous",
+        "images.duplicate_streak",
+        "images.elapsed_s",
         "rounds.round_id",
         "rounds.room_id",
         "rounds.entry_date",
@@ -162,10 +209,13 @@ def test_migrate_adds_missing_room_columns(tmp_path):
         "rounds.suspect_duplicate",
         "rounds.dup_groups",
         "rounds.content_check_error",
+        "rounds.n_duplicate",
+        "rounds.n_frames_recorded",
     }
     cols = {r[1] for r in conn.execute("PRAGMA table_info(images)")}
     assert {"round_id", "room_id", "entry_date", "batch_no", "imaging_profile",
-            "object_name_source", "frame_dup", "dup_group", "content_sha256"} <= cols
+            "object_name_source", "frame_dup", "dup_group", "content_sha256",
+            "same_as_previous", "duplicate_streak", "elapsed_s"} <= cols
     rounds_cols = {r[1] for r in conn.execute("PRAGMA table_info(rounds)")}
     assert {"round_id", "room_id", "entry_date", "batch_no"} <= rounds_cols
 

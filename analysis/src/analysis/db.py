@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 SCHEMA = """
@@ -71,8 +72,11 @@ CREATE TABLE IF NOT EXISTS rounds (
   -- 轮内容完整性（巡检手票 13）：整轮疑似复制 ⇒ `suspect_duplicate=1` + `dup_groups`；
   -- **复核没查成** ⇒ 写 `content_check_error`（原因），**不许当成"已确认无重复"**。
   suspect_duplicate   INTEGER,
-  dup_groups          TEXT,
-  content_check_error TEXT
+  dup_groups          TEXT,                -- **JSON 文本**（列表在 SQLite 里存不了，见 _as_text）
+  content_check_error TEXT,
+  -- 轮级计数（2026-10-13，巡检手票 13 §3.2）：重复帧数 / 实际记录帧数。
+  n_duplicate         INTEGER,
+  n_frames_recorded   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS images (
@@ -90,6 +94,10 @@ CREATE TABLE IF NOT EXISTS images (
   frame_dup      INTEGER,
   dup_group      TEXT,
   content_sha256 TEXT,
+  -- 轮内连续性（2026-10-13，巡检手票 13 §3.2）：这张帧与上一张是否完全相同、
+  -- 连续相同了多少张。**是标记，不是删除**：聚合侧照样要排除它们。
+  same_as_previous  INTEGER,
+  duplicate_streak  INTEGER,
   camera_ip     TEXT,
   y             REAL,
   z             REAL,
@@ -101,6 +109,9 @@ CREATE TABLE IF NOT EXISTS images (
   cloud_url     TEXT,
   ok            INTEGER,
   error         TEXT,
+  -- 该帧从下发到取回耗时（秒）。生产者一直在发这个键，但表里原先没有 ⇒ 被静默丢。
+  -- 按"写入方多给、存储方少要"那条教训，这里补上列而不是继续吞掉（2026-10-13）。
+  elapsed_s     REAL,
   -- 库房维度（2026-09-13 补）：`patrol.daemon` 给每条索引行都盖了
   -- `room_id`/`entry_date`/`batch_no`（见 daemon._room_fields 的说明：多库房/多批次
   -- 部署时"这张照片属于哪一间、哪一批"必须跟着行本身走），但表里原先没有这三列，
@@ -179,6 +190,9 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "frame_dup": "INTEGER",
         "dup_group": "TEXT",
         "content_sha256": "TEXT",
+        "same_as_previous": "INTEGER",
+        "duplicate_streak": "INTEGER",
+        "elapsed_s": "REAL",
     },
     "rounds": {
         "round_id": "TEXT",
@@ -189,6 +203,8 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "suspect_duplicate": "INTEGER",
         "dup_groups": "TEXT",
         "content_check_error": "TEXT",
+        "n_duplicate": "INTEGER",
+        "n_frames_recorded": "INTEGER",
     },
     # 循环补光（2026-10-12）：加列即可，不用重建——老行这三列留空表示"那时还没采这个量"，
     # 比编一个 0 诚实（0 会被读成"补光为零"）。
@@ -474,6 +490,8 @@ ROUND_FIELDS = (
     "suspect_duplicate",
     "dup_groups",
     "content_check_error",
+    "n_duplicate",
+    "n_frames_recorded",
 )
 
 IMAGE_FIELDS = (
@@ -491,7 +509,10 @@ IMAGE_FIELDS = (
     "frame_dup",
     "dup_group",
     "content_sha256",
+    "same_as_previous",
+    "duplicate_streak",
     "cloud_url",
+    "elapsed_s",
     "ok",
     "error",
     # 库房维度：与 daemon 写入的行一一对应（见 SCHEMA 里 images 的注释）
@@ -561,6 +582,46 @@ def fetch_images(
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def _as_text(value):
+    """列表/字典 → JSON 文本，其余原样。
+
+    `rounds.dup_groups` 是 TEXT 列，而生产者发来的是**列表** —— 直接绑给 sqlite3 会抛
+    `ProgrammingError: type 'list' is not supported`。修的是这一条，但**真正的教训**
+    是它的反面：如果存储层默默接受、库里头变成别的形状，那才是查不出来的那种坏。
+    """
+    if isinstance(value, (list, tuple, dict)):
+        return json.dumps(value, ensure_ascii=False)
+    return value
+
+
+def _as_list(value):
+    """JSON 文本 → Python 列表；不是 JSON 或解析失败就**原样返回**（不猜、不吞错）。"""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if not text.startswith(("[", "{")):
+        return value
+    try:
+        return json.loads(text)
+    except ValueError:
+        return value
+
+
+def insert_rounds(conn: sqlite3.Connection, rows: list[dict]) -> None:
+    """按 `ts` 覆盖写轮次行。列表型字段（`dup_groups`）序列化成 JSON 文本。
+
+    读回来时由 `fetch_rounds` 解回列表 —— 写入方与读取方**成对**，否则下游拿到一个
+    字符串，`dup_groups` 就没法用了。
+    """
+    cols = ", ".join(ROUND_FIELDS)
+    marks = ", ".join(f":{f}" for f in ROUND_FIELDS)
+    conn.executemany(
+        f"INSERT OR REPLACE INTO rounds ({cols}) VALUES ({marks})",
+        [{f: _as_text(r.get(f)) for f in ROUND_FIELDS} for r in rows],
+    )
+    conn.commit()
+
+
 def fetch_rounds(
     conn: sqlite3.Connection,
     *,
@@ -589,7 +650,14 @@ def fetch_rounds(
         params.append(int(limit))
     cur = conn.execute(sql, params)
     cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    out = []
+    for row in cur.fetchall():
+        item = dict(zip(cols, row))
+        # 写入方把列表序列化成 JSON（`_as_text`），读取方成对解回来 ——
+        # 否则下游拿到的 `dup_groups` 是个字符串，等于没这个字段。
+        item["dup_groups"] = _as_list(item.get("dup_groups"))
+        out.append(item)
+    return out
 
 
 def replace_ranges(conn: sqlite3.Connection, rows: list[dict], computed_at: str) -> None:

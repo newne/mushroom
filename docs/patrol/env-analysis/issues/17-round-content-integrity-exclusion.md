@@ -14,11 +14,28 @@
 
 | 表 | 列 | 由谁产生 |
 | --- | --- | --- |
-| `images` | `frame_dup`、`dup_group`、`content_sha256` | 巡检手 |
-| `rounds` | `suspect_duplicate`、`dup_groups`、`content_check_error` | 巡检手 |
+| `images` | `frame_dup`、`dup_group`、`content_sha256`、`same_as_previous`、`duplicate_streak`、`elapsed_s` | 巡检手 |
+| `rounds` | `suspect_duplicate`、`dup_groups`、`content_check_error`、`n_duplicate`、`n_frames_recorded` | 巡检手 |
 
 `ADDED_COLUMNS` 就地迁移、老行 NULL（NULL = "那时还没查"，**不是"已确认无重复"**）。
 `IMAGE_FIELDS`/`ROUND_FIELDS` 已带上，`/ingest` 原样透传（提交见 Comments）。
+
+**`dup_groups` 是列表 ⇒ 存 JSON 文本**：`rounds.dup_groups` 是 TEXT 列，
+生产者发的是列表，直接绑给 sqlite3 会抛
+`ProgrammingError: type 'list' is not supported`（`insert_rounds` 里 `_as_text` 序列化，
+`fetch_rounds` 里 `_as_list` **成对**解回列表）——只写不读回来等于没这个字段。
+
+## 1.5 护栏：没有对应列的键**必须**被点名
+
+`/ingest` 现在按 kind 检查键是否在 `*_FIELDS` 里，表外的键进响应
+`warnings`（并打一行日志）："`image_index.brand_new_field 没有对应列，会被忽略`"。
+**静默忽略是这类错误唯一的藏身处** —— 巡检手票 13 §3.2 那四个字段就是这样被吞过一次，
+发送方以为已经落库。测试：`test_unknown_key_is_reported_not_swallowed`、
+`test_clean_batch_has_no_warnings`。
+
+顺带补了 `images.elapsed_s`：生产者一直在发（`elapsed_s`），表里原先没有 ⇒ 被静默丢。
+按"写入方多给、存储方少要"的教训**加列而不是继续吞掉**；`yz`（坐标列表，由
+`flatten_image` 摊平成 y/z）在检查里显式认作已知键。
 
 ## 2. 排除规则（`analysis/src/analysis/integrity.py`）
 
@@ -46,10 +63,17 @@
 ## 4. 验收
 
 - [x] `test_integrity.py`：窗口=到下一轮为止、没查成也排除、干净轮不排、最后一条可疑轮不变永久窗口、老数据（无列）不误排、别的库房不受影响
-- [x] `test_ingest_room.py`：迁移把 6 列补上（老行 NULL）
-- [x] 全量 analysis **140 passed**
+- [x] `test_ingest_room.py`：迁移把列补上（老行 NULL）；`dup_groups` 列表 JSON 往返；
+      帧级 5 列落库；**未知键进响应 `warnings`**；干净批次零警告
+- [x] 全量 analysis **144 passed**
 
 ## Comments
 
-- 2026-10-18 开票并落地（同日）。列由环境官先落（提交见仓库 log），巡检手随后按"先落列再发字段"的顺序发。
+- 2026-10-13 开票并落地（同日）。列由环境官先落，巡检手随后按"先落列再发字段"的顺序发。
+- 2026-10-13 追补（Chief 转巡检手 `d9c1ee6`，票 13 §3.2）：① 再加四列
+  `same_as_previous`/`duplicate_streak`/`n_duplicate`/`n_frames_recorded`（原本会被
+  `*_FIELDS` 静默吞掉）；② **修真 bug** —— `dup_groups` 绑列表抛
+  `sqlite3.ProgrammingError: type 'list' is not supported`，改成写 JSON、读解回列表；
+  ③ 加护栏：`/ingest` 收到表外的键进 `warnings` 并在日志点名（"静默忽略是这类错误
+  唯一的藏身处"）；顺带把生产者一直发的 `elapsed_s` 补成列。
 - 与票 11 §5 的关系：那是"空值 ≠ 0"，本票是"复制帧 ≠ 长势"，同一条保守原则的不同面。
