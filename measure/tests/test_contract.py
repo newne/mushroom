@@ -39,3 +39,22 @@ def test_level_view_does_not_block_usability():
     """`level_view` 是口径标记，不是"不可用"标记。"""
     assert contract.is_usable("baseline+level_view+no_angle_profile")
     assert not contract.is_usable("baseline+level_view+low_confidence")
+
+
+def test_no_angle_profile_is_orthogonal_to_verified():
+    """环境官 2026-10-13 硬规则：`no_angle_profile` 只标记盖径/杆长两列不可用，
+    **不否定整行** —— `verified+no_angle_profile` 合法且照常进统计。
+
+    若把它当"整行不可用"，平视单档下每行都带它 ⇒ `verified` 一行不剩，
+    等于从"标注缺测"变成"删数据"。
+    """
+    assert "no_angle_profile" not in contract.NON_USABLE_FLAGS
+    assert contract.is_usable("verified+no_angle_profile")
+    assert contract.is_usable("verified+no_angle_profile+level_view")
+
+
+def test_no_light_is_unusable_not_downgraded():
+    """近黑帧没有信息量：处置是"不可用"，不是降权（Chief 2026-10-13）。"""
+    assert "no_light" in contract.QUALITY_FLAGS
+    assert not contract.is_usable("no_light")
+    assert not contract.is_usable("baseline+no_light+no_angle_profile")

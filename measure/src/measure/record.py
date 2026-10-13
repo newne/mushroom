@@ -27,7 +27,10 @@ if TYPE_CHECKING:
 
 #: spec §6 + 票 11 的 measurements 线格式字段。
 #: **钉点**：这一份与 analysis 侧 `MEASUREMENT_FIELDS` 必须一字不差（票 11 §1 铁律）。
-#: 想加字段先改票，两侧同时改——单侧加会静默丢字段。
+#: 2026-10-13 环境官落了菌簇四列（`mean_cluster_w_mm` / `mean_cluster_h_mm` /
+#: `mean_area_mm2` / `mean_projected_d_mm`）：平视单档下盖径/杆长缺测，**长势只能从
+#: 这几个量算**，所以它们必须真发；顺序也照 analysis 侧（`db.py` 的
+#: `MEASUREMENT_FIELDS`），加字段先改票、两侧同时改。
 RECORD_FIELDS = (
     "ts",
     "room_id",
@@ -37,6 +40,10 @@ RECORD_FIELDS = (
     "n",
     "mean_len_mm",
     "mean_cap_mm",
+    "mean_cluster_w_mm",
+    "mean_cluster_h_mm",
+    "mean_area_mm2",
+    "mean_projected_d_mm",
     "p10_len",
     "p90_len",
     "quality",
@@ -53,6 +60,10 @@ class MeasurementRecord:
     n: int | None = None
     mean_len_mm: float | None = None
     mean_cap_mm: float | None = None
+    mean_cluster_w_mm: float | None = None
+    mean_cluster_h_mm: float | None = None
+    mean_area_mm2: float | None = None
+    mean_projected_d_mm: float | None = None
     p10_len: float | None = None
     p90_len: float | None = None
     quality: str | None = None
@@ -80,6 +91,10 @@ class MeasurementRecord:
             n=stats.n_total,
             mean_len_mm=stats.mean_len_mm,
             mean_cap_mm=stats.mean_cap_mm,
+            mean_cluster_w_mm=stats.mean_cluster_w_mm,
+            mean_cluster_h_mm=stats.mean_cluster_h_mm,
+            mean_area_mm2=stats.mean_area_mm2,
+            mean_projected_d_mm=stats.mean_projected_d_mm,
             p10_len=stats.p10_len_mm,
             p90_len=stats.p90_len_mm,
             quality=stats.quality_flags,

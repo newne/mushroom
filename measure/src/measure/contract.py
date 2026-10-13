@@ -33,10 +33,12 @@ QUALITY_FLAGS = (
     "low_confidence",        # 置信度不足（实例拆分未生效 / 无种子 / 前景无法分离）
     "no_angle_profile",      # 该量在当前角度档下不可测（原因：无对应角度档）
     "level_view",            # **平视口径**：该值是俯视投影量，不是真实几何尺寸
+    "no_light",              # 整帧近黑（灯未亮/无信息量）⇒ 该帧不可用，不是降权
 )
 
 #: 出现其中任意一个 ⇒ 这一行没有可用测量。
-NON_USABLE_FLAGS = ("no_detection", "low_confidence")
+#: `no_light` 同属"不可用"（Chief 2026-10-13：近黑帧没有信息量，降权会污染统计）。
+NON_USABLE_FLAGS = ("no_detection", "low_confidence", "no_light", "blurry", "overexposed")
 
 #: 多标记连接符（票 11 §3）。
 JOINER = "+"

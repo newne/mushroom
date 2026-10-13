@@ -76,6 +76,11 @@ def test_row_has_contract_fields_and_null_unmeasurable():
     assert row["mean_cap_mm"] is None
     assert row["mean_len_mm"] is None
     assert row["p10_len"] is None and row["p90_len"] is None
+    # 菌簇四列：平视单档下唯一可用的长势量，必须真发（毫米/平方毫米）
+    assert row["mean_cluster_h_mm"] == pytest.approx(109 * MM_PER_PX, rel=0.05)
+    assert row["mean_cluster_w_mm"] == pytest.approx(109 * MM_PER_PX, rel=0.05)
+    assert row["mean_area_mm2"] == pytest.approx(9473 * MM_PER_PX ** 2, rel=0.05)
+    assert row["mean_projected_d_mm"] == pytest.approx(109.8 * MM_PER_PX, rel=0.05)
     assert row["n"] == 1
     assert "baseline" in row["quality"] and "no_angle_profile" in row["quality"]
     # 平视口径必须标清（Chief 2026-10-13 裁定）

@@ -113,7 +113,11 @@ def notes_for(detected: bool) -> str:
 def row_from_stats(*, frame: FrameInput, room_id: str, stats: BoxStats,
                    quality: str, notes: str,
                    flags: Iterable[str] = ()) -> MeasurementRecord:
-    """`BoxStats` → 线格式记录（字段名翻译的唯一钉点在 `MeasurementRecord`）。"""
+    """`BoxStats` → 线格式记录（字段名翻译的唯一钉点在 `MeasurementRecord`）。
+
+    菌簇四列是平视单档下**唯一可用的长势量**（票 11 §1 的 2026-10-13 加列），必须真发；
+    盖径/杆长仍恒 NULL。
+    """
     return MeasurementRecord(
         ts=frame.ts,
         room_id=room_id,
@@ -124,11 +128,19 @@ def row_from_stats(*, frame: FrameInput, room_id: str, stats: BoxStats,
         # 菌盖直径 / 菌杆长度：单档平视下明确缺测 ⇒ 恒 NULL，禁止近似
         mean_len_mm=None,
         mean_cap_mm=None,
+        mean_cluster_w_mm=_round3(stats.mean_cluster_w_mm),
+        mean_cluster_h_mm=_round3(stats.mean_cluster_h_mm),
+        mean_area_mm2=_round3(stats.mean_area_mm2),
+        mean_projected_d_mm=_round3(stats.mean_projected_d_mm),
         p10_len=None,
         p90_len=None,
         quality=quality,
         notes=notes,
     )
+
+
+def _round3(value: float | None) -> float | None:
+    return None if value is None else round(float(value), 3)
 
 
 def rows_from_frames(
@@ -175,7 +187,7 @@ def rows_from_frames(
                 gray = image if image.ndim == 2 else image.mean(axis=-1)
                 ok, qflags = quality_gate(gray)
                 if not ok:
-                    extra.update(f for f in qflags.split(",") if f)
+                    extra.update(contract.parse_flags(qflags))
                     extra.add("no_detection")
                     if not emit_empty:
                         continue

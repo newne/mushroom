@@ -4,9 +4,11 @@ from measure.pipeline import DummyDetector, aggregate_box, aggregate_round
 from measure.quality import (
     frame_quality,
     is_blurry,
+    is_dark,
     is_overexposed,
     laplacian_variance,
     overexposed_fraction,
+    p99_brightness,
 )
 
 
@@ -40,6 +42,29 @@ def test_frame_quality_flags():
     assert ok and flags == ""
     bad, flags = frame_quality(np.full((32, 32), 255, dtype=np.uint8))
     assert not bad and "overexposed" in flags and "blurry" in flags
+    # 标记串用 `+`（票 11 §3），不是逗号
+    assert "," not in flags
+
+
+def test_dark_frame_is_no_light_and_unusable():
+    """灯未亮的整帧：标 no_light，处置是**不可用**（不是降权）。"""
+    dark = np.full((32, 32), 12, dtype=np.uint8)
+    ok, flags = frame_quality(dark)
+    assert not ok
+    assert "no_light" in flags.split("+")
+    from measure import contract
+
+    assert not contract.is_usable(flags)
+
+
+def test_vignetted_frame_is_not_mistaken_for_no_light():
+    """强晕影但中心有亮区 ⇒ 不许判成"灯没亮"（拿 S306 真机帧的形状造）。"""
+    yy, xx = np.mgrid[0:200, 0:200]
+    dist = np.hypot(yy - 100, xx - 100) / 141.0
+    vignette = np.clip(230 * (1.0 - dist ** 2), 8, 255).astype(np.uint8)
+    assert not is_dark(vignette)
+    ok, flags = frame_quality(vignette, blur_threshold=0.0)   # 只考近黑判据
+    assert "no_light" not in flags and ok
 
 
 def test_quality_requires_2d():
