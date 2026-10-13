@@ -12,6 +12,13 @@
 > `analysis/src/analysis/align.py:40-41` 按 `hour` 单键聚合环境，而 `measurements` 原先没有任何
 > 库房维度 ⇒ 四个库房会被混进同一个分箱，本票做出来的是**错表，不是空表**。票 11 关掉之前不开工。
 
+> **口径变更（2026-10-13，票 11 §9）：** 平视单档下 `mean_len_mm`（杆长）**明确缺测**，
+> 所以"生长速率"**不能再用杆长差分**（`align.hourly_rates` 现在吃 `mean_len_mm`，
+> 平视下会全空）。改用**菌簇范围**的小时增量：`mean_area_mm2`（mm²/h）或
+> `mean_projected_d_mm`（mm/h），见票 11 §1 新增的四列。
+> `ranges.rate_mm_per_h` 字段名保留兼容，但**语义 = 所选长势量的增量**，
+> 必须在 `/ranges` 响应里带一个 `metric` 字段说明用的是哪个量（别让下游把 mm²/h 当 mm/h）。
+
 **Status:** ready-for-agent
 
 - [ ] 实际参数区间（主）：按 D 分档（可切图像 4 阶段）× 长势分层，统计 `temp_c / rh_pct / co2_ppm / lamp_on_min` 的 median / q25 / q75 / n，并列该层生长速率

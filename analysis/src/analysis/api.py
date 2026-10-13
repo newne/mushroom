@@ -78,7 +78,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        jobs = list(jobs_factory(conn, resolved_db))
+        try:
+            jobs = list(jobs_factory(conn, resolved_db))
+        except Exception as e:  # noqa: BLE001 - 装配失败不许把 API 拖下水
+            print(f"[ingest] 作业装配失败，API 照常启动: {e}")
+            jobs = []
         tasks = [asyncio.create_task(run_job(job), name=f"ingest:{job.name}") for job in jobs]
         for job in jobs:
             period = (f"每 {job.interval_s}s" if job.interval_s is not None

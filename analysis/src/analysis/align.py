@@ -68,6 +68,14 @@ def align(rates: pd.DataFrame, environment: pd.DataFrame) -> pd.DataFrame:
     env["ts"] = pd.to_datetime(env["ts"])
     env["hour"] = env["ts"].dt.floor("h")
     cols = [c for c in ("temp_c", "rh_pct", "co2_ppm", "lamp_on_min") if c in env.columns]
+    if rates.empty or env.empty:
+        # 空输入直接给空结果，**不要进 merge**：空 DataFrame 的 dtype 随 pandas 版本
+        # 摇摆（object vs datetime64），混跑换解释器时会抛
+        # "You are trying to merge on object and datetime64 columns" —— 测试门禁
+        # 必须与版本/顺序无关。
+        return pd.DataFrame(columns=[
+            "room_id", "box_id", "hour", "level_mm", "rate_mm_per_h", *cols, "stage_mm", "stage",
+        ])
     env_hourly = (
         env.groupby(["zone", "hour"])[cols].mean().reset_index()
         .rename(columns={"zone": "room_id"})

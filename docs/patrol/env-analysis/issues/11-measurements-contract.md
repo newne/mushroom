@@ -27,6 +27,8 @@ analysis 侧只消费，不复制字段表（现在 `analysis/src/analysis/db.py
 | `angle_profile` | **缺（若同站位有多角度档）** | 同站位多角度档时必填 | 否则同 (ts, 站位) 的多档会互相覆盖；当前单档为 `level0`（CONTEXT.md:20） |
 | `n` | 有 | 必填 | 本行统计的有效检出数；`n=0` 与"没写行"含义不同 |
 | `mean_len_mm` / `mean_cap_mm` | 有 | 无检出时 **NULL** | 见 §5；平视单档下这两列**明确缺测**，见 §9 |
+| `mean_cluster_w_mm` / `mean_cluster_h_mm` | **缺** | **新增（2026-10-13）** | 菌簇水平/垂直跨度均值，**mm**。平视下唯一可用的长势量（见 §9） |
+| `mean_area_mm2` / `mean_projected_d_mm` | **缺** | **新增（2026-10-13）** | 菌簇面积均值（**mm²**）与投影径均值（**mm**）。**投影径不是菌盖直径**，不许互换 |
 | `p10_len` / `p90_len` | 有 | 可空 | 分位数，样本太小时允许 NULL |
 | `quality` | 有（自由文本） | 必填，枚举见 §3 | |
 
@@ -59,10 +61,18 @@ analysis 侧只消费，不复制字段表（现在 `analysis/src/analysis/db.py
 | `cap_level_approx` | 菌盖高度为近似值 | 否 |
 | `stem_absent(level0)` | 菌柄缺失（level 0），长度无意义 | 否 |
 | `low_confidence` | 置信度不足 | 否 |
+| `no_angle_profile` | **盖径/杆长不可用：没有对应角度档**（平视单档下每行都有） | **是 —— 但只作"那两列不可用"的标记，见下** |
 
-判定规则：**区间表与决策层只吃 `quality == "verified"`**，其余行落在库里但不参与统计
-（不是删掉 —— 缺失要可审计，`spec.md` §6）。允许多标记用 `+` 连接（如
-`cap_level_approx+low_confidence`）；只要不含 `verified` 就不进统计。
+**多标记用 `+` 连接**（不是逗号）：如 `verified+no_angle_profile`、
+`baseline+low_confidence+no_angle_profile`。
+
+**`no_angle_profile` 与 `verified` 正交（2026-10-13 裁定）**：它标记的是
+"`mean_cap_mm`/`mean_len_mm` 这两列不可用"，**不否定整行**。
+`verified+no_angle_profile` 是合法组合，该行**照样进统计**（用菌簇范围的形态量）。
+若把这个 flag 当成"整行不可用"，平视单档下会一行不剩 —— 那就从"标注缺测"变成了"删数据"。
+
+判定规则：**区间表与决策层只吃 `quality` 里含 `verified` 的行**，其余行落在库里但不参与统计
+（不是删掉 —— 缺失要可审计，`spec.md` §6）。
 
 ## 4. 时间与聚合口径
 
@@ -103,7 +113,10 @@ analysis 侧只消费，不复制字段表（现在 `analysis/src/analysis/db.py
 
 ## 9. 菌盖直径 / 菌杆长度：明确缺测（2026-10-13 补）
 
-角度档口径（用户 2026-10-13 裁定）：**A —— 单档平视（level0），顶拍与 45° 侧斜都不做。**
+**现役物理现状 = 单档平视 `level0`**（CONTEXT.md:20、ADR-0024、
+`fmc4030-camera-scan/issues/09-angle-profile-and-framing.md` 第三版），
+所以顶拍与 45° 侧斜对应的测量能力**今天不存在** —— 缺测口径照本节不变。
+**是否换角不预设**：由现场作业与用户安排决定；**换角生效日 = 数据口径分界**。
 
 - `mean_cap_mm`（菌盖直径）与 `mean_len_mm`（菌杆长度）两列在当前形态下**明确缺测**：
   写 **NULL + `quality='no_detection'`**，原因登记为「**无对应角度档**」。
@@ -114,10 +127,14 @@ analysis 侧只消费，不复制字段表（现在 `analysis/src/analysis/db.py
   所以本节成立。**将来若换角生效，本节要重写**（45° 下菌盖直径可得、杆长带投影补偿），
   且**换角生效日 = 数据口径分界**：生效日之前与之后的量**不可直接比较**，
   区间表与趋势图不得跨角拼接。
-- 依据：`docs/patrol/fmc4030-camera-scan/issues/09-angle-profile-45-default.md` §0.2、§5
-  （"level0 给形态、不给定量"、"不许算法侧拿平视图硬算充数"）。
-  ⚠️ 该票 §0 的"默认 45° 单档"是**已作废**的早先口径（Chief 2026-10-13 明确：
-  用户改口径后没有"默认 45°"这回事），巡检手正在改那份文字；**以本节为准**。
+- 依据：`docs/patrol/fmc4030-camera-scan/issues/09-angle-profile-and-framing.md` §0.2、§5
+  （"level0 给形态、不给定量"、"不许算法侧拿平视图硬算充数"；该票已按"名字本身不该是结论"
+  改名，早先的 `09-angle-profile-45-default.md` 已不存在）与 **ADR-0024**（测量标定权威）。
+  三处（该票 / ADR-0024 / 本票）同口径，不再互标冲突。
+- **对区间表的直接后果（2026-10-13 补）**：`mean_len_mm` 缺测 ⇒ `align.hourly_rates` 拿不到
+  生长速率 ⇒ 区间表**不能**再用杆长差分。平视下可用的长势量是**菌簇范围**
+  （`mean_area_mm2` / `mean_projected_d_mm` / 跨度，见 §1），速率改用它们的小时增量算。
+  这条已写进票 05。
 
 ## Comments
 

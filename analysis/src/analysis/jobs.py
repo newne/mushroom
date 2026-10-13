@@ -34,31 +34,52 @@ DEFAULT_TDENGINE_URL = "http://127.0.0.1:6041"
 
 @dataclass
 class IngestJob:
-    """一个常驻作业：`run` 跑一轮，`interval_s` 或 `daily_at` 决定下一轮什么时候。"""
+    """一个常驻作业：`run` 跑一轮，`interval_s` 或 `daily_at` 决定下一轮什么时候。
+
+    `backoff_cap_s` 是**连续失败**时的退避上限：退避只影响这个作业，
+    同进程的其它任务与 API 不受影响；上限保证"对方恢复后最多 15 分钟就恢复拉取"。
+    """
 
     name: str
     run: Callable[[], object]
     interval_s: float | None = None
     daily_at: str | None = None
+    backoff_cap_s: float = 900.0
 
     def __post_init__(self) -> None:
         if (self.interval_s is None) == (self.daily_at is None):
             raise ValueError("作业要给且只给一种周期：interval_s 或 daily_at")
 
-    def delay_s(self) -> float:
+    def base_delay_s(self) -> float:
         if self.interval_s is not None:
             return float(self.interval_s)
         return seconds_until(self.daily_at)  # type: ignore[arg-type]
 
+    def next_delay_s(self, failures: int = 0) -> float:
+        """正常周期；连续失败时指数退避（×2，最多 4 次方），上限 `backoff_cap_s`。
+
+        对"每天一次"的作业，退避反而让失败**更早**重试（24 h → 15 min），
+        这正是我们要的：当天失败了不该等明天。
+        """
+        base = self.base_delay_s()
+        if failures <= 0:
+            return base
+        return min(base * (2 ** min(failures - 1, 4)), float(self.backoff_cap_s))
+
 
 async def run_job(job: IngestJob) -> None:
-    """先跑一轮，再按周期睡。任何异常都只打印 —— 循环不许因为一轮失败就退出。"""
+    """先跑一轮，再按周期睡。任何异常都只打印 —— **运行在独立线程里，API 不会跟着崩**。"""
+    failures = 0
     while True:
         try:
             await asyncio.to_thread(job.run)
-        except Exception as e:  # noqa: BLE001 - 网络/接口抖动不中断循环
-            print(f"[{job.name}] 失败，稍后重试: {e}")
-        await asyncio.sleep(job.delay_s())
+            if failures:
+                print(f"[{job.name}] 恢复正常（此前连续失败 {failures} 次）")
+            failures = 0
+        except Exception as e:  # noqa: BLE001 - 网络/接口抖动不中断循环，也不许冒泡
+            failures += 1
+            print(f"[{job.name}] 第 {failures} 次失败，{job.next_delay_s(failures):.0f}s 后重试: {e}")
+        await asyncio.sleep(job.next_delay_s(failures))
 
 
 def default_jobs(conn, db_path: str) -> list[IngestJob]:

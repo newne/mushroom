@@ -106,7 +106,22 @@ def test_field_list_matches_the_wire_contract():
     assert MEASUREMENT_FIELDS == (
         "ts", "room_id", "box_id", "station_id", "angle_profile",
         "n", "mean_len_mm", "mean_cap_mm", "p10_len", "p90_len", "quality",
+        "mean_cluster_w_mm", "mean_cluster_h_mm", "mean_area_mm2", "mean_projected_d_mm",
     )
+
+
+def test_cluster_range_is_kept_because_it_is_the_only_growth_signal_left(tmp_path):
+    """平视单档下盖径/杆长缺测 ⇒ 长势只能从菌簇范围算（票 11 §9）。"""
+    row = measurement(mean_len_mm=None, mean_cap_mm=None, quality="verified+no_angle_profile",
+                      mean_cluster_w_mm=61.5, mean_cluster_h_mm=44.0,
+                      mean_area_mm2=2123.0, mean_projected_d_mm=52.0)
+    with client(tmp_path) as c:
+        c.post("/ingest", json={"rows": [row]})
+        got = c.get("/measurements").json()[0]
+    assert got["mean_cluster_w_mm"] == 61.5
+    assert got["mean_area_mm2"] == 2123.0
+    assert got["mean_projected_d_mm"] == 52.0
+    assert got["mean_cap_mm"] is None, "投影径是投影径，不许冒充菌盖直径"
 
 
 # ---------- 老库迁移：不编库房号，也不丢行 ----------

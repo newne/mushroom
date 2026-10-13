@@ -43,9 +43,16 @@ CREATE TABLE IF NOT EXISTS measurements (
   n             INTEGER,             -- 本行有效检出数
   mean_len_mm   REAL,                -- 平视单档下**明确缺测**（无对应角度档）→ NULL，不写 0
   mean_cap_mm   REAL,                -- 同上
+  -- 菌簇范围（2026-10-13 加，测量师票 11）：**平视单档下唯一可用的长势量**。
+  -- 盖径/杆长缺测后，生长速率只能从这几个量算（面积或投影径的小时增量），
+  -- 见票 05 的口径变更。单位一律 mm / mm²，跨角度档不可比。
+  mean_cluster_w_mm    REAL,         -- 菌簇水平跨度均值
+  mean_cluster_h_mm    REAL,         -- 菌簇垂直跨度均值
+  mean_area_mm2        REAL,         -- 菌簇面积均值
+  mean_projected_d_mm  REAL,         -- 投影径均值（**不是菌盖直径**：平视下不许拿它冒充）
   p10_len       REAL,
   p90_len       REAL,
-  quality       TEXT,                -- 逗号 flag 串；区间表与决策层只吃含 verified 的行
+  quality       TEXT,                -- `+` 分隔的 flag 串；区间表与决策层只吃含 verified 的行
   PRIMARY KEY (ts, room_id, box_id)
 );
 
@@ -132,6 +139,9 @@ CREATE TABLE IF NOT EXISTS ranges (
 
 def connect(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, check_same_thread=check_same_thread)
+    # 单进程里现在有多个写者（API 请求线程 + lifespan 里的入库线程）：
+    # WAL 允许多读一写，但撞上写锁时要等一下，不要立刻抛 "database is locked"。
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.executescript(SCHEMA)
     migrate(conn)
     return conn
@@ -169,6 +179,11 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "measurements": {
         "station_id": "TEXT",
         "angle_profile": "TEXT",
+        # 菌簇范围（2026-10-13）：平视单档下盖径/杆长缺测，长势只能从这几个量算。
+        "mean_cluster_w_mm": "REAL",
+        "mean_cluster_h_mm": "REAL",
+        "mean_area_mm2": "REAL",
+        "mean_projected_d_mm": "REAL",
     },
 }
 
@@ -377,6 +392,7 @@ def fetch_batches(conn: sqlite3.Connection, *, room_id: str | None = None) -> li
 MEASUREMENT_FIELDS = (
     "ts", "room_id", "box_id", "station_id", "angle_profile",
     "n", "mean_len_mm", "mean_cap_mm", "p10_len", "p90_len", "quality",
+    "mean_cluster_w_mm", "mean_cluster_h_mm", "mean_area_mm2", "mean_projected_d_mm",
 )
 
 

@@ -36,7 +36,19 @@ def test_jobs_are_assembled_from_env(monkeypatch, tmp_path):
     assert jobs["env"].interval_s == 300
     assert jobs["audit"].interval_s == 600
     assert jobs["batch"].daily_at == "05:20"
-    assert jobs["batch"].delay_s() > 0, "daily_at 要换算成到下一个 05:20 的秒数"
+    assert jobs["batch"].base_delay_s() > 0, "daily_at 要换算成到下一个 05:20 的秒数"
+
+
+def test_failures_back_off_with_a_cap():
+    """连续失败要退避（别把对方打穿），但要封顶（对方恢复后别等太久）。"""
+    job = IngestJob("env", lambda: None, interval_s=300)
+    assert job.next_delay_s(0) == 300
+    assert job.next_delay_s(1) == 300          # 第一轮失败按正常周期重试
+    assert job.next_delay_s(2) == 600
+    assert job.next_delay_s(10) == 900         # 封顶，不是无限翻倍
+
+    daily = IngestJob("batch", lambda: None, daily_at="05:20")
+    assert daily.next_delay_s(1) <= daily.backoff_cap_s, "每天一次的作业失败后要更快重试（不是等明天）"
 
 
 def test_audit_job_is_skipped_without_credentials(monkeypatch, tmp_path):
@@ -81,3 +93,32 @@ def test_db_path_defaults_to_analysis_db_env(monkeypatch, tmp_path):
     with TestClient(create_app()) as c:
         assert c.get("/healthz").json() == {"ok": True}
     assert target.exists()
+
+
+# ---------- 异常隔离：作业炸了不许把 API 拖崩（Chief 2026-10-13 硬要求） ----------
+
+
+def test_a_failing_job_never_takes_the_api_down(tmp_path):
+    runs: list[int] = []
+
+    def run() -> None:
+        runs.append(1)
+        raise RuntimeError("TDengine 抖了一下")
+
+    def factory(conn, db_path):
+        return [IngestJob("bad", run, interval_s=0.01, backoff_cap_s=0.02)]
+
+    app = create_app(str(tmp_path / "bad.db"), jobs_factory=factory)
+    with TestClient(app) as c:
+        assert c.get("/healthz").json() == {"ok": True}
+        time.sleep(0.3)
+        assert c.get("/healthz").json() == {"ok": True}, "作业失败不许影响 API"
+    assert len(runs) >= 2, "失败后要重试，不是就此停掉"
+
+
+def test_broken_jobs_factory_still_serves_the_api(tmp_path):
+    def factory(conn, db_path):
+        raise RuntimeError("装配就炸了")
+
+    with TestClient(create_app(str(tmp_path / "f.db"), jobs_factory=factory)) as c:
+        assert c.get("/healthz").json() == {"ok": True}
