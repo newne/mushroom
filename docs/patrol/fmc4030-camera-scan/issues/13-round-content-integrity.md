@@ -99,11 +99,19 @@
 
 ## 4. 证据（命令 + 结果）
 
+**复验工具（给下一轮巡检用，只读）**：`patrol/tools/verify_round_integrity.py <rows.jsonl>`
+—— 验收票 06 的五条（实时指纹落帧、帧全入库、`n_results` 记账、`n_duplicate` 与标记一致、
+正常轮不置 `suspect_duplicate`），逐条 PASS/FAIL，全绿才返回 0。行可以从 outbox 复制，
+也可以从接口拉；**它自己不连任何东西**。工具自测见 `patrol/tests/test_verify_round_integrity.py`。
+
 ```bash
 cd D:\code\mushroom\patrol-workspace
 .\.venv\Scripts\python.exe -m pytest -q ../patrol/tests/test_daemon_sync.py \
   ../deploy/tests/test_content_verify.py ../deploy/tests/test_m1.py
 # → 43 passed
+
+.\.venv\Scripts\python.exe ..\patrol\tools\verify_round_integrity.py <那一轮的 rows.jsonl>
+# 正常轮六条全 PASS；事故形状轮：n_results=13 / n_duplicate=35 / 帧 48 全入库 / 可疑轮已置位
 ```
 
 - `patrol/tests/test_daemon_sync.py`：三例 —— 同指纹跨站 ⇒ 帧 `frame_dup` + 轮
