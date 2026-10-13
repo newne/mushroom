@@ -66,12 +66,13 @@ def test_layer_z_refuses_to_leave_the_travel_range():
 
 
 def test_columns_keep_the_nominal_pitch_with_calibrated_c08_offset():
+    """第 8 列叠加 −40mm 偏移（2026-10-12 由 −80 右移，躲货架立柱）。"""
     ys = [col_y(c) for c in range(1, GRID_COLS + 1)]
     nominal = [
         M1.y.travel_min + (col - 0.5) * (M1.y.travel_span / GRID_COLS)
         for col in range(1, GRID_COLS + 1)
     ]
-    expected = [y - 80.0 if col == 8 else y for col, y in enumerate(nominal, start=1)]
+    expected = [y - 40.0 if col == 8 else y for col, y in enumerate(nominal, start=1)]
     assert ys == pytest.approx(expected)
     assert all(M1.y.contains(y) for y in ys)
 
@@ -79,14 +80,15 @@ def test_columns_keep_the_nominal_pitch_with_calibrated_c08_offset():
 def test_c08_layer_two_offset_is_used_by_grid_and_retarget():
     nominal_c08 = M1.y.travel_min + 7.5 * (M1.y.travel_span / GRID_COLS)
     stations = {(s.layer, s.col): s for s in build_grid()}
-    assert stations[(1, 8)].y == pytest.approx(nominal_c08 - 80.0)
-    assert stations[(2, 8)].y == pytest.approx(nominal_c08 - 40.0)
-    assert stations[(4, 8)].y == pytest.approx(nominal_c08 - 80.0)
+    assert stations[(1, 8)].y == pytest.approx(nominal_c08 - 40.0)
+    # 第 2 层第 8 框比其它层再向右 40mm：格点偏移是**替换**列偏移，所以它是 0.0
+    assert stations[(2, 8)].y == pytest.approx(nominal_c08)
+    assert stations[(4, 8)].y == pytest.approx(nominal_c08 - 40.0)
 
     stale = [replace(stations[key], y=0.0) for key in ((2, 8), (4, 8))]
     updated = {(s.layer, s.col): s for s in retarget(stale)}
-    assert updated[(2, 8)].y == pytest.approx(nominal_c08 - 40.0)
-    assert updated[(4, 8)].y == pytest.approx(nominal_c08 - 80.0)
+    assert updated[(2, 8)].y == pytest.approx(nominal_c08)
+    assert updated[(4, 8)].y == pytest.approx(nominal_c08 - 40.0)
 
 
 @pytest.mark.parametrize("bad", [0, -1, GRID_LAYERS + 1])

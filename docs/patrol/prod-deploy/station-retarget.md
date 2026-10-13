@@ -296,7 +296,7 @@ Z 扫描（第 6 列，0→210mm 每 10mm）测到：**画面以 ≈50mm 为周�
 
 1. 按**实际安装角**改 `GRID_ANGLES`（俯拍 = `("top0",)`；平视 = `("level0",)`），
    否则图像索引里的角度档是假的，下游按角度档筛图会筛错。表里残留的旧标签由
-   `patrol-migrate z-anchor` 一并归一（单角度档配置下）；
+   `patrol-migrate reanchor` 一并归一（单角度档配置下）；
 2. **重扫 z**：取景几何变了，能看到袋顶/菇体的 z 也随之变——走 §7.2 的流程，
    并且要用**抓图链路**扫（`capture`），不能用预览（§8.4 第 2 条：两者成像不能逐像素互推）；
 3. 跑一轮，用 `round-sheet.py` 的联系表按层复核。
@@ -308,28 +308,27 @@ Z 扫描（第 6 列，0→210mm 每 10mm）测到：**画面以 ≈50mm 为周�
 
 改 `GRID_LAYER_Z_OFFSETS` 只影响**新生成**的表；库房里那份 `configs/stations.yaml`
 还是旧锚点（−57/−80/−152/−202）——§2 记着这个坑："改常量不会重算已有 YAML"。
-用 `patrol-migrate z-anchor`（与 `z-frame` 同一条 CLI，先看 diff、再落盘、落盘前自动备份）：
-
+用 `patrol-migrate reanchor`（与 `z-frame` 同一条 CLI，先看 diff、再落盘、落盘前自动备份）：
 ```bash
 BASE=/home/sysadmin/algorithm          # REG / TAG 见 z-frame-cutover.md §2
 cd $BASE/mushroom_patrol
 cp configs/stations.yaml configs/stations.yaml.bak-anchor-$(date +%Y%m%d)
 
 docker run --rm -v $BASE/mushroom_patrol/configs:/app/configs \
-  $REG/mushroom_patrol:$TAG patrol-migrate z-anchor \
+  $REG/mushroom_patrol:$TAG patrol-migrate reanchor \
   --stations /app/configs/stations.yaml --dry-run
 # 判据：四层分别变成 −40 / −90 / −145 / −195（落盘前先看清 trim_z 会被清零几个）
 
 docker run --rm -v $BASE/mushroom_patrol/configs:/app/configs \
-  $REG/mushroom_patrol:$TAG patrol-migrate z-anchor \
+  $REG/mushroom_patrol:$TAG patrol-migrate reanchor \
   --stations /app/configs/stations.yaml
 ```
 
-它做四件事：`z` 按层号重算；`trim_z` **清零**（那是相对旧锚点学到的，锚点一换就失去意义，
-留着会把新锚点悄悄推偏，日志里逐个列出）；`y` / `trim_y` / id / 相机字段原样保留；
-单角度档配置下把 `angle_profile` 归一成 `DEFAULT_ANGLE`（表里还留着历史的 `top45`，
-而支架在平视位 ⇒ 刷成 `level0`；多档配置下不动）。
-
+它做五件事：`y`/`z` 按当前 `col_y`/`layer_z` 重算；**只清零"锚点真动了"的那条轴的 trim**
+（`trim_*` 是相对旧锚点学到的——只调第 8 列 Y 时，其余 47 站的 `trim_y` 不该被牵连，
+那是现场一点一点挪出来的有效标定）；单角度档配置下把 `angle_profile` 归一成
+`DEFAULT_ANGLE`；`id`/相机/曝光字段原样保留；框架没变，**不需要重新回零**。
+（2026-10-12 起两轴都刷，命令名由 `z-anchor` 改为 `reanchor`。）
 生效边界同 §4：**下一轮巡检自动读新表**；但 console / 手动抓拍的"最近格点"归属是
 启动时快照，要**重启 `mushroom_patrol`** 才跟上。
 
@@ -349,8 +348,8 @@ docker run --rm -v $BASE/mushroom_patrol/configs:/app/configs \
 | --- | --- |
 | 提交 | `e23af06` fix(patrol): 四层 Z 锚点改为 −40/−90/−145/−195 |
 | 镜像 | `registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261012123424-e23af06` |
-| 落盘 | `patrol-migrate z-anchor`（预演判据全中：四层 −40/−90/−145/−195、48 个标签 top45→level0、trim_z 无需清零） |
-| 备份 | `configs/stations.yaml.bak-z-anchor-20261012-131424` |
+| 落盘 | `patrol-migrate reanchor`（预演判据全中：四层 −40/−90/−145/−195、48 个标签 top45→level0、trim_z 无需清零） |
+| 备份 | `configs/stations.yaml.bak-reanchor-20261012-131424` |
 | 重启 | `mushroom_patrol` + `mushroom_console` 均 Up (healthy) |
 | 巡检 | 触发 job `20261012-131614`，13:16:14 → 13:23:57，**48/48 成功、0 失败** |
 
@@ -438,3 +437,56 @@ docker run --rm -v $BASE/mushroom_patrol/configs:/app/configs \
 
 
 
+
+## 13. 2026-10-12（续）：第 8 列右移 40mm + 巡检中允许看实时画面
+
+### 13.1 第 8 列的柱子：移动量是量出来的，不是估的
+
+用户口径：**08 列存在柱子遮挡问题，向右移动**。前两次（§9）各右移 40mm 后，
+`GRID_COL_Y_OFFSETS[8]` 停在 −80，仍有立柱挡在画面中右部（15:20 那轮四层抽样图：
+第 1 层立柱位于画幅 ≈65%，第 4 层已贴右缘 ≈85%）。
+
+移动量用了**同列四层图反推 mm/px**，不猜：
+
+* 四张图的 `(y, z)` 都已知：S108 `y=2727.5 z=−40`、S208 `y=2767.5 z=−90`、
+  S308/S408 `y=2727.5 z=−145/−195`；
+* 取下半幅（菌包区，受 z 视角差影响小）做**列亮度剖面互相关**求水平错位；
+* **对照组**（同 y、只差 z）：S108→S308 +40px、S108→S408 +17px、S308→S408 +40px
+  ⇒ 方法本身的噪声 ±40px；
+* **实验组**（y 差 40mm）：S108→S208 −639px、S308→S208 −677px（相关 0.62/0.73）；
+  S408→S208 +316px 符号不对（z 差 105mm，透视压过了 40mm 的平移，弃用）；
+* ⇒ `mm/px ≈ 40/658 ≈ 0.061`，整幅画宽 ≈ **175mm**（≈0.47 个列距）；
+* ⇒ 立柱从画幅 65% 挪到 90% 需右移 ≈ **44mm**，取 **40mm**（与现场既有小步长一致，
+  也便于下一轮再判断要不要追加）。
+
+代码：`GRID_COL_Y_OFFSETS[8]` −80 → **−40**，`GRID_CELL_Y_OFFSETS[(2,8)]` −40 → **0**
+（格点偏移是**替换**列偏移、不是叠加，不同步改就把"第 2 层相对其它层再向右 40mm"
+这条既有的相对关系吃掉了）。
+
+生效走 `patrol-migrate reanchor`（本次起两轴都刷，只清零锚点真动了的那条轴的 trim）。
+判据：预演里**只有第 8 列的 4 个站位** `y` 变化（2727.5 → 2767.5 / 2807.5 → 2807.5
+按层不同），其余 44 站一行都不动。
+
+### 13.2 巡检中允许看实时画面：把原决定缺的测量补上
+
+用户口径：**巡检过程看不到实时视频流，而实际上视频流支持多 client 观看**，
+要求再次探查。ADR-0017 决定 4 当初写的是"尽管实测并发够用，也不去赌'两路同时拉流时
+抓图不受影响'"——缺的不是能力判断，是**测量**。补测（同一位置、同一盏灯，抓图不动机架）：
+
+| 项 | 不开预览 | 开 3 路 MJPEG | 差 |
+| --- | --- | --- | --- |
+| 对比度 σ | 38.64 | 38.46 | −0.5% |
+| 平均亮度 | 109.4 | 108.5 | −0.9% |
+| 梯度能量 | 1.76 | 1.74 | −0.8% |
+| 抓图用时 | 6.4 s | 6.3 s | — |
+
+另外：4 路并发观看各自 6 秒收到 ~135 KB（一次转码、广播）；抓图服务 72h 的
+`pool_capture` 1206 次里 31 次 500 ≈ **2.6% 失败率**，与开不开预览同量级——这是噪声底线。
+
+⇒ 放开：`preview_block` 默认放行（`PATROL_PREVIEW_DURING_ROUND=0` 可关回去），
+页面不再在轮开始时自动关流，"看画面"按钮不需要接管就能点。
+
+**残余未知**（写进 ADR，不阻塞放开）：老系统整点抓 6 台，72h 日志实测**包含我们这台
+238**（`dynamic_capture?ip=192.168.1.238` 72 次＝每小时一次）。所以"预览 + 我们抓图 +
+老系统抓图"的三方并发只在整点交叉时出现。判断方法：看那几轮的 `n_failures` 是否偏离
+2.6% 基线。

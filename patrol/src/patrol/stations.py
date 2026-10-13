@@ -41,8 +41,16 @@ GRID_LAYERS = 4         # 竖向层数（沿 Z 短行程 −212…0mm，**第 1 
 #   长出菌包后要改成"平视看菌杆/菌盖/整体形态"——换角度＝重新固定相机支架，
 #   之后必须**重扫 z**（station-retarget.md §10）。均分格心之上只剩逐层偏移。
 GRID_LAYER_Z_OFFSETS = (13.5, 10.5, 12.5, 9.5)
-GRID_COL_Y_OFFSETS = {8: -80.0}
-GRID_CELL_Y_OFFSETS = {(2, 8): -40.0}
+# 第 8 列的横向偏移。2026-10-12 由 −80 → **−40**：这一列挨着一根货架立柱，
+# 前两次各右移 40mm（§9）后仍挡住画面中右部。本次移动量是**量出来的**不是估的：
+# 用同列四层站位图（y/z 都已知）做列亮度剖面互相关，对照组（同 y、只差 z）错位 ≈0
+# 验证方法，实验组（y 差 40mm）错位 ≈658px ⇒ mm/px ≈ 0.061 ⇒ 整幅画宽 ≈175mm
+# ⇒ 立柱要从画幅 65% 挪到 90% 需右移 ≈44mm，取 40mm（与现场既有的小步长一致）。
+# 证据见 docs/patrol/prod-deploy/station-retarget.md §13。
+# ⚠️ `GRID_CELL_Y_OFFSETS` 是**替换**列偏移、不是叠加（见 `col_y`）：第 2 层第 8 框要
+# 比其它层再向右 40mm，所以它必须跟着列偏移一起改，否则"相对右移 40mm"就被吃掉了。
+GRID_COL_Y_OFFSETS = {8: -40.0}
+GRID_CELL_Y_OFFSETS = {(2, 8): 0.0}
 # 全场**唯一**相机：老系统与 M1 共用同一台（spec §2；现场 2026-09-12 确认 238 无密码）。
 # 收敛成全局常量而不是每站位一个字段——"每框一个 IP"是改造前的假想，实际只有一台。
 CAMERA_IP = "192.168.1.238"
@@ -307,76 +315,82 @@ def retarget_z_in_file(path: str, *, out: str | None = None,
     return len(migrated)
 
 
-# ---------- Z 重锚：按当前层心刷新已落盘的表（2026-10-10） ----------
+# ---------- 重锚：按当前锚点刷新已落盘的表（2026-10-12 起两轴都刷） ----------
 
 
-def reanchor_z_in_file(path: str, *, out: str | None = None,
-                       log: Callable[[str], None] = print) -> int:
-    """把站位表的 ``z`` 重算成**当前的层心锚点**（`layer_z`），返回改动数。
+def reanchor_in_file(path: str, *, out: str | None = None,
+                     log: Callable[[str], None] = print) -> int:
+    """把站位表的 `(y, z)` 重算成**当前的锚点**（`col_y` / `layer_z`），返回改动数。
 
-    与 `retarget_z_in_file` 的分工：那个迁的是**坐标框架**（原点从底端搬到顶端、
-    第 1 层翻到最上），一辈子只用一次；这个迁的是**锚点数值**——框架没变，
-    只是用户重新定了初始锚点（2026-10-10：−40/−90/−145/−195，见 `GRID_LAYER_Z_OFFSETS`）。
+    改 `GRID_*` 常量**不会**重算已经落盘的站位表（`station-retarget.md` §2 记着这个坑）
+    ——库里的 `configs/stations.yaml` 会继续按旧锚点跑，看起来就像"改了没生效"。
+    这条命令就是那条固定路子：先看 diff、再落盘、落盘前备份
+    （CLI：`patrol-migrate reanchor`；只改 Z 框架的那次迁移是 `z-frame`，见
+    `retarget_z_in_file`——那个一辈子只用一次，这个随锚点调整随时用）。
 
-    为什么必须有它：改 `GRID_LAYER_Z_OFFSETS` **不会**重算已经落盘的站位表
-    （`station-retarget.md` §2 记着这个坑）——库里的 `configs/stations.yaml` 会继续
-    按旧锚点跑，看起来就像"改了没生效"。框架迁移同理，所以两条路都在这里。
+    做五件事：
 
-    做四件事：
+    1. `y` 按 `col_y(col, layer)` 重算，`z` 按 `layer_z(layer)` 重算；
+    2. **只清零"锚点真的动了"的那个轴的 trim**——`trim_*` 是相对旧锚点学到的微调，
+       锚点没动的轴上它仍然有效。只调了第 8 列的 Y 时，其余 47 站的 `trim_y` 不该被
+       牵连清零（那是现场一点一点挪出来的有效标定）；
+    3. 单角度档配置下把 `angle_profile` 归一成 `DEFAULT_ANGLE`（多档时不动：那张表
+       本来就该有多个档，全刷成一个等于偷偷把双档改成单档）；
+    4. `id` / `box_id` / 相机与曝光字段原样保留；
+    5. **不需要重新回零**：坐标框架没动（原点还在顶端、行程还是 −212…0），动的只是
+       目标值——这一点与 Z 框架迁移正相反，别照那次的开机清单做。
 
-    1. ``z`` 按层号重算（``z = layer_z(layer)``）；
-    2. ``trim_z`` **清零**——它是相对**旧锚点**学到的（`Station.trim_z` 的语义是
-       "叠在锚点上的小量"），锚点一换就失去意义，留着只会把新锚点悄悄推偏；
-    3. ``y`` / ``trim_y`` / id / 相机与标定字段**原样保留**——横向装配误差与层锚点无关；
-    4. 单角度档时把 ``angle_profile`` 归一成 ``DEFAULT_ANGLE``——标签必须和实物一致
-       （现场确认支架是**平视**，而表里还留着历史的 ``top45``）。多档配置下**不动**：
-       那张表本来就该有多个档，全刷成一个等于偷偷把双档改成单档。
-
-    **不需要重新回零**：坐标框架没动（原点还在顶端、行程还是 −212…0），
-    动的只是目标值。这一点与 Z 框架迁移正相反，别照那次的开机清单做。
-
-    防呆：表里每个站位都得带层号（``layer`` 为 0 的示教残留没有层，无从按层重算），
-    否则报错并把 id 列出来，而不是跳过——跳过等于"悄悄少改几个站"。
+    防呆：表里每个站位都得带层号与框号（示教残留可能没有），否则报错并列出来，
+    而不是跳过——跳过等于"悄悄少改几个站"。
     """
     stations = load_stations(path)
     if not stations:
         raise ValueError(f"{path} 里没有站位，不重锚")
-    unknown = [s.id for s in stations if not s.layer]
+    unknown = [s.id for s in stations if not (s.layer and s.col)]
     if unknown:
         raise ValueError(
-            f"{path} 里有 {len(unknown)} 个站位没有层号（{unknown[:3]}…），"
-            "无从按层重算 z——用 patrol-teach record 补上层号/框号再来"
+            f"{path} 里有 {len(unknown)} 个站位没有层号/框号（{unknown[:3]}…），"
+            "无从按锚点重算——用 patrol-teach record 补上层号/框号再来"
         )
 
     single_angle = len(GRID_ANGLES) == 1
     moved = 0
     out_stations: list[Station] = []
     for s in stations:
+        y = col_y(s.col, layer=s.layer)
         z = layer_z(s.layer)
-        note = s.trim_note
-        if s.trim_z:
-            log(f"  {s.id}: trim_z {s.trim_z:+.1f} → 0.0（相对旧锚点学到的微调，随重锚作废）")
-            if s.trim_y:
-                log(f"      trim_note 原样保留：它还说明 trim_y={s.trim_y:+.1f} 的来历")
-            else:
-                note = ""
+        trim_y, trim_z = s.trim_y, s.trim_z
+
+        # 日志每行都带站位 id：现场是把日志整段贴出来看的，缩进归属在粘贴/截图里会丢
+        if abs(y - s.y) > 1e-6:
+            log(f"  {s.id}: y {s.y:.1f} → {y:.1f}")
+            if trim_y:
+                log(f"  {s.id}: trim_y {trim_y:+.1f} → 0.0（相对旧 y 锚点学到的微调，随重锚作废）")
+                trim_y = 0.0
+        if abs(z - s.z) > 1e-6:
+            log(f"  {s.id}: z {s.z:.1f} → {z:.1f}")
+            if trim_z:
+                log(f"  {s.id}: trim_z {trim_z:+.1f} → 0.0（相对旧 z 锚点学到的微调，随重锚作废）")
+                trim_z = 0.0
         if single_angle and s.angle_profile != DEFAULT_ANGLE:
             log(f"  {s.id}: 角度档 {s.angle_profile} → {DEFAULT_ANGLE}"
                 "（标签与现场支架不一致，一并归一）")
-        changed = abs(z - s.z) > 1e-6 or s.trim_z or (
-            single_angle and s.angle_profile != DEFAULT_ANGLE)
+        # 两个 trim 都归零了，"谁/何时学到的"那条备注也就没了指向对象
+        note = s.trim_note if (trim_y or trim_z) else ""
+
+        changed = (abs(y - s.y) > 1e-6 or abs(z - s.z) > 1e-6
+                   or trim_y != s.trim_y or trim_z != s.trim_z
+                   or note != s.trim_note
+                   or (single_angle and s.angle_profile != DEFAULT_ANGLE))
         if changed:
             moved += 1
         out_stations.append(replace(
-            s,
-            z=z,
+            s, y=y, z=z, trim_y=trim_y, trim_z=trim_z, trim_note=note,
             angle_profile=DEFAULT_ANGLE if single_angle else s.angle_profile,
-            trim_z=0.0,
-            trim_note=note,
         ))
 
     save_stations(out_stations, out or path)
-    log(f"Z 重锚：{path}，{len(out_stations)} 个站位按层号重算 z"
+    log(f"重锚：{path}，{len(out_stations)} 个站位按当前锚点重算 (y, z)"
         f"（{moved} 个站位有改动；框架未变，不需要重新回零）")
     return moved
 

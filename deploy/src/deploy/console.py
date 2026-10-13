@@ -153,6 +153,11 @@ class ConsoleDeps:
     preview_url: str = "http://mushroom_preview:8003"
     # 预览上游的打开器：`(path) -> async with 得 httpx 响应`（测试注入假的，不碰网络）
     preview_open: object | None = None
+    # **巡检进行中也给看预览**（2026-10-12 实测后放开，ADR-0017 决定 4 已修订）。
+    # 实测：3 路 MJPEG 并发开着抓图，对比度/亮度/梯度能量/抓图耗时变化全部 <1%
+    # （噪声内），基线抓图失败率 31/1206 ≈ 2.6% 与不开预览时同量级。
+    # 留这个开关是为了"现场真出问题时不改代码就能关回去"：环境变量置 0 即恢复旧行为。
+    preview_during_round: bool = True
     # 历史图像的来源（ADR-0003：图像**经 console 代理**，页面不直连 MinIO）。
     # 为什么非得代理：MinIO 是宿主上的 host 网络容器，地址在控制网（`192.168.1.250`）——
     # 上位机走 VPN 只被推到 `10.77.77.x` 这一段，浏览器打开它就是个黑洞，
@@ -503,6 +508,105 @@ class Console:
         base = self.deps.minio_base.rstrip("/")
         return f"{base}/{self.deps.minio_bucket}/{object_name}"
 
+    def environment(
+        self,
+        *,
+        zone: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        granularity: str = "hour",
+    ) -> dict:
+        """实测环境序列——**代理 prod 的 `/environment`**，页面不直连 prod（ADR-0003）。
+
+        与 `/api/growth` 同一套规矩：prod 不通就如实报错，不返回一条空曲线顶替——
+        "这段时间没有数据"与"问不到 prod"在现场是两件完全不同的事。
+        """
+        if self.deps.transport is None:
+            return {"ok": False, "error": "未接入 prod 分析服务（transport 未配置）", "rows": []}
+        params: dict = {"granularity": granularity}
+        for key, value in (("zone", zone), ("start", start), ("end", end)):
+            if value:
+                params[key] = value
+        try:
+            got = self.deps.transport(
+                f"{self.deps.analysis_url}/environment?{urlencode(params)}"
+            )
+        except Exception as e:  # noqa: BLE001 - prod 不通不该让环境页整页报错
+            return {"ok": False, "error": f"prod 查询失败：{e}", "rows": []}
+        rows = got.get("rows", []) if isinstance(got, dict) else []
+        return {"ok": True, "granularity": granularity, "rows": rows}
+
+    def environment_summary(
+        self, *, zone: str | None = None, start: str | None = None, end: str | None = None
+    ) -> dict:
+        """窗口统计与缺口——同样只经 console 代理，浏览器不直连 prod。"""
+        if self.deps.transport is None:
+            return {"ok": False, "error": "未接入 prod 分析服务（transport 未配置）", "params": {}}
+        params: dict = {}
+        for key, value in (("zone", zone), ("start", start), ("end", end)):
+            if value:
+                params[key] = value
+        q = f"/environment/summary?{urlencode(params)}" if params else "/environment/summary"
+        try:
+            got = self.deps.transport(f"{self.deps.analysis_url}{q}")
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"prod 查询失败：{e}", "params": {}}
+        out = dict(got) if isinstance(got, dict) else {}
+        out["ok"] = True
+        return out
+
+    def environment_batches(self, *, zone: str | None = None, limit: int = 3) -> dict:
+        """批次段与每段参数汇总（代理 prod 的 `/environment/batches`）。
+
+        换批在数据上就是一段连续数据结束，所以按断档切段即可——不用去够生产台账。
+        """
+        if self.deps.transport is None:
+            return {"ok": False, "error": "未接入 prod 分析服务（transport 未配置）", "batches": []}
+        params: dict = {"limit": limit}
+        if zone:
+            params["zone"] = zone
+        try:
+            got = self.deps.transport(
+                f"{self.deps.analysis_url}/environment/batches?{urlencode(params)}"
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"prod 查询失败：{e}", "batches": []}
+        if not isinstance(got, dict):
+            return {"ok": True, "batches": []}
+        # 原样带上数据覆盖区间：页面要说明"更早的批次只有窗口没有数据"
+        return {
+            "ok": True,
+            "batches": got.get("batches", []),
+            "data_from": got.get("data_from"),
+            "data_to": got.get("data_to"),
+        }
+
+    def operations(
+        self, *, zone: str | None = None, start: str | None = None,
+        end: str | None = None, limit: int = 200,
+    ) -> dict:
+        """操作日志——同样只经 console 代理 prod（ADR-0003：浏览器不直连）。
+
+        这是**运行经验**的原始记录：谁在什么时候把哪个设备的哪个点改成了什么。
+        取不到就如实报错，不用空列表顶替——"这段时间没人操作"与"问不到 prod"
+        在现场是两件事。
+        """
+        if self.deps.transport is None:
+            return {"ok": False, "error": "未接入 prod 分析服务（transport 未配置）", "rows": []}
+        params: dict = {"limit": limit}
+        for key, value in (("zone", zone), ("start", start), ("end", end)):
+            if value:
+                params[key] = value
+        try:
+            got = self.deps.transport(
+                f"{self.deps.analysis_url}/operations?{urlencode(params)}"
+            )
+        except Exception as e:  # noqa: BLE001 - prod 不通不该让环境页整页报错
+            return {"ok": False, "error": f"prod 查询失败：{e}", "rows": []}
+        rows = got.get("rows", []) if isinstance(got, dict) else []
+        summary = got.get("summary", {}) if isinstance(got, dict) else {}
+        return {"ok": True, "rows": rows, "summary": summary}
+
     def station_summary(self, *, refresh: bool = False) -> dict:
         """每站一行的粗摘要：**末帧时间 + 末帧成没成**。
 
@@ -552,12 +656,28 @@ class Console:
 
 
 def preview_block(deps: ConsoleDeps) -> dict | None:
-    """巡检进行中**不给预览**（ADR-0017 §4）：返回拒绝体；允许预览则返回 None。
+    """巡检进行中**给不给预览**（ADR-0017 决定 4，2026-10-12 修订）：返回拒绝体或 None。
 
-    为什么要拒：那一轮要用相机抓 60 张。实测这台 DVR 允许 ≥3 路并发 RTSP，但"预览 +
-    抓图 + 老系统整点抓 6 台"三方同时拉没做过长时间验证，不去赌。轮间（约 94% 的时间）
-    随时可看；急停**不**解锁预览——它停的是机构，本轮仍在跑。
+    **2026-10-12 起默认允许**。原决定是"尽管实测并发够用，也不去赌两路同时拉流时抓图
+    不受影响"——那句话缺的只是测量。现场补做了：
+
+    * 同一位置、不开预览抓一张，与开 3 路 MJPEG 时再抓一张逐项比：对比度 σ 38.64→38.46
+      （−0.5%）、平均亮度 109.4→108.5（−0.9%）、梯度能量 1.76→1.74（−0.8%）、
+      抓图用时 6.4s→6.3s —— 全部落在噪声里；
+    * 4 路并发观看各自拿到 ~135 KB/6 s（广播，一次转码多人看），DVR 侧 RTSP 并发
+      实测 ≥3 路（ADR-0017 背景）；
+    * 预览与抓图本来是两条独立会话（RTSP 554 vs XCloudSDK 8000），本模块顶部有说明。
+
+    仍保留关掉的口子（`ConsoleDeps.preview_during_round=False` / 环境变量
+    `PATROL_PREVIEW_DURING_ROUND=0`）：现场若真看到抓图变差，不用改代码就能退回旧行为。
+
+    残余未知（写进 ADR，不阻塞放开）：**整点**老系统会抓 6 台（含我们这台 238，
+    72h 日志实测 72 次＝每小时一次），所以"预览 + 我们抓图 + 老系统抓图"的三方并发
+    只在下一次整点交叉时才会出现。判断方法也定了：看那几轮的 `n_failures` 是否偏离
+    2.6% 的基线。
     """
+    if deps.preview_during_round:
+        return None
     patrol = patrol_state(deps.runs_dir)
     if not patrol.get("active"):
         return None
@@ -656,6 +776,10 @@ def deps_from_env() -> ConsoleDeps:
         trigger_dir=os.environ.get("PATROL_TRIGGER_DIR", "/app/data/trigger"),
         cmd_dir=os.environ.get("PATROL_CMD_DIR", "/app/data/cmd"),
         preview_url=os.environ.get("PATROL_PREVIEW", "http://mushroom_preview:8003"),
+        # 巡检中允许看预览（2026-10-12 实测后放开）。置 0 恢复旧行为——见 preview_block
+        # 的实测记录；"0/false/no" 一律当关，别让一个拼写差异把开关悄悄留在开的状态。
+        preview_during_round=os.environ.get("PATROL_PREVIEW_DURING_ROUND", "1").strip().lower()
+                              not in ("0", "false", "no", "off"),
         # MinIO 是宿主上的 host 网络容器，桥接容器走 docker0 网关就到它（与上面
         # PATROL_ANALYSIS / PATROL_CAPTURE_HOST 同一个套路）。控制网地址
         # `192.168.1.250:9000` 在这里同样可用，但**不选它**：那个地址浏览器够不着，
@@ -770,6 +894,44 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
         latest = got.get("latest") if isinstance(got, dict) else None
         return {"ok": True, "box_id": box_id, "points": points, "latest": latest}
 
+    @app.get("/api/environment")
+    def api_environment(
+        zone: str = "",
+        start: str = "",
+        end: str = "",
+        granularity: str = Query("hour", pattern="^(raw|hour|day)$"),
+    ) -> dict:
+        """实测环境序列：console 代理 prod 的 `/environment`（ADR-0003 单一 origin）。"""
+        return console.environment(
+            zone=zone or None,
+            start=start or None,
+            end=end or None,
+            granularity=granularity,
+        )
+
+    @app.get("/api/environment/batches")
+    def api_environment_batches(zone: str = "", limit: int = Query(3, ge=1, le=12)) -> dict:
+        """批次对比（console 代理 prod 的 `/environment/batches`）。"""
+        return console.environment_batches(zone=zone or None, limit=limit)
+
+    @app.get("/api/operations")
+    def api_operations(
+        zone: str = "",
+        start: str = "",
+        end: str = "",
+        limit: int = Query(200, ge=1, le=2000),
+    ) -> dict:
+        """操作日志（console 代理 prod 的 `/operations`）：运行经验的原始记录。"""
+        return console.operations(
+            zone=zone or None, start=start or None, end=end or None, limit=limit
+        )
+
+    @app.get("/api/environment/summary")
+    def api_environment_summary(zone: str = "", start: str = "", end: str = "") -> dict:
+        return console.environment_summary(
+            zone=zone or None, start=start or None, end=end or None
+        )
+
     # ---------- 实时预览：从 console 反代到预览容器（ADR-0017） ----------
     #
     # 页面写 `<img src="/api/preview">`，不直连预览容器：相机地址与**口令**只存在于
@@ -846,8 +1008,11 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
             n = 0
             try:
                 async for chunk in r.aiter_bytes(16384):
-                    # 流开着的时候巡检可能开始了（调度器不看页面）。**服务端**兜底把它断掉，
-                    # 而不是指望页面自觉——标签页卡住、网线掉了、页面是老版本，规则就没人执行了。
+                    # 策略变化的兜底：正常情况下 `preview_block` 全程返回 None（巡检中
+                    # 也允许看，2026-10-12 起）。留这一道是因为**策略可能被环境变量关回去**
+                    # （`PATROL_PREVIEW_DURING_ROUND=0`）——那时流开着的时候巡检可能开始
+                    # （调度器不看页面），必须**服务端**自己断掉，而不是指望页面自觉：
+                    # 标签页卡住、网线掉了、页面是老版本，规则就没人执行了。
                     # 按块数而不是按秒判：5 fps 下 8 块约 1.5 秒，且不引入第二个时钟。
                     n += 1
                     if n % PREVIEW_RECHECK_CHUNKS == 0 and preview_block(deps) is not None:

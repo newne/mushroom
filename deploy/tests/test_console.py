@@ -51,7 +51,7 @@ def write_run(runs: Path, name: str, events: list[dict], *, age_s: float = 0.0) 
 
 def make_client(tmp_path, *, entry="2026-09-04", transport=None, preview_open=None,
                 minio_base="http://minio-test:9000", minio_bucket="mogu",
-                image_fetch=None) -> TestClient:
+                image_fetch=None, preview_during_round=True) -> TestClient:
     room = tmp_path / "room.yaml"
     write_room(room, entry)
     stations = tmp_path / "stations.yaml"
@@ -67,7 +67,8 @@ def make_client(tmp_path, *, entry="2026-09-04", transport=None, preview_open=No
                        trigger_dir=str(tmp_path / "trigger"), cmd_dir=str(tmp_path / "cmd"),
                        minio_base=minio_base, minio_bucket=minio_bucket,
                        image_fetch=image_fetch,
-                       transport=transport, preview_open=preview_open, now=lambda: NOW)
+                       transport=transport, preview_open=preview_open, now=lambda: NOW,
+                       preview_during_round=preview_during_round)
     return TestClient(create_app(deps))
 
 
@@ -557,6 +558,60 @@ def test_growth_without_transport_says_so(tmp_path):
     assert got["ok"] is False and "未接入 prod" in got["error"]
 
 
+# ---------- 环境序列：同样只经 console 代理 prod，浏览器不直连 ----------
+
+
+def test_environment_is_proxied_to_prod(tmp_path):
+    seen = {}
+
+    def transport(url, *, params=None, body=None):
+        seen["url"] = url
+        return {"granularity": "hour",
+                "rows": [{"ts": "2026-10-12T15:00:00", "zone": "611", "temp_c": 19.6,
+                          "rh_pct": 92.4, "co2_ppm": 1620.0, "lamp_state": 2.0, "n": 60}]}
+
+    with make_client(tmp_path, transport=transport) as c:
+        got = c.get("/api/environment?zone=611&granularity=hour").json()
+    assert got["ok"] is True and len(got["rows"]) == 1
+    assert "/environment?" in seen["url"]
+    assert "zone=611" in seen["url"] and "granularity=hour" in seen["url"]
+
+
+def test_environment_summary_is_proxied_to_prod(tmp_path):
+    seen = {}
+
+    def transport(url, *, params=None, body=None):
+        seen["url"] = url
+        return {"n": 1440, "params": {"temp_c": {"min": 18.9, "max": 20.4}},
+                "lamp_states": {"2": 900, "3": 540}}
+
+    with make_client(tmp_path, transport=transport) as c:
+        got = c.get("/api/environment/summary?zone=611").json()
+    assert got["ok"] is True and got["n"] == 1440
+    assert seen["url"].endswith("/environment/summary?zone=611")
+
+
+def test_environment_reports_prod_failure_instead_of_an_empty_curve(tmp_path):
+    """「这段时间没有数据」与「问不到 prod」必须分得开——页面据此决定是等待还是排障。"""
+    def bad_transport(url, *, params=None, body=None):
+        raise ConnectionError("prod 不通")
+
+    with make_client(tmp_path, transport=bad_transport) as c:
+        got = c.get("/api/environment?zone=611").json()
+    assert got["ok"] is False and "prod 不通" in got["error"] and got["rows"] == []
+
+
+def test_environment_without_transport_says_so(tmp_path):
+    with make_client(tmp_path) as c:      # make_client 不给 transport
+        got = c.get("/api/environment?zone=611").json()
+    assert got["ok"] is False and "未接入 prod" in got["error"]
+
+
+def test_environment_rejects_unknown_granularity(tmp_path):
+    with make_client(tmp_path) as c:
+        assert c.get("/api/environment?granularity=week").status_code == 422
+
+
 # ---------- 手动面：巡检进行中的拒绝（ADR-0013） ----------
 
 
@@ -769,6 +824,19 @@ def make_preview_opener(status_code=200, chunks=None):
     return open_upstream, seen
 
 
+def make_path_opener(by_path: dict, default_status=200):
+    """按上游路径给不同响应体：`/healthz` 回 JSON、流与单帧回 JPEG。"""
+    seen: list[str] = []
+
+    @asynccontextmanager
+    async def open_upstream(path: str):
+        seen.append(path)
+        body = by_path.get(path)
+        yield FakeUpstream(default_status, [body] if body is not None else [JPEG, JPEG])
+
+    return open_upstream, seen
+
+
 JPEG = b"\xff\xd8\xff\xe0jpeg-bytes\xff\xd9"
 
 
@@ -798,14 +866,35 @@ async def test_preview_stream_is_proxied_as_multipart(tmp_path):
     await body.aclose()
 
 
-def test_preview_is_refused_while_a_round_runs(tmp_path):
-    """巡检进行中拒绝预览（ADR-0017 §4），并且要说清"还要等多久"。"""
+def test_preview_is_allowed_while_a_round_runs(tmp_path):
+    """巡检进行中**也給看预览**（2026-10-12 实测后修订 ADR-0017 决定 4）。
+
+    实测依据：同一位置不开预览抓一张 vs 开 3 路 MJPEG 再抓一张，对比度 σ 38.64→38.46、
+    亮度 109.4→108.5、梯度能量 1.76→1.74、抓图用时 6.4s→6.3s——全部落在噪声里；
+    预览与抓图本是两条独立会话（RTSP 554 vs XCloudSDK 8000）。
+    """
+    write_run(tmp_path / "runs", "20260914-100000-9.jsonl", [
+        {"event": "start", "ts": "2026-09-14T09:58:00", "stations": 60},
+        {"event": "station", "index": 12, "total": 60, "station_id": "S105"},
+    ])
+    # /healthz 要回 JSON、/stream.mjpg 与 /frame.jpg 要回 JPEG：按路径分开喂
+    opener, seen = make_path_opener({"/healthz": b'{"ok": true, "frames": 12, "viewers": 1}'})
+    with make_client(tmp_path, preview_open=opener) as c:
+        assert c.get("/api/preview").status_code == 200, "默认放开：轮内也能看"
+        assert c.get("/api/preview/frame.jpg").status_code == 200
+        st = c.get("/api/preview/status").json()
+        assert seen, "放行时真的去连了预览上游"
+    assert st["available"] is True and st["upstream"]["viewers"] == 1
+
+def test_preview_is_refused_while_a_round_runs_when_the_flag_is_off(tmp_path):
+    """开关关回去时恢复旧行为（`PATROL_PREVIEW_DURING_ROUND=0`），并且要说清"还要等多久"。"""
     write_run(tmp_path / "runs", "20260914-100000-9.jsonl", [
         {"event": "start", "ts": "2026-09-14T09:58:00", "stations": 60},
         {"event": "station", "index": 12, "total": 60, "station_id": "S105"},
     ])
     opener, seen = make_preview_opener()
-    with make_client(tmp_path, preview_open=opener) as c:
+    with make_client(tmp_path, preview_open=opener,
+                     preview_during_round=False) as c:
         r = c.get("/api/preview")
         assert r.status_code == 409
         assert "巡检进行中" in r.json()["error"]
@@ -868,7 +957,8 @@ def test_preview_frame_over_the_cap_errors_instead_of_returning_half_a_jpeg(tmp_
 
 @pytest.mark.anyio
 async def test_preview_stream_stops_itself_when_a_round_starts(tmp_path):
-    """轮次开跑时，**服务端**把已经开着的流断掉（ADR-0017 §4）。
+    """开关关回去时（`PATROL_PREVIEW_DURING_ROUND=0`）：轮次开跑，**服务端**把已经开着
+    的流断掉（ADR-0017 §4 的旧行为）。
 
     不能只靠页面自觉：标签页卡住、网线掉了、页面还是老版本，规则就没人执行了。
     """
@@ -878,7 +968,8 @@ async def test_preview_stream_stops_itself_when_a_round_starts(tmp_path):
                        stations_path=str(tmp_path / "stations.yaml"),
                        runs_dir=str(tmp_path / "runs"), outbox_path=str(tmp_path / "o.jsonl"),
                        trigger_dir=str(tmp_path / "trigger"), cmd_dir=str(tmp_path / "cmd"),
-                       preview_open=opener, now=lambda: NOW)
+                       preview_open=opener, now=lambda: NOW,
+                       preview_during_round=False)
     route = next(r for r in create_app(deps).routes
                  if getattr(r, "path", None) == "/api/preview")
 
@@ -895,3 +986,29 @@ async def test_preview_stream_stops_itself_when_a_round_starts(tmp_path):
             got.append(await anext(body))
     assert 0 < len(got) < PREVIEW_RECHECK_CHUNKS < len(chunks), \
         "必须在轮次开始后不久就断掉，而不是把 40 块全发完"
+
+
+@pytest.mark.anyio
+async def test_preview_stream_keeps_flowing_when_a_round_starts(tmp_path):
+    """**2026-10-12 起默认如此**：轮次开跑也不断流——实测预览不影响抓图（见
+    `test_preview_is_allowed_while_a_round_runs` 的 docstring）。"""
+    chunks = [JPEG] * 40
+    opener, _ = make_preview_opener(chunks=chunks)
+    deps = ConsoleDeps(room_path=str(tmp_path / "room.yaml"),
+                       stations_path=str(tmp_path / "stations.yaml"),
+                       runs_dir=str(tmp_path / "runs"), outbox_path=str(tmp_path / "o.jsonl"),
+                       trigger_dir=str(tmp_path / "trigger"), cmd_dir=str(tmp_path / "cmd"),
+                       preview_open=opener, now=lambda: NOW)
+    route = next(r for r in create_app(deps).routes
+                 if getattr(r, "path", None) == "/api/preview")
+
+    resp = await route.endpoint()
+    body = resp.body_iterator
+    got = [await anext(body)]
+    write_run(tmp_path / "runs", "20260914-100000-8.jsonl", [
+        {"event": "start", "ts": "2026-09-14T09:58:00", "stations": 60},
+        {"event": "station", "index": 2, "total": 60, "station_id": "S102"},
+    ])
+    for _ in range(PREVIEW_RECHECK_CHUNKS * 2):
+        got.append(await anext(body))
+    assert len(got) == 1 + PREVIEW_RECHECK_CHUNKS * 2, "轮内不断流：块数照发"
