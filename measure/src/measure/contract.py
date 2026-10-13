@@ -46,9 +46,12 @@ JOINER = "+"
 
 
 def parse_flags(quality: str | None) -> set[str]:
+    """解析标记串 → 集合（**读兼容历史别名**：`underexposed` ≡ `no_light`）。"""
+    from measure.quality import canonical_flag
+
     if not quality:
         return set()
-    return {f for f in quality.split(JOINER) if f}
+    return {canonical_flag(f) for f in quality.split(JOINER) if f}
 
 
 def format_flags(flags) -> str:

@@ -7,6 +7,7 @@ from measure.quality import (
     VERDICT_LOW,
     VERDICT_OK,
     VERDICT_REJECT,
+    assess_exposure,
     frame_quality,
     frame_stats,
     is_blurry,
@@ -148,6 +149,47 @@ def test_relative_verdict_rejects_dark_frame():
     dark = np.full((64, 64), 12, dtype=np.uint8)
     verdict, reasons = relative_verdict(frame_stats(dark), None)
     assert verdict == VERDICT_REJECT and reasons == ["no_light"]
+
+
+# ---------- 曝光轴：唯一一份定义（Chief 2026-10-13 裁定） ----------
+
+def test_assess_exposure_is_the_single_definition():
+    """欠曝端与过曝端在同一个入口判，标记名唯一。"""
+    dark = np.full((32, 32), 10, dtype=np.uint8)
+    got = assess_exposure(dark)
+    assert got.underexposed and not got.overexposed
+    assert got.flags == ("no_light",)
+    blown = np.full((32, 32), 255, dtype=np.uint8)
+    got2 = assess_exposure(blown)
+    assert got2.overexposed and not got2.underexposed
+    assert got2.flags == ("overexposed",)
+    good = np.full((32, 32), 128, dtype=np.uint8)
+    assert assess_exposure(good).flags == ()
+
+
+def test_frame_quality_uses_the_same_exposure_definition():
+    """`frame_quality` 的曝光两端必须与 `assess_exposure` 完全一致（不许两处各判一次）。"""
+    for frame in (np.full((32, 32), 10, dtype=np.uint8),        # 近黑
+                  np.full((32, 32), 255, dtype=np.uint8),       # 全白
+                  rng_gray()):                                  # 正常
+        _, flags = frame_quality(frame)
+        exp = assess_exposure(frame)
+        assert [f for f in flags.split("+") if f in ("no_light", "overexposed")] == list(exp.flags)
+
+
+def test_legacy_underexposed_alias_reads_but_is_never_emitted():
+    """历史别名 `underexposed` 只在**读**时认；产出永远是 `no_light`。"""
+    from measure.quality import canonical_flag
+
+    assert canonical_flag("underexposed") == "no_light"
+    assert canonical_flag("no_light") == "no_light"
+    dark = np.full((32, 32), 10, dtype=np.uint8)
+    _, flags = frame_quality(dark)
+    assert "underexposed" not in flags          # 不产出别名
+    # 读兼容：下游用合同解析器读旧串时，别名折回唯一名字
+    from measure import contract
+
+    assert contract.parse_flags("underexposed+blurry") == {"no_light", "blurry"}
 
 
 def test_quality_requires_2d():

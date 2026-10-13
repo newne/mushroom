@@ -35,8 +35,9 @@ import numpy as np
 #: 需要"只看纹理很差的帧"时显式传 `blur_threshold=100`（或更高）。
 LEGACY_STRICT_BLUR_THRESHOLD = 100.0
 DEFAULT_MAX_OVEREXPOSED = 0.05
-#: 近黑：p99 亮度低于此值（[0,1] 归一化）。ok 帧实测 p99 min = 0.722、
+#: 近黑（欠曝端）：p99 亮度低于此值（[0,1] 归一化）。ok 帧实测 p99 min = 0.722、
 #: 两张真暗帧 p99 = 0.008/0.012 ⇒ 0.12 落在巨大的空隙里，两侧都有 6 倍以上余量。
+#: （灰阶口径 ≈ p99 < 31，而 ok 帧最低 184、真暗帧 2–3。）
 DEFAULT_DARK_P99 = 0.12
 #: **清晰度绝对下限**（票 14，Chief 2026-10-13 加的约束）：相对基线判"塌了"之前，
 #: 先看绝对清晰度。没有它，相机**整体**失焦/镜头被污染时，每帧相对自己的基线都
@@ -98,17 +99,66 @@ def is_dark(gray: np.ndarray, *, dark_p99: float = DEFAULT_DARK_P99) -> bool:
     return p99_brightness(gray) < dark_p99
 
 
+#: 曝光轴的**唯一标记名**（Chief 2026-10-13 裁定：判定可以发生在不同时刻，定义只能一份）。
+#: `no_light` 覆盖"欠曝/近黑/灯未亮"这一端，`overexposed` 覆盖另一端——同一个曝光轴两侧。
+FLAG_NO_LIGHT = "no_light"
+FLAG_OVEREXPOSED = "overexposed"
+#: 历史别名：`patrol/framing.py` 的 `judge_frame` 曾用 `underexposed` 指同一件事。
+#: 解析（读）时认它，**产出（写）时绝不生成**——保证线上只有一套名字。
+LEGACY_ALIASES = {"underexposed": FLAG_NO_LIGHT}
+
+
+def canonical_flag(flag: str) -> str:
+    """把历史别名折回唯一名字（读兼容，写唯一）。"""
+    return LEGACY_ALIASES.get(flag, flag)
+
+
+@dataclass(frozen=True)
+class ExposureAssessment:
+    """一帧的曝光判定结果（**同时面向测量与取景两处调用者**）。
+
+    为什么把逐帧的 `p99` / `overexposed_fraction` 也带出来：`patrol/framing.py` 的取景
+    判断需要这两个量本身（例如"看起来偏暗"就多等一会儿灯）。把量给它，它可以**只读**
+    这个结果做判断，而不必自己再定义一套阈值与标记名（Chief 裁定）。
+    """
+
+    flags: tuple[str, ...]
+    p99: float
+    overexposed_fraction: float
+    underexposed: bool
+    overexposed: bool
+
+
+def assess_exposure(gray: np.ndarray, *, dark_p99: float = DEFAULT_DARK_P99,
+                    max_overexposed: float = DEFAULT_MAX_OVEREXPOSED,
+                    over_level: int = 250) -> ExposureAssessment:
+    """曝光轴（欠曝端 + 过曝端）的**唯一判定入口**。"""
+    p99 = p99_brightness(gray)
+    over = overexposed_fraction(gray, level=over_level)
+    underexposed = p99 < dark_p99
+    overexposed = over > max_overexposed
+    flags: list[str] = []
+    if underexposed:
+        flags.append(FLAG_NO_LIGHT)
+    if overexposed:
+        flags.append(FLAG_OVEREXPOSED)
+    return ExposureAssessment(flags=tuple(flags), p99=p99, overexposed_fraction=over,
+                              underexposed=underexposed, overexposed=overexposed)
+
+
 def frame_quality(gray: np.ndarray, *, blur_threshold: float = DEFAULT_ABS_LAPVAR_FLOOR,
                   max_overexposed: float = DEFAULT_MAX_OVEREXPOSED,
                   dark_p99: float = DEFAULT_DARK_P99) -> tuple[bool, str]:
-    """返回 ``(是否可用, 标记串)``；标记串 `+` 分隔（票 11 §3），空串表示通过。"""
-    flags = []
+    """返回 ``(是否可用, 标记串)``；标记串 `+` 分隔（票 11 §3），空串表示通过。
+
+    三判据：清晰度（绝对下限）、欠曝（`no_light`）、过曝（`overexposed`）。
+    曝光那两端走 `assess_exposure()`——**唯一一份定义**。
+    """
+    flags: list[str] = []
     if is_blurry(gray, blur_threshold):
         flags.append("blurry")
-    if is_overexposed(gray, max_overexposed):
-        flags.append("overexposed")
-    if is_dark(gray, dark_p99=dark_p99):
-        flags.append("no_light")
+    flags.extend(assess_exposure(gray, dark_p99=dark_p99,
+                                 max_overexposed=max_overexposed).flags)
     return (not flags), "+".join(flags)
 
 
@@ -144,11 +194,12 @@ VERDICT_REJECT = "reject"
 
 
 def frame_stats(gray: np.ndarray) -> FrameStats:
-    """灰度帧 → `FrameStats`。"""
+    """灰度帧 → `FrameStats`（统计量走曝光轴与清晰度的同一份定义）。"""
+    exposure = assess_exposure(gray)
     return FrameStats(
         lapvar=laplacian_variance(gray),
-        p99=p99_brightness(gray),
-        overexposed_fraction=overexposed_fraction(gray),
+        p99=exposure.p99,
+        overexposed_fraction=exposure.overexposed_fraction,
     )
 
 
@@ -198,7 +249,7 @@ def relative_verdict(
     """
     reasons: list[str] = []
     if now.p99 < dark_p99:
-        return VERDICT_REJECT, ["no_light"]
+        return VERDICT_REJECT, [FLAG_NO_LIGHT]
     if now.lapvar < abs_lapvar_floor:
         reasons.append("below_abs_lapvar_floor")
         return VERDICT_REJECT, reasons
