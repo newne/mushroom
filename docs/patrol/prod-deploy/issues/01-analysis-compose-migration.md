@@ -59,8 +59,11 @@
     cpus: 1.0
 ```
 
-**入口怎么把凭据交给进程**（供票 12 对齐）：`api` 角色在 `exec uvicorn` 之前
-`set -a; . "${EMS_ENV_FILE:-/run/ems.env}"; set +a`。文件本身 0600 root:root，容器以 root 跑。
+**入口怎么把凭据交给进程**：**用 compose 的 `env_file: /etc/mushroom/ems.env`**（宿主机上那份
+0600 文件），`environment` 里只放非凭据的键。**不用"挂载 /run/ems.env + entrypoint source"**
+那条路——Chief 裁定 entrypoint 不加角色，而现有 `api` 角色不会 source 任何文件；票 12 §2 也把
+`env_file:` 列为等价物。代价：`docker inspect` 的 `Config.Env` 里可读到，前提是宿主 root，
+与 systemd 时代 `EnvironmentFile` 同级；真要更严用 docker secret，另开票。
 
 ## 3. 裁定（2026-10-13 Chief，已生效——本节不再是"建议"）
 

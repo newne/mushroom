@@ -330,6 +330,49 @@ services:
     mem_limit: 512m
     cpus: 1.5
 
+  # ---------- analysis 侧（2026-10-13 从宿主 6 个 systemd 单元迁入；票 01 / 12）----------
+  #
+  # 为什么是**一个** service 而不是四个：四个作业共享同一个 SQLite、同一套凭据、同一条 import
+  # 链；拆开只增加挂载面与失败面（用户红线：非必要不加 compose service）。
+  # 定时落在 `analysis.api` 的 lifespan 里（`analysis/jobs.py`）：**不设对应的环境变量就不跑**，
+  # 于是同一个 service 可以分步接管（过渡期只设 AUDIT_INTERVAL）。
+  # 单 worker 是硬约束：create_app 在工厂里建一个 SQLite 连接，多 worker 各持一份写不进对方。
+  mushroom_analysis:
+    <<: *base
+    profiles: ["patrol"]
+    image: "${PATROL_IMAGE:-registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0}"
+    container_name: mushroom_analysis
+    command: ["api"]
+    ports:
+      # 与迁移前同址同端口（宿主 uvicorn :8000）⇒ patrol/console 的 .env 三处零改动。
+      # ⚠️ 独占资源：宿主 `mushroom-analysis.service` 必须**先停**再起本容器，否则抢端口。
+      - "${ANALYSIS_PORT:-8000}:8000"
+    env_file:
+      # 凭据（EMS_URL / EMS_ACCOUNT / EMS_PASSWORD_MD5）走宿主上那份 0600 文件，**不进仓库、
+      # 不进 compose 明文**（票 12 §2 把 env_file 列为等价物）。代价是 `docker inspect` 的
+      # Config.Env 里能读到——能读它的前提是宿主 root，与 systemd 时代 EnvironmentFile 同级。
+      - /etc/mushroom/ems.env
+    environment:
+      # 三个写者 + API 共用同一个库文件：**显式路径 + 挂载卷**，不能靠工作目录。
+      - ANALYSIS_DB=/opt/mushroom-analysis/mushrooms.db
+      # 容器里的 127.0.0.1 不是宿主
+      - TDENGINE_URL=http://172.17.0.1:6041
+      # 过渡期只开 audit（每 10 分钟）。ENV_INGEST_INTERVAL / BATCH_AT 等对应作业从 systemd
+      # 摘下来那天再设；不设就不跑（票 01 §4 / §4.1）。
+      - AUDIT_INTERVAL=600
+    volumes:
+      # 挂宿主原目录：DB 路径不变 ⇒ 回滚不用搬数据。⚠️ 不要设 PYTHONPATH 指到这里面的 src，
+      # 代码走镜像自带的 site-packages，宿主目录只当数据盘。
+      - /opt/mushroom-analysis:/opt/mushroom-analysis:rw
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    mem_limit: 1g
+    cpus: 1.0
+
 # 数据卷（根级别，关键修复！）
 volumes:
   postgre_data_v18:
