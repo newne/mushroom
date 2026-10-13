@@ -45,6 +45,7 @@ from patrol.stations import (
 from patrol.store import JsonlStore
 from patrol.sync import PROD_INGEST_URL, SyncClient
 
+from deploy.content_verify import make_content_hash
 from deploy.framing_wire import build as build_framing
 from deploy.framing_wire import make_apply_trim
 from deploy.measure_wire import build as build_measure
@@ -256,6 +257,10 @@ def build_parser() -> argparse.ArgumentParser:
                          "`measure/tools/calibrate_quality_thresholds.py` 重算")
     ap.add_argument("--measure-emit-empty", action="store_true",
                     help="失败帧也产一行 n=0 + no_detection（默认不产行）")
+    ap.add_argument("--verify-content", action="store_true",
+                    help="帧内容复核（票 13）：每轮末逐帧取回 cloud_url 算 sha256，把"
+                         "\"同一份字节发给多个站位\"标成 frame_dup（轮标 suspect_duplicate）。"
+                         "代价 ≈34 MB/轮（48 × ≈700 KB），默认不查")
 
     ap.add_argument("--ip", default=CONTROLLER_IP, help="控制器 IP")
     ap.add_argument("--port", type=int, default=CONTROLLER_PORT, help="控制器端口")
@@ -357,6 +362,13 @@ def main(argv: list[str] | None = None) -> int:
         args, room_id=(room.room_id if room is not None else ""), log=log)
     log(measure_wire.reason)
 
+    # 帧内容复核（票 13）：`ok=1` 证不了"内容属于这一站"——2026-10-09 那轮 35/48 帧同字节。
+    # 默认关（每轮多约 34 MB 取回）；开则**留帧 + 标记**，由下游按标记排除。
+    content_hash = make_content_hash(log=log) if args.verify_content else None
+    if content_hash is not None:
+        log("帧内容复核：开启（每轮末逐帧取回算 sha256；重复帧标 frame_dup，"
+            "轮标 suspect_duplicate——**不丢帧**）")
+
     # 「整轮避让」（调度侧，票 09 分工）：保持（加湿）生效时**本轮就此停下**，不再动机构。
     # 判定读的是 console 写下的 hold.json —— 与触发偏置同一份状态，谁都不另造一套。
     should_stop = None
@@ -419,6 +431,8 @@ def main(argv: list[str] | None = None) -> int:
         measure_fn=measure_wire.fn,
         # 整轮避让（读者：hold.json；None = 没接保持目录，行为与从前一致）
         should_stop=should_stop,
+        # 帧内容复核（None = 不查；开了则重复帧带 frame_dup、轮带 suspect_duplicate）
+        content_hash=content_hash,
         apply_trim=apply_trim,
         # 急停：console 按下 → 标志文件 → 这里每等一步看一眼 → 正在跑的那一轮被打断。
         abort=make_estop_check(args.cmd_dir, disabled=args.no_estop, log=log),

@@ -381,6 +381,94 @@ def test_daemon_writes_failed_station_index_row(tmp_path):
     assert "相机不在线" in idx["error"]
 
 
+def test_daemon_flags_frames_that_share_one_content_hash(tmp_path):
+    """票 13：同一份字节发给多个站位 ⇒ 帧标 `frame_dup`、轮标 `suspect_duplicate`，**留帧不丢**。
+
+    2026-10-09 18:20–18:27 那轮：48 帧里 **35 帧字节完全相同**（同一张陈旧近黑帧），
+    横跨 S211→S401，而 round 行写着 `ok=1 / 48 帧 / 0 失败`——`ok=1` 证不了
+    "内容属于这一站"。可疑帧与可疑轮必须留档、带标记，由下游排除。
+    """
+    store = JsonlStore(str(tmp_path / "outbox.jsonl"))
+    sent: list = []
+    stations = [Station(id=f"S{i:02d}", box_id=f"B{i:02d}", y=float(i), z=0.0)
+                for i in range(1, 4)]
+
+    def content_hash(meta: dict) -> str:
+        return "a" * 64 if meta["station_id"] in ("S01", "S02") else "b" * 64
+
+    daemon = PatrolDaemon(
+        room_state=ALLOWED_ROOM,
+        now=_allowed_now,
+        open_fmc=lambda: commissioned_client(),
+        stations=stations,
+        capture_client=SyncClientAndCaptureStub(),
+        store=store,
+        sync=SyncClient(transport=lambda url, body=None: sent.append(body["rows"])),
+        content_hash=content_hash,
+        log=lambda msg: None,
+    )
+    assert daemon.run_cycle() == "ok"
+
+    rows = [r for batch in sent for r in batch]
+    idx = [r for r in rows if r["kind"] == "image_index"]
+    assert len(idx) == 3, "可疑帧必须留档，不许静默丢掉"
+    assert {r["station_id"]: r.get("frame_dup") for r in idx} == {
+        "S01": True, "S02": True, "S03": None}
+    assert all(len(r["content_sha256"]) == 64 for r in idx)
+
+    round_row = next(r for r in rows if r["kind"] == "round")
+    assert round_row["suspect_duplicate"] is True
+    (group,) = round_row["dup_groups"]
+    assert group["n"] == 2 and group["stations"] == ["S01", "S02"]
+
+
+def test_daemon_content_check_failure_is_recorded_not_hidden(tmp_path):
+    """复核失败 ⇒ 轮行留 `content_check_error`，且**不假装"没有重复"**。"""
+    store = JsonlStore(str(tmp_path / "outbox.jsonl"))
+    sent: list = []
+
+    def boom(_meta: dict) -> str:
+        raise RuntimeError("minio 502")
+
+    daemon = PatrolDaemon(
+        room_state=ALLOWED_ROOM,
+        now=_allowed_now,
+        open_fmc=lambda: commissioned_client(),
+        stations=[Station(id="S01", box_id="B01", y=10.0, z=0.0)],
+        capture_client=SyncClientAndCaptureStub(),
+        store=store,
+        sync=SyncClient(transport=lambda url, body=None: sent.append(body["rows"])),
+        content_hash=boom,
+        log=lambda msg: None,
+    )
+    assert daemon.run_cycle() == "ok"
+    rows = [r for batch in sent for r in batch]
+    round_row = next(r for r in rows if r["kind"] == "round")
+    assert "minio 502" in round_row["content_check_error"]
+    assert "suspect_duplicate" not in round_row
+    assert not any(r.get("frame_dup") for r in rows if r["kind"] == "image_index")
+
+
+def test_daemon_without_content_hash_adds_no_check_fields(tmp_path):
+    """默认不查：行里不该凭空多出复核字段（行为与从前一致）。"""
+    store = JsonlStore(str(tmp_path / "outbox.jsonl"))
+    sent: list = []
+    daemon = PatrolDaemon(
+        room_state=ALLOWED_ROOM,
+        now=_allowed_now,
+        open_fmc=lambda: commissioned_client(),
+        stations=[Station(id="S01", box_id="B01", y=10.0, z=0.0)],
+        capture_client=SyncClientAndCaptureStub(),
+        store=store,
+        sync=SyncClient(transport=lambda url, body=None: sent.append(body["rows"])),
+        log=lambda msg: None,
+    )
+    daemon.run_cycle()
+    rows = [r for batch in sent for r in batch]
+    assert not [r for r in rows if "content_sha256" in r or "dup_groups" in r
+                or "content_check_error" in r]
+
+
 def test_daemon_measure_fn_rows_synced(tmp_path):
     store = JsonlStore(str(tmp_path / "outbox.jsonl"))
     sent = []
