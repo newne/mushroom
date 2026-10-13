@@ -78,6 +78,8 @@ def test_row_has_contract_fields_and_null_unmeasurable():
     assert row["p10_len"] is None and row["p90_len"] is None
     assert row["n"] == 1
     assert "baseline" in row["quality"] and "no_angle_profile" in row["quality"]
+    # 平视口径必须标清（Chief 2026-10-13 裁定）
+    assert "level_view" in row["quality"]
     assert "no_detection" not in row["quality"]
 
 

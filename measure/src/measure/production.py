@@ -39,8 +39,8 @@ from measure.pipeline import BoxStats, Detector, Detection, aggregate_box
 from measure.quality import frame_quality
 from measure.record import MeasurementRecord
 
-#: 每一行都带的标记：当前全部产出都是未标定的基线值
-CONST_FLAGS = ("baseline",)
+#: 每一行都带的标记：当前全部产出都是未标定的基线值，且都是平视口径
+CONST_FLAGS = ("baseline", "level_view")
 
 #: 缺测原因（票 11 §9：`mean_cap_mm`/`mean_len_mm` 单档平视下明确缺测）
 UNMEASURABLE_FLAGS = ("no_angle_profile",)

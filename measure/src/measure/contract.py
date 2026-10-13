@@ -23,7 +23,7 @@
 
 from __future__ import annotations
 
-#: 票 11 §3 的枚举 + `no_angle_profile`。
+#: 票 11 §3 的枚举 + `no_angle_profile` + `level_view`。
 QUALITY_FLAGS = (
     "verified",              # 检出可信，可用于分析（当前无一行是它）
     "no_detection",          # 无有效检出，长度列全 NULL
@@ -32,6 +32,7 @@ QUALITY_FLAGS = (
     "stem_absent(level0)",   # 菌柄缺失，长度无意义
     "low_confidence",        # 置信度不足（实例拆分未生效 / 无种子 / 前景无法分离）
     "no_angle_profile",      # 该量在当前角度档下不可测（原因：无对应角度档）
+    "level_view",            # **平视口径**：该值是俯视投影量，不是真实几何尺寸
 )
 
 #: 出现其中任意一个 ⇒ 这一行没有可用测量。

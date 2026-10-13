@@ -29,5 +29,13 @@ def test_is_usable_gates_on_no_detection():
     assert contract.is_usable("verified")
 
 
-def test_verified_is_registered():
+def test_verified_and_level_view_are_registered():
     assert "verified" in contract.QUALITY_FLAGS
+    # 平视口径必须是一个显式标记（Chief 2026-10-13：平视能算的量也要标清口径）
+    assert "level_view" in contract.QUALITY_FLAGS
+
+
+def test_level_view_does_not_block_usability():
+    """`level_view` 是口径标记，不是"不可用"标记。"""
+    assert contract.is_usable("baseline+level_view+no_angle_profile")
+    assert not contract.is_usable("baseline+level_view+low_confidence")
