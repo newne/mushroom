@@ -4,6 +4,7 @@
 结果怎么写回"，真控制器的行为另有一整套（`patrol/tests/test_fmc_client.py`）。
 """
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 
 import pytest
@@ -352,6 +353,29 @@ def test_capture_rejects_a_non_boolean_no_lamp(tmp_path):
     _cmd, res = run(channel, executor, "capture", {"station_id": "s105", "no_lamp": "yes"})
     assert res.ok is False and "no_lamp" in res.detail
     assert capture.shots == [] and rows == []
+
+
+def test_capture_index_carries_the_imaging_profile_when_recorded(tmp_path):
+    """成像参数快照 id 逐帧落索引（票 11 §3；analysis 侧 `images.imaging_profile` 已加列）。"""
+    capture = FakeCapture()
+    stations = [replace(STATIONS[1], imaging_profile="p20261013a")]
+    channel, fmc, executor, rows, _logs = make(tmp_path, capture=capture, stations=stations)
+    fmc.pos = (505.0, -50.0)
+    _cmd, res = run(channel, executor, "capture", {"station_id": "s105"})
+    assert res.ok is True
+    (row,) = rows
+    assert row["imaging_profile"] == "p20261013a"
+
+
+def test_capture_index_omits_the_imaging_profile_when_not_recorded(tmp_path):
+    """没记就**不写这个键**：库里是 NULL = "那时还没记"，不许编值。"""
+    capture = FakeCapture()
+    channel, fmc, executor, rows, _logs = make(tmp_path, capture=capture)
+    fmc.pos = (505.0, -50.0)
+    _cmd, res = run(channel, executor, "capture", {"station_id": "s105"})
+    assert res.ok is True
+    (row,) = rows
+    assert "imaging_profile" not in row
 
 
 def test_capture_index_keeps_the_key_and_url_the_service_returned(tmp_path):

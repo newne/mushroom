@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime
 
 import pytest
@@ -24,6 +25,32 @@ def test_station_roundtrip(tmp_path):
     save_stations(stations, path)
     loaded = load_stations(path)
     assert loaded == stations
+
+
+def test_station_roundtrip_keeps_the_imaging_profile(tmp_path):
+    """成像参数快照 id 是逐帧取证归属（票 11）：写盘/读回必须原样。
+
+    表里**没有**这一列 = 空（沿用旧行为，不编值）；**有**这一列就必须带回来。
+    """
+    stations = [Station(id="S01", box_id="B01", y=1200.0, z=-120.0,
+                        imaging_profile="p20261013a")]
+    path = str(tmp_path / "stations.yaml")
+    save_stations(stations, path)
+    assert load_stations(path)[0].imaging_profile == "p20261013a"
+
+
+def test_capture_meta_carries_the_imaging_profile_only_when_recorded():
+    """有快照 id 才写这个键；**没记就让它缺席**（库里 NULL = 那时还没记）。"""
+    st = Station(id="S01", box_id="B01", y=0.0, z=0.0, camera_ip="192.168.1.231")
+
+    def transport(url, *, params=None, body=None) -> dict:
+        return ok_transport(url, params=params)
+
+    sc = StationCapture(ScriptedFmc(), CaptureClient(transport=transport),
+                        decay_s=0.0, settle_s=0.0, sleep=lambda s: None)
+    ts = datetime(2026, 8, 30, 8, 0, 0)
+    assert "imaging_profile" not in sc.run(st, ts=ts)
+    assert sc.run(replace(st, imaging_profile="p20261013a"), ts=ts)["imaging_profile"] == "p20261013a"
 
 
 def test_station_yaml_spec_example(tmp_path):

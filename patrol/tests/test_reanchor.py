@@ -81,7 +81,7 @@ def test_reanchor_keeps_ids_camera_and_exposure(tmp_path):
     """id / 相机 / 曝光是示教与现场调出来的，重锚不许碰。"""
     table = stale_table()
     table[0] = replace(table[0], camera_ip="192.168.1.231", camera_user="ops",
-                       exposure_note="locked")
+                       exposure_note="locked", imaging_profile="p20261013a")
     path = write(tmp_path / "stations.yaml", table)
     reanchor_in_file(path, log=lambda _m: None)
 
@@ -89,6 +89,8 @@ def test_reanchor_keeps_ids_camera_and_exposure(tmp_path):
     assert got["S101"].id == "S101" and got["S101"].box_id == "B101"
     assert got["S101"].camera_ip == "192.168.1.231"
     assert got["S101"].camera_user == "ops" and got["S101"].exposure_note == "locked"
+    # 成像参数快照 id 同理：重锚只动坐标与 trim，不许碰取证字段（票 11）
+    assert got["S101"].imaging_profile == "p20261013a"
 
 
 def test_only_the_axis_that_moved_gets_its_trim_cleared(tmp_path):

@@ -153,6 +153,9 @@ class StationCapture:
             "yz": [round(shot_at[0], 3), round(shot_at[1], 3)],
             "angle_profile": station.angle_profile,
             "camera_ip": station.camera_ip,
+            # 成像参数快照 id：**有才写**。空 ⇒ 这个键不出现 ⇒ 库里是 NULL = "那时还没记"
+            # （与 analysis 的加列迁移同口径，不编值）。images 是一帧一行，存 id 不存全文。
+            **({"imaging_profile": station.imaging_profile} if station.imaging_profile else {}),
             "object_name": result.object_name,
             "cloud_url": result.cloud_url,
             # 单站耗时是整轮时长的唯一可分解口径（采图实测 5.2 s 是大头）

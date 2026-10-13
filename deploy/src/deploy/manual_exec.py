@@ -420,6 +420,8 @@ class ManualExecutor:
             "station_id": station.id,
             "box_id": station.box_id,
             "angle_profile": station.angle_profile,
+            # 成像参数快照 id：**有才写**（空 ⇒ 键不出现 ⇒ 库里 NULL = "那时还没记"）
+            **({"imaging_profile": station.imaging_profile} if station.imaging_profile else {}),
             "camera_ip": station.camera_ip,
             "yz": [round(y, 3), round(z, 3)],
             "object_name": stored_name,
