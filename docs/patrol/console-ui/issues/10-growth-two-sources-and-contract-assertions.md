@@ -72,7 +72,38 @@
 
 ```
 (1) & D:\code\mushroom\patrol-workspace\.venv\Scripts\python.exe -m pytest deploy\tests\test_console.py -q
+    → 69 passed
 (2) $env:NODE_PATH=D:\code\energy-agent\console\node_modules
     node docs/patrol/console-ui/verify-page.js D:\code\mushroom\web\console\index.html
+    → 290/299 通过，运行期错误：无（连跑 3 次同结果）
+    失败 9 条与 HEAD 逐条相同（Compare-Object 比过清单）⇒ 无改动引入的失败
+(3) 护栏自证（把页面改成"剩余时间按 until 自己算"，即去掉对载荷 seconds_left 的信任）
+    → 288/299：『保持中：标签给出剩余分钟』『剩余时间用载荷里的 seconds_left』两条当场红（显示"剩 0 分钟"）
 ```
-结果见本票 Comments（命令 + 数字）。
+
+## 7. 同类 bug 第二处：`/api/status` 的 `trigger` / `envelope`（已修）
+
+**问题**：假 `/api/status` 没有 `trigger`、`envelope`，而真响应**总是**带
+（`console.py:415-417` 直接透传 `TriggerStore.state()` 与 `deps.envelope()`）。页面读 `s.trigger`
+（`index.html:1525-1543`），于是**加湿期避让**（设保持 / 延后）那块 UI 在回归里只走到
+`undefined` 分支，且**零断言**——现场靠它避开雾气拍图，这条路等于从没验过。
+
+**修**：
+1. fixture 按真形状补齐（形状由巡检手提供，出处 `patrol_trigger.TriggerStore.state()` /
+   `hold_summary()` / `console.py:171-173 envelope()`）：
+   `trigger = {job|null, pending, age_s, stale, due_at, wait_s, hold}`；
+   `hold = {active:false}` 或 `{active:true, until, defer_s, reason, set_by, set_at, seconds_left}`；
+   `envelope = {y:[min,max], z:[min,max]}`（值取自 `grid_geometry()`，现役 Y 0…4492、Z −212…0）。
+   注：`envelope` 页面**不消费**——它用 `/api/grid` 自己算软限位。两个来源同出 `grid_geometry()`，
+   一致；保留真字段是为了契约完整。**这是"同一事实两个来源"的隐患，记在下面。**
+2. 断言 5 条（全部 PASS）：未设保持时标签/解除置灰/延后可点；保持中标签给出剩余分钟且解除可用；
+   **剩余时间必须用载荷的 `seconds_left`**（`until` 故意给已过期时刻仍显示 25 分钟）；
+   已偏置的排队请求让延后按钮变倒计时且置灰；恢复后按钮态复位。
+3. 契约表新增 `/api/status`（三件套）+ 三条**嵌套**形状断言（trigger 7 键、hold 无/有保持两种形态、
+   envelope 两轴各两数）——顶层键相等盖不住"语义在嵌套里"的情况。
+
+### 遗留（下一批，不必等齐）
+- 进契约表：`/api/cmd`、`/api/session`、`/api/stop`（注意后两者是 POST/DELETE 有状态路由，
+  要点入 fixture 的请求方法），`/api/image` 是字节流、按 media type 断言。
+- "同一事实两个来源"：`envelope` 服务端给了、页面自己从 `/api/grid` 再算一遍。目前一致，
+  但以后 `grid_geometry()` 若是分叉成两个端点就会漂——建议将来收敛到一个来源。

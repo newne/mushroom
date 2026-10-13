@@ -275,6 +275,18 @@ function route(method, url, body) {
         : { active: false, known: true, status: 'ok', n_results: 60, reason: '上一轮已结束（ok）' },
       room: { ok: true, allowed: true, room_id: '611', entry_date: '2026-09-04', batch_no: 'BATCH-10', day: 10,
               text: '第 10 天：巡检' },
+      // trigger / envelope 是**真响应里总有**的两块（console.py:415-417 直接透传）。
+      // 以前假件没有它们 ⇒ 页面读 s.trigger 只走到 undefined 分支，
+      // "加湿期避让"（保持/延后）那块 UI **一条断言都没有**（2026-10-13 补）。
+      // 形状来自 patrol_trigger.TriggerStore.state() / hold_summary()（巡检手提供）：
+      //   trigger = {job|null, pending, age_s, stale, due_at, wait_s, hold}
+      //   hold    = {active:false} | {active:true, until, defer_s, reason, set_by, set_at, seconds_left}
+      trigger: state.trigger || { job: null, pending: false, age_s: null, stale: false,
+                                  due_at: null, wait_s: null, hold: { active: false } },
+      // envelope 来自 grid_geometry()（现役 Y 0…4492、Z −212…0）。
+      // 注意：页面**不消费** s.envelope，它用 /api/grid 自己算（软限位拦在浏览器侧）。
+      // 两个来源都出自 grid_geometry()，所以一致；这里保留真字段是为了契约完整。
+      envelope: { y: [GRID.y_min, GRID.y_max], z: [GRID.z_min, GRID.z_max] },
       events: [{ ts: NOW, level: 'info', text: '页面已连接' }],
     });
   }
@@ -1557,6 +1569,44 @@ await sleep(150);
   await click('#reloadbtn');
   await sleep(300);
 
+  // 加湿保持 / 偏置（`/api/status` 的 trigger）：真形状，2026-10-13 补。
+  // 这块 UI 现场用来**避开雾气拍图**（设保持 → 期间来的触发一律延后），以前假件没这个字段，
+  // 只测到 undefined 分支。现在逐条钉住页面是怎么消费它的。
+  state.trigger = { job: null, pending: false, age_s: null, stale: false, due_at: null,
+                    wait_s: null, hold: { active: false } };
+  await sleep(1300);
+  check('未设保持：标签写"未设保持"、解除置灰、延后按钮可点',
+    T('#holdstate') === '未设保持' && $('#holdclear').disabled === true
+    && $('#deferbtn').disabled === false && T('#deferbtn').includes('延后 20 分钟'),
+    [T('#holdstate'), $('#holdclear').disabled, T('#deferbtn')].join(' | '));
+  // 关键：`until` 故意给"已经过去"的时刻，`seconds_left` 给 1500。
+  // 页面若自己按 until 算就会显示 0/负数——这条断言就钉住"用载荷给的剩余秒数"。
+  state.trigger = { job: null, pending: false, age_s: null, stale: false, due_at: null, wait_s: null,
+                    hold: { active: true, until: '2026-09-14T09:00:00', defer_s: 1200,
+                            reason: '加湿', set_by: 'operator', set_at: '2026-09-14T09:30:00',
+                            seconds_left: 1500 } };
+  await sleep(1300);
+  check('保持中：标签给出剩余分钟、解除可用',
+    T('#holdstate').includes('加湿保持中') && T('#holdstate').includes('25 分钟')
+    && $('#holdclear').disabled === false, T('#holdstate') + ' / clear=' + $('#holdclear').disabled);
+  check('剩余时间用**载荷里的 seconds_left**，不是页面自己按 until 算（until 已过期仍显示 25 分钟）',
+    T('#holdstate').includes('25 分钟'), T('#holdstate'));
+  // 已在排队的请求被偏置：延后按钮变成倒计时并置灰（单飞，不排队）
+  state.trigger = { job: { id: 'r-1', created_at: '2026-09-14T09:59:00', created_by: 'scheduler',
+                           reason: '加湿期', consumed_at: null, note: null,
+                           not_before: '2026-09-14T10:20:00', pending: true },
+                    pending: true, age_s: 60, stale: false, due_at: '2026-09-14T10:20:00',
+                    wait_s: 900, hold: { active: false } };
+  await sleep(1300);
+  check('已偏置的排队请求：延后按钮显示剩余并置灰（不让人重复点）',
+    T('#deferbtn').includes('已延后') && T('#deferbtn').includes('15 分钟')
+    && $('#deferbtn').disabled === true, T('#deferbtn') + ' / disabled=' + $('#deferbtn').disabled);
+  state.trigger = { job: null, pending: false, age_s: null, stale: false, due_at: null,
+                    wait_s: null, hold: { active: false } };
+  await sleep(1300);
+  check('恢复未设保持后按钮态复位',
+    T('#holdstate') === '未设保持' && $('#deferbtn').disabled === false, T('#deferbtn'));
+
   // 快速切站时，慢返回的旧图像不能覆盖后选中的站位。
   await click('#modeSeg [data-mode="realtime"]');
   state.image_delay = { S101: 500, S102: 20 };
@@ -1722,6 +1772,10 @@ await sleep(150);
       fields: ['ts', 'round_id', 'station_id', 'box_id', 'angle_profile', 'camera_ip', 'y', 'z',
                'object_name', 'ok', 'error', 'room_id', 'entry_date', 'batch_no', 'source'],
       required: ['ts', 'station_id', 'box_id', 'angle_profile', 'object_name', 'ok', 'source'] },
+    // deploy/console.py compute_status（`:399-419`）：trigger/envelope 是**总有**的两块
+    '/api/status': { q: '', pick: 'top', fields: ['ts', 'machine', 'patrol', 'room', 'trigger',
+                                                   'envelope', 'events'],
+      required: ['ts', 'machine', 'patrol', 'room', 'trigger', 'envelope', 'events'] },
   };
   // 页面实际消费的字段（改页面时同步改这里；这是"页面不许读不存在的字段"的锚）
   const PAGE_CONSUMES = {
@@ -1735,10 +1789,11 @@ await sleep(150);
                          'lamp_on_s', 'lamp_off_s', 'n'],
     '/api/images': ['ts', 'round_id', 'station_id', 'box_id', 'angle_profile', 'object_name',
                     'ok', 'source'],
+    '/api/status': ['ts', 'machine', 'patrol', 'room', 'trigger', 'events'],
   };
   for (const [path, c] of Object.entries(CONTRACT)) {
     const payload = await (await route('GET', path + c.q)).json();
-    const rows = payload[c.pick] || [];
+    const rows = c.pick === 'top' ? [payload] : (payload[c.pick] || []);
     const keys = new Set();
     for (const r of rows) for (const k of Object.keys(r)) keys.add(k);
     const fieldSet = new Set(c.fields);
@@ -1756,6 +1811,32 @@ await sleep(150);
   // （上一版就是 `p.mean_len_mm`，而 delta 行里根本没有这一列）。
   check('页面不再把 mean_len_mm/mean_cap_mm 当 /growth 的字段读',
     !/p\.mean_(len|cap)_mm/.test(html), (html.match(/p\.mean_(len|cap)_mm[^\n]*/) || ['ok'])[0]);
+
+  // ---- 嵌套形状：/api/status 的 trigger / hold / envelope（2026-10-13 补）----
+  // 顶层键相等还不够：这块 UI 的语义全在嵌套里（保持剩余秒数、排队等待秒数）。
+  // 真形状由巡检手提供（patrol_trigger.TriggerStore.state() / hold_summary()）。
+  const stPayload = await (await route('GET', '/api/status')).json();
+  const trigShape = stPayload.trigger || {};
+  check('契约 /api/status.trigger：7 个键齐全（job/pending/age_s/stale/due_at/wait_s/hold）',
+    ['job', 'pending', 'age_s', 'stale', 'due_at', 'wait_s', 'hold']
+      .every(k => k in trigShape), Object.keys(trigShape).join(','));
+  check('契约 /api/status.trigger.hold：无保持时只有 active',
+    'active' in (trigShape.hold || {}), Object.keys(trigShape.hold || {}).join(','));
+  check('契约 /api/status.envelope：{y:[min,max], z:[min,max]} 两轴各两个数（来自 grid_geometry）',
+    !!stPayload.envelope && Array.isArray(stPayload.envelope.y)
+    && stPayload.envelope.y.length === 2 && Array.isArray(stPayload.envelope.z)
+    && stPayload.envelope.z.length === 2
+    && stPayload.envelope.y.concat(stPayload.envelope.z).every(n => typeof n === 'number'),
+    JSON.stringify(stPayload.envelope || null));
+  state.trigger = { job: null, pending: false, age_s: null, stale: false, due_at: null,
+                    wait_s: null, hold: { active: true, until: '2026-09-14T10:30:00',
+                                          defer_s: 1200, reason: '加湿', set_by: 'operator',
+                                          set_at: '2026-09-14T10:00:00', seconds_left: 1500 } };
+  const holdActive = ((await (await route('GET', '/api/status')).json()).trigger || {}).hold || {};
+  state.trigger = null;
+  check('契约 /api/status.trigger.hold（有保持）：active + until/defer_s/reason/set_by/set_at/seconds_left 都在',
+    ['active', 'until', 'defer_s', 'reason', 'set_by', 'set_at', 'seconds_left']
+      .every(k => k in holdActive), Object.keys(holdActive).join(','));
 
   console.log(out.join('\n'));
   console.log('\n运行期错误：' + (errors.length ? '\n  ' + errors.join('\n  ') : '无'));
