@@ -83,13 +83,35 @@ p.add_argument("--measure-emit-empty", action="store_true",
 `RoundReport`（`patrol/src/patrol/round.py:46`）**没有 room_id 字段**，所以 `room_id`
 必须在装配时固定（这也是 `make_measure_fn` 要求必传的原因）。
 
+## 开启清单（**开启 `--measure` 的那次装配必须整组显式给出**）
+
+Chief 2026-10-13 裁：代码默认保持**保守**（`--measure off`、`--measure-emit-empty` 关、
+`--measure-blur-threshold` 缺省走标定默认），**留痕不靠默认值**，靠装配时显式给：
+
+| 参数 | 缺省行为 | 开启时必须 |
+| --- | --- | --- |
+| `--measure` | `off`（不产任何测量行） | 显式 `on` |
+| `--mm-per-px` | `None` ⇒ 按"缺标定换算"**拒绝开启测量**（fail-closed） | 显式给现场标定值 |
+| `--room` | `DEFAULT_ROOM_PATH`（room.yaml 路径） | 确认指向本库房；`room_id` 由它**派生** |
+| `--measure-emit-empty` | 关（失败帧不产行） | **显式带上**，否则被拒帧在库里毫无痕迹 |
+| `--measure-blur-threshold` | `None` ⇒ 走 `measure/quality.py` 的标定默认 | 一般不传；要覆盖才传 |
+
+⚠️ **参数名以代码为准**：`m1.py` 里是 **`--room`（room.yaml 路径）**，**没有 `--room-id`**；
+`room_id` 从该文件派生（与巡检察门禁同源）。谁在票里写 `--room-id`，以本节的实际参数名为准。
+
+**开启日复核（归发版官）**：从**镜像/运行态核 argv**（不是看票），确认实际进程带齐上表；
+`--help` 文案与代码保持一致。
+
 ## 验收
 
 - [ ] `--measure on --mm-per-px <值>` 跑一轮（真机或回放），outbox 出现
       `kind="measurement"` 行，字段与 `measure.record.RECORD_FIELDS` 逐字一致
 - [ ] 缺 `--mm-per-px` 时日志明确拒绝，且巡检本身照常跑完（测量起不来不拦巡检）
 - [ ] `GET /measurements`（analysis）出现非零行，每行带 `quality`（票 11 §7 验收）
-- [ ] 失败帧不产行；`--measure-emit-empty` 时才产 `n=0` 行
+- [ ] **不给 `--measure-emit-empty` ⇒ 失败帧不产空行**；
+      **显式给了 ⇒ 失败帧产一行 `n=0` + 原因标记**（菌簇四列仍 NULL）
+- [ ] `--measure-blur-threshold`:**不给 ⇒ 走标定默认**；**给了 ⇒ 覆盖生效**
+- [ ] 开启日由发版官从镜像/运行态核 argv，确认上表五条实际生效
 
 ## Comments
 
@@ -123,3 +145,9 @@ p.add_argument("--measure-emit-empty", action="store_true",
   已贴在 `env-analysis/issues/11-measurements-contract.md` 的 Comments。
   单测证据：`measure/tests/` 75 passed（`test_production.py` 覆盖报告对象调用、
   失败帧不产行、两库房不撞键、缺测 NULL）。
+
+- 2026-10-13 补「开启清单」与验收改写（Chief）：发版官在运行态抓到"票里建议开 `emit_empty`
+  而镜像里 `--measure-emit-empty` 是 `store_true` 无 `default=True` ⇒ 实际关着"。
+  裁定：**不改代码默认**（保守），留痕由**装配侧显式传参**实现；开启那次装配必须整组给出
+  `--measure on` / `--mm-per-px` / `--room` / `--measure-emit-empty`，并由发版官**从镜像/运行态核 argv**。
+  同条记下：票里常见写法 `--room-id` 在 `m1.py` **不存在**（实际是 `--room` 指向 room.yaml，`room_id` 派生）。
