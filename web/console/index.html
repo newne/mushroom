@@ -2752,6 +2752,28 @@ function unitLabel(unit){
   return unit === 'mm2' ? 'mm²' : String(unit || '');
 }
 
+/* 「不可测」与「不可用」是**两件事**，词不能互换（CONTEXT.md:62 归一，Chief 2026-10-13）：
+   - **不可测**：这个量在当前形态下根本不存在（单档平视 ⇒ 没有对应角度档，`no_angle_profile`）；
+   - **不可用**：这一帧/这个值本身不可信（`no_light` 近黑、`low_confidence`、`no_detection`…）。
+
+   注意**按列判**，不是按行判：`no_angle_profile` 只让"盖径/杆长"两列不可测；
+   同一行里菌簇面积/投影径如果是 NULL，原因通常是**帧不可用**（以下几行的 fixture 就是这么造的）。
+   判据与 `measure/production.py:UNMEASURABLE_FLAGS` / `measure/contract.py:NON_USABLE_FLAGS` 对齐。 */
+const ANGLE_BOUND_KEYS = new Set(['mean_len_mm', 'mean_cap_mm']);
+const NON_USABLE_FLAGS = ['no_detection', 'low_confidence', 'no_light', 'blurry', 'overexposed'];
+const FLAG_TEXT = { no_detection: '未检出', low_confidence: '置信度不足', no_light: '近黑',
+                    blurry: '模糊', overexposed: '过曝' };
+
+function qualityFlags(quality){
+  return String(quality || '').split('+').map(s => s.trim()).filter(Boolean);
+}
+
+/** 这一行为什么不可用（返回中文原因；没有不可用标记就返回空串）。 */
+function unusableReason(quality){
+  const bad = qualityFlags(quality).filter(f => NON_USABLE_FLAGS.includes(f));
+  return bad.map(f => FLAG_TEXT[f] || f).join('、');
+}
+
 function qualityHas(quality, flag){
   return String(quality || '').split('+').map(s => s.trim()).includes(flag);
 }
@@ -2765,13 +2787,18 @@ function pickGrowthMetric(rows){
 }
 
 /** 测量行里某一列该显示什么（两条措辞别混，Chief 2026-10-13 钉的口径）：
- *  有值 ⇒ 数 + 量纲；NULL 且 `quality` 带 `no_angle_profile` ⇒「不可测（无角度档）」
- *  （现场不用等）；NULL 且没有那个标记 ⇒「本次未测出」。
+ *  有值 ⇒ 数 + 量纲；
+ *  该列是**角度相关**的（盖径/杆长）且 `quality` 带 `no_angle_profile` ⇒「不可测（无角度档）」（不用等）；
+ *  其余 NULL：带不可用标记 ⇒「不可用（近黑/未检出…）」；都没有 ⇒「本次未测出」。
  *  **整个框一行都没有**才是「还没测到」（要等接线）——那是曲线级的空态，不在这。 */
 function measureCellText(row, key, unit){
   const v = row ? row[key] : undefined;
   if(typeof v === 'number') return v + ' ' + unit;
-  if(row && qualityHas(row.quality, QUALITY_NO_ANGLE)) return '不可测（无角度档）';
+  if(row && ANGLE_BOUND_KEYS.has(key) && qualityHas(row.quality, QUALITY_NO_ANGLE)){
+    return '不可测（无角度档）';
+  }
+  const why = row ? unusableReason(row.quality) : '';
+  if(why) return '不可用（' + why + '）';
   return '本次未测出';
 }
 

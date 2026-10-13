@@ -128,7 +128,23 @@ node docs/patrol/console-ui/verify-page.js D:\code\mushroom\web\console\index.ht
 
 **措辞已归一（2026-10-13，巡检手撤回自己的写法）**：统一用「**不可测（无角度档）**」，
 不用「不可用（无对应角度档）」。巡检手已改成同一句并落进他的票 09 §4.4（提交 `2a87bb8`）。
-实现时按这句写，不再保留别的版本。
+实现时按这句写，不再保留别的版本。**唯一权威口径 = `CONTEXT.md:62`**（Chief 已把词条改成同句，
+字面就是「不可测（无角度档）」，**没有"对应"二字**；Chief 2026-10-13 的消息里出现过
+"不可测（无对应角度档）"的写法，与他自己后一句和词表都冲突，以 `CONTEXT.md` 为准）。
+
+**「不可测」与「不可用」是两个词，不能互换**（`CONTEXT.md:62` 同一条）：
+- **不可测** = 这个量在当前形态下**根本不存在**（单档平视 ⇒ 没有对应角度档）⇒ NULL + `no_angle_profile`；
+- **不可用** = 这一帧/这个值**本身不可信**（`no_light` 近黑、`low_confidence`、`no_detection`…）。
+**要按列判、不是按行判**：同一行里"盖径/杆长"列是不可测（量不存在），
+而"菌簇面积/投影径"列若是 NULL，原因通常是整帧不可用。判据出处：
+`measure/contract.py:27-42`（`NON_USABLE_FLAGS`）、`measure/production.py:46-47`（`UNMEASURABLE_FLAGS`）。
+
+**已实现并断言（票 10 的页面改动，commit `9f3d746` 之后续）**：三个状态各有说法——
+有值 ⇒「数 + 量纲」；角度相关列 + `no_angle_profile` ⇒「不可测（无角度档）」；
+其余 NULL + 不可用标记 ⇒「不可用（近黑/未检出…）」；整框一行都没有 ⇒「还没测到」（空态，不画零增长线）。
+实现出处 `web/console/index.html` 的 `measureCellText()` / `unusableReason()`；
+断言在 `verify-page.js`：同一行里两个列分别显示两种措辞（`no_light+no_angle_profile` 那一行）。
+
 
 判据写死在这里（三处一致，别再各写各的）：
 - 行里带 `no_angle_profile` ⇒「**不可测（无角度档）**」，现场**不用等**；
