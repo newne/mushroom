@@ -4,6 +4,8 @@
 （只有 numpy + Pillow）能跑，CI 也能跑。
 """
 
+import time
+
 import numpy as np
 import pytest
 
@@ -193,3 +195,42 @@ def test_frame_from_meta_keeps_station_and_angle():
     assert isinstance(f, FrameInput)
     assert f.angle_profile == "level0" and f.station_id == "S105"
     assert frame_from_meta({"box_id": "B105"}) is None
+
+
+# --- 每帧耗时与超门计数（Chief 2026-10-14：超门要看得见，票 15 §8.1） ---------
+
+
+def test_timing_summary_counts_over_gate_frames():
+    from measure.production import timing_summary
+
+    line = timing_summary([0.9, 1.05, 1.4, 0.8], gate_s=1.1)
+    assert "4 帧" in line and "超门(>1.1 s) 1 帧" in line
+    # 偶数帧数的中位数 = 中间两个的均值（[0.8, 0.9, 1.05, 1.4] ⇒ 0.975 ≈ 0.98）
+    assert "均 1.04 s/帧" in line and "中位 0.98 s" in line
+
+
+def test_timing_summary_handles_empty_and_all_under_gate():
+    from measure.production import timing_summary
+
+    assert "0 帧" in timing_summary([])
+    assert "超门(>1.1 s) 0 帧" in timing_summary([0.1, 0.2, 0.3])
+
+
+def test_rows_from_frames_logs_timing_and_flags_over_gate():
+    """每轮必须留下一行耗时摘要；超门帧要单独喊出来（不许只能靠人感觉）。"""
+    fetch, decode = stubs(circle())
+    logs: list[str] = []
+    rows_from_frames([frame()], room_id=ROOM, mm_per_px=MM_PER_PX, detector=DET,
+                     fetch=fetch, decode=decode, log=logs.append)
+    assert any("测量：1 帧" in m for m in logs), logs
+
+    # 人为把单帧拖过门（慢 decode），验证超门那条路径真的会喊
+    def slow_decode(data):
+        time.sleep(1.2)
+        return circle()
+
+    logs2: list[str] = []
+    rows_from_frames([frame()], room_id=ROOM, mm_per_px=MM_PER_PX, detector=DET,
+                     fetch=fetch, decode=slow_decode, log=logs2.append)
+    assert any("超门" in m for m in logs2), logs2
+    assert any("超门(>1.1 s) 1 帧" in m for m in logs2), logs2

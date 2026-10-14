@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
@@ -50,6 +51,32 @@ UNMEASURABLE_FLAGS_WITH_EMPTY = ("no_detection", "no_angle_profile")
 LOW_CONFIDENCE_FLAG = "low_confidence"
 
 DEFAULT_MEASURE_KIND = "measurement"
+
+#: 在线单帧耗时门（票 15 §8.1，Chief 2026-10-14 裁定）：**超门必须看得见**，
+#: 不能只靠人感觉。推荐在线组合实测 1.02 s/帧，门给 1.1 s（约 8% 余量）。
+#: 注意：索引里的 `elapsed_s` 是**抓拍/运动**耗时（`patrol/round.py`），不是测量耗时，
+#: 所以测量侧的耗时必须由这里自己报出来。
+MEASURE_TIME_GATE_S: float = 1.1
+
+
+def timing_summary(durations: Sequence[float],
+                   gate_s: float = MEASURE_TIME_GATE_S) -> str:
+    """一行"测量耗时"摘要：帧数 / 总耗时 / 均值 / 中位 / 超门帧数。
+
+    纯函数，便于单测（不依赖真实计时）。超门帧数 >0 就是性能退化的信号，
+    第一嫌疑永远是"有人把 L1/L3 退回全帧 / 没降采样"（票 15 §8.1 C1–C3）。
+    """
+    ds = [float(d) for d in durations]
+    if not ds:
+        return "测量：0 帧，无耗时样本"
+    ordered = sorted(ds)
+    n = len(ordered)
+    median = (ordered[n // 2] if n % 2
+              else 0.5 * (ordered[n // 2 - 1] + ordered[n // 2]))
+    total = sum(ordered)
+    over = sum(1 for d in ds if d > gate_s)
+    return (f"测量：{n} 帧 共 {total:.2f} s（均 {total / n:.2f} s/帧，"
+            f"中位 {median:.2f} s，超门(>{gate_s:.1f} s) {over} 帧）")
 
 
 @dataclass
@@ -193,10 +220,17 @@ def rows_from_frames(
     """
     det = detector or BaselineDetector(BaselineConfig())
     out: list[dict] = []
-    for raw in frames:
+    durations: list[float] = []
+
+    def one(raw) -> list[dict]:
+        """处理一帧 → 该帧的行（0 或 1 行）。
+
+        抽成内部函数只为给"每帧耗时"加计时（Chief 2026-10-14：超门要看得见），
+        判定逻辑与以前逐字一致。
+        """
         frame = raw if isinstance(raw, FrameInput) else frame_from_meta(raw)
         if frame is None:
-            continue
+            return []
         kind = frame.measure_kind or DEFAULT_MEASURE_KIND
         integrity = content_integrity_reason(frame)
         if frame.content_check_error:
@@ -206,7 +240,7 @@ def rows_from_frames(
             # 跨站重复帧：不是"它自己那份"，不能进测量与统计（票 13-round-content-integrity）
             log(f"测量：{frame.box_id} {frame.ts} 内容可疑（{integrity}）——跳过，不产测量行")
             if not emit_empty:
-                continue
+                return []
             extra_dup: set[str] = {"no_detection", LOW_CONFIDENCE_FLAG}
             stats = aggregate_box([])
             quality = quality_for(flags=extra_dup, detected=False)
@@ -215,21 +249,20 @@ def rows_from_frames(
                                  notes=f"内容可疑：{integrity}", flags=extra_dup)
             row = rec.to_row()
             row["kind"] = kind
-            out.append(row)
-            continue
+            return [row]
         dets: list[Detection] = []
         extra: set[str] = set()
         if fetch is None or decode is None or not frame.cloud_url:
             extra.add("no_detection")
             if not emit_empty:
-                continue
+                return []
         else:
             try:
                 image = decode(fetch(frame.cloud_url))
             except Exception as e:  # noqa: BLE001 - 取不到这一帧不该毁掉整轮
                 log(f"测量：{frame.box_id} 取图失败（{type(e).__name__}: {e}）——跳过")
                 if not emit_empty:
-                    continue
+                    return []
                 extra.add("no_detection")
                 image = None
             if image is not None:
@@ -239,13 +272,13 @@ def rows_from_frames(
                     extra.update(contract.parse_flags(qflags))
                     extra.add("no_detection")
                     if not emit_empty:
-                        continue
+                        return []
                 else:
                     dets = det.detect(image, mm_per_px=mm_per_px, box_id=frame.box_id)
                     if not dets:
                         extra.add("no_detection")
                         if not emit_empty:
-                            continue
+                            return []
         detected = bool(dets)
         flags = detection_flags(dets) | extra
         stats = aggregate_box(dets)
@@ -254,7 +287,19 @@ def rows_from_frames(
                              quality=quality, notes=notes_for(detected), flags=flags)
         row = rec.to_row()
         row["kind"] = kind
-        out.append(row)
+        return [row]
+
+    for raw in frames:
+        t0 = time.monotonic()
+        produced = one(raw)
+        elapsed = time.monotonic() - t0
+        durations.append(elapsed)
+        if elapsed > MEASURE_TIME_GATE_S:
+            log(f"测量：单帧 {elapsed:.2f} s 超门（>{MEASURE_TIME_GATE_S:.1f} s/帧）"
+                f"——先查是否退回全帧/未降采样路径（票 15 §8.1 C1–C3）")
+        out.extend(produced)
+    if durations:
+        log(timing_summary(durations))
     return out
 
 
