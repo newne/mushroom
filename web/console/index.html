@@ -2313,14 +2313,18 @@ function dupGroupsText(groups){
   return '重复组：' + parts.join('；');
 }
 
-/** 一帧的内容可信度（票 12）。判据与环境官聚合侧同口径：
- *  `frame_dup=1` 或 `duplicate_streak>0` ⇒ 不可信。**NULL/缺键不是"干净"**，
- *  但帧级没有"未核查"这个档（轮级才有）——所以这里只认显式标记。 */
+/** 一帧的内容可信度（票 12；判据在 2026-10-14 部署态验收时按**真样本**更正过）。
+ *
+ *  ⚠️ **`duplicate_streak > 1`，不是 `> 0`**。真机样本（`.scratch/deploy-acceptance/`）里
+ *  正常轮的 48/48 帧全是 `duplicate_streak = 1`——那是"连续 1 张"＝就是它自己，**正常**。
+ *  按 `>0` 判会把每一帧都标成「连续重复 1 张」⇒ **全站天天报警**，
+ *  正是票 12 明令禁止的那种失败（真报警会被淹掉）。
+ *  判据只认：`frame_dup` 为真，或 `duplicate_streak > 1`（连续 ≥2 张同字节）。 */
 function frameDupInfo(row){
   const streak = (row && typeof row.duplicate_streak === 'number') ? row.duplicate_streak : null;
-  const flagged = !!row && (isFlag(row.frame_dup) || (streak !== null && streak > 0));
+  const flagged = !!row && (isFlag(row.frame_dup) || (streak !== null && streak > 1));
   if(!flagged) return { dup: false, label: '', detail: '' };
-  const label = (streak !== null && streak > 0) ? ('连续重复 ' + streak + ' 张') : '重复帧';
+  const label = (streak !== null && streak > 1) ? ('连续重复 ' + streak + ' 张') : '重复帧';
   const detail = [
     row.dup_group ? ('重复组 ' + row.dup_group) : '',
     row.content_sha256 ? ('内容指纹 ' + String(row.content_sha256).slice(0, 12)) : '',

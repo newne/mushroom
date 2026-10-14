@@ -49,7 +49,11 @@ const GRID = { cols: 12, layers: 4, y_pitch: 4492.0 / 12, z_pitch: 212.0 / 4,
 const IMAGES = [
   // 09-14：S102 是**干净的正常帧**（很多断言拿它当基准、详情区零痕迹也用它）
   { round_id: 'round-20260914', ts: '2026-09-14T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top45',
-    ok: true, object_name: '20260914/B102_S102_top45_093000', source: 'prod' },
+    ok: true, object_name: '20260914/B102_S102_top45_093000', source: 'prod',
+    // ⚠️ 2026-10-14 部署态验收：**真机正常帧**就是这个形状 ——
+    // `duplicate_streak = 1`（连续 1 张＝它自己，正常）、`same_as_previous = 0`、
+    // `frame_dup` / `dup_group` 为 NULL。照生产写，别再照"设想的形状"写。
+    duplicate_streak: 1, same_as_previous: 0, frame_dup: null, dup_group: null },
   { round_id: 'round-20260914', ts: '2026-09-14T06:30:00', station_id: 'S101', box_id: 'B101', angle_profile: 'top0',
     ok: false, object_name: null, source: 'prod' },
   // 09-13：S102 那一帧是"重复帧"的例子（票 12）——挂在**已存在**的帧上，
@@ -67,7 +71,8 @@ const IMAGES = [
   // 第三轮（round-20260910）也有一帧，且是本地待同步：让它落进拼图，
   // 好断言"下拉直接选到最早一轮后落点仍是拼图、且这一轮确实换上了新图"。
   { round_id: 'round-20260910', ts: '2026-09-10T09:30:00', station_id: 'S102', box_id: 'B102', angle_profile: 'top0',
-    ok: true, object_name: '20260910/B102_S102_top0_093000', source: 'local' },
+    ok: true, object_name: '20260910/B102_S102_top0_093000', source: 'local',
+    duplicate_streak: 1, same_as_previous: 0, frame_dup: null, dup_group: null },
 ];
 const ROUNDS = [
   // 正常轮（票 12 附条件 1）：字段有值且干净 ⇒ 页面必须**零痕迹**
@@ -1779,6 +1784,19 @@ await sleep(150);
   check('① 正常轮整轮没有 dup 角标（零痕迹，回到最新一轮后复核）',
     !document.querySelector('#timeline .mosaic-cell.dup'),
     document.querySelectorAll('#timeline .mosaic-cell.dup').length + ' 个');
+
+  // ---- 2026-10-14 部署态验收抓到的坑：`duplicate_streak = 1` 是**正常** ----
+  // 真机正常轮 48/48 帧都是 `duplicate_streak = 1`（连续 1 张＝它自己）。
+  // 按 `> 0` 判会把每一帧标成「连续重复 1 张」⇒ 全站天天报警。
+  const normFrame = IMAGES.find(im => im.round_id === 'round-20260914' && im.station_id === 'S102');
+  check('① 真机形状的正常帧（`duplicate_streak=1` + `frame_dup=NULL`）不许被标成重复帧',
+    window.frameDupInfo(normFrame).dup === false,
+    JSON.stringify(window.frameDupInfo(normFrame)));
+  // 反面：连续 ≥2 张才算，且张数来自字段
+  check('⑥ `duplicate_streak=2` 才算「连续重复 2 张」（`>1` 而不是 `>0`）',
+    (() => { const info = window.frameDupInfo({ ...normFrame, duplicate_streak: 2 });
+             return info.dup === true && info.label === '连续重复 2 张'; })(),
+    JSON.stringify(window.frameDupInfo({ ...normFrame, duplicate_streak: 2 })));
 
   // ---- ① 生产实际形状的"正常轮"（2026-10-14，巡检手给的 21:27 真机实测）----
   // 真机上正常轮长这样：`suspect_duplicate`/`dup_groups`/`content_check_error` **全是 NULL**
