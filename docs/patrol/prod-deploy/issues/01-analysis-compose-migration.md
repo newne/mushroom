@@ -69,7 +69,7 @@
 
 | # | 事项 | **裁定** |
 | --- | --- | --- |
-| 1 | **batch-ingest 的 MySQL 通路**（`analysis/batches.py:56-59` 走 `docker exec tools_mysql mysql …`，口令只在 `tools_mysql` 的 env，刻意不外搬） | **目标 (b)：改成直连 MySQL 只读账号**（代码改动，凭据走挂载 env）；**过渡期 (c)：暂不迁 batch-ingest**。<br>⚠️ **永远不挂 `docker.sock`**：那个容器同时是对外 `:8000` API，挂 sock 等于给对外端口配 root 等价权限。**原方案里"(a) 若必须先上"的 fallback 已删除，不留活口。** |
+| 1 | ~~batch-ingest 的 **MySQL** 通路~~（旧实现：`analysis/batches.py` 走 `docker exec tools_mysql mysql …`） | **⚠️ 2026-10-14 更正（用户裁定）：`tools_mysql` 是业务数据库、禁止使用。** `batch_ingest` 不再走 `docker exec`，改为 **pgsql 取数**（`postgres_db` / 库 `mushroom_algorithm`）。所以"目标 (b)"里的"直连"= **pgsql**：compose 里**不要**加任何 MySQL 通路、**不要**挂 `docker.sock`。取数口径与事实盘点见 `../env-analysis/issues/13-batch-ledger-pgsql.md`。<br>**过渡期 (c)：暂不迁 batch-ingest**（它现在仍跑在宿主 systemd 上）。<br>⚠️ **永远不挂 `docker.sock`**：那个容器同时是对外 `:8000` API，挂 sock 等于给对外端口配 root 等价权限。 |
 | 2 | **端口 8000 的对外方式** | **(a) `publish 8000:8000`**，`.env` 的 `PROD_INGEST`/`PATROL_ANALYSIS`/`PATROL_INGEST` **零改动**；(b) 走 compose DNS 单开后续票。 |
 | 3 | **`mushrooms.db` 落点** | **(a) 挂宿主原目录 `/opt/mushroom-analysis`**（DB 路径不变 ⇒ 回滚不搬数据）。 |
 | 4 | **采图服务**（见 §5） | **C1**：`FROM xcloudsdk-py:0.1.0` + 仓库 `capture.py` + Pillow；**基础镜像与衍生镜像都推 registry**；现场只换**现有**服务的 image tag、删两条 `levels-fix` 挂载与 `PYTHONPATH`。C2 不够——漂移可见了，改动还是到不了生产。 |
@@ -254,10 +254,12 @@ WantedBy=timers.target
 1. **迁移方案：批**。形态 = 净新增 1 个 service（`mushroom_analysis`），复用现役 `PATROL_IMAGE`
    与已有 `api` 角色；**定时落在 `analysis.api` 的 lifespan**（环境官代码，票 12）；
    **entrypoint 不加角色**；DB 原地挂载、`:8000` 同址发布、`.env` 三处零改动。
-2. **`batch-ingest`：目标 (b) 直连 MySQL 只读账号，过渡期 (c)**（迁移当天不迁它，见 §4.1）。
-   **绝不给 API 容器挂 `docker.sock`**——对外 :8000 + root 等价权限，红线。
-   **原 (a) fallback 已从本票删除，不留活口。** 环境官开票改直连，(b) 落地后补跑一次把窗口
-   补齐（`batch_ingest` 按窗口幂等，缺几天可回补）。
+2. **`batch-ingest`：目标 = 从 pgsql 取数**（**2026-10-14 用户裁定后更正**；原文"直连 MySQL 只读账号"已作废）。
+   `tools_mysql` 是**业务数据库、禁止使用**；算法侧取数一律走 **pgsql**（`postgres_db` / 库 `mushroom_algorithm`）。
+   ⇒ compose 里**不加任何 MySQL 通路**、**不挂 `docker.sock`**；取数口径与事实盘点见
+   `../env-analysis/issues/13-batch-ledger-pgsql.md`。
+   **过渡期 (c)：迁移当天不迁它**（见 §4.1）；**原 (a) fallback 已删除，不留活口**；
+   (b) 落地后补跑一次把窗口补齐（`batch_ingest` 按窗口幂等，缺几天可回补）。
 3. **采图：走 C1**（`docker/Dockerfile.capture` = `FROM xcloudsdk-py:0.1.0` + 仓库 `capture.py`
    + Pillow；**基础镜像与衍生镜像都推 registry**；现场只换**现有**服务的 image tag、删两条
    `levels-fix` 挂载）。C2 不够——漂移可见了，改动还是到不了生产。
@@ -282,6 +284,32 @@ WantedBy=timers.target
 
 ⇒ **在 `api.py` 出现 lifespan 定时、且她能给出一个干净的构建点（提交或明确的文件集）之前，
 本票不实施**。这不算拖延：切成现状会让三个 ingest 全部停摆。
+
+### 8.1 ⚠️ 迟到的实施记录（发版官 2026-10-14 补记）
+
+上面"§8 16:2x 结论"是**当时的**判断。**当晚前置满足了，Step 1 与 Step 2 都已执行**，票面一直没回写
+（Chief 2026-10-14 因此看到的是"批准未实施"）：
+
+| 步 | 时间 | 做了什么 | 判据（实测） |
+| --- | --- | --- | --- |
+| **Step 1**（API + audit 同容器） | 2026-10-13 **16:43** | 停 `mushroom-analysis.service` + `mushroom-audit-ingest.{service,timer}`；起 `mushroom_analysis` 容器（只设 `AUDIT_INTERVAL`） | 行数与切前逐条相等（67/3203/0/2524/27/22）；`:8000` 属主变 docker-proxy；三个单元 disabled/inactive |
+| **Step 2**（+ env） | 2026-10-13 **17:0x** | 停 `mushroom-env-ingest.service`；加 `ENV_INGEST_INTERVAL=300` 重建容器 | `analysis.environment` **2524 → 2528**、游标推进；容器日志 `[ingest] 启动作业 env（每 300.0s）` |
+| **Step 3**（batch 迁 compose） | **未做** | 等 (b)…**且 2026-10-14 目标形态已改为 pgsql** | 见上 |
+
+**2026-10-14 09:26 只读复核（当前态）**：`mushroom-analysis.service`、`mushroom-audit-ingest.{service,timer}`、
+`mushroom-env-ingest.service` **全部 inactive**；`analysis.audit_ingest` / `env_ingest` 进程数 **0 / 0**；
+容器内 audit **600 s 一轮**（不是旧单元的 60 s）。
+**唯一残留的 systemd 存量 = `mushroom-batch-ingest.timer`**（enabled+active；LAST **2026-10-14 05:20:06**、
+`ExecMainStatus=0`；NEXT 2026-10-15 05:20）。
+
+⚠️ **合规缺口（2026-10-14 裁定带出的，需裁定）**：batch 那条 timer 跑的是**宿主源码拷贝**
+`/opt/mushroom-analysis/src`（整目录停在 **10-12 19:07–19:19**），其中 `batches.py`（sha `98f39f52…`）
+**仍是旧的 `docker exec tools_mysql` 通路**；而**仓库版已经改成 pgsql + 惰性 `psycopg`**。
+⇒ **用户明令禁止的那个业务库，今天 05:20 还被这个定时任务访问过一次，明天 05:20 还会再访问。**
+且**不能只拷文件**：宿主 venv **没有 `psycopg`**（新代码会直接抛"环境没有 psycopg"）。
+三条路（**未定，等裁定**）：(a) 立刻 `systemctl disable --now mushroom-batch-ingest.timer`（合规优先，
+台账停更、可回补）；(b) 给宿主补源码 + 装 `psycopg[binary]`（快，但又是"宿主打补丁"）；
+(c) 走 Step 3 搬进容器（正确，依赖 `psycopg` 进镜像 + pgsql 两张表有数）。
 
 **已落盘的相关票**：`02-preview-channel-stability.md`（归属巡检手）、
 `03-tdengine-6041-exposure.md`（平台侧，我们不动）。
