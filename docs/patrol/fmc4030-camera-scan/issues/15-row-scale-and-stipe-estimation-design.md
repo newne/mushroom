@@ -560,10 +560,16 @@ mm_per_px=1.0924   scale_ref_mm=240.0   scale_ref_px=220.0
 - [x] **缺标尺五列不写假值**（`estimated_fields`/`mm_per_px`/`scale_ref_mm`/`scale_ref_px` 为 NULL，
       `scale_source='none'`）。
 
-**两条边界成对留在同一测试文件**（Chief 要求，防后人"简化"掉一条）：
+**两条边界成对留在同一测试文件、且必须永远并排**（Chief 2026-10-14，两条要求合并）：
 `test_missing_reference_emits_enum_none_and_no_fabricated_values`（零候选 ⇒ `{no_scale, no_detection}`，
 **不含** `unreliable`）与 `test_all_rows_unreliable_yields_unreliable_not_no_detection`
 （整帧只剩不可信排 ⇒ **`unreliable`**，不含 `no_detection`）——`test_l3_wiring.py` 里并排。
+
+**为什么"并排"是硬要求（不是为了整齐）**：这次接线层**真的漏搬**了 `all_rows_unreliable()` 分支
+（估计层有、接线层没有），而它**只在"整帧只剩不可信排 + 无实例"这个交叉条件下**才显形；
+`unreliable` 还会伪装成 `no_detection` 出现在行里，人眼几乎看不出。
+**靠"把零候选与"全不可信"两条断言写在一起"才发现**（写第一条时顺手写了反例）。
+⇒ 后人不许为"简化"把两条合成一条：**分开写 = 这两条路径各自可判；合并写 = 交叉条件又丢了**。
 
 **两个方向分别生效**（这是接线的关键改动）：`pipeline.aggregate_box()` 现在优先读
 `metrics.mm_per_px_x` / `mm_per_px_y`——水平用袋长 **240 mm**、竖直用袋径 **140 mm**（θ 注入后再 ÷cosθ）；
