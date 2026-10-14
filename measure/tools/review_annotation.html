@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>20 帧标注复核（离线 · 无依赖）</title>
+<style>
+  :root { --bg:#111; --panel:#1b1b1b; --line:#333; --fg:#eee; --ok:#39d353; --no:#f85149;
+          --edit:#e3b341; --bag:#58a6ff; --drop:#f85149; --human:#f0883e; --sel:#ffd33d; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.5 "Segoe UI",system-ui,sans-serif; }
+  header { padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line);
+           display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  header b { color:var(--sel); }
+  .grow { flex:1; }
+  button { background:#222; color:var(--fg); border:1px solid var(--line); border-radius:6px;
+           padding:5px 10px; cursor:pointer; }
+  button:hover { background:#2d2d2d; }
+  button.on { border-color:var(--sel); color:var(--sel); }
+  button.danger { border-color:var(--no); color:var(--no); }
+  button.primary { border-color:var(--ok); color:var(--ok); }
+  main { display:flex; height:calc(100vh - 92px); }
+  #left { flex:1; overflow:auto; padding:8px; background:#000; }
+  #wrap { position:relative; display:inline-block; }
+  canvas { display:block; max-width:100%; height:auto; cursor:crosshair; }
+  #right { width:430px; overflow:auto; background:var(--panel); border-left:1px solid var(--line);
+           padding:10px; }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  th,td { border-bottom:1px solid var(--line); padding:3px 4px; text-align:left; }
+  tr.sel { background:#2a2a1a; }
+  tr.rejected td { opacity:.45; text-decoration:line-through; }
+  input[type=text],input[type=number],select { background:#0d0d0d; color:var(--fg);
+    border:1px solid var(--line); border-radius:4px; padding:2px 4px; font:inherit; }
+  input[type=number] { width:64px; }
+  .hint { color:#999; }
+  .legend span { display:inline-block; margin-right:10px; }
+  .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:3px; }
+  .bar { height:6px; background:#333; border-radius:3px; overflow:hidden; width:120px; }
+  .bar > i { display:block; height:100%; background:var(--ok); width:0; }
+</style>
+</head>
+<body>
+<header>
+  <b>标注复核（离线）</b>
+  <label>工单目录 <input type="file" id="folder" webkitdirectory multiple></label>
+  <span class="hint">或</span>
+  <label>frames.csv <input type="file" id="fFrames" accept=".csv"></label>
+  <label>instances.csv <input type="file" id="fInst" accept=".csv"></label>
+  <label>dropped.csv <input type="file" id="fDrop" accept=".csv"></label>
+  <label>overlays <input type="file" id="fImgs" accept="image/*" multiple></label>
+  <span class="grow"></span>
+  <label>复核人 <input type="text" id="reviewer" placeholder="姓名" size="8"></label>
+  <button id="btnExport" class="primary">导出 CSV</button>
+</header>
+<header id="bar" style="border-top:none">
+  <button id="prev">← 上一帧</button>
+  <button id="next">下一帧 →</button>
+  <span id="pos" class="hint">未载入</span>
+  <span class="bar"><i id="prog"></i></span>
+  <span id="stat" class="hint"></span>
+  <span class="grow"></span>
+  <button id="btnShowDrop" class="on">显示被门丢掉的候选</button>
+  <button id="btnAdd">＋ 新增框（画一个矩形）</button>
+  <select id="addCat"><option value="fruitbody">fruitbody</option><option value="bag">bag</option></select>
+  <span class="legend">
+    <span><i class="sw" style="background:#39d353"></i>菇体</span>
+    <span><i class="sw" style="background:#58a6ff"></i>菌包</span>
+    <span><i class="sw" style="background:#f85149"></i>门丢掉的候选</span>
+    <span><i class="sw" style="background:#f0883e"></i>人补</span>
+  </span>
+</header>
+<main>
+  <div id="left"><div id="wrap"><canvas id="cv"></canvas></div></div>
+  <div id="right">
+    <div id="frameInfo" class="hint">选目录或三个 CSV + overlay 图即可开始。</div>
+    <div id="rows"></div>
+    <div id="help" class="hint" style="margin-top:10px">
+      <p><b>操作</b>：点框选中 → 拖动=改框（自动 <code>edited</code>）；右下列角拖动=缩放；
+      <b>确认</b>=confirmed，<b>删除</b>=rejected（<b>行保留</b>，不算真删）。
+      枚举用下拉，别手打。</p>
+      <p><b>新增框</b>：点"＋ 新增框"后在画面上拖一个矩形 ⇒ 生成 <code>human_added</code>；
+      若压在被门丢掉的候选上，自动写 <code>gate_false_negative</code>。</p>
+      <p class="hint">坐标一律<b>原图 px</b>（2880×1616）；导出格式与输入 CSV 完全一致（列名/顺序不变）。</p>
+    </div>
+  </div>
+</main>
+<script>
+"use strict";
+/* ------------------------------------------------------------------ *
+ * 纯函数（可在 Node 里单测；不碰 DOM）                                *
+ * ------------------------------------------------------------------ */
+
+/** RFC4180 解析（支持引号、逗号、换行、"" 转义）。 */
+function parseCSV(text) {
+  const rows = []; let row = []; let field = ""; let inQ = false;
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);      // BOM
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; } else { inQ = false; }
+      } else { field += c; }
+    } else if (c === '"') { inQ = true; }
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+    else if (c === "\r") { /* skip */ }
+    else { field += c; }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows.filter(r => r.length > 1 || (r.length === 1 && r[0] !== ""));
+}
+
+function toObjects(rows, meta) {
+  const head = rows[0].map(h => h.trim());
+  const out = rows.slice(1).map(r => {
+    const o = {}; head.forEach((h, i) => o[h] = r[i] === undefined ? "" : r[i]); return o;
+  });
+  const m = meta || {};
+  return { columns: head, rows: out, eol: m.eol || "\n", bom: !!m.bom };
+}
+
+/** 嗅探输入的换行/BOM（导出**原样保留**，才算"格式与现有 CSV 完全一致"）。 */
+function sniffFormat(text) {
+  return { eol: text.indexOf("\r\n") >= 0 ? "\r\n" : "\n",
+           bom: text.charCodeAt(0) === 0xFEFF };
+}
+
+/** 按给定列顺序序列化（列名与顺序原样；换行/BOM 与输入一致）。 */
+function serializeCSV(columns, rows, fmt) {
+  const f = fmt || {};
+  const eol = f.eol || "\n";
+  const esc = v => {
+    const s = v === null || v === undefined ? "" : String(v);
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lines = [columns.join(",")];
+  for (const r of rows) lines.push(columns.map(c => esc(r[c])).join(","));
+  return (f.bom ? "\uFEFF" : "") + lines.join(eol) + eol;
+}
+
+function bboxOf(row) {
+  return { x0: +row.bbox_x0, y0: +row.bbox_y0, x1: +row.bbox_x1, y1: +row.bbox_y1 };
+}
+
+function overlapRatio(a, b) {
+  const ix = Math.max(0, Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0));
+  const iy = Math.max(0, Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0));
+  const inter = ix * iy;
+  const area = Math.max(1, (a.x1 - a.x0) * (a.y1 - a.y0));
+  return inter / area;
+}
+
+/** 人补的框是否压在被门丢掉的候选上 ⇒ 自动写 gate_false_negative。 */
+function autoNoteForNewBox(box, droppedRows) {
+  for (const d of droppedRows) {
+    if (overlapRatio(box, bboxOf(d)) > 0.3) return "gate_false_negative";
+  }
+  return "";
+}
+
+function todayISO() { return new Date().toLocaleDateString("sv-SE"); }
+
+/** 导出前的落格：复核人/日期与 review_status（**只在导出时写**，输入文件不动）。 */
+function applyReviewer(frames, instances, reviewer, dateISO) {
+  const touched = new Set(instances.filter(r => (r.review_status || "pending") !== "pending")
+                                  .map(r => r.frame_id));
+  const out = frames.map(f => {
+    const g = Object.assign({}, f);
+    if (touched.has(f.frame_id) && reviewer) {
+      g.reviewer = reviewer; g.review_date = dateISO;
+    }
+    return g;
+  });
+  return out;
+}
+
+/** 新实例行的模板（列名与现有 CSV 一致；**坐标原图 px**）。 */
+function newInstanceRow(frameId, category, box, seq, droppedRows, reviewer, dateISO) {
+  const isFruit = category === "fruitbody";
+  const h = box.y1 - box.y0;
+  return {
+    frame_id: frameId,
+    instance_id: frameId + "-" + (isFruit ? "H" : "B") + String(seq).padStart(3, "0"),
+    category: category,
+    source: "human_added",
+    review_status: "confirmed",
+    bbox_x0: Math.round(box.x0), bbox_y0: Math.round(box.y0),
+    bbox_x1: Math.round(box.x1), bbox_y1: Math.round(box.y1),
+    bag_id: "", cluster_id: "",
+    base_y: isFruit ? Math.round(box.y1) : "",
+    tip_y: isFruit ? Math.round(box.y0) : "",
+    height_valid: isFruit ? 1 : "",
+    truncated: (box.x0 <= 1 || box.y0 <= 1 || box.x1 >= 2879 || box.y1 >= 1615) ? 1 : 0,
+    occluded_frac: 0, ignore: 0, gate: "",
+    reviewer_note: autoNoteForNewBox(box, droppedRows || []),
+  };
+}
+
+const __api = { parseCSV, toObjects, sniffFormat, serializeCSV, bboxOf, overlapRatio,
+                autoNoteForNewBox, applyReviewer, newInstanceRow, todayISO };
+if (typeof globalThis !== "undefined") globalThis.__reviewApi = __api;
+
+/* ------------------------------------------------------------------ *
+ * 界面（只在浏览器里跑）                                              *
+ * ------------------------------------------------------------------ */
+if (typeof document !== "undefined") (function () {
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+  const state = {
+    frames: [], frameCols: [], instances: [], instCols: [], dropped: [],
+    images: new Map(), fIdx: 0, sel: null, scale: 1, adding: false, showDrop: true,
+    drag: null,
+  };
+
+  const el = id => document.getElementById(id);
+  const frameIdNow = () => state.frames[state.fIdx] && state.frames[state.fIdx].frame_id;
+  const rowsNow = () => state.instances.filter(r => r.frame_id === frameIdNow());
+  const dropsNow = () => state.dropped.filter(r => r.frame_id === frameIdNow());
+
+  function readFile(f) {
+    return new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsText(f, "utf-8"); });
+  }
+  function loadImage(f) {
+    return new Promise((res, rej) => {
+      const url = URL.createObjectURL(f);
+      const im = new Image();
+      im.onload = () => res(im); im.onerror = rej; im.src = url;
+    });
+  }
+
+  async function loadFolder(files) {
+    const byName = {};
+    for (const f of files) byName[(f.webkitRelativePath || f.name).split("/").pop()] = f;
+    if (byName["frames.csv"]) {
+      const t = await readFile(byName["frames.csv"]);
+      const o = toObjects(parseCSV(t), sniffFormat(t));
+      state.frames = o.rows; state.frameCols = o.columns; state.frameFmt = o;
+    }
+    if (byName["instances.csv"]) {
+      const t = await readFile(byName["instances.csv"]);
+      const o = toObjects(parseCSV(t), sniffFormat(t));
+      state.instances = o.rows; state.instCols = o.columns; state.instFmt = o;
+    }
+    if (byName["dropped.csv"]) {
+      state.dropped = toObjects(parseCSV(await readFile(byName["dropped.csv"]))).rows;
+    }
+    for (const f of files) if (/\.(jpe?g|png)$/i.test(f.name)) {
+      state.images.set(f.name.replace(/\.[^.]+$/, ""), await loadImage(f));
+    }
+    state.fIdx = 0; render();
+  }
+
+  el("folder").addEventListener("change", e => loadFolder(e.target.files));
+  for (const [id, key, colKey] of [["fFrames", "frames", "frameCols"],
+                                   ["fInst", "instances", "instCols"],
+                                   ["fDrop", "dropped", null]]) {
+    el(id).addEventListener("change", async e => {
+      const t = await readFile(e.target.files[0]);
+      const o = toObjects(parseCSV(t), sniffFormat(t));
+      state[key] = o.rows; if (colKey) state[colKey] = o.columns;
+      if (id === 'fFrames') state.frameFmt = o; if (id === 'fInst') state.instFmt = o;
+      render();
+    });
+  }
+  el("fImgs").addEventListener("change", async e => {
+    for (const f of e.target.files) state.images.set(f.name.replace(/\.[^.]+$/, ""), await loadImage(f));
+    render();
+  });
+
+  el("prev").onclick = () => { state.fIdx = Math.max(0, state.fIdx - 1); state.sel = null; render(); };
+  el("next").onclick = () => { state.fIdx = Math.min(state.frames.length - 1, state.fIdx + 1); state.sel = null; render(); };
+  el("btnShowDrop").onclick = e => { state.showDrop = !state.showDrop; e.target.classList.toggle("on", state.showDrop); render(); };
+  el("btnAdd").onclick = e => { state.adding = !state.adding; e.target.classList.toggle("on", state.adding); };
+  el("btnExport").onclick = () => {
+    if (!state.instances.length) return alert("还没载入 instances.csv");
+    const rv = el("reviewer").value.trim();
+    const date = todayISO();
+    download("instances.csv", serializeCSV(state.instCols, state.instances, state.instFmt));
+    if (state.frames.length) {
+      download("frames.csv", serializeCSV(state.frameCols, applyReviewer(state.frames, state.instances, rv, date), state.frameFmt));
+    }
+    alert("已导出 instances.csv" + (state.frames.length ? " + frames.csv" : "") + "（列名与顺序未变）");
+  };
+  function download(name, text) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
+    a.download = name; a.click();
+  }
+
+  /* ---- 绘制与命中 ---- */
+  function fit() {
+    const im = state.images.get(frameIdNow());
+    const w = im ? im.naturalWidth : 2880, h = im ? im.naturalHeight : 1616;
+    const maxW = el("left").clientWidth - 16;
+    state.scale = Math.min(1, maxW / w);
+    cv.width = w; cv.height = h;
+    cv.style.width = Math.round(w * state.scale) + "px";
+    cv.style.height = Math.round(h * state.scale) + "px";
+  }
+  function draw() {
+    const w = cv.width, h = cv.height;
+    ctx.fillStyle = "#000"; ctx.fillRect(0, 0, w, h);
+    const im = state.images.get(frameIdNow());
+    if (im) ctx.drawImage(im, 0, 0, w, h);
+    else { ctx.fillStyle = "#666"; ctx.font = "28px sans-serif";
+           ctx.fillText("（没找到该帧的 overlay 图；请一起选择 overlays 目录）", 30, 60); }
+    if (state.showDrop) for (const d of dropsNow()) rect(d, "#f85149", 2, false);
+    const selRow = state.sel >= 0 ? rowsNow()[state.sel] : null;
+    for (const r of rowsNow()) {
+      const rejected = (r.review_status || "") === "rejected";
+      let color = r.category === "bag" ? "#58a6ff"
+                : (r.source === "human_added" ? "#f0883e" : "#39d353");
+      if (rejected) color = "#999";
+      const isSel = r === selRow;
+      rect(r, color, isSel ? 4 : 2, true);
+      if (isSel) { const b = bboxOf(r);
+        ctx.fillStyle = "#ffd33d"; ctx.fillRect(b.x1 - 11, b.y1 - 11, 11, 11); }
+    }
+  }
+  function rect(r, color, lw, label) {
+    const b = bboxOf(r);
+    ctx.strokeStyle = color; ctx.lineWidth = lw;
+    ctx.strokeRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0);
+    if (label && r.reviewer_note) {
+      ctx.fillStyle = color; ctx.font = "16px sans-serif";
+      ctx.fillText(r.reviewer_note, b.x0 + 2, Math.max(14, b.y0 - 4));
+    }
+  }
+  function toImg(ev) {
+    const r = cv.getBoundingClientRect();
+    return { x: (ev.clientX - r.left) / state.scale, y: (ev.clientY - r.top) / state.scale };
+  }
+  function hit(p) {
+    const list = rowsNow();
+    for (let i = list.length - 1; i >= 0; i--) {
+      const b = bboxOf(list[i]);
+      if (p.x >= b.x0 && p.x <= b.x1 && p.y >= b.y0 && p.y <= b.y1) return i;
+    }
+    return -1;
+  }
+
+  cv.addEventListener("mousedown", ev => {
+    const p = toImg(ev), rows = rowsNow();
+    if (state.adding) { state.drag = { mode: "new", box: { x0: p.x, y0: p.y, x1: p.x, y1: p.y } }; return; }
+    const i = hit(p);
+    if (i < 0) { state.sel = null; render(); return; }
+    state.sel = i;
+    const b = bboxOf(rows[i]);
+    const corner = (Math.abs(p.x - b.x1) < 14 && Math.abs(p.y - b.y1) < 14);
+    state.drag = { mode: corner ? "resize" : "move", i: i, p0: p, box: Object.assign({}, b) };
+    render();
+  });
+  cv.addEventListener("mousemove", ev => {
+    if (!state.drag) return;
+    const p = toImg(ev), d = state.drag;
+    if (d.mode === "new") { d.box.x1 = p.x; d.box.y1 = p.y; draw(); rectPx(d.box, "#ffd33d"); return; }
+    const row = rowsNow()[d.i];
+    const dx = Math.round(p.x - d.p0.x), dy = Math.round(p.y - d.p0.y);
+    if (d.mode === "move") {
+      row.bbox_x0 = d.box.x0 + dx; row.bbox_y0 = d.box.y0 + dy;
+      row.bbox_x1 = d.box.x1 + dx; row.bbox_y1 = d.box.y1 + dy;
+    } else {
+      row.bbox_x1 = Math.max(row.bbox_x0 + 2, d.box.x1 + dx);
+      row.bbox_y1 = Math.max(row.bbox_y0 + 2, d.box.y1 + dy);
+    }
+    row.review_status = "edited";
+    draw();
+  });
+  cv.addEventListener("mouseup", () => {
+    const d = state.drag; state.drag = null;
+    if (!d) return;
+    if (d.mode === "new") {
+      const box = { x0: Math.min(d.box.x0, d.box.x1), y0: Math.min(d.box.y0, d.box.y1),
+                    x1: Math.max(d.box.x0, d.box.x1), y1: Math.max(d.box.y0, d.box.y1) };
+      if (box.x1 - box.x0 < 3 || box.y1 - box.y0 < 3) { render(); return; }
+      const fid = frameIdNow();
+      const seq = state.instances.filter(r => r.frame_id === fid && r.source === "human_added").length + 1;
+      const cat = el("addCat").value;
+      state.instances.push(newInstanceRow(fid, cat, box, seq, state.dropped, "", ""));
+      state.adding = false; el("btnAdd").classList.remove("on");
+      state.sel = rowsNow().length - 1;
+    }
+    render();
+  });
+  function rectPx(b, color) { ctx.strokeStyle = color; ctx.lineWidth = 3;
+                              ctx.strokeRect(b.x0, b.y0, b.x1 - b.x0, b.y1 - b.y0); }
+
+  /* ---- 右侧列表 ---- */
+  function renderRows() {
+    const rows = rowsNow();
+    if (state.sel === null || state.sel >= rows.length) state.sel = rows.length ? 0 : null;
+    const cols = {
+      occluded_frac: ["0", "1", "2", "3"], truncated: ["0", "1"],
+      height_valid: ["0", "1"], ignore: ["0", "1"],
+      category: ["fruitbody", "bag"],
+      review_status: ["pending", "confirmed", "edited", "rejected"],
+    };
+    const html = rows.map((r, i) => {
+      const b = bboxOf(r);
+      const sel = i === state.sel;
+      const st = r.review_status || "pending";
+      const cls = [sel ? "sel" : "", st === "rejected" ? "rejected" : ""].join(" ");
+      const ddl = k => '<select data-i="' + i + '" data-k="' + k + '">' +
+        cols[k].map(v => '<option' + (String(r[k]) === v ? " selected" : "") + '>' + v + '</option>').join("") +
+        "</select>";
+      const num = k => '<input type="number" data-i="' + i + '" data-k="' + k + '" value="' + Math.round(b[k === "bbox_x0" ? "x0" : k === "bbox_y0" ? "y0" : k === "bbox_x1" ? "x1" : "y1"]) + '">';
+      return '<tr class="' + cls + '">' +
+        '<td><input type="radio" name="sel" data-i="' + i + '"' + (sel ? " checked" : "") + '></td>' +
+        "<td>" + r.instance_id + "<br><span class=\"hint\">" + st + " · " + (r.source || "pre") + "</span></td>" +
+        "<td>" + ddl("category") + "</td>" +
+        "<td>" + num("bbox_x0") + num("bbox_y0") + "<br>" + num("bbox_x1") + num("bbox_y1") + "</td>" +
+        "<td>" + ddl("occluded_frac") + ddl("truncated") + ddl("height_valid") + ddl("ignore") + "</td>" +
+        '<td><button data-act="ok" data-i="' + i + '">确认</button> ' +
+        '<button data-act="del" data-i="' + i + '" class="danger">删除</button></td>' +
+        '<td><input type="text" data-i="' + i + '" data-k="reviewer_note" value="' + (r.reviewer_note || "") + '" size="14"></td>' +
+        "</tr>";
+    }).join("");
+    el("rows").innerHTML = "<table><thead><tr><th></th><th>实例</th><th>类别</th><th>框(x0 y0 x1 y1)</th>" +
+      "<th>遮挡/切/高可用/忽略</th><th></th><th>备注</th></tr></thead><tbody>" + html + "</tbody></table>";
+
+    el("rows").querySelectorAll("button[data-act]").forEach(btn => btn.onclick = () => {
+      const i = +btn.dataset.i, r = rowsNow()[i];
+      if (btn.dataset.act === "ok") r.review_status = "confirmed";
+      else r.review_status = "rejected";              // **不真删**：行保留
+      state.sel = i; render();
+    });
+    el("rows").querySelectorAll("input[type=radio]").forEach(rb => rb.onchange = () => {
+      state.sel = +rb.dataset.i; render();
+    });
+    el("rows").querySelectorAll("select,input[type=text],input[type=number]").forEach(inp => {
+      inp.onchange = () => {
+        const i = +inp.dataset.i, k = inp.dataset.k, r = rowsNow()[i];
+        if (k.startsWith("bbox_")) r[k] = Math.round(+inp.value);
+        else r[k] = inp.value;
+        if (!k.startsWith("bbox_") === false || true) {
+          if (k !== "reviewer_note" && (r.review_status || "pending") === "pending") r.review_status = "edited";
+        }
+        render();
+      };
+    });
+  }
+
+  function render() {
+    if (!state.frames.length) { el("pos").textContent = "未载入"; return; }
+    fit(); draw(); renderRows();
+    const fid = frameIdNow();
+    const done = new Set(state.instances.filter(r => (r.review_status || "pending") !== "pending")
+                                        .map(r => r.frame_id));
+    el("pos").textContent = "第 " + (state.fIdx + 1) + " / " + state.frames.length + " 帧 · " + fid;
+    el("prog").style.width = Math.round(100 * done.size / state.frames.length) + "%";
+    el("stat").textContent = "已复核 " + done.size + "/" + state.frames.length + " 帧";
+    const f = state.frames[state.fIdx];
+    el("frameInfo").innerHTML = "<b>" + fid + "</b>　" + (f.station_id || "") + "　" + (f.ts || "") +
+      "<br><span class='hint'>本站位: 袋 " + (f.n_bag_pre || "?") + " / 候选 " + (f.n_fruit_pre || "?") +
+      " / 门后 " + (f.n_fruit_gate_kept || "?") + " / 门丢 " + (f.n_fruit_gate_dropped || "?") +
+      " · 本帧实例行 " + rowsNow().length + "（门丢掉的红框 " + dropsNow().length + "）</span>" +
+      "<br><span class='hint'>图像 " + cv.width + "×" + cv.height + " px（导出坐标即原图 px）</span>";
+  }
+  window.addEventListener("resize", () => { if (state.frames.length) render(); });
+})();
+</script>
+</body>
+</html>

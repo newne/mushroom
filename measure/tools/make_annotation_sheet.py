@@ -70,6 +70,12 @@ INSTANCE_COLUMNS = [
     "height_valid", "truncated", "occluded_frac", "ignore", "gate", "reviewer_note",
 ]
 
+#: 被袋肩门丢掉的候选（**不进 instances.csv**，只给复核页当"漏检线索"画红框用）
+DROPPED_COLUMNS = [
+    "frame_id", "candidate_id", "bbox_x0", "bbox_y0", "bbox_x1", "bbox_y1",
+    "reason", "bag_id",
+]
+
 
 def _in_excluded(ts: str) -> bool:
     for start, end in EXCLUDED_WINDOWS:
@@ -102,7 +108,7 @@ def _read_gray(path: Path) -> np.ndarray:
 
 
 def annotate_one(entry: dict, samples: Path, out: Path, *, seq: int, bag_cfg: BagConfig,
-                 fruit_cfg: FruitConfig, pre_version: str) -> tuple[dict, list[dict]]:
+                 fruit_cfg: FruitConfig, pre_version: str) -> tuple[dict, list[dict], list[dict]]:
     from PIL import Image, ImageDraw
 
     gray = _read_gray(samples / entry["file"])
@@ -164,6 +170,25 @@ def annotate_one(entry: dict, samples: Path, out: Path, *, seq: int, bag_cfg: Ba
     for b in bags:
         draw.rectangle([b.x0, b.y0, b.x1, b.y1], outline=(0, 120, 255), width=4)
     dropped = {id(i) for i in insts} - {id(i) for i in kept}
+    dropped_rows: list[dict] = []
+    cand_seq = 0
+    for i in insts:
+        if id(i) not in dropped:
+            continue
+        cand_seq += 1
+        bag = nearest_bag_in_same_row(bags, i.cy, bag_cfg, x=i.cx)
+        bid = bag_ids.get(id(bag), "") if bag is not None else ""
+        if bag is None:
+            reason = "unassigned_no_same_row_bag"
+        else:
+            bag_top = bag.centroid_y - bag.height_px / 2.0
+            reason = ("inside_bag_body" if i.base_y > bag_top + 10 else "other")
+        dropped_rows.append({
+            "frame_id": fid, "candidate_id": f"{fid}-D{cand_seq:03d}",
+            "bbox_x0": int(i.x0), "bbox_y0": int(i.y0),
+            "bbox_x1": int(i.x1), "bbox_y1": int(i.y1),
+            "reason": reason, "bag_id": bid,
+        })
     for i in insts:
         if id(i) in dropped:
             draw.rectangle([i.x0, i.y0, i.x1, i.y1], outline=(255, 0, 0), width=2)
@@ -184,7 +209,7 @@ def annotate_one(entry: dict, samples: Path, out: Path, *, seq: int, bag_cfg: Ba
         "notes": f"bdiag n_rows={bdiag.get('n_rows')} weak_retry={bdiag.get('weak_retry')}; "
                  f"gate kept_frac={gdiag['kept_frac']:.2f}",
     }
-    return frame_row, rows
+    return frame_row, rows, dropped_rows
 
 
 def _stratum(entry: dict) -> str:
@@ -218,12 +243,13 @@ def main() -> int:
     pre_version = f"{rev}@{datetime.now():%Y-%m-%d}"
 
     bag_cfg, fruit_cfg = BagConfig(downscale=args.downscale), FruitConfig(downscale=args.downscale)
-    frame_rows, inst_rows = [], []
+    frame_rows, inst_rows, dropped_rows = [], [], []
     for i, e in enumerate(picked, 1):
-        fr, rows = annotate_one(e, samples, out, seq=i, bag_cfg=bag_cfg, fruit_cfg=fruit_cfg,
-                                pre_version=pre_version)
+        fr, rows, drops = annotate_one(e, samples, out, seq=i, bag_cfg=bag_cfg,
+                                       fruit_cfg=fruit_cfg, pre_version=pre_version)
         frame_rows.append(fr)
         inst_rows.extend(rows)
+        dropped_rows.extend(drops)
         print(f"[{i}/{len(picked)}] {fr['frame_id']} 菌包 {fr['n_bag_pre']} / "
               f"菇体候选 {fr['n_fruit_pre']} → 门后 {fr['n_fruit_gate_kept']}")
 
@@ -235,9 +261,15 @@ def main() -> int:
         wr = csv.DictWriter(fh, fieldnames=INSTANCE_COLUMNS)
         wr.writeheader()
         wr.writerows(inst_rows)
+    # 被门丢掉的候选：**给复核页画红框用**（不进 instances.csv，避免几千行人工拒绝）
+    with (out / "dropped.csv").open("w", newline="", encoding="utf-8") as fh:
+        wr = csv.DictWriter(fh, fieldnames=DROPPED_COLUMNS)
+        wr.writeheader()
+        wr.writerows(dropped_rows)
     (out / "README.md").write_text(_readme(pre_version, len(frame_rows), len(inst_rows)),
                                    encoding="utf-8")
-    print(f"\n工单 → {out}（{len(frame_rows)} 帧 / {len(inst_rows)} 实例行，预标注版本 {pre_version}）")
+    print(f"\n工单 → {out}（{len(frame_rows)} 帧 / {len(inst_rows)} 实例行 / "
+          f"{len(dropped_rows)} 个被门丢掉的候选，预标注版本 {pre_version}）")
     return 0
 
 
