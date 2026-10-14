@@ -42,6 +42,7 @@ from analysis.environment import (
     summary as env_summary,
 )
 from analysis.growth import latest_delta, room_summary, series
+from analysis.rooms import canonical_room, canonical_rooms, display_room, resolve_rooms
 
 
 class IngestBody(BaseModel):
@@ -308,23 +309,62 @@ def create_app(
         批次边界只能来自台账：环境是连续采集的，换批不会让传感器停（真机证否过
         "按断档切段"那条路）。台账由 `analysis.batch_ingest` 从 **pgsql** 同步
         （2026-10-14 起；业务库 MySQL 已禁用，旧的 `docker exec tools_mysql` 通路已下线）。
+
+        **库房号跨域 join（Chief 2026-10-14）**：台账侧的旧编号（`7`/`8`）与
+        `environment.zone`（`607`/`608`）不是一套编码。这里按**显式别名表**归一，
+        解不出的行写 NULL + 计数可见（`room_alias`）、**不猜**；每批还带 `room_label`
+        让页面能显示「`607`（原始 `7`）」，不许只给一个数字让人以为是同一编码。
         """
         if not (zone or "").strip():
             raise HTTPException(status_code=400, detail="批次对比要指定 zone（批次按库房算）")
-        ledger = db_fetch_batches(conn, room_id=zone)
+        want = canonical_room(zone)
+        if want is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{zone!r} 不是规范库房号（{'/'.join(canonical_rooms())}），"
+                    "也不是别名表里登记过的旧编号"
+                ),
+            )
+        # 整份台账都要看：只按 zone 过滤会把"旧编号挂着的那几批"当成"没有台账"
+        ledger, alias_report = resolve_rooms(db_fetch_batches(conn), label="/environment/batches")
         if not ledger:
             return {
                 "ok": False,
                 "error": "还没有批次台账：先跑一次 analysis.batch_ingest",
                 "batches": [],
             }
-        windows = window_of(ledger, room=zone, limit=max(1, min(limit, 12)))
-        rows = fetch_environment(conn, zone=zone)
+        windows = window_of(
+            ledger, room=want, limit=max(1, min(limit, 12)), key="room_id_canonical"
+        )
+        if not windows:
+            # 解不出的编号要点名说出来：不能让"旧编号"看起来像"这个库房没有批次"
+            unresolved = alias_report["unresolved_values"]
+            hint = (
+                "台账里存在未解出的库房编号 "
+                + ", ".join(f"{k!r}×{v}" for k, v in sorted(unresolved.items()))
+                + "（未登记别名 ⇒ 不猜）；"
+                if unresolved
+                else ""
+            )
+            return {
+                "ok": False,
+                "zone": zone,
+                "error": f"{hint}台账里没有库房 {want} 的批次",
+                "batches": [],
+                "room_alias": alias_report,
+            }
+        rows = fetch_environment(conn, zone=want)
         kept = [r for r in rows if r.get("ts")]
         return {
             "ok": True,
-            "zone": zone,
-            "batches": env_batches(rows, windows, zone=zone),
+            "zone": want,
+            "zone_requested": zone,
+            "batches": [
+                {**b, "room_label": display_room(b.get("room_id"))}
+                for b in env_batches(rows, windows, zone=want)
+            ],
+            "room_alias": alias_report,
             # 数据实际覆盖到哪天：更早的批次只有窗口没有数据，对比时要看"覆盖天数"
             "data_from": min((r["ts"] for r in kept), default=None),
             "data_to": max((r["ts"] for r in kept), default=None),

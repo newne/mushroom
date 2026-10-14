@@ -1,0 +1,20 @@
+{
+  "generated_at": "2026-10-14T11:05:00",
+  "source": "Chief 2026-10-14 裁定的显式别名表：原始编号 → 规范库房号。代码只读 map；每条必须有 evidence 才生效（analysis/src/analysis/rooms.py）。",
+  "canonical_rooms": ["607", "608", "611", "612"],
+  "map": {},
+  "unconfirmed": [
+    {
+      "from": "7",
+      "to": "607",
+      "evidence": "日期巧合匹配：analysis/data/batch_no_map.json 里 7 的最新 in_date=2026-10-10，与发版官 2026-10-14 只读盘点的 607 最新 in_date=2026-10-10 相同",
+      "blocker": "没有任何一条记录同时给出两种编码，方向仍是推断 ⇒ 按裁定不许写进 map。需要现场/业务侧给库房对照，或一条同时含 7/8 与 607/608 的记录。"
+    },
+    {
+      "from": "8",
+      "to": "608",
+      "evidence": "同上：batch_no_map.json 里 8 的最新 in_date=2026-09-27，与 608 最新 in_date=2026-09-27 相同",
+      "blocker": "同上"
+    }
+  ]
+}

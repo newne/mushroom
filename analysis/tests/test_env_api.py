@@ -1,5 +1,7 @@
 """环境序列的聚合、读接口与"原始不落库"（票 01/02）。"""
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -177,6 +179,54 @@ def test_api_batches_with_ledger(tmp_path):
     got = TestClient(create_app(db)).get("/environment/batches", params={"zone": "611"}).json()
     assert got["ok"] is True and len(got["batches"]) == 1
     assert got["batches"][0]["batch_no"] == "mogu-107" and got["batches"][0]["hours"] == 4
+    assert got["batches"][0]["room_label"] == "611", "规范号不洗白成别的写法"
+    assert got["room_alias"]["n_unresolved"] == 0
+
+
+def _legacy_room_fixture(tmp_path):
+    """台账里 607 那间挂着旧编号 `7`，环境侧用 `607` —— 跨域 join 的真实形状。"""
+    db = str(tmp_path / "legacy.db")
+    conn = connect(db)
+    upsert_environment(conn, _hours(count=4, zone="607"))
+    upsert_batches(conn, [{"room_id": "7", "entry_date": "2026-09-30",
+                           "batch_no": None, "batch_id": "7|2026-09-30"}])
+    conn.close()
+    return db
+
+
+def test_api_batches_reports_unresolved_room_code_instead_of_saying_no_ledger(tmp_path, capsys):
+    """旧编号解不出时**不许**说成"还没有批次台账" —— 那是把"身份对不上"报成"数据没有"。"""
+    db = _legacy_room_fixture(tmp_path)
+    got = TestClient(create_app(db)).get("/environment/batches", params={"zone": "607"}).json()
+    assert got["ok"] is False
+    assert "batch_ingest" not in got["error"], "台账明明在，只是挂着旧编号"
+    assert "'7'" in got["error"] and "不猜" in got["error"]
+    assert got["room_alias"]["unresolved_values"] == {"7": 1}
+    assert got["room_alias"]["unresolved_samples"] == [{"index": 0, "raw": "7"}]
+    printed = capsys.readouterr().out
+    assert "库房号解不出" in printed, "解不出要打样例，不许静默 NULL"
+
+
+def test_api_batches_uses_the_alias_once_confirmed(tmp_path, monkeypatch):
+    """确证过的别名生效 ⇒ join 成立，且标签明写"原始 7"（口径 3）。"""
+    db = _legacy_room_fixture(tmp_path)
+    alias = tmp_path / "room_alias.json"
+    alias.write_text(json.dumps({"map": {
+        "7": {"to": "607", "evidence": "现场库房对照表 2026-10-15"}
+    }}), encoding="utf-8")
+    monkeypatch.setenv("ROOM_ALIAS_FILE", str(alias))
+
+    got = TestClient(create_app(db)).get("/environment/batches", params={"zone": "607"}).json()
+    assert got["ok"] is True and len(got["batches"]) == 1
+    assert got["batches"][0]["hours"] == 4
+    assert got["batches"][0]["room_label"] == "607（原始 7）"
+    assert got["room_alias"]["n_resolved"] == 1
+
+
+def test_api_batches_rejects_a_non_room_zone(tmp_path):
+    db = _legacy_room_fixture(tmp_path)
+    got = TestClient(create_app(db)).get("/environment/batches", params={"zone": "999"})
+    assert got.status_code == 400 and "不是规范库房号" in got.json()["detail"]
 
 
 def test_aggregate_hourly_splits_by_zone():

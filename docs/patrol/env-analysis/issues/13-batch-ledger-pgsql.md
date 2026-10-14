@@ -118,13 +118,30 @@ SELECT room_id, max(in_date) FROM mushroom_batch_yield GROUP BY room_id;
    `generated_at=2026-10-14T10:47:12`，生成器 `python -m analysis.batch_map`；
    只读快照由发版官取，提交 `e6b2b56`）；② 映射缺失写 NULL + **"缺映射"可见计数**；
    ③ 长期解（生产侧在 pgsql 补真批次 id）待协调，不归我们单方面决定。
-3. **⚠️ 库房号身份不一致（2026-10-14 发现，未决）**：映射文件里 607/608 两个库房的键是
-   **`7|…` / `8|…`**，不是 `607|…` / `608|…` —— 即 `batches`（生产）侧的库房号对这两间用的是
-   **旧编号 `7`/`8`**，而 `environment.zone`、`measurements.room_id`、`audit` 的库房映射
-   （`audit.py:31`、`env/tdengine.py:36`）用的是 **`607`/`608`**。⇒ 「库房号+入库日期」这个身份
-   在**跨域 join 时会静默对不上**（试点 611/612 不受影响：它们两侧一致）。
-   **不做静默别名替换**（会再造一个"看不见的默认"）：要么由生产侧统一，要么在 analysis 侧
-   建一份**显式别名表**并在 join 失败时计数可见 —— **待 Chief 裁定**。
+3. **⚠️ 库房号身份不一致（2026-10-14 发现；Chief 已裁定口径，机制已落地）**：
+   映射文件里 607/608 两个库房的键是 **`7|…` / `8|…`**，不是 `607|…` / `608|…` ——
+   即 `batches` 侧的库房号对这两间用**旧编号 `7`/`8`**，而 `environment.zone`、
+   `measurements.room_id`、`audit.ROOM_BY_DEVICE_PREFIX`（`audit.py:28-33`）、
+   `env.tdengine.ROOM_DEVICE_CODES`（`env/tdengine.py:33-38`）用 **`607`/`608`**。
+   ⇒ 「库房号+入库日期」这个身份**跨域 join 会静默对不上**：`/environment/batches?zone=607`
+   原先会说"还没有批次台账"，而台账里其实有 —— 只是挂着 `7`（试点 611/612 两侧一致，所以没炸）。
+
+   **Chief 2026-10-14 四条口径 + 已落地的机制**（`analysis/src/analysis/rooms.py`、
+   `analysis/data/room_alias.json`，提交见 Comments）：
+   1. 别名表落仓库、带 `source`/`generated_at`、**只写确证过的对应**；
+      **代码只读 `map`，每条必须有 `evidence`，缺 evidence 一律跳过并报警** ⇒ "不许猜"由结构保证。
+   2. **join 不上 ⇒ `room_id_canonical = NULL` + 计数 + 打印样例**（哪几条、原始值是什么）；
+      `resolve_rooms()` 是这条的落点，**原始 `room_id` 列一律不改**。
+   3. **显示层不许洗白**：`display_room()` 给「`607`（原始 `7`）」/「`7`（原始编号，未登记别名）」，
+      `/environment/batches` 每批带 `room_label`，页面不必自己拼。
+   4. **长期解 = 生产侧统一编码**（待协调）；在那之前别名表是唯一过渡口径，
+      **任何人不得在代码里再写一份映射** —— `rooms.py` 只有"读文件 + 比对"，无内联表。
+   **当前 `map` 是空的**（`unconfirmed` 里留了 `7→607` / `8→608` 的推断与卡点：
+   只有"最新 `in_date` 日期巧合"作证据，**没有一条记录同时给出两种编码**）
+   —— 未确证就不生效，`/environment/batches?zone=607` 现在会明确报
+   "台账里存在未解出的库房编号 `'7'`（未登记别名 ⇒ 不猜）"，**不再误报"没有台账"**。
+   **还需一条事实来解锁**：pgsql/业务侧有没有一张表（或一条记录）同时出现 `7`/`8` 与 `607`/`608`
+   （库房名对照）—— 已请发版官只读查。
 4. **镜像缺 `psycopg`**（发版官实测：`PATROL_IMAGE` 的 site-packages 里没有）⇒ Step 3 的硬前置：
    `analysis/pyproject.toml` **已声明** `psycopg[binary]>=3.3.2`（2026-10-14 补，版本区间与根
    `pyproject.toml:25` 一致）；**镜像构建以 `patrol-workspace/uv.lock` 为准**（`Dockerfile.patrol`

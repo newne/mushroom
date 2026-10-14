@@ -114,27 +114,46 @@ def test_legacy_list_has_the_1009_round_with_evidence():
     first = LEGACY_EXCLUSIONS[0]
     assert first.round_id == "12038e7ac0334a8bbc1e178793ed5c09"
     assert first.room_id == "611"
-    assert (first.start, first.end) == ("2026-10-09T18:20:05", "2026-10-09T18:27:34")
+    assert (first.start, first.end) == ("2026-10-09T18:20:02", "2026-10-09T18:28:00")
     assert "35 帧" in first.reason and "legacy" in first.reason
     assert "ok=1" in first.reason, "要记下'轮行看起来完全正常'这个最坑人的点"
     assert first.approved_by == "Chief 2026-10-14"
     assert first.verified is True, "已核准 ⇒ 生效"
 
 
+def test_1009_window_contains_the_round_row_ts():
+    """半开区间 `[start, end)` 的右端必须含轮行 ts（2026-10-09T18:27:34）。
+
+    这是真缺口（发版官 2026-10-14 指出）：右端若取 18:27:34，**轮行自己被判在窗口外**，
+    凡按轮行/帧行 ts 匹配的路径就排不掉这一轮 —— `verified=True` 也白搭。
+    同时右端要与测量侧 `measure/src/measure/sample_hygiene.py` 的 18:28:00 一致。
+    """
+    first = LEGACY_EXCLUSIONS[0]
+    assert first.start <= "2026-10-09T18:27:34" < first.end
+
+
 def test_the_1009_round_is_actually_excluded_now_with_reason():
     """生效后：该轮窗口内的测量行被排除，且能说出'哪条规则命中、谁批的'。"""
     kept, dropped = partition(
         [measure("2026-10-09T18:22:00"), measure("2026-10-09T18:22:00", room="612"),
+         measure("2026-10-09T18:27:34"), measure("2026-10-09T18:28:00"),
          measure("2026-10-09T21:20:00")],
         [{"ts": "2026-10-09T18:27:34", "room_id": "611",
           "round_id": "12038e7ac0334a8bbc1e178793ed5c09"}],
     )
-    assert [r["ts"] for r in kept] == ["2026-10-09T18:22:00", "2026-10-09T21:20:00"]
-    assert len(dropped) == 1 and dropped[0].zone == "611"
-    assert dropped[0].reason == REASON_LEGACY_EXCLUDED
+    # 18:28:00（右端，开区间）起算恢复：半开区间的边界要能说清
+    assert [r["ts"] for r in kept] == [
+        "2026-10-09T18:22:00", "2026-10-09T18:28:00", "2026-10-09T21:20:00"
+    ]
+    dropped_zones = {d.zone for d in dropped}
+    assert dropped_zones == {"611"}
+    assert {d.ts for d in dropped} == {
+        "2026-10-09T18:22:00", "2026-10-09T18:27:34"
+    }
+    assert all(d.reason == REASON_LEGACY_EXCLUDED for d in dropped)
     detail = dropped[0].detail or ""
     assert "round_id 命中" in detail and "Chief 2026-10-14" in detail
-    assert dropped[0].window == "2026-10-09T18:20:05~2026-10-09T18:27:34"
+    assert dropped[0].window == "2026-10-09T18:20:02~2026-10-09T18:28:00"
 
 
 def test_window_key_covers_legacy_rows_without_round_id():

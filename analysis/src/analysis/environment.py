@@ -260,6 +260,10 @@ def batches(rows: list[dict], windows: list[dict], *, zone: str | None = None) -
         stats: dict = {
             "batch_no": w.get("batch_no"),
             "entry_date": w["entry_date"],
+            # 台账侧的**原始**库房号（可能是旧编号 7/8）+ 归一到规范号的那一列；
+            # 页面要能显示「607（原始 7）」，所以两列都得往下带（Chief 2026-10-14）。
+            "room_id": w.get("room_id"),
+            "room_id_canonical": w.get("room_id_canonical"),
             "start": seg[0]["ts"],
             "end": seg[-1]["ts"],
             "hours": len(seg),

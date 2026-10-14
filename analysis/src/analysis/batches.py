@@ -244,9 +244,16 @@ def _pgsql_runner(dsn: str | None):
     return run
 
 
-def window_of(batches: list[dict], *, room: str, limit: int = 3) -> list[dict]:
-    """某库房最近 `limit` 个批次的窗口；窗口右端是下一批的入库日（含端点用开区间）。"""
-    mine = [b for b in batches if b["room_id"] == room]
+def window_of(
+    batches: list[dict], *, room: str, limit: int = 3, key: str = "room_id"
+) -> list[dict]:
+    """某库房最近 `limit` 个批次的窗口；窗口右端是下一批的入库日（含端点用开区间）。
+
+    `key` 缺省按原始 `room_id` 取；**跨域 join 请传 `key="room_id_canonical"`**
+    （原始编号 `7`/`8` 与 `607`/`608` 不是一套编码，见 `analysis.rooms`）。
+    **原始列一律不改**：解不出的行 `room_id_canonical` 是 NULL，不许拿默认值糊。
+    """
+    mine = [b for b in batches if b.get(key) == room]
     mine.sort(key=lambda b: b["entry_date"])
     picked = mine[-limit:]
     out: list[dict] = []

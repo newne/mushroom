@@ -134,7 +134,12 @@ def test_legacy_exclusion_is_visible_with_reason(tmp_path):
     sample = run.detail["excluded_samples"][0]
     assert sample["ts"] == "2026-10-09T18:25:00"
     assert "Chief 2026-10-14" in sample["detail"], "谁批的要留在证据里"
-    assert sample["window"].startswith("2026-10-09T18:20:05")
+    # 窗口从清单读，不在这里再抄一份：同一个坏轮的窗口只许有一个出处
+    from analysis.integrity import LEGACY_EXCLUSIONS
+
+    first = LEGACY_EXCLUSIONS[0]
+    assert sample["window"] == f"{first.start}~{first.end}"
+    assert first.start <= "2026-10-09T18:27:34" < first.end, "右端要含轮行 ts"
     assert run.state != STATE_ALL_EXCLUDED, "只排掉一条，剩下的要继续算"
 
 
