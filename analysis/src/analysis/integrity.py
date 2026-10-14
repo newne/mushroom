@@ -89,25 +89,29 @@ class LegacyExclusion:
     room_id: str | None = None
     start: str | None = None
     end: str | None = None
+    approved_by: str | None = None
     verified: bool = False
 
 
-#: 显式排除清单（票 17 §3）。**只增不改**；每条都要能说出"为什么"。
+#: 显式排除清单（票 17 §2.5）。**只增不改**；每条都要能说出"为什么、谁批的"。
 LEGACY_EXCLUSIONS: tuple[LegacyExclusion, ...] = (
     LegacyExclusion(
         reason=(
-            "2026-10-09 18:20:05–18:27:16 整轮：35 帧字节完全相同（同一份陈旧近黑帧 "
-            "sha256 41685c09…、92364 B、p99=2.0，S211→S401），而轮行标 ok=1 / 48 帧 / 0 失败。"
-            "该轮是 **legacy 行** —— suspect_duplicate / frame_dup 列当时还不存在、值为 NULL，"
-            "所以**靠标记排不掉**（现在能过滤掉只是因为太黑被质量门顺手丢掉，那是运气）。"
-            "round_id 在 2026-10-09 及更早的行是 NULL（frame-sample-extract.py:38），"
-            "因此本条用实测窗口而非 round_id。"
+            "2026-10-09 那一轮：48 帧里 35 帧字节完全相同（同一份陈旧近黑帧 sha256 41685c09…、"
+            "92364 B、p99=2.0，S211→S401，18:20:05–18:27:16），而轮行看起来完全正常："
+            "`ok=1 / n_results=48 / n_failures=0 / aborted=0`。"
+            "该轮是 **legacy 行**：`suspect_duplicate`/`dup_groups`/`content_check_error` 全为 NULL，"
+            "**靠标记排不掉**（现在能过滤掉只是因为那 35 帧太黑被质量门顺手丢，那是运气不是口径）。"
         ),
-        round_id=None,
-        room_id=None,          # ← **待发版官只读取准**（rounds 行的 room_id）；核准前不生效
+        # 轮行的 round_id **不是 NULL**（`.scratch/deploy-acceptance/round-accident-12038e7a.json` 原文）；
+        # 而**帧行**那一代可能没有 round_id —— 所以两个键都留着，见 suspect_intervals 的优先级。
+        round_id="12038e7ac0334a8bbc1e178793ed5c09",
+        room_id="611",
+        # 窗口两端是**实测帧时间戳**（不是猜的）：帧 18:20:05–18:27:16，轮行 ts=18:27:34
         start="2026-10-09T18:20:05",
-        end="2026-10-09T18:27:16",
-        verified=False,
+        end="2026-10-09T18:27:34",
+        approved_by="Chief 2026-10-14",
+        verified=True,
     ),
 )
 
@@ -176,30 +180,45 @@ def suspect_intervals(
         out[zone] = intervals
 
     # 显式排除清单（legacy 轮没有标记列，只能点名排）——只吃已核准条目。
+    # **两个键**：`round_id` 优先命中；`round_id` 为空（或没查到这个轮）时按时间窗命中。
+    # 命中的行**带原因**：哪条规则命中 + 谁批的 + 为什么。
     for item in active_exclusions(exclusions):
+        rule: str | None = None
+        zone = item.room_id
+        start = item.start
+        end = item.end
+
         if item.round_id:
-            for row in rounds:
-                if str(row.get("round_id") or "") != item.round_id:
-                    continue
-                zone = str(row.get("room_id") or "")
-                ts = str(row.get("ts") or "")
-                if not zone or not ts:
-                    continue
-                times = sorted(str(r.get("ts")) for r in rounds
-                               if str(r.get("room_id") or "") == zone and r.get("ts"))
-                later = [t for t in times if t > ts]
-                end = later[0] if later else _plus_hours(ts, SUSPECT_MAX_SPAN_H)
-                out.setdefault(zone, []).append(Interval(
-                    start=ts, end=end, reason=REASON_LEGACY_EXCLUDED,
-                    bounds=ts, detail=item.reason,
-                ))
-        elif item.room_id and item.start:
-            # legacy：没有 round_id，用**实测窗口**（两端是帧时间戳证据，不是猜的）
-            out.setdefault(str(item.room_id), []).append(Interval(
-                start=item.start, end=item.end, reason=REASON_LEGACY_EXCLUDED,
-                bounds=None, detail=item.reason,
-            ))
-        # room_id 与 round_id 都没有 ⇒ 无法归属，**不排**（宁可少排，也不冤枉别的库房）
+            matched = next((r for r in rounds
+                            if str(r.get("round_id") or "") == item.round_id), None)
+            if matched is not None:
+                rule = "round_id"
+                zone = zone or str(matched.get("room_id") or "") or None
+            if not (start and zone) and matched is not None:
+                # 没有显式窗口（或没有库房）时，退回"该轮行 → 同库房下一轮"的窗口
+                ts = str(matched.get("ts") or "")
+                row_zone = zone or str(matched.get("room_id") or "")
+                if ts and row_zone:
+                    times = sorted(str(r.get("ts")) for r in rounds
+                                   if str(r.get("room_id") or "") == row_zone and r.get("ts"))
+                    later = [t for t in times if t > ts]
+                    start = start or ts
+                    end = end or (later[0] if later else _plus_hours(ts, SUSPECT_MAX_SPAN_H))
+                    zone = row_zone
+
+        if not (zone and start):
+            # 归属不了就不排：宁可少排，也不冤枉别的库房
+            continue
+        if rule is None:
+            rule = "window" if item.start else "round_id"
+
+        who = item.approved_by or "未记录批准人"
+        detail = (f"规则：{'round_id 命中' if rule == 'round_id' else '时间窗命中'}"
+                  f"；批准：{who}；{item.reason}")
+        out.setdefault(str(zone), []).append(Interval(
+            start=start, end=end, reason=REASON_LEGACY_EXCLUDED,
+            bounds=item.round_id, detail=detail,
+        ))
 
     for zone in out:
         out[zone].sort(key=lambda i: i.start)

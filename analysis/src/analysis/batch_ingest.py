@@ -1,4 +1,4 @@
-"""批次台账同步（`mogu.mo_gu_batch` → analysis.batches）。
+"""批次台账同步（pgsql → `analysis.batches`）。
 
 用法::
 
@@ -6,8 +6,9 @@
     python -m analysis.batch_ingest --db mushrooms.db --interval 86400
     python -m analysis.batch_ingest --db mushrooms.db --daily-at 05:20
 
-台账在宿主 docker 的 `tools_mysql` 里，口令只存在于容器 env，本模块用
-`docker exec` 读（与 `deploy-fetch-room` 同一套做法），不把库口令搬进分析服务。
+**取数已改走 pgsql**（用户 2026-10-14 裁定）：`tools_mysql` 是业务数据库、**禁止使用**；
+旧的 `docker exec tools_mysql` 通路已下线。连接串走 `PGSQL_DSN_FILE`（文件优先）或 `PGSQL_DSN`，
+细节见 `analysis/batches.py`。**宿主上那份旧拷贝已停用、待退役**——不要照它排查。
 
 **常驻形态（票 12）**：启动先同步一次，然后按 `--interval` 每 N 秒、或按
 `--daily-at HH:MM` 每天一次（容器本地时区）。全量覆盖 upsert（PK

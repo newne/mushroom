@@ -305,7 +305,8 @@ def create_app(
         """按**生产台账的批次窗口**汇总环境参数，最新在前，供"当前 vs 前两批"对比。
 
         批次边界只能来自台账：环境是连续采集的，换批不会让传感器停（真机证否过
-        "按断档切段"那条路）。台账由 `analysis.batch_ingest` 从 `mogu.mo_gu_batch` 同步。
+        "按断档切段"那条路）。台账由 `analysis.batch_ingest` 从 **pgsql** 同步
+        （2026-10-14 起；业务库 MySQL 已禁用，旧的 `docker exec tools_mysql` 通路已下线）。
         """
         if not (zone or "").strip():
             raise HTTPException(status_code=400, detail="批次对比要指定 zone（批次按库房算）")

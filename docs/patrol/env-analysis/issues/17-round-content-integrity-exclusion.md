@@ -67,17 +67,31 @@
 
 ## 2.5 显式排除清单（legacy 轮：没有标记列，只能点名排）
 
-`analysis/integrity.py` 里的 `LEGACY_EXCLUSIONS`：**只增不改**的清单，每条 `round_id` 或
-`(room_id, start, end)` + 一行原因。**第一条 = 2026-10-09 那轮**：`suspect_duplicate`/
-`frame_dup` 列当时还不存在、值为 NULL，**靠标记永远排不掉它** —— 现在能过滤掉只是因为那
-35 帧太黑会被质量门顺手丢，那是运气不是口径。
+`analysis/integrity.py` 里的 `LEGACY_EXCLUSIONS`：**只增不改**的清单，每条带
+`round_id` **和/或** `(room_id, ts_from, ts_to)` 窗口 + 一行原因 + **批准人**。
+**第一条 = 2026-10-09 那一轮**。
 
-- **两种键**：有 `round_id` 的轮按该轮窗口排；**legacy 行没有 `round_id`**（实测：2026-10-09
-  及更早全为 NULL，`prod-deploy/frame-sample-extract.py:38`）⇒ 用**实测窗口**，两端是帧时间戳
-  证据，**不许编**。
-- **`verified=False` 不生效**：`active_exclusions()` 只吃已核准条目 —— 防止一个还没现场核准的
-  `room_id`/窗口被悄悄写进名单、把好数据排掉。**当前那条的 `room_id` 待发版官只读取准**。
-- 排除时 **`Dropped.detail` 带上人话原因**，"为什么少了这一段"必须答得出来。
+**两个键，优先级写死**（Chief 2026-10-14）：**`round_id` 优先命中**；`round_id` 为空、
+或那一代的**帧行**没有 `round_id` 时，按**时间窗**命中。命中的行 `Dropped.detail`
+带上"**哪条规则命中 + 谁批的 + 为什么**"。
+
+**第一条的证据（原文，发版官只读导出 `.scratch/deploy-acceptance/round-accident-12038e7a.json`）**：
+
+```json
+{"ts": "2026-10-09T18:27:34", "round_id": "12038e7ac0334a8bbc1e178793ed5c09",
+ "ok": 1, "n_results": 48, "n_failures": 0, "aborted": 0,
+ "room_id": "611", "entry_date": "2026-09-30", "batch_no": "mogu-107",
+ "suspect_duplicate": null, "dup_groups": null, "content_check_error": null,
+ "n_duplicate": null, "n_frames_recorded": null, "source": "prod"}
+```
+
+⇒ **轮行的 `round_id` 不是 NULL**（`frame-sample-extract.py:38` 说的那一代大概指**帧行**）；
+窗口两端用**实测帧时间戳** `18:20:05–18:27:16`，轮行 ts（`18:27:34`）作上界。
+**最坑人的一点也记在这里**：这一轮 `ok=1 / 48 帧 / 0 失败`，从轮行完全看不出异常 ——
+它正是页面「未核查」那条分支的样本。
+
+- **`verified=False` 不生效**：`active_exclusions()` 只吃已核准条目 —— 防止一个还没核准的
+  `room_id`/窗口被悄悄写进名单、把好数据排掉。
 - 既没有 `round_id` 也没有 `room_id` 的条目 ⇒ 无法归属 ⇒ **不排**（宁可少排，不冤枉别的库房）。
 
 `source` 标记的排期（Chief 2026-10-14 确认）：**落列 → 测量师发字段 → 再启用排除**，

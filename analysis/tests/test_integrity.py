@@ -38,7 +38,7 @@ def test_suspect_round_window_ends_at_the_next_round():
     rounds = [rnd("2026-10-09T18:20:00", suspect=1),
               rnd("2026-10-09T19:10:00"),
               rnd("2026-10-09T20:00:00")]
-    intervals = suspect_intervals(rounds)
+    intervals = suspect_intervals(rounds, exclusions=())
     assert len(intervals["611"]) == 1
     got = intervals["611"][0]
     assert got.reason == REASON_SUSPECT_ROUND
@@ -47,25 +47,28 @@ def test_suspect_round_window_ends_at_the_next_round():
 
 def test_check_error_round_is_excluded_too():
     """**没查成 ≠ 已确认无重复**：同样排除，但要能说清原因。"""
-    intervals = suspect_intervals([rnd("2026-10-09T18:20:00", check_error="服务超时")])
+    intervals = suspect_intervals([rnd("2026-10-09T18:20:00", check_error="服务超时")],
+                                  exclusions=())
     assert intervals["611"][0].reason == REASON_CHECK_ERROR
 
 
 def test_checked_and_clean_rounds_exclude_nothing():
-    assert suspect_intervals([rnd("2026-10-09T18:20:00"), rnd("2026-10-09T19:00:00")]) == {}
+    assert suspect_intervals([rnd("2026-10-09T18:20:00"), rnd("2026-10-09T19:00:00")],
+                             exclusions=()) == {}
 
 
 def test_last_suspect_round_does_not_exclude_forever():
     """可疑轮没有后继时，窗口必须封顶 —— 否则该库房之后的数据全被永久排除。"""
-    intervals = suspect_intervals([rnd("2026-10-09T18:20:00", suspect=1)])
+    intervals = suspect_intervals([rnd("2026-10-09T18:20:00", suspect=1)], exclusions=())
     item = intervals["611"][0]
     assert item.end == "2026-10-09T19:20:00"
     assert SUSPECT_MAX_SPAN_H == 1.0
 
 
 def test_rounds_without_the_new_columns_stay_clean():
-    """老数据没有这些列 ⇒ 一律照常参与统计（不因"缺标记"而误排）。"""
-    assert suspect_intervals([{"ts": "2026-10-09T18:20:00", "room_id": "611"}]) == {}
+    """老数据没有这些列 ⇒ 标记口径下不误排（显式清单另算，见清单那组用例）。"""
+    assert suspect_intervals([{"ts": "2026-10-09T18:20:00", "room_id": "611"}],
+                             exclusions=()) == {}
 
 
 # ---------- 排除 ----------
@@ -77,6 +80,7 @@ def test_measurements_inside_the_window_are_dropped_with_reasons():
         [measure("2026-10-09T18:25:00"), measure("2026-10-09T19:30:00"),
          measure("2026-10-09T18:25:00", room="612")],
         rounds,
+        exclusions=(),
     )
     assert [row["ts"] for row in kept] == ["2026-10-09T19:30:00", "2026-10-09T18:25:00"]
     assert len(dropped) == 1, "只丢可疑轮里的那一行；别的库房不受影响"
@@ -87,7 +91,7 @@ def test_measurements_inside_the_window_are_dropped_with_reasons():
 
 def test_exclusion_reason_is_none_outside_windows():
     intervals = suspect_intervals([rnd("2026-10-09T18:20:00", suspect=1),
-                                   rnd("2026-10-09T19:10:00")])
+                                   rnd("2026-10-09T19:10:00")], exclusions=())
     assert exclusion_reason(intervals, "611", "2026-10-09T18:00:00") is None
     assert exclusion_reason(intervals, "611", "2026-10-09T19:10:00") is None
     assert exclusion_reason(intervals, "612", "2026-10-09T18:30:00") is None
@@ -105,21 +109,46 @@ def test_frame_dup_boxes_helper():
 
 
 def test_legacy_list_has_the_1009_round_with_evidence():
-    """第一条就是 10-09 那轮，且理由写全（谁排、为什么靠标记排不掉）。"""
+    """第一条就是 10-09 那轮，键、窗口、批准人、"为什么靠标记排不掉"都要写全。"""
     assert LEGACY_EXCLUSIONS, "清单不能空 —— 这就是为了 legacy 轮存在的"
     first = LEGACY_EXCLUSIONS[0]
-    assert (first.start, first.end) == ("2026-10-09T18:20:05", "2026-10-09T18:27:16")
+    assert first.round_id == "12038e7ac0334a8bbc1e178793ed5c09"
+    assert first.room_id == "611"
+    assert (first.start, first.end) == ("2026-10-09T18:20:05", "2026-10-09T18:27:34")
     assert "35 帧" in first.reason and "legacy" in first.reason
-    assert "round_id" in first.reason, "要说清为什么不能用 round_id 做键"
-    assert first.room_id is None and first.verified is False, (
-        "room_id 还没从生产核准 ⇒ 条目存在但**不生效**（宁可少排，也不冤枉别的库房）"
+    assert "ok=1" in first.reason, "要记下'轮行看起来完全正常'这个最坑人的点"
+    assert first.approved_by == "Chief 2026-10-14"
+    assert first.verified is True, "已核准 ⇒ 生效"
+
+
+def test_the_1009_round_is_actually_excluded_now_with_reason():
+    """生效后：该轮窗口内的测量行被排除，且能说出'哪条规则命中、谁批的'。"""
+    kept, dropped = partition(
+        [measure("2026-10-09T18:22:00"), measure("2026-10-09T18:22:00", room="612"),
+         measure("2026-10-09T21:20:00")],
+        [{"ts": "2026-10-09T18:27:34", "room_id": "611",
+          "round_id": "12038e7ac0334a8bbc1e178793ed5c09"}],
     )
+    assert [r["ts"] for r in kept] == ["2026-10-09T18:22:00", "2026-10-09T21:20:00"]
+    assert len(dropped) == 1 and dropped[0].zone == "611"
+    assert dropped[0].reason == REASON_LEGACY_EXCLUDED
+    detail = dropped[0].detail or ""
+    assert "round_id 命中" in detail and "Chief 2026-10-14" in detail
+    assert dropped[0].window == "2026-10-09T18:20:05~2026-10-09T18:27:34"
+
+
+def test_window_key_covers_legacy_rows_without_round_id():
+    """帧行那一代可能没有 round_id ⇒ 即便 rounds 里查不到该轮，时间窗仍要排掉。"""
+    kept, _ = partition([measure("2026-10-09T18:25:00")], [], exclusions=LEGACY_EXCLUSIONS)
+    assert kept == [], "没有轮行也要能靠时间窗排掉（两个键的意义就在这里）"
 
 
 def test_unverified_entries_do_not_exclude_anything():
-    """没核准的窗口不许悄悄排数据：默认清单里那条不生效。"""
+    """没核准的窗口不许悄悄排数据。"""
+    entry = LegacyExclusion(reason="还没批", room_id="611",
+                            start="2026-10-09T18:20:05", end="2026-10-09T18:27:34")
     rows = [measure("2026-10-09T18:22:00")]
-    kept, dropped = partition(rows, [], exclusions=LEGACY_EXCLUSIONS)
+    kept, dropped = partition(rows, [], exclusions=(entry,))
     assert len(kept) == 1 and dropped == []
 
 
