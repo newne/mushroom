@@ -176,3 +176,18 @@ cp -a /tmp/env.now .env                   # ★ 立刻复原新 tag，否则 pat
 | 验收 | 页面 8002 = **200**；`/api/rounds?limit=1` = 200；`/api/measurements?room_id=611` = 200；**六容器全 healthy** |
 
 回滚：`cp -a index.html.bak-20261014-105659 index.html`（前一份备份 `index.html.bak-20261014-100904` 也还在，指向更早的 `793c023c…`）。
+
+## 7. 第三条交付通道：`/ranges` 在 analysis:8000，页面够不着（2026-10-14 记）
+
+analysis 重建后（票 01 §8.5）`GET http://127.0.0.1:8000/ranges` 返回**信封**；但
+**`GET http://127.0.0.1:8002/api/ranges` = 404**。
+
+原因：页面 nginx 只把 `/api/*` 反代到 **console:8001**，而 `/ranges` 是 **analysis:8000** 的路由、**且不带 `/api` 前缀**；
+`console.py` 里也**没有** `/api/ranges` 这条只读代理。
+
+⇒ **页面要直接读 ranges，必须先在 console 侧补一条只读代理**（归界面师，Chief 2026-10-14 已认领派单）。
+本票只记这条通道事实：**前端 → nginx:8002 `/api/*` → console:8001 →（需要新增代理）→ analysis:8000 `/ranges`**。
+发布前后都如此，**不是 2026-10-14 那次发布的缺陷**。
+
+**给后续发布的一条**：改这条通道只涉及 console（重建容器）+ 页面（scp），**不涉及 analysis 重启**；
+但别忘了 `PATROL_IMAGE` 是共享变量 —— 重建 console 会把它带到 `.env` 里当前那个 tag（现在 = `46ca2f2`）。
