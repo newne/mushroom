@@ -110,6 +110,59 @@ def test_no_fruitbodies_on_flat_frame():
     assert fruits == [] and diag["n_instances"] == 0
 
 
+# ---------- 袋肩门（2026-10-14：72–83% 的 L3 实例是袋面纹理） ----------
+
+def _bag(cy=1000.0, height=200, row_id=2, x0=800, x1=1000):
+    from measure.bag_ruler import BagRegion
+    return BagRegion(x0=x0, y0=int(cy - height / 2), x1=x1, y1=int(cy + height / 2),
+                     centroid_y=cy, centroid_x=(x0 + x1) / 2.0,
+                     width_px=x1 - x0, height_px=height, area_px=(x1 - x0) * height,
+                     width_profile=np.full(height, x1 - x0), row_id=row_id,
+                     contrast=100.0, sigma=25.0)
+
+
+def _fruit(base_y, *, cx=900.0, cy=None, h=30, w=20):
+    from measure.fruitbody import FruitInstance
+    cy = base_y - h if cy is None else cy
+    return FruitInstance(cx=cx, cy=cy, x0=int(cx - w / 2), y0=int(cy - h / 2),
+                         x1=int(cx + w / 2), y1=int(cy + h / 2),
+                         height_px=h, width_px=w, area_px=h * w,
+                         base_y=base_y, tip_y=base_y - h, on_bag=True)
+
+
+def test_above_bag_top_keeps_shoulder_drops_surface_texture():
+    """袋顶线 = 1000−200/2 = 900。base_y ≤ 910 留；扎在袋体内部的丢。"""
+    from measure.estimate import filter_above_bag_top
+
+    bags = [_bag()]
+    shoulder = _fruit(base_y=895)      # 长在袋顶上 ⇒ 留
+    on_edge = _fruit(base_y=905)       # 袋顶线附近（margin 10）⇒ 留
+    surface = _fruit(base_y=980, cx=850)   # 袋体内部 ⇒ 袋面纹理，丢
+    kept, diag = filter_above_bag_top([shoulder, on_edge, surface], bags, margin_px=10)
+    assert [k.base_y for k in kept] == [895, 905]
+    assert diag["above_bag_top"] == 2 and diag["inside_bag_body"] == 1
+    assert diag["kept_frac"] == pytest.approx(2 / 3)
+
+
+def test_above_bag_top_is_fail_closed_for_unassignable_instances():
+    """同排找不到袋 ⇒ 证不了它长在袋上，丢弃（不猜、不默认保留）。"""
+    from measure.estimate import filter_above_bag_top
+
+    bags = [_bag(cy=1000.0, row_id=2)]
+    far = _fruit(base_y=100, cy=100)   # 离袋 900px，超出 row_band ⇒ 未归属
+    kept, diag = filter_above_bag_top([far], bags)
+    assert kept == [] and diag["unassigned"] == 1 and diag["kept_frac"] == 0.0
+
+
+def test_above_bag_top_handles_no_bags_and_no_instances():
+    from measure.estimate import filter_above_bag_top
+
+    assert filter_above_bag_top([], [_bag()]) == ([], {"kept": 0, "above_bag_top": 0,
+                                                      "inside_bag_body": 0,
+                                                      "unassigned": 0, "kept_frac": 0.0})
+    assert filter_above_bag_top([_fruit(base_y=895)], [])[0] == []
+
+
 # ---------- 估算层 ----------
 
 def _one_instance_and_bag():

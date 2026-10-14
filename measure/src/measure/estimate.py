@@ -103,6 +103,43 @@ def local_scale(instance: FruitInstance, bags: list[BagRegion], *,
                        f"同排菌包 #{bag.row_id} 在 y={instance.cy:.0f} 处宽 {ref_px:.0f}px")
 
 
+def filter_above_bag_top(instances: list[FruitInstance], bags: list[BagRegion], *,
+                         margin_px: float = 10.0) -> tuple[list[FruitInstance], dict]:
+    """只留**长在袋肩上方/袋顶线附近**的实例（L3 的袋肩门）。
+
+    为什么必须有这道门（2026-10-14 实测，帧 `20261013_S401_level0_145911.jpg` /
+    `20261013_S110_level0_152136.jpg`，2880×1616）：L3 默认配置在袋肩 ROI 上出
+    **221–235 个实例/帧**，但按"实例底端 `base_y` 与所属袋的袋顶线"分类，
+    **72–83% 落在袋体内部**（袋顶线以下）——那是**袋面纹理**，不是菇体；
+    只有 **16–27%** 在袋肩上方。不设门，交付的"菌簇直径"会把整袋宽量进去
+    （实测袋级簇宽 291–426 mm、最大 925 mm，明显不是菌簇）。
+
+    规则：
+    - 实例归属用 `nearest_bag_in_same_row()`（**禁止跨排**）；
+    - `base_y <= 袋顶线 + margin_px` ⇒ 留下（长在肩上的菇是从袋顶往上长的）；
+    - 找不到同排袋的实例 ⇒ **丢弃**（fail-closed：证不了它长在袋上，不猜）。
+
+    返回 ``(保留的实例, 诊断 dict)``；诊断里的计数供日志/评估引用。
+    """
+    kept: list[FruitInstance] = []
+    above = inside = unassigned = 0
+    for inst in instances:
+        bag = nearest_bag_in_same_row(bags, inst.cy, None, x=inst.cx) if bags else None
+        if bag is None:
+            unassigned += 1
+            continue
+        bag_top = bag.centroid_y - bag.height_px / 2.0
+        if inst.base_y <= bag_top + float(margin_px):
+            above += 1
+            kept.append(inst)
+        else:
+            inside += 1
+    diag = {"kept": len(kept), "above_bag_top": above,
+            "inside_bag_body": inside, "unassigned": unassigned,
+            "kept_frac": (len(kept) / len(instances)) if instances else 0.0}
+    return kept, diag
+
+
 def propagate_uncertainty(*, mean_len_px: float | None, ref_px: float | None,
                           mm_per_px: float | None, depression_deg: float | None,
                           cfg: EstimateConfig | None = None) -> tuple[float | None, str]:
