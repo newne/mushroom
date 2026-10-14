@@ -106,8 +106,54 @@ python measure/tools/make_annotation_sheet.py --out .scratch/annotation-20 --n 2
 
 产物：`.scratch/annotation-20/{frames.csv, instances.csv, overlays/*.jpg, README.md}`。
 
-## 5. 复核完成后产出什么（写回票 15）
+## 4.5 离线复核页（把"923 行手改"变成"点选"）
 
+**文件**：`measure/tools/review_annotation.html`（**单个 HTML**，无服务、无依赖、**双击即开**，离线可用）。
+
+**怎么用（三步）**：
+
+1. 双击打开该 HTML（Chrome/Edge 均可）；
+2. 顶部 **"工单目录"** 选 `.scratch/annotation-20/` 整个目录（`webkitdirectory`；
+   或分别选 `frames.csv` / `instances.csv` / `dropped.csv` + `overlays/*.jpg`）；
+3. 逐帧复核 → 点 **导出 CSV**（得到 `instances.csv` + `frames.csv`，**列名与顺序与输入完全一致**，
+   行尾与 BOM 也随输入保留）。
+
+**页面上能做什么**（对应 §1.5 的"四件事"）：
+- 点框选中 → **拖动改框**（自动 `edited`）、**右下角拖动缩放**；
+- **确认** / **删除**（写 `rejected`，**行保留不真删**）；
+- **＋ 新增框**：在画面上拖一个矩形 ⇒ `human_added`；**若压在被门丢掉的候选上，自动写
+  `gate_false_negative`**；
+- `occluded_frac` / `truncated` / `height_valid` / `ignore` / `category` **一律下拉**（不许自由文本）；
+- 可开关"**显示被门丢掉的候选**"（红框来自工单新增的 `dropped.csv`，见 §2.3）；
+- `reviewer` 与 `review_date` 在**导出时**自动回填到 `frames.csv`（只回填真有复核动作的帧）。
+
+**硬约束（Chief 2026-10-14）逐条落地**：① 坐标一律**原图 px / 2880×1616**（页面直接以原图尺寸画布，
+缩的只是 CSS 显示）✔；② 导出**列名/顺序/取值域与输入一致**（`serializeCSV` 用输入的表头顺序，
+并按输入嗅探 CRLF/BOM 原样保留）✔；③ 删掉的框**写 `rejected` 保留行** ✔；④ **不联网、不起服务、无依赖** ✔。
+
+**验证（无浏览器环境下做过什么）**：
+- `node --check` 通过（页面脚本语法）；
+- **纯函数往返**（Node 载入页面脚本）：读真工单 923 行 → 确认 1、改框 1、删除 1、新增 1
+  （压在被门丢掉的候选上）→ 导出 ⇒ **表头与输入逐字相同**、**换行保持 CRLF**、行数 923→924、
+  新行 `reviewer_note=gate_false_negative`；
+- **下游可读性**：导出文件被普通 `csv` 读回，**列名与顺序一致（19 列）**、
+  `review_status`/`source` 计数正确，并可算出 P/R 骨架
+  （precision = (确认+改框)/(确认+改框+拒)；recall = (确认+改框)/(确认+改框+人补)）。
+
+### 2.3 `dropped.csv`（被袋肩门丢掉的候选，**只给复核页画红框**）
+
+| 列 | 说明 |
+| --- | --- |
+| `frame_id` / `candidate_id` | 帧与候选号（`…-D001`） |
+| `bbox_x0/y0/x1/y1` | **原图 px** |
+| `reason` | `inside_bag_body`（钉在袋体内部=袋面纹理）/ `unassigned_no_same_row_bag` / `other` |
+| `bag_id` | 归属袋（能归属时） |
+
+**它不进 `instances.csv`**：2819 个候选逐条进 CSV 就等于让人做几千次"拒绝"，
+而复核页把它们画成红框、只在"确实是菇"时才点新增（新增行会自动带上 `gate_false_negative`）——
+**既省人时，又保住了门漏检的计数**。
+
+## 5. 复核完成后产出什么（写回票 15）
 1. **L1**：菌包 precision/recall、袋宽 px 的一致性（预标注 vs 人工 ⇒ **分割误差**，不是像素测量误差）；
 2. **L3**：菇体实例 precision/recall（`rejected` 率 = 假阳、`human_added` = 漏检）；
 3. **袋肩门**：假阴/假阳率（红框侧 + `gate_false_negative`）；
