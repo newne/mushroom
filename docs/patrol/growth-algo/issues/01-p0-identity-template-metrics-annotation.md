@@ -17,7 +17,7 @@
 | 键 | 表达 | 结论 |
 | --- | --- | --- |
 | `AnchorKey` | `room_id`=`images.room_id`；`rack_id`=常量 `M1`；`layer_id`=`Station.layer`；`anchor_id`=**`images.station_id`（S101…S412，共 48）** | 现成，48 锚点 ↔ 48 站位一对一 |
-| `image_id` | `images` 主键 `(ts, station_id, angle_profile)` | 现成 |
+| `image_id` | **派生确定性非空键** `"{YYYYMMDD}T{HHMMSS}.{station_id}.{angle_profile}"`（如 `20261013T092634.S406.level0`；叫不出身份的帧退化为 `"file.{stem}"`，**绝不为空**） | **Chief 裁定（2026-10-14）**：**同一记录里同时带原始字段四元组** `raw_key={room_id, ts, station_id, angle_profile, source_file}`——`images` 主键仍是 `(ts, station_id, angle_profile)`，但**不作 `image_id`** |
 | `ObservationKey` | 追加 `observation_cycle_id` | **新表 `anchor_cycles`**（未批前用 `(room_id,station_id,entry_date,batch_no)` 临时键 + `cycle_id_tentative=true`） |
 | `ResultKey` | 版本四元组 `pipeline/model/roi/calibration_version` | `measurements` 表达不了 ⇒ **三层离线表** `frame_results/bag_results/cap_results`（DDL 交环境官） |
 
@@ -70,7 +70,7 @@ ResultKey      = (image_id, pipeline_version, model_version, roi_version, calibr
 | `col` | `Station.col` ＝ `station_id` 后两位 | 可直接表达 |
 | `anchor_id` | **`images.station_id`（`S101`…`S412`，48 个）** | **可直接表达** |
 | `rack_id` | **不存在**（现场单台相机 `CAMERA_IP="192.168.1.238"`、一层 12 框 × 4 层） | **需常量兜底**：建议 `rack_id="M1"`；**待确认是否只有一列货架** |
-| `image_id` | `images` 主键 **`(ts, station_id, angle_profile)`** | **可直接表达**（就用这个三元组当 `image_id`） |
+| `image_id` | **派生非空键**（见 §0.1）＋随行 `raw_key` 四元组 | **可直接表达**；主键 `(ts, station_id, angle_profile)` 保留作**来源四元组**，不当 `image_id`（Chief 裁定） |
 | `observation_cycle_id` | **不存在** | **需新表/新列**（见 1.4） |
 | `pipeline_version` / `model_version` / `roi_version` / `calibration_version` | **都不存在**（`measurements` 主键是 `(ts, room_id, box_id)`，无版本维度） | **`ResultKey` 无法用 `measurements` 表达 ⇒ 必须新表**（见 1.5） |
 
@@ -125,7 +125,7 @@ ResultKey      = (image_id, pipeline_version, model_version, roi_version, calibr
 | 字段 | 类型 | 必填 | 说明 / 取值规则 |
 | --- | --- | --- | --- |
 | `room_id` / `rack_id` / `layer_id` / `anchor_id` | 文本 | ✔ | 锚点键（§1） |
-| `reference_image_id` | 文本 | ✔ | = 参考帧的三元组 `(ts, station_id, angle_profile)`；**选取规则**：质量门通过 + 对齐稳定 + 菌包与袋顶清晰 + 不含临时遮挡（人挑，复核） |
+| `reference_image_id` | 文本 | ✔ | = 参考帧的**派生 `image_id`**（§0.1）＋随行来源四元组 `(room_id, ts, station_id, angle_profile)`；**选取规则**：质量门通过 + 对齐稳定 + 菌包与袋顶清晰 + 不含临时遮挡（人挑，复核） |
 | `reference_image_size` | `(w,h)` | ✔ | 必须 **2880×1616**；不符 ⇒ 记 `resolution_mismatch`（Plan §6.1） |
 | `static_background_mask` | 掩码文件 + sha256 | ✔ | **只含稳定结构**（货架/管线/背景）；**不得包含菌包、菌簇、菌帽** |
 | `front_roi_polygon` | 多边形（N×2，原图坐标） | ✔ | **前排限定**；不跨到后排（Plan §7.2）；**不逐帧随检测结果改变** |
@@ -302,12 +302,16 @@ H_profile = (1/|V|) · Σ_{x∈V} [ b(x) − t(x) ]        # 单位：原图像�
 3. 回读判据按票 02 §6.2 四条执行：对象数与类别逐条一致；几何在容差内；**属性键值逐条一致或显式产出丢失清单（不许静默丢）**；坐标恒 `2880×1616`。
 4. **实测结论（2026-10-14，运维跑 `xlabel2coco --mode segment`）**：COCO 的 annotation **只剩
    `area/bbox/category_id/id/ignore/image_id/iscrowd/segmentation`** ⇒ **`attributes`、`group_id`、帧级 `flags` 全丢**。因此：
-   - **主档案 = XLABEL JSON（无损，唯一权威）**；COCO 只是训练派生物，**不许当归档**；
+   - **红线：主档案 = XLABEL JSON（无损，唯一权威）**；COCO 只是训练派生物，**不许当归档**；
    - **必须自建 join 转换器**（P1 待建；**写码按红线需 Chief 批，未批不写**）：
      输入 = 图目录 + XLABEL JSON + `labels.txt`；输出 = COCO `segment` + 侧车 `objects.json`
      （`filename` / `shape_index` / `label` / `group_id` / 全部属性 / 帧级 flags）；
    - 硬规则：join 键 `(filename, shape_index)` **1:1 可断言**（对不上报错，不许静默配错）；
      `review_status=rejected` 的对象**要么落 `iscrowd=1`、要么落侧车标记**，不许悄悄消失；类别顺序按 `labels.txt` 行序固定。
+   - **已落地（2026-10-14，Chief 授权）**：`docs/patrol/growth-algo/tools/xlabel_coco_join/`（`convert_xlabel.py` + 用例 + README）。
+     **本工具不进任何镜像**——它不在 measure/patrol/analysis/deploy/web 任何一个被镜像复制的目录里（结构性保证）。
+     证据：正跑 1 帧真样例 6 shape ⇒ COCO 5 ann + 侧车 6、`bag_top` 折线进丢失清单点名；**8/8 用例绿**；
+     反向自证：抽掉 1:1 检查 ⇒ 2 条用例红（6/8），`rejected` 改 `iscrowd=0` ⇒ 1 条红（7/8），还原后 sha256 一致。
 5. **未实测项（P1 第一件）**：~~客户端实际版本与文档是否一致~~ ⇒ **已核（2026-10-14，无需 GUI）**：
    本文档依据的上游 commit `a7d2765` 里 `anylabeling/app_info.py` 的 `__version__ = "4.1.1"`，与客户端实测 `4.1.1 / CPU` 一致；
    仍需实测（**被 GUI 的 GL 阻塞**，等窗口能开）：**帧级 flags 的手工设置路径**（文档只写模型预测后到 `Ctrl+3` 改，纯人工怎么设要实测；不行就退到 `View -> Image Tags`（`Ctrl+Shift+T`）写 `cap_state:clear` 这类固定串）。
