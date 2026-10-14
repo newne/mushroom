@@ -8,9 +8,6 @@ dependencies = [
     "httpx>=0.27",
 ]
 
-[tool.uv.sources]
-patrol = { workspace = true }
-
 [project.scripts]
 patrol-m1 = "deploy.m1:main"
 deploy-fetch-room = "deploy.fetch_room:main"

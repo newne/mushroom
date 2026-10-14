@@ -6,21 +6,18 @@ requires-python = ">=3.12"
 dependencies = ["patrol", "measure", "analysis", "deploy"]
 
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+dev = ["pytest>=8.0", "ruff>=0.6", "pillow>=12.2"]
 
 # 为什么是两个项目而不是一个 workspace（ADR-0012 修订）：把我们的包并进根项目，
 # uv 会重算他们那份锁——实测一次 `uv lock` 动了 **84 个包**（fastapi 0.133→0.136、
 # transformers 5.2→5.9、redis 7.2→8.0…），而那是要进生产镜像的依赖集。
 # 拆成两个互不干扰的项目后，根目录的 `pyproject.toml` 与 `uv.lock` **一个字节都不变**，
 # 巡检这边的依赖也独立演进（两个镜像本来就该各带各的锁）。
-[tool.uv.workspace]
-members = ["../patrol", "../deploy", "../measure", "../analysis"]
-
 [tool.uv.sources]
-patrol = { workspace = true }
-measure = { workspace = true }
-analysis = { workspace = true }
-deploy = { workspace = true }
+patrol = { path = "../patrol", editable = true }
+measure = { path = "../measure", editable = true }
+analysis = { path = "../analysis", editable = true }
+deploy = { path = "../deploy", editable = true }
 
 [tool.ruff]
 line-length = 100
