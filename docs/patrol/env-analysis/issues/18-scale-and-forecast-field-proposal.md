@@ -47,8 +47,9 @@
 
 ### 1.3 菌帽后续长度（预测，provisional）
 
-**固定目标时点**：未来 **3 天**、未来 **5 天**；**若知道采收日**，再加"到采收日"那一条。
-放在**单独一张表**（§3），不混进 `measurements`。
+**固定目标时点**：未来 **3 天**、未来 **5 天**（这两条照排）；**"到采收日"那条不排期** ——
+2026-10-14 实测 `mushroom_batch_yield.harvest_time` 填充率 **0/27** 且没有任何写入路径
+（证据见 §6.3），**待有填充来源后再排**。放在**单独一张表**（§3），不混进 `measurements`。
 
 ---
 
@@ -132,11 +133,24 @@
 | 8b | **"远排"判据** | 由测量师定（按站位层级/成像分辨率/置信度哪个维度判），我这边只按 `unreliable` 标记过滤 |
 | 10 | 外接框面积的**平均口径** | 是"逐实例 bbox 面积取均值"还是"所有实例的外接框并集面积"？两者数值差很多，必须写进列注释（我建议**逐实例均值**，与 `mean_area_mm2`/`mean_cluster_w_mm` 的"均值"口径一致） |
 
-### 6.3 待核事实
+### 6.3 已核事实（发版官只读实测 2026-10-14）
 
-| # | 事项 | 怎么核 |
+| # | 事项 | 结论 |
 | --- | --- | --- |
-| 9 | **采收日**从哪来、是否可排期 | 先核 pgsql `mushroom_batch_yield.harvest_time` 的**填充率**（谁填、覆盖多少）：`SELECT count(*) AS n, count(harvest_time) AS n_filled FROM mushroom_batch_yield;` 填得出来才排"到采收日"那条预测；**3 天/5 天两条不受影响**（发版官只读，已请他补这一条） |
+| 9 | **采收日排不排期** | **排不了。`harvest_time` 填充率 = 0/27（0%），且没有任何路径在填它** —— 见下方的完整证据链。⇒ "**到采收日**"那条预测**当前没有目标时点**，**待有填充来源后再排**（不留看起来能跑的空壳）。**3 天 / 5 天两条不受影响，照排。** |
+
+**证据链（发版官提供，全部只读）**：`SELECT count(*) , count(harvest_time)` = `27 / 0`，
+四库房逐条也是 0（607/608/611/612 = 7/7/5/8 行，填充全 0），`last_harvest` 为空；
+**不止 `harvest_time`** —— `fresh_weight`/`dried_weight`/`human_evaluation` 也**全部 NULL**，
+全表实际只承载 `(room_id, in_date, stat_date)` 三个事实。
+"没有人填、也没有自动化填"的证据：① 27 行 `version` 全 = 1 且 `create_time`=`update_time` 逐行相等 ⇒ **只插不改**；
+② `pg_stat_user_tables` 里 `mushroom_batch_yield` 的 `n_tup_ins=8`、`n_tup_upd=**0**`；
+③ `mushroom_batch_yield_audit` **0 行**（那张表就是给人工改动记 before/after + operator 的）；
+④ `pg_trigger` **零行** ⇒ 不是 DB 侧自动填；⑤ `create_time` 呈自动化节律（多行落在整点 05:00:00.3xx，
+最近 8 行 = 上述 8 次插入）；⑥ 当前唯一客户端是算法侧容器 **`mushroom_solution`**（`172.21.0.6`）。
+
+⇒ **要用"到采收日"，先得有人回答"谁把 `harvest_time` 写进 `mushroom_batch_yield`"**；
+在那之前这条预测**不排期**（不拿 `stat_date` 或别的列凑目标时点）。
 
 ## 7. 本票不做
 
