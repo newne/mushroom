@@ -27,7 +27,11 @@
 - `height_uncorrected`：**未做 cosθ 补偿的竖直投影跨度（mm）**，**不是长度**；
   与 `estimate` 并存，与 `no_theta` 同时出现；**不进 `verified`/区间表/建议层**，
   只能作相对比较（同站位、同档、同 `imaging_profile`）。
-  默认开关关（`allow_uncorrected_height=False`），开启时机由 Chief 定。
+  **两个入口的默认值不同，读口径要认准是哪条路**（2026-10-14 核对）：
+  `measure.estimate.estimate_cluster` 默认**关**（`allow_uncorrected_height=False`），
+  而 **L3 / 生产路径**（`measure.l3.L3Config`、`measure.production.make_measure_fn`）默认**开**。
+  ⇒ 生产行在 θ 未注入时会**带值 + 挂本标记**；若某天看到的是 NULL + 仅 `no_theta`，
+  说明走的是 estimate 那条默认关的路，而不是"θ 已校"。
 
 ## `scale_source` 枚举（本侧定名，测量侧同步）
 

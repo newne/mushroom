@@ -144,7 +144,11 @@ contract.field_is_usable(quality, estimated_fields, field) -> bool
 - **`height_uncorrected`**：**不是长度**、与 `estimate` 并存、**不进 `verified`/区间表/建议层**，
   只作相对比较（同站位/同档/同 `imaging_profile`）。用例
   `test_height_uncorrected_row_keeps_its_values_and_stays_out_of_verified_stats`
-  （值留得住，但 `compute_ranges` 一行都不出）。开关仍是默认关，**开启时机由 Chief 定**。
+  （值留得住，但 `compute_ranges` 一行都不出）。
+  **两个入口默认值不同（2026-10-14 核对，读口径要认准）**：`measure.estimate.estimate_cluster`
+  默认**关**；而 **L3 / 生产路径**（`measure.l3.L3Config`、`measure.production.make_measure_fn`）
+  默认**开** ⇒ 生产行在 θ 未注入时**带值 + 挂本标记**；看到 NULL + 仅 `no_theta`
+  说明走的是默认关的那条路，**不是"θ 已校"**。
 
 ### 两侧契约
 
