@@ -2527,7 +2527,11 @@ function wireMosaicResize(){
    纯前端，不新增后端：逐轮问 /api/images?round_id=…&station_id=…，图仍走 /api/image
    同源代理（ADR-0003，页面不直连 MinIO）。
 
-   ⚠️ 一帧约 750 KB（1080×648），所以默认只铺 CMP_DEFAULT_SHOWN 天、其余按需展开；
+   ⚠️ 一帧 ≈700 KB（**2880×1616**，4.65 MP；实测 279 KB–1.12 MB/帧），所以默认只铺
+   CMP_DEFAULT_SHOWN 天、其余按需展开；
+   （2026-10-14 更正：这里原写"750 KB（1080×648）"——**分辨率是错的**，
+   2026-10-13 现场只读取证 25/25 帧全是 2880×1616，
+   见 `docs/patrol/prod-deploy/container-cutover.md` §21。）
    缩略图能力（票 08）到位后把这里的图片地址换成缩略图即可，其余逻辑不用动。 */
 const CMP_FRAME_LIMIT = 20; // 每轮最多取几帧：一个站位在几何上只有一帧，留余量防重复帧
 
