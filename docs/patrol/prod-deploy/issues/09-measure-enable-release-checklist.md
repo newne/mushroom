@@ -44,12 +44,39 @@
 | 5 | 重建 analysis（`2b24ead`/`58bb197`/`3c30feb` + `BATCH_AT=05:20` + 显式 `PATROL_ANALYSIS`）+ ④ `analysis.batch_ingest` | **一并按住**（按"容器不动"执行，等 Chief 明确是否放行） | 该次改动**已规划未执行**：构建点、compose 两行 diff、④ 判据（27 行 / `n_pruned=11` / `n_missing_batch_no=5` / `batch_no` 非空 22 / `batches_state.refreshed_at`）都留档在本节，随时可接 |
 | 6 | 票 04 `/ranges` 代理缺口、票 08 锁修法等已交付项 | 已交付，不在挂起范围 | — |
 
-### 5.1 挂起带来的一处**副作用（需裁决，不是我自行决定）**
+### 5.1 挂起带来的一处**副作用**（Chief 2026-10-14 15:3x 裁定：**接受陈旧**，但有硬边界）
 
 容器不动 ⇒ **容器内没有 `BATCH_AT`**，而宿主 `mushroom-batch-ingest.timer` 已于 2026-10-14 10:28:35 停用
 ⇒ **从 2026-10-15 07:20 起 `batches_state` 会被判 stale（物化最后刷新停在 2026-10-14 05:20:06）**。
-两条路：**(a)** 接受台账变 stale（本期主交付是离线簇趋势，不影响）；**(b)** 只放行第 5 项里的 `BATCH_AT=05:20` 一行 + 重建 analysis 让容器内定时恢复。
-**在 Chief 明确之前我不动生产。**
+
+**① 陈旧必须"可见"——`stale` / `stale_after_h` 的真实状态（我核过代码与线上，两级不同，别混）**
+
+| 层级 | 状态 | 证据 |
+| --- | --- | --- |
+| **仓库代码/用例** | **已具备** ✅ | 生产者：`analysis/src/analysis/api.py:53`（`_stale_after_h()`，默认 **26h**，`BATCH_STALE_AFTER_H` 可调）、`:457` 算 `stale`、`:473-474` 出 `stale`/`stale_after_h`；用例：`analysis/tests/test_batches_endpoint.py`（`stale_after_h == 26.0`、"从没刷过不许假装新鲜"）。消费端：`deploy/src/deploy/fetch_room.py:122-126`（`stale=true` ⇒ **报"台账陈旧"、保留旧 `room.yaml`**）、缺字段**直接红**（`deploy/tests/test_fetch_room.py:147`） |
+| **线上运行态** | **尚未具备** ❌ | 线上 analysis = `…c3dcbc5`（13:07 镜像）**不含该端点**：2026-10-14 15:3x 实测 `GET http://127.0.0.1:8000/batches?room_id=611` → **404**（patrol 容器内同路径 14:16 也实测 404） |
+
+⇒ **"页面显示 stale" 的硬前置 = 先做一次 analysis 重建**（不是可选的美化项）。重建后 `stale`/`stale_after_h` 才在线上；前端接显示时**不要自己算 26h**，按响应字段用（阈值可由 `BATCH_STALE_AFTER_H` 调）。
+
+**② 恢复动作的"就绪清单"（Chief 要求随时一条命令可放行；我这边全部预置）**
+
+1. **compose diff**：analysis 服务加两行 —— `BATCH_AT=05:20`（与既有 `RANGES_AT=05:10` 同形）+ `PATROL_ANALYSIS=http://172.17.0.1:8000`（显式写，不靠代码默认）；档案在 `/home/sysadmin/algorithm/mushroom_service/mushroom_solution.yml`，改前带时间戳备份；
+2. **构建点与门禁**：构建点要干净 → 在**该 commit 点**跑全量门禁（锁派生干净环境 `UV_PROJECT_ENVIRONMENT=/tmp/gatevenvN`，默认 editable）→ 记录 N passed / 0 failed；
+3. **镜像内自查**：`import psycopg` OK、四包 import、信封代码在、`python -c "import measure.contract"` 能过、DSN 可读（`/etc/mushroom/pgsql.dsn` 同路径 `:ro` 已挂）、revision 归属按"工作区字节/去 `\r`"核；
+4. **发布动作**：只重建 `mushroom_analysis`（`--no-deps`，patrol/console 不动）；先核**无轮次窗口**；
+5. **迁移核 + 健康检查 + 复验**：`rounds`/`images` 行数不变、`ranges_state` 仍在、`batches_state` 一行、七容器 healthy；patrol 容器内真调 `GET {PATROL_ANALYSIS}/batches?room_id=611` 应 **200**（现 404）；
+6. **④ 手动 `analysis.batch_ingest` 一次**：判据 **27 行 / `n_pruned=11`（逐字等于预登记 11 键）/ `n_missing_batch_no=5` / `batch_no` 非空 22 / `batches_state.refreshed_at` = 本次时间**；实际 ≠ 集合就原样发打印、不硬掰。
+
+**③ 硬边界（Chief 定的那条我照记账，并补一条我实测到的缺口）**
+
+- Chief：`room.yaml` 的 `entry_date` 固定 `2026-09-30`、**day 25 ≈ 2026-10-25**，之后准入窗口关掉、**巡检会停摆**；**最迟 2026-10-20 之前要放行一次 analysis 重建**（只重建 analysis、只加那两行）。
+- **我补的实测缺口（重要，别把"重建"当"救活"）**：2026-10-14 15:3x 只读复查 ——
+  - **没有任何调度器在跑 `deploy-fetch-room`**：`systemctl list-timers --all | grep -iE 'mushroom|fetch'` → **none**；`crontab -l` → **no crontab for root**；
+  - `room.yaml` 仍是 **2026-10-06 21:01:10 / 683 B**；patrol 容器 19 小时内日志里 `fetch-room|room.yaml` 命中 **0** 次；
+  - ⇒ **放行 analysis 重建只解决"端点可用 + 台账新鲜"，不解决"room.yaml 被刷新"**——后者还需要**有人给 `deploy-fetch-room` 一个调度**（`docker/patrol-entrypoint.sh:29` 有 `fetch-room` 角色，但没有 service/定时器在调它）。
+  - **归属提醒**：`deploy/**` 是别的写者的领地，我不动；这条要 Chief 指定归属并排期，否则 10-20 的硬边界照旧破。
+
+**在 Chief 明确之前我不动生产**（当前容器状态与 15:3x 复查一致：analysis/console = `c3dcbc5`、patrol = `89e4a54`、其余另五个 mushroom 容器未动）。
 
 ### 5.2 同窗口结案/未结的现场动作（诚实记账）
 
