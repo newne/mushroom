@@ -11,8 +11,8 @@
 
 | 来源 | 标记 | 处置 |
 | --- | --- | --- |
-| 帧行 | `images.frame_dup = 1`（+ `dup_group` 同指纹组） | 该帧不许进统计 |
-| 轮行 | `rounds.suspect_duplicate = 1`（+ `dup_groups`） | **整轮**的帧不许进统计 |
+| 帧行 | `images.frame_dup`（生产者发布尔 `True` ⇒ 库里 0/1）+ `dup_group`（sha12） | 该帧不许进统计 |
+| 轮行 | `rounds.suspect_duplicate`（生产者发布尔 `True`）+ `dup_groups`（**对象数组**：`[{"sha256_12","n","stations"}, …]`，无重复时 NULL 或 `[]`） | **整轮**的帧不许进统计 |
 | 轮行 | `rounds.content_check_error` 非空 | **"没查成"不是"已确认无重复"** ⇒ 同样排除，并说明原因 |
 
 ## 为什么按"轮窗口"排除

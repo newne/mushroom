@@ -69,10 +69,13 @@ CREATE TABLE IF NOT EXISTS rounds (
   room_id    TEXT,
   entry_date TEXT,
   batch_no   TEXT,
-  -- 轮内容完整性（巡检手票 13）：整轮疑似复制 ⇒ `suspect_duplicate=1` + `dup_groups`；
-  -- **复核没查成** ⇒ 写 `content_check_error`（原因），**不许当成"已确认无重复"**。
+  -- 轮内容完整性（巡检手票 13）：整轮疑似复制 ⇒ `suspect_duplicate`（生产者发布尔 True）
+  -- + `dup_groups` = **对象数组**（JSON 文本）
+  --   [{"sha256_12": "<12位>", "n": <帧数>, "stations": ["S211", …]}, …]
+  --   无重复时 NULL 或 `[]`。**复核没查成** ⇒ 写 `content_check_error`（原因），
+  --   **不许当成"已确认无重复"**。
   suspect_duplicate   INTEGER,
-  dup_groups          TEXT,                -- **JSON 文本**（列表在 SQLite 里存不了，见 _as_text）
+  dup_groups          TEXT,                -- JSON 文本：元素是对象，不是字符串（见上）
   content_check_error TEXT,
   -- 轮级计数（2026-10-13，巡检手票 13 §3.2）：重复帧数 / 实际记录帧数。
   n_duplicate         INTEGER,
@@ -89,8 +92,9 @@ CREATE TABLE IF NOT EXISTS images (
   -- 里某个快照，**只存 id，不塞参数全文**。老行 NULL = "那时还没记"，不编。
   imaging_profile TEXT,
   -- 轮内容完整性（2026-10-13，巡检手票 13）：一张陈旧帧被复制到多个站位时，
-  -- 帧行标 `frame_dup=1` + 同指纹组 `dup_group`；`content_sha256` 复核到就写。
-  -- 聚合统计（区间表/生长曲线）**不得吃**这些帧（见 analysis/integrity.py）。
+  -- 帧行标 `frame_dup`（生产者发布尔 True ⇒ 库里 0/1）+ 同指纹组 `dup_group`（sha12）；
+  -- `content_sha256` 复核到就写。聚合统计（区间表/生长曲线）**不得吃**这些帧
+  -- （见 analysis/integrity.py）。
   frame_dup      INTEGER,
   dup_group      TEXT,
   content_sha256 TEXT,
@@ -585,9 +589,11 @@ def fetch_images(
 def _as_text(value):
     """列表/字典 → JSON 文本，其余原样。
 
-    `rounds.dup_groups` 是 TEXT 列，而生产者发来的是**列表** —— 直接绑给 sqlite3 会抛
-    `ProgrammingError: type 'list' is not supported`。修的是这一条，但**真正的教训**
-    是它的反面：如果存储层默默接受、库里头变成别的形状，那才是查不出来的那种坏。
+    `rounds.dup_groups` 是 TEXT 列，而生产者发来的是**对象数组**
+    （`[{"sha256_12":…, "n":…, "stations":[…]}, …]`，见 `patrol/daemon.py:344`）——
+    直接绑给 sqlite3 会抛 `ProgrammingError: type 'list' is not supported`。
+    修的是这一条，但**真正的教训**是它的反面：如果存储层默默接受、库里头变成别的形状，
+    那才是查不出来的那种坏。
     """
     if isinstance(value, (list, tuple, dict)):
         return json.dumps(value, ensure_ascii=False)

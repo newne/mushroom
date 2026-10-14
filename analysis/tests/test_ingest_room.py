@@ -118,16 +118,34 @@ def test_images_can_be_filtered_by_room_and_box(tmp_path):
 # ---------- 票 13 §3.2：新字段与"静默忽略"护栏 ----------
 
 
-def test_dup_groups_list_round_trips_as_json(tmp_path):
-    """列表不能直接绑进 TEXT 列（`type 'list' is not supported`）：写入序列化、读取解回。"""
-    row = round_row(room_id="611", suspect_duplicate=1, dup_groups=["a1b2c3d4", "ff00aa11"],
+def test_dup_groups_round_trips_as_objects_not_strings(tmp_path):
+    """`dup_groups` 的元素是**对象**（生产者 `patrol/daemon.py:344`），不是字符串。
+
+    夹具用真形状（含 `n` 与 `stations`）：这样生产者/消费者一旦漂移，这条测试会红 ——
+    早先的夹具用 `["a1b2c3d4"]`，会把"元素是字符串"这个错误印象固化成契约。
+    """
+    groups = [{"sha256_12": "a1b2c3d4e5f6", "n": 35,
+               "stations": ["S211", "S212", "S301"]}]
+    row = round_row(room_id="611", suspect_duplicate=True, dup_groups=groups,
                     n_duplicate=35, n_frames_recorded=48, content_check_error=None)
     with client(tmp_path) as c:
         assert c.post("/ingest", json={"rows": [row]}).status_code == 200
         got = c.get("/rounds").json()[0]
-    assert got["dup_groups"] == ["a1b2c3d4", "ff00aa11"], "读回来必须还是列表"
+    assert isinstance(got["dup_groups"], list), "读回来必须是列表（不是 JSON 字符串）"
+    assert got["dup_groups"] == groups, "元素必须还是那三个键的对象"
+    assert set(got["dup_groups"][0]) == {"sha256_12", "n", "stations"}
+    assert got["suspect_duplicate"] in (1, True)
     assert got["n_duplicate"] == 35
     assert got["n_frames_recorded"] == 48
+
+
+def test_no_duplicates_round_has_null_groups(tmp_path):
+    """无重复时生产者不发这两个键 ⇒ 库里 NULL（不是 `[]`、更不是 0）。"""
+    with client(tmp_path) as c:
+        c.post("/ingest", json={"rows": [round_row(room_id="611")]})
+        got = c.get("/rounds").json()[0]
+    assert got["dup_groups"] is None
+    assert got["suspect_duplicate"] is None
 
 
 def test_frame_level_dup_columns_land(tmp_path):
@@ -164,26 +182,30 @@ def test_rounds_and_images_endpoints_expose_the_integrity_fields(tmp_path):
 
     `dup_groups` 必须是 **list**（不是 JSON 字符串）——否则界面拿到一坨文本没法用。
     """
-    rnd = round_row(room_id="611", suspect_duplicate=1, dup_groups=["a1b2c3d4"],
+    rnd = round_row(room_id="611", suspect_duplicate=True,
+                    dup_groups=[{"sha256_12": "a1b2c3d4e5f6", "n": 35,
+                                 "stations": ["S211"]}],
                     n_duplicate=35, n_frames_recorded=48,
                     content_check_error=None)
-    img = image_row(frame_dup=1, dup_group="a1b2c3d4", content_sha256="b" * 64,
-                    same_as_previous=1, duplicate_streak=35)
+    img = image_row(frame_dup=True, dup_group="a1b2c3d4e5f6", content_sha256="b" * 64,
+                    same_as_previous=True, duplicate_streak=35)
     with client(tmp_path) as c:
         c.post("/ingest", json={"rows": [rnd, img]})
         round_out = c.get("/rounds").json()[0]
         image_out = c.get("/images").json()[0]
 
-    assert round_out["suspect_duplicate"] == 1
-    assert round_out["dup_groups"] == ["a1b2c3d4"] and isinstance(round_out["dup_groups"], list)
+    assert round_out["suspect_duplicate"] in (1, True)
+    assert round_out["dup_groups"] == [{"sha256_12": "a1b2c3d4e5f6", "n": 35,
+                                       "stations": ["S211"]}]
+    assert set(round_out["dup_groups"][0]) == {"sha256_12", "n", "stations"}
     assert round_out["n_duplicate"] == 35
     assert round_out["n_frames_recorded"] == 48
     assert round_out["content_check_error"] is None
 
-    assert image_out["frame_dup"] == 1
-    assert image_out["same_as_previous"] == 1
+    assert image_out["frame_dup"] in (1, True)
+    assert image_out["same_as_previous"] in (1, True)
     assert image_out["duplicate_streak"] == 35
-    assert image_out["dup_group"] == "a1b2c3d4"
+    assert image_out["dup_group"] == "a1b2c3d4e5f6"
     assert image_out["content_sha256"] == "b" * 64
 
 

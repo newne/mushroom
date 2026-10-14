@@ -20,10 +20,19 @@
 `ADDED_COLUMNS` 就地迁移、老行 NULL（NULL = "那时还没查"，**不是"已确认无重复"**）。
 `IMAGE_FIELDS`/`ROUND_FIELDS` 已带上，`/ingest` 原样透传（提交见 Comments）。
 
-**`dup_groups` 是列表 ⇒ 存 JSON 文本**：`rounds.dup_groups` 是 TEXT 列，
-生产者发的是列表，直接绑给 sqlite3 会抛
-`ProgrammingError: type 'list' is not supported`（`insert_rounds` 里 `_as_text` 序列化，
-`fetch_rounds` 里 `_as_list` **成对**解回列表）——只写不读回来等于没这个字段。
+**`dup_groups` 是对象数组 ⇒ 存 JSON 文本**（**更正 2026-10-14，以生产者为准确认**）：
+`rounds.dup_groups` 是 TEXT 列，生产者 `patrol/src/patrol/daemon.py:344` 发的是
+
+```
+[{"sha256_12": "<12 位>", "n": <帧数>, "stations": ["S211", …]}, …]   无重复时 NULL 或 []
+```
+
+直接绑给 sqlite3 会抛 `ProgrammingError: type 'list' is not supported`
+（`insert_rounds` 的 `_as_text` 序列化、`fetch_rounds` 的 `_as_list` **成对**解回）——
+只写不读回来等于没这个字段。**元素是对象，不是字符串**；`suspect_duplicate` 与
+`frame_dup` 生产者发的是**布尔 `True`**，库里落 0/1（INTEGER）。
+回归：`test_dup_groups_round_trips_as_objects_not_strings`（夹具用真形状含 `n`/`stations` ——
+早先用 `["a1b2c3d4"]` 会把"元素是字符串"的错误印象固化成契约）。
 
 ## 1.5 护栏：没有对应列的键**必须**被点名
 
@@ -41,9 +50,12 @@
 
 | 标记 | 处置 |
 | --- | --- |
-| `images.frame_dup = 1` | 该帧不进统计 |
-| `rounds.suspect_duplicate = 1` | **整轮**的帧不进统计 |
+| `images.frame_dup`（生产者布尔 `True` ⇒ 库里 0/1） | 该帧不进统计 |
+| `rounds.suspect_duplicate`（生产者布尔 `True`） | **整轮**的帧不进统计 |
 | `rounds.content_check_error` 非空 | **"没查成"≠"已确认无重复"** ⇒ 同样排除，并记原因 |
+
+（`dup_groups` 只作**取证/展示**用：排除判定看 `suspect_duplicate`/`content_check_error`
+这两个标量，**不靠解析对象数组** —— 阵列形状变了也不该让排除规则失效。）
 
 **为什么按"轮窗口"排**：测量行只有 `(ts, room_id, box_id)`，**没有 `round_id`**
 （票 11 的线格式里没有），逐帧对不上。于是取
