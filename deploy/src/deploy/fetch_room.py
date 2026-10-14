@@ -11,10 +11,14 @@
 ## 数据源：复用权威源，不自写第二套口径
 
 用户 2026-10-14 裁定：**业务库禁止使用**（旧实现借别人的容器 + root 口令取数，那条路
-已整条删除，发票 17）。取数改为 **pgsql**（``mushroom_algorithm``），并且**复用**
+已整条删除，见票 17）。取数改为 **pgsql**（``mushroom_algorithm``），并且**复用**
 ``src/utils/batch_yield_service.get_batch_ranges`` —— 批次口径**只有一个来源**：
-``(room_id, in_date)``。本模块**不自己写 SQL、不自己解析连接串**：那等于造第二套口径，
-正是这次要消灭的东西。
+**实时并集（IoT 面板 ∪ ``image_text_quality``）**。本模块**不自己写 SQL、不自己解析连接串**：
+那等于造第二套口径，正是这次要消灭的东西。
+
+``mushroom_batch_yield`` 是**物化缓存**（由那个并集灌出来），**不作成员判据**——它只会滞后或缺行。
+但"滞后"必须**看得见**：每次取数都把"只在物化缓存里 / 只在实时并集里"的批次记一条日志 + 计数
+（``_log_cache_diff``）；差异观测失败**只告警、不阻断**（准入依据是实时并集，判别只是取证）。
 
 代价（已报 Chief / 发版官评估）：巡检镜像要带 ``src/**`` 与 sqlalchemy。所以这里的 import
 **全部惰性**，拿不到就报一条指名道姓的错，**且不退回任何自写取数**。
@@ -82,12 +86,15 @@ class BatchRow:
 
 # --------------------------------------------------------------------------- 取数（权威源）
 
-def ledger_rows_via_service(room_id: str, *, session=None) -> list[tuple]:
+def ledger_rows_via_service(room_id: str, *, session=None, log=None) -> list[tuple]:
     """**唯一**取数实现：调 ``utils.batch_yield_service.get_batch_ranges``。
 
     返回 ``[(room_id, in_date), …]``。``session`` 可注入（测试用）；不注入时用权威源
     自己的 pgsql engine（``global_const.global_const.pgsql_engine``）——连接串口径也归它，
     本模块**不解析 DSN**。
+
+    权威口径 = **实时并集**（IoT 面板 ∪ `image_text_quality`）；物化缓存
+    `mushroom_batch_yield` **不作成员判据**，只用来把滞后记成一条可见的差异日志。
     """
     if session is None:
         try:
@@ -109,17 +116,58 @@ def ledger_rows_via_service(room_id: str, *, session=None) -> list[tuple]:
         items = get_batch_ranges(session, room_ids=[room_id])
     except Exception as exc:      # 读不到就报错，绝不返回空表
         raise FetchError(f"读 pgsql 台账失败：{exc}") from exc
-    return [(it["room_id"], it["in_date"]) for it in items]
+    pairs = [(it["room_id"], it["in_date"]) for it in items]
+    _log_cache_diff(session, pairs, log=log)
+    return pairs
 
 
-def fetch_ledger_rows(room_id: str, *, runner=None) -> list[tuple]:
+def _fmt_pairs(pairs: list[tuple[str, date]], limit: int = 5) -> str:
+    head = "、".join(f"{room}|{day}" for room, day in pairs[:limit])
+    return head + ("…" if len(pairs) > limit else "")
+
+
+def _log_cache_diff(session, realtime: list, *, log=None) -> dict | None:
+    """把"物化缓存 vs 实时并集"的差异记一条日志 + 计数，返回 ``dict``（测试用）。
+
+    **为什么要它**（Chief 2026-10-14 裁定）：`mushroom_batch_yield` 是派生表，只能滞后或
+    缺行；两侧用不同集合就是第二套口径。所以口径统一到实时并集，同时**让滞后看得见**——
+    "只在缓存里 / 只在实时里"各多少条、分别是哪些批次。
+
+    **差异观测失败不阻断取数**：准入依据是实时并集，这一段只是取证。悄悄降级也不行——
+    失败时同样打一条告警（否则"没日志"会被读成"没有差异"）。
+    """
+    if log is None:
+        log = print
+    try:
+        from utils.create_table import MushroomBatchYield
+        rows = (session.query(MushroomBatchYield.room_id, MushroomBatchYield.in_date)
+                .distinct().all())
+    except Exception as exc:  # noqa: BLE001 - 取证失败不许拖垮准入
+        log(f"！物化缓存差异未能观测（{exc}）：本次取数照常，但滞后就看不见了")
+        return None
+
+    cache = {(str(room), _as_date(day)) for room, day in rows if room and day}
+    real = {(str(room), _as_date(day)) for room, day in realtime}
+    only_cache = sorted(cache - real)
+    only_realtime = sorted(real - cache)
+    log(f"台账差异：只在物化缓存里 {len(only_cache)} 条、只在实时并集里 {len(only_realtime)} 条"
+        "（权威=实时并集；物化缓存不作成员判据）")
+    if only_cache:
+        log(f"  只在缓存（滞后/残留）：{_fmt_pairs(only_cache)}")
+    if only_realtime:
+        log(f"  只在实时（缓存缺行）：{_fmt_pairs(only_realtime)}")
+    return {"cache_only": only_cache, "realtime_only": only_realtime}
+
+
+def fetch_ledger_rows(room_id: str, *, runner=None, log=None) -> list[tuple]:
     """取台账原始行 ``(room_id, in_date)``。
 
     ``runner`` 可注入（测试用；也是将来若改走算法侧只读端点时的**唯一**替换点，票 17 §2）。
-    默认 = 复用权威源，不自写 SQL。
+    默认 = 复用权威源，不自写 SQL；``log`` 默认打印（差异观测要落在日志里）。
     """
-    run = runner if runner is not None else ledger_rows_via_service
-    return list(run(room_id))
+    if runner is not None:
+        return list(runner(room_id))
+    return ledger_rows_via_service(room_id, log=log if log is not None else print)
 
 
 def _as_date(value) -> date:

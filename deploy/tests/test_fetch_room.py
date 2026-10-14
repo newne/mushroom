@@ -185,6 +185,88 @@ def test_service_failure_does_not_return_an_empty_ledger(monkeypatch) -> None:
         ledger_rows_via_service("611", session=object())
 
 
+# ---------- 口径统一 + 滞后可观测（Chief 2026-10-14 裁定） ----------
+
+
+class _FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def distinct(self):
+        return self
+
+    def all(self):
+        return self._rows
+
+
+class _FakeSession:
+    """只够 `session.query(A, B).distinct().all()` 用；`boom=True` 时整条查询炸。"""
+
+    def __init__(self, rows=(), *, boom: bool = False):
+        self._rows = list(rows)
+        self._boom = boom
+
+    def query(self, *_args, **_kwargs):
+        if self._boom:
+            raise RuntimeError("cache table unavailable")
+        return _FakeResult(self._rows)
+
+
+def install_fake_cache_table(monkeypatch):
+    """假 `utils.create_table`：只需要两个可当列传的占位属性（假查询不看参数）。"""
+    module = types.ModuleType("utils.create_table")
+
+    class MushroomBatchYield:                      # 与真实模型同名，便于对照
+        room_id = object()
+        in_date = object()
+
+    module.MushroomBatchYield = MushroomBatchYield
+    monkeypatch.setitem(sys.modules, "utils.create_table", module)
+
+
+def test_cache_vs_realtime_diff_is_logged_with_counts(monkeypatch) -> None:
+    """物化缓存滞后必须**看得见**：只在缓存 / 只在实时各多少条、都是谁。"""
+    install_fake_cache_table(monkeypatch)
+    install_fake_service(monkeypatch, [
+        {"room_id": "611", "in_date": date(2026, 9, 30)},      # 两边都有
+        {"room_id": "611", "in_date": date(2026, 10, 8)},      # 只在实时并集
+    ])
+    # 缓存里多一条旧的、少一条新的
+    session = _FakeSession([("611", date(2026, 9, 30)), ("611", date(2026, 8, 16))])
+    logs: list[str] = []
+
+    rows = ledger_rows_via_service("611", session=session, log=logs.append)
+
+    assert rows == [("611", date(2026, 9, 30)), ("611", date(2026, 10, 8))]
+    joined = "\n".join(logs)
+    assert "只在物化缓存里 1 条" in joined and "只在实时并集里 1 条" in joined
+    assert "611|2026-08-16" in joined and "611|2026-10-08" in joined
+    assert "权威=实时并集" in joined
+
+
+def test_cache_diff_is_quiet_when_both_sides_agree(monkeypatch) -> None:
+    install_fake_cache_table(monkeypatch)
+    install_fake_service(monkeypatch, [{"room_id": "611", "in_date": date(2026, 9, 30)}])
+    logs: list[str] = []
+    ledger_rows_via_service("611", session=_FakeSession([("611", date(2026, 9, 30))]),
+                            log=logs.append)
+    joined = "\n".join(logs)
+    assert "只在物化缓存里 0 条" in joined and "只在实时并集里 0 条" in joined
+    assert "只在缓存" not in joined and "只在实时（" not in joined
+
+
+def test_cache_diff_failure_only_warns_and_does_not_block_the_fetch(monkeypatch) -> None:
+    """取证失败不许拖垮准入，但也不许静默——没日志会被读成"没有差异"。"""
+    install_fake_cache_table(monkeypatch)
+    install_fake_service(monkeypatch, [{"room_id": "611", "in_date": date(2026, 9, 30)}])
+    logs: list[str] = []
+
+    rows = ledger_rows_via_service("611", session=_FakeSession(boom=True), log=logs.append)
+
+    assert rows == [("611", date(2026, 9, 30))]
+    assert any("未能观测" in line for line in logs)
+
+
 # ---------- 判定 ----------
 
 

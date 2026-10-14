@@ -30,6 +30,12 @@ C 否。③ analysis 侧环境官已做（`b1e29a4`），引用点清单按 HEAD
 4. **下游可见变化（需环境官/界面师同步）**：`rounds.batch_no` 从 `mogu-<业务库主键>` 变成
    `<room>_<YYYYMMDD>`，`rounds.packages` 类信息不再有值（本来就是 null 形状）。
    **筛选/展示不能再按 `mogu-…` 串匹配**，见 §5。
+5. **权威口径 + 滞后可观测**（Chief 2026-10-14 裁定）：唯一权威 = `get_batch_ranges` 的
+   **实时并集（IoT 面板 ∪ `image_text_quality`）**；`mushroom_batch_yield` 退为**物化缓存**、
+   **不作成员判据**。两侧都必须用同一个函数（analysis 侧由环境官改）。
+   每次取数**记一条差异日志 + 计数**："只在物化缓存里 N 条 / 只在实时并集里 M 条"并列前几条
+   （`_log_cache_diff`）；**差异观测失败只告警、不阻断**——准入依据是实时并集，取证不许拖垮准入，
+   但也不许静默（没日志会被读成"没有差异"）。
 
 ---
 
@@ -58,11 +64,11 @@ C 否。③ analysis 侧环境官已做（`b1e29a4`），引用点清单按 HEAD
 `fetch_ledger_rows(room_id, *, runner=…)` 是唯一替换点；import 不到时**报一条指名道姓的错**
 （"镜像要带 `src/**` 与 sqlalchemy"），**绝不退回自写取数**。
 
-⚠️ **一条必须报的口径差异**（不属我改的范围）：权威源 `get_batch_ranges` 的集合是
-**IoT ∪ `image_text_quality`**；而 `analysis/batches.py` 的 SQL 是
-**`mushroom_batch_yield` ∪ `image_text_quality`**。两者不是同一集合（`mushroom_batch_yield`
-是被 `init_batch_yield_records` 从前者灌出来的，可能滞后或缺行）。"巡检侧用权威源、分析侧用产量表"
-是不是刻意的？需要 Chief/环境官定。
+**权威口径已裁（Chief 2026-10-14）**：唯一权威 = `get_batch_ranges` 的**实时并集**
+（IoT 面板 ∪ `image_text_quality`）。理由：`mushroom_batch_yield` 是**派生表**（由那个并集灌出来），
+只能滞后或缺行，不能比源更权威；两侧用不同集合就是第二套口径。
+⇒ `mushroom_batch_yield` 退为**物化缓存、不作成员判据**；**两侧都必须用同一个函数**
+（巡检侧＝本模块已用；analysis 侧＝环境官改）；**差异必须可观测**（本模块已实现差异日志，见 §0.5）。
 
 ## 3. 变更清单
 
@@ -100,7 +106,9 @@ C 否。③ analysis 侧环境官已做（`b1e29a4`），引用点清单按 HEAD
 ## 6. 验收（命令 + 判据）
 
 - `cd D:\code\mushroom\patrol-workspace && .\.venv\Scripts\python.exe -m pytest -q ../deploy/tests/test_fetch_room.py`
-  → **42 passed**（含"假权威源注入 session 取到批次与房间""runner 注入无数据库""源码守门"三类）。
+  → **45 passed**（含"假权威源注入 session 取到批次与房间""runner 注入无数据库"
+  "缓存 vs 实时并集的差异日志/计数""差异取证失败只告警不阻断""源码守门"五类）；
+  `../deploy/tests` 全套 → **311 passed**。
 - `ruff check` 干净。
 - 生产侧（发版官，待部署前置完成）：`docker exec mushroom_patrol python3 -m deploy.fetch_room
   --room 611 --print` → `entry_date` 与权威源该库房最新 `in_date` 一致，`batch_no` = `611_YYYYMMDD`，
@@ -114,6 +122,10 @@ C 否。③ analysis 侧环境官已做（`b1e29a4`），引用点清单按 HEAD
 
 ## Comments
 
+- 2026-10-14 巡检手：**权威口径裁定已落地**（Chief 同日）：唯一权威 = `get_batch_ranges` 实时并集；
+  `mushroom_batch_yield` 退为物化缓存、不作成员判据；两侧同函数（analysis 侧环境官改）；
+  **滞后可观测**由本模块实现——`_log_cache_diff` 每次取数打"只在缓存 N 条 / 只在实时 M 条"
+  并列出前 5 条，取证失败只告警不阻断（3 条新用例）。测试 45 passed、deploy 全套 311 passed、ruff 干净。
 - 2026-10-14 巡检手：立项 + 实现（同一提交）。Chief 三条裁定逐条落地：① 派生 `batch_no`
   + `packages` NULL（§1）；② A′（§2，含 A 否、B 备选、唯一替换点）；③ analysis 侧按 HEAD 复核（§5 末）。
 - 旧通路下线证据：守门用例逐字扫源码里的 `subprocess` / 容器名 / 查询客户端名 / 口令变量名，
