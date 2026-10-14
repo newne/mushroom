@@ -35,7 +35,9 @@ import os
 from pathlib import Path
 
 #: 仓库里的别名表（数据文件）。环境变量只给测试/临时覆盖用。
-DEFAULT_ALIAS_PATH = "analysis/data/room_alias.json"
+#: **路径按包位置解析，不按 cwd** —— 相对路径在别的 cwd 下会"文件不存在 ⇒ 一律解不出"，
+#: 而那个失败长得跟"还没确证"一模一样（实测踩过：测试/CLI 换个工作目录就全解不出）。
+DEFAULT_ALIAS_PATH = str(Path(__file__).resolve().parents[2] / "data" / "room_alias.json")
 ALIAS_PATH_ENV = "ROOM_ALIAS_FILE"
 
 

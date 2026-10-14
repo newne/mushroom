@@ -42,8 +42,10 @@ from pathlib import Path
 DEFAULT_DSN_ENV = "PGSQL_DSN"
 #: 更推荐的一条：DSN 放文件、进程运行时读（`env_file` 会把值注入 `docker inspect` 可见的环境变量）
 DEFAULT_DSN_FILE_ENV = "PGSQL_DSN_FILE"
-#: `batch_no` 映射文件（仓库里的数据文件；由 `python -m analysis.batch_map` 生成）
-DEFAULT_MAP_PATH = "analysis/data/batch_no_map.json"
+#: `batch_no` 映射文件（仓库里的数据文件；由 `python -m analysis.batch_map` 生成）。
+#: **按包位置解析，不按 cwd**：相对路径换个工作目录就"文件不存在 ⇒ batch_no 全 NULL"，
+#: 而那个失败长得跟"还没生成映射"一样（房间别名表那边实测踩过同一个坑）。
+DEFAULT_MAP_PATH = str(Path(__file__).resolve().parents[2] / "data" / "batch_no_map.json")
 
 #: 两条来源的并集；只取"批次身份"要用的两列（ADR-0020：库房号 + 入库日期）。
 SQL = """
