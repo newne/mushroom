@@ -1,6 +1,10 @@
 # 14 · 一期交付量的显示（菌簇长度/直径）+ 环境首日剔除的显式标记
 
 **Status:** proposed（**只出票，未实现**——Chief 2026-10-14 明说"等契约落地后再动手"）
+**⚠️ 2026-10-14 后续：** 用户新口径把这两列改成走**估算**（菌包标尺反推 mm/px），并给出**三态**
+（估算/不可测/不可用）——**本票 §3.1/§3.2 里"现有列够、不确定度用 p10–p90"的写法已被
+`15-three-states-estimate-unmeasurable-unusable.md` 覆盖**；本票 §3.3（探索项）§3.4（首日剔除）
+仍然有效。两票的实现口径以 15 为准。
 **归属（实现）：** `web/console/index.html` + `docs/patrol/console-ui/verify-page.js`（界面师）
 **归属（我等的契约）：** ① **不确定度列**（测量侧 → analysis，归属待 Chief 指：测量师/环境官）；
 ② **首日剔除的显式标记**（环境官，`/api/environment` 及 summary/batches）。
