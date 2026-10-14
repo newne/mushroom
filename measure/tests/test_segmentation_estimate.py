@@ -86,6 +86,49 @@ def test_row_is_reliable_flags_low_contrast_row():
     assert not row_is_reliable(bags3, 0)
 
 
+def test_zero_candidates_is_no_detection_not_unreliable():
+    """**零候选 ⇒ `no_detection`**（"没有候选可判"≠"判为不可信"），刻意 fail-closed。
+
+    Chief 2026-10-14：把零候选报成 `unreliable` 会把"真的什么都没拍到"说成"远排不可信"，
+    那是在事实之外编一层解释。**这不是 bug，下一个人别顺手改掉。**
+    """
+    gray, _ = synth_frame()
+    bags_reliable, _ = bags_of(gray)          # 有候选且可信，但一个实例都没有
+    assert bags_reliable
+    e = estimate_cluster([], bags_reliable, depression_deg=20.0)
+    assert "no_detection" in e.quality and "unreliable" not in e.quality
+    # 连候选都没有（空袋）：同样 no_detection
+    e2 = estimate_cluster([], [], depression_deg=20.0)
+    assert "no_detection" in e2.quality and "unreliable" not in e2.quality
+
+
+def test_low_contrast_candidates_yield_unreliable_not_silence():
+    """**有候选但判不可信 ⇒ `unreliable`**：L1 不许静默丢排（这条钉住那个分叉）。
+
+    低对比排要能返回候选，由 `row_is_reliable()` 判、由发射层出 `unreliable`——
+    否则现场看到的理由会从"远排不可靠"变成"没检出"。
+    """
+    from measure.bag_ruler import row_is_reliable
+
+    gray, _ = synth_frame(bag_gray=80, bg_gray=60)      # 对比 20：低对比档
+    bags, _ = bags_of(gray, min_contrast=60.0, min_sigma=15.0)
+    assert bags, "低对比排必须有候选（L1 不许静默丢排）"
+    assert not any(row_is_reliable(bags, b.row_id) for b in bags)
+    e = estimate_cluster([], bags, depression_deg=20.0)   # 该排没实例
+    assert "unreliable" in e.quality and "no_detection" not in e.quality
+    # 极端低对比（对比 1）**且画面里只有袋**（无亮钉干扰阈值）：
+    # `weak_retry_percentile` 弱对比重试要能救回候选，而不是静默丢排
+    flat, _ = synth_frame(bag_gray=56, bg_gray=55, pins=())
+    bags2, _ = bags_of(flat)
+    assert bags2, "极端低对比也要有候选（weak_retry 不许静默丢排）"
+    assert "unreliable" in estimate_cluster([], bags2, depression_deg=20.0).quality
+    # 但"零候选"是另一件事：走 `no_detection`（见上一条测试），两条路都不许被掩盖
+    flat_pins, _ = synth_frame(bag_gray=56, bg_gray=55)   # 带亮钉：阈值被判据抬高
+    bags3, _ = bags_of(flat_pins)
+    if not bags3:
+        assert "no_detection" in estimate_cluster([], bags3, depression_deg=20.0).quality
+
+
 def test_nearest_bag_same_row_refuses_cross_row():
     gray, _ = synth_frame()
     bags, _ = bags_of(gray)

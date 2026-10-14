@@ -26,7 +26,11 @@ from __future__ import annotations
 #: 票 11 §3 的枚举 + `no_angle_profile` + `level_view`。
 QUALITY_FLAGS = (
     "verified",              # 检出可信，可用于分析（当前无一行是它）
-    "no_detection",          # 无有效检出，长度列全 NULL
+    "no_detection",          # 无有效检出，长度列全 NULL。**"没有候选可判"（本帧真的没找到东西）
+                             # 与 `unreliable`（找到了、但标尺/置信度不可靠）是两件事**：
+                             # 零候选 ⇒ 本码；有候选但判不可信 ⇒ `unreliable`。
+                             # 这是**刻意的 fail-closed**，不是漏判——把零候选报成 `unreliable`
+                             # 等于"在事实之外编一层解释"（Chief 2026-10-14 裁定，票 15 §14-2）。
     "baseline",              # 基线/定标帧，不是生长测量
     "cap_level_approx",      # 菌盖数值为平视近似
     "stem_absent(level0)",   # 菌柄缺失，长度无意义
@@ -37,7 +41,9 @@ QUALITY_FLAGS = (
     "no_light",              # 整帧近黑（灯未亮/无信息量）⇒ 该帧不可用，不是降权
     # 估算/预测三码（Chief 2026-10-14 裁定 5；命名对齐票 18，不许混成一个）
     "estimate",              # 行级 fail-safe：本行有估算值（与 verified 正交，但单独出现不算可用）
-    "unreliable",            # 远排/低置信 ⇒ 值写 NULL，处置=不可用（与 no_light 同级）
+    "unreliable",            # 远排/低置信 ⇒ 值写 NULL，处置=不可用（与 no_light 同级）。
+                             # **产出前提 = 有候选被判不可信**（L1 返回候选 → `row_is_reliable()`
+                             # 判 → `all_rows_unreliable()` 发射）；零候选走 `no_detection`。
     "no_scale",              # **完全没有标尺**（无参考物/找不到同排菌包/标准尺寸缺失）⇒ mm 写 NULL
     "no_theta",              # **有标尺、只是缺俯角 θ** ⇒ 投影项无法补偿：竖直量写 NULL，
                              # 水平量照出。**与 no_scale 严格分开**（Chief 2026-10-14）：

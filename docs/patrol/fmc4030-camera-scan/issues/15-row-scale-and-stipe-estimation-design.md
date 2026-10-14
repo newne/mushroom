@@ -467,8 +467,7 @@ $py = 'D:\code\mushroom\patrol-workspace\.venv\Scripts\python.exe'
 1. **不做 interim wiring**：L1–L3 **等证据列齐了一次接**（票 20 是解锁点，优先级最高）。
    理由：现在接上去产出的行仍带"85% 袋面纹理 + 两方向自差 38.6%"的值，接完还得重来。
    在列齐之前，交付量**只标量级、只展示、不进 `verified`、不进区间表**。
-2. **`no_theta` 与 `no_scale` 拆开（已实现）**：`contract.QUALITY_FLAGS` 新增 `no_theta`
-   （注释里写死语义），`estimate.py` 里"未注入 θ"的处罚从 `no_scale` 改为 `no_theta`：
+2. **`no_theta` 与 `no_scale` 拆开（已实现）**：`contract.QUALITY_FLAGS` 新增 `no_theta`   （注释里写死语义），`estimate.py` 里"未注入 θ"的处罚从 `no_scale` 改为 `no_theta`：
    - **`no_scale`** = **完全没有标尺**（无参考物 / 找不到同排菌包 / 标准尺寸没注入）⇒ 在
      `NON_USABLE_FLAGS` 里，整行不可用；
    - **`no_theta`** = **有标尺、只缺俯角** ⇒ **不在** `NON_USABLE_FLAGS`，只说明"哪个修正项缺"，
@@ -501,6 +500,30 @@ $py = 'D:\code\mushroom\patrol-workspace\.venv\Scripts\python.exe'
   开关开 ⇒ 值 = θ 补偿值 × cosθ 且标记齐全（且不出现 `verified`）、
   未补偿 vs 已补偿**数值可区分**（防被混比）；
 - `measure/tools/evaluate_l1_l3.py` 增列**袋级竖直投影跨度**（离线分布，见 §13.1）。
+
+### 14.2 零候选 vs 判不可信（Chief 2026-10-14 裁定：保持 `no_detection`，不改）
+
+**写死这条边界，并标明"这是刻意的 fail-closed，不是漏判"**（否则下一个人会当 bug 顺手改掉）：
+
+| 情形 | 产出码 | 含义 |
+| --- | --- | --- |
+| **零候选**（`find_bags` 一个袋都没返回） | **`no_detection`** | "这帧里没找到东西"——**没有候选可判** |
+| **有候选、但判不可信**（低对比/太远/袋粘连） | **`unreliable`** | "找到了、但标尺/置信度不可靠" |
+
+- 两层结构：**L1 只做候选**（低对比走 `weak_retry_percentile=95.0` 弱对比阈值**重试一次**，
+  绝不静默丢排）→ **`row_is_reliable()`**（袋宽 CV + 袋数 + weak_retry）判 →
+  **发射层 `all_rows_unreliable()`** 出 `unreliable`；
+- **把零候选报成 `unreliable` 等于"在事实之外编一层解释"**（Chief 原话）：会让"真的什么都没拍到"
+  看起来像"远排不可信"；近黑帧更早被 `frame_quality` 拦成 `no_light`；
+- 两条路都可达、没被掩盖：218 帧实测 **`unreliable` 5 / `no_detection` 0**；
+- **测试钉住**（`test_segmentation_estimate.py`）：
+  `test_zero_candidates_is_no_detection_not_unreliable`（零候选 ⇒ `no_detection`，含空袋）、
+  `test_low_contrast_candidates_yield_unreliable_not_silence`（对比 20 有候选 ⇒ `unreliable`；
+  极端对比 1 且无亮钉 ⇒ weak_retry 救回候选 ⇒ `unreliable`；带钉零候选 ⇒ `no_detection`）。
+- **自曝一处**：我最初把"极端低对比必须永远有候选"写成断言，**跑红了**——因为合成图里那个
+  亮"菌杆"钉子会把 Otsu 阈值抬起来，该帧确实零候选。**是断言写错、不是实现错**：
+  已改成"只有袋（无钉）时 weak_retry 必须救回候选"。这也说明**零候选是真实可达的状态**，
+  更要按上表分开，而不能靠"总会有候选"的假设。
 
 ## 15. 答复巡检手（票 16 三点，2026-10-14，附 218 帧证据）
 
