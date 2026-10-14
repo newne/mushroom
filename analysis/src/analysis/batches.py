@@ -9,7 +9,14 @@
 **pgsql**（compose 里的 `postgres_db`，库 `mushroom_algorithm`）。旧实现（`docker exec`
 + `mysql` 客户端 + `MYSQL_ROOT_PASSWORD`）已下线，连带"给容器挂 docker.sock"那条方案作废。
 
-## 取数口径
+## 取数口径（⚠️ 待切换到权威源，Chief 2026-10-14）
+
+**唯一权威 = 算法侧 `src/utils/batch_yield_service.get_batch_ranges` 的实时并集**
+（IoT 面板 ∪ `image_text_quality`）；`mushroom_batch_yield` 只是**派生缓存**、会滞后。
+本模块当前的 `SQL` 是**临时口径**（凭证明可用的两张表做并集），**不算权威**：
+切换方式二选一 —— **A′ 镜像带 `src/**` ⇒ 直接 import 同一函数**；
+否则走**算法侧只读 HTTP**（同一个函数的出口，不新增服务/端口）。
+**两条路都不许自己再写一份 SQL 取集合**（本文件现状即为待替换项）。
 
 pgsql 里带 `(room_id, in_date)` 的表有两张（`src/utils/create_table.py:138-208`）：
 
