@@ -137,6 +137,17 @@ DEBUG No workspace root found, using project root
 
 **最终数字（在本次提交的 commit 上重跑）**：见 `## 8. 提交点上的最终门禁`。
 
+## 8. 提交点上的最终门禁（证据 5 定稿）
+
+| 项 | 值 |
+| --- | --- |
+| commit | **`cf25957`**（本票与两个 pyproject + 锁同一个提交） |
+| 跑法 | 锁派生出来的**干净环境**（`UV_PROJECT_ENVIRONMENT` 指向临时 venv）→ `uv sync --frozen`（**默认 editable**，含 dev 组）→ `python -m pytest -q` |
+| 环境自证 | `PIL 12.3.0 / pytest 9.1.1 / numpy 2.5.2 / pandas 3.0.5 / psycopg 3.3.6` |
+| **结果** | **1089 passed / 0 failed / 3 skipped，257.62 s（4 分 17 秒），exit 0** ✓ |
+| 与 Chief 基线（1076 passed / 0 failed / 367 s）的差 | **+13 passed**：期间新增用例（票 20 证据列、rooms 等）；**3 skipped 是既有**的环境相关跳过；**0 failed** |
+| 前一次那 1 红 | `test_record_fields_are_the_analysis_contract` —— 提交前已被后续提交修掉（两侧 20/20、对称差空），本次**不再出现** |
+
 ## 5. 回滚点
 
 - 旧锁副本：**`.scratch/prod-deploy/uv.lock.bak-20261014-114542`**（sha256 `4bdbde216ee10eab2ac8bf99b0fde2c609f221d708e938f3ff3b192737cb4d0b`，原样保留，未删）。
