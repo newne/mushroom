@@ -31,9 +31,14 @@
        wdr: off
        day_night_mode: ""
        working_distance_mm: null
+       # --- 取景档（票 16 §7，Chief 2026-10-14 裁定走本快照、零加列）---
+       view_stage: surface            # surface | pin | stipe | cluster（观察高度档）
+       observation_z: [-40.0, -90.0, -145.0, -195.0]   # 该档 4 层实际生效的 z（mm）
        by: ""
        note: ""
    ```
+   **取景档的规则（写死，票 16 §7）**：换观察高度档 ⇒ **必须换/新建快照 id**；
+   **同一 `imaging_profile` 内才可跨天比较**（跨档的绝对量与差分不可比）。
 2. **每站引用 id**：`Station` 增字段 `imaging_profile: str = ""`（空 = 沿用旧行为，不假设）。
    站位表里写 `imaging_profile: p20261013a`。`exposure_note` **保留原样**（兼容，不改语义）。
 3. **迁移与示教**：`patrol-migrate reanchor`/`z-frame` 必须**原样保留**这两个字段
