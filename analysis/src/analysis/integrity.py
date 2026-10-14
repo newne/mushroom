@@ -41,6 +41,7 @@ SUSPECT_MAX_SPAN_H = 1.0
 REASON_SUSPECT_ROUND = "suspect_duplicate_round"
 REASON_CHECK_ERROR = "content_check_error"
 REASON_FRAME_DUP = "frame_dup"
+REASON_LEGACY_EXCLUDED = "legacy_excluded"
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class Interval:
     end: str | None
     reason: str
     bounds: str | None = None      # 触发该窗口的轮次时间，便于追溯
+    detail: str | None = None      # 人话原因（显式排除清单里那条全文）
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,61 @@ class Dropped:
     zone: str
     reason: str
     window: str
+    detail: str | None = None      # **排除必须能说出为什么**，不静默消失
+
+
+@dataclass(frozen=True)
+class LegacyExclusion:
+    """一条**显式**排除：给"当时还没有标记列"的 legacy 轮用。
+
+    背景（2026-10-09 那轮）：`suspect_duplicate`/`frame_dup` 这些列当时并不存在，
+    轮行上全是 NULL —— **靠标记永远排不掉它**；现在能"排除"只是因为那 35 帧太黑会被
+    质量门顺手丢掉，那是运气不是口径。所以点名把它写进名单。
+
+    两种键，二选一（都填则都要满足）：
+    - `round_id`：有轮次 id 的行 ⇒ 按该轮的时间窗排（与标记口径一致）；
+    - `(room_id, start, end)`：**legacy 行没有 round_id**（实测：2026-10-09 及更早全为 NULL，
+      `docs/patrol/prod-deploy/frame-sample-extract.py:38`）⇒ 用实测窗口。
+      窗口两端必须是**证据**（帧时间戳），不许为了"凑一条"编一个。
+
+    `verified=False` 的条目**不生效**（见 `active_exclusions`）：防止一个还没现场核准的
+    room_id/窗口被悄悄写进名单、把好数据排掉。
+    """
+
+    reason: str
+    round_id: str | None = None
+    room_id: str | None = None
+    start: str | None = None
+    end: str | None = None
+    verified: bool = False
+
+
+#: 显式排除清单（票 17 §3）。**只增不改**；每条都要能说出"为什么"。
+LEGACY_EXCLUSIONS: tuple[LegacyExclusion, ...] = (
+    LegacyExclusion(
+        reason=(
+            "2026-10-09 18:20:05–18:27:16 整轮：35 帧字节完全相同（同一份陈旧近黑帧 "
+            "sha256 41685c09…、92364 B、p99=2.0，S211→S401），而轮行标 ok=1 / 48 帧 / 0 失败。"
+            "该轮是 **legacy 行** —— suspect_duplicate / frame_dup 列当时还不存在、值为 NULL，"
+            "所以**靠标记排不掉**（现在能过滤掉只是因为太黑被质量门顺手丢掉，那是运气）。"
+            "round_id 在 2026-10-09 及更早的行是 NULL（frame-sample-extract.py:38），"
+            "因此本条用实测窗口而非 round_id。"
+        ),
+        round_id=None,
+        room_id=None,          # ← **待发版官只读取准**（rounds 行的 room_id）；核准前不生效
+        start="2026-10-09T18:20:05",
+        end="2026-10-09T18:27:16",
+        verified=False,
+    ),
+)
+
+
+def active_exclusions(
+    exclusions: tuple[LegacyExclusion, ...] | None = None,
+) -> tuple[LegacyExclusion, ...]:
+    """只有 `verified=True` 的条目才生效 —— 未核准的窗口不许悄悄排数据。"""
+    items = LEGACY_EXCLUSIONS if exclusions is None else exclusions
+    return tuple(item for item in items if item.verified)
 
 
 def _truthy(value) -> bool:
@@ -80,11 +137,17 @@ def _plus_hours(ts: str, hours: float) -> str | None:
         return None
 
 
-def suspect_intervals(rounds: list[dict]) -> dict[str, list[Interval]]:
-    """按库房列出可疑窗口（升序）。
+def suspect_intervals(
+    rounds: list[dict],
+    *,
+    exclusions: tuple[LegacyExclusion, ...] | None = None,
+) -> dict[str, list[Interval]]:
+    """按库房列出可疑窗口（升序）：**标记列**（`suspect_duplicate`/`content_check_error`）
+    与**显式排除清单**（`LEGACY_EXCLUSIONS`，只吃已核准条目）合并。
 
-    `rounds` 是 `/rounds` 那样的行字典（需要 `ts`、`room_id`、
-    `suspect_duplicate`、`content_check_error`）。缺少这些列的旧行一律不算可疑。
+    `rounds` 是 `/rounds` 那样的行字典（需要 `ts`、`room_id`、`round_id`、
+    `suspect_duplicate`、`content_check_error`）。缺少这些列的旧行一律**不算可疑**
+    —— legacy 轮靠清单点名，不靠给它编标记。
     """
     by_room: dict[str, list[tuple[str, str]]] = {}
     for row in rounds:
@@ -111,6 +174,35 @@ def suspect_intervals(rounds: list[dict]) -> dict[str, list[Interval]]:
             end = later[0] if later else _plus_hours(ts, SUSPECT_MAX_SPAN_H)
             intervals.append(Interval(start=ts, end=end, reason=reason, bounds=ts))
         out[zone] = intervals
+
+    # 显式排除清单（legacy 轮没有标记列，只能点名排）——只吃已核准条目。
+    for item in active_exclusions(exclusions):
+        if item.round_id:
+            for row in rounds:
+                if str(row.get("round_id") or "") != item.round_id:
+                    continue
+                zone = str(row.get("room_id") or "")
+                ts = str(row.get("ts") or "")
+                if not zone or not ts:
+                    continue
+                times = sorted(str(r.get("ts")) for r in rounds
+                               if str(r.get("room_id") or "") == zone and r.get("ts"))
+                later = [t for t in times if t > ts]
+                end = later[0] if later else _plus_hours(ts, SUSPECT_MAX_SPAN_H)
+                out.setdefault(zone, []).append(Interval(
+                    start=ts, end=end, reason=REASON_LEGACY_EXCLUDED,
+                    bounds=ts, detail=item.reason,
+                ))
+        elif item.room_id and item.start:
+            # legacy：没有 round_id，用**实测窗口**（两端是帧时间戳证据，不是猜的）
+            out.setdefault(str(item.room_id), []).append(Interval(
+                start=item.start, end=item.end, reason=REASON_LEGACY_EXCLUDED,
+                bounds=None, detail=item.reason,
+            ))
+        # room_id 与 round_id 都没有 ⇒ 无法归属，**不排**（宁可少排，也不冤枉别的库房）
+
+    for zone in out:
+        out[zone].sort(key=lambda i: i.start)
     return out
 
 
@@ -128,24 +220,28 @@ def partition(
     *,
     zone_key: str = "room_id",
     ts_key: str = "ts",
+    exclusions: tuple[LegacyExclusion, ...] | None = None,
 ) -> tuple[list[dict], list[Dropped]]:
     """把数据行分成"可进统计"与"被排除"两堆（返回 kept 与 dropped 明细）。
 
-    调用方应当把 `dropped` 的数量记进响应或日志 —— **不静默丢**。
+    调用方应当把 `dropped` 的数量记进响应或日志 —— **不静默丢**：
+    每条 `Dropped` 都带 `reason` 与 `detail`（人话原因），能回答"为什么少了这一段"。
     """
-    intervals = suspect_intervals(rounds)
+    intervals = suspect_intervals(rounds, exclusions=exclusions)
     kept: list[dict] = []
     dropped: list[Dropped] = []
     for row in rows:
         ts = str(row.get(ts_key) or "")
         zone = str(row.get(zone_key) or "")
-        reason = exclusion_reason(intervals, zone, ts) if ts else None
-        if reason is None:
+        hit = next((i for i in intervals.get(zone, [])
+                    if ts and i.start <= ts and (i.end is None or ts < i.end)), None)
+        if hit is None:
             kept.append(row)
         else:
-            window = next((f"{i.start}~{i.end or '…'}" for i in intervals.get(zone, [])
-                           if i.start <= ts and (i.end is None or ts < i.end)), "")
-            dropped.append(Dropped(ts=ts, zone=zone, reason=reason, window=window))
+            dropped.append(Dropped(
+                ts=ts, zone=zone, reason=hit.reason,
+                window=f"{hit.start}~{hit.end or '…'}", detail=hit.detail,
+            ))
     return kept, dropped
 
 

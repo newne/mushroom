@@ -62,8 +62,26 @@
 `[round.ts, 同库房下一条 round.ts)`；没有后继轮次时上界封顶
 `round.ts + SUSPECT_MAX_SPAN_H`（1 小时）——**不让一个可疑轮把该库房之后的数据永久排除**。
 
-**不静默丢**：`partition()` 返回 `Dropped` 明细（ts/zone/reason/window），
+**不静默丢**：`partition()` 返回 `Dropped` 明细（ts/zone/reason/**detail**/window），
 调用方要把它记进响应或日志。
+
+## 2.5 显式排除清单（legacy 轮：没有标记列，只能点名排）
+
+`analysis/integrity.py` 里的 `LEGACY_EXCLUSIONS`：**只增不改**的清单，每条 `round_id` 或
+`(room_id, start, end)` + 一行原因。**第一条 = 2026-10-09 那轮**：`suspect_duplicate`/
+`frame_dup` 列当时还不存在、值为 NULL，**靠标记永远排不掉它** —— 现在能过滤掉只是因为那
+35 帧太黑会被质量门顺手丢，那是运气不是口径。
+
+- **两种键**：有 `round_id` 的轮按该轮窗口排；**legacy 行没有 `round_id`**（实测：2026-10-09
+  及更早全为 NULL，`prod-deploy/frame-sample-extract.py:38`）⇒ 用**实测窗口**，两端是帧时间戳
+  证据，**不许编**。
+- **`verified=False` 不生效**：`active_exclusions()` 只吃已核准条目 —— 防止一个还没现场核准的
+  `room_id`/窗口被悄悄写进名单、把好数据排掉。**当前那条的 `room_id` 待发版官只读取准**。
+- 排除时 **`Dropped.detail` 带上人话原因**，"为什么少了这一段"必须答得出来。
+- 既没有 `round_id` 也没有 `room_id` 的条目 ⇒ 无法归属 ⇒ **不排**（宁可少排，不冤枉别的库房）。
+
+`source` 标记的排期（Chief 2026-10-14 确认）：**落列 → 测量师发字段 → 再启用排除**，
+且**启用后排除条数必须可见**（不允许变成"诚实地空"却没人知道为什么）。
 
 **来源标记（2026-10-14 排期，与票 11 §1 的 `source` 成对）**：`preview` 帧与
 **来源缺失**的测量行同样不许进聚合统计 —— 预览流的成像与抓拍链路不能逐像素互推，
