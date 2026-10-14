@@ -8,39 +8,34 @@
 
 本模块只做两件事：**取数**与**落盘**，判定仍旧归 ``patrol.room``（同一份规则，不复制）。
 
-## 数据源：复用权威源，不自写第二套口径
+## 数据源：算法侧的只读端点（不碰数据库）
 
 用户 2026-10-14 裁定：**业务库禁止使用**（旧实现借别人的容器 + root 口令取数，那条路
-已整条删除，见票 17）。取数改为 **pgsql**（``mushroom_algorithm``），并且**复用**
-``src/utils/batch_yield_service.get_batch_ranges`` —— 批次口径**只有一个来源**：
-**实时并集（IoT 面板 ∪ ``image_text_quality``）**。本模块**不自己写 SQL、不自己解析连接串**：
-那等于造第二套口径，正是这次要消灭的东西。
+已整条删除，见票 17）。现在取数走**算法侧的只读 HTTP 端点**：
 
-``mushroom_batch_yield`` 是**物化缓存**（由那个并集灌出来），**不作成员判据**——它只会滞后或缺行。
-但"滞后"必须**看得见**：每次取数都把"只在物化缓存里 / 只在实时并集里"的批次记一条日志 + 计数
-（``_log_cache_diff``）；差异观测失败**只告警、不阻断**（准入依据是实时并集，判别只是取证）。
+    GET {base}/batches?room_id=611
 
-代价（已报 Chief / 发版官评估）：巡检镜像要带 ``src/**`` 与 sqlalchemy。所以这里的 import
-**全部惰性**，拿不到就报一条指名道姓的错，**且不退回任何自写取数**。
+``base`` 取 ``--analysis-url`` → 环境变量 ``PATROL_ANALYSIS`` → 默认 ``http://172.17.0.1:8000``
+（与 console 访问算法侧同一套路：容器里走宿主网桥网关）。
 
-## 口径（哪些字段来自哪里）
+**本模块不写 SQL、不解析连接串、不 import 任何数据库驱动**（连"第二条口径"的可能性一起掐掉）：
+台账的成员与刷新由端点负责，端点还负责把 ``stale`` 一起报回来。
 
-* ``room_id`` / ``entry_date`` ← 权威源的 ``(room_id, in_date)``；
-* ``batch_no`` = **派生**显示名 ``<room_id>_<YYYYMMDD>``（与权威源里已有的写法
-  ``batch_yield_service.resolve_setpoint_batch_info`` 同一格式，如 ``611_20260930``）；
-  旧值 ``mogu-<业务库主键>`` **不再使用**（那是被禁用的业务库主键）；
-* ``packages``（入库包数）：pgsql 侧没有对应列、也无法可靠派生 ⇒ **写 NULL（未知）**，
-  **绝不写 0**；
-* 批次**身份** = ``room_id|entry_date``（ADR-0020），写进 ``source`` 注；
-* 生产系统的"在库第 N 天"（入库当天 = 01）由日期派生（= 我们的天数 + 1）。
+## 端点给的字段（三个名字别混，Chief 2026-10-14 裁定）
 
-## 安全约束
+| 字段 | 含义 | 本模块怎么用 |
+| --- | --- | --- |
+| ``batch_id`` | ``<规范库房号>|<入库日期>``（ADR-0020） | 与 ``(room_id, entry_date)`` 推出的值**逐字核对**，不一致就报错 |
+| ``batch_no`` | **派生名** ``<规范库房号>_<YYYYMMDD>`` | **直接用端点给的**，不自己拼 |
+| ``display_name`` | 业务名 ``mogu-*``；缺映射 ⇒ NULL | 原样落进 ``room.yaml``，**缺就是 null，不编** |
 
-* **未来日期一律拒绝**：入库日期比今天晚，说明查询打到了错库/错表或系统时间不对，
-  写进去会让机构在"第 -N 天"这个不存在的状态下开跑。
+## 准入规则（fail-closed）
+
+* ``stale = true`` ⇒ **明确报"台账陈旧"、保留旧 ``room.yaml``**（阈值由端点给，当前 26h）：
+  陈旧台账判不了准入，**绝不静默用旧值**；端点没给 ``stale`` 也拒绝继续（没法判断就不动）。
+* 取不到 / ``ok≠true`` / 结构不对 / 未来日期 / 库房不存在 ⇒ 报错且**一个字节都不写**。
 * ``entry_date`` 变化会**明确打印**旧值→新值。它会变（换批次），但绝不该悄悄变。
 * 原子落盘（同目录临时文件 + ``os.replace``），避免 daemon 读到半截 YAML。
-* 取不到台账 ⇒ **一个字节都不写**（宁可留着旧值，也不要写半份）。
 """
 
 from __future__ import annotations
@@ -54,6 +49,12 @@ from pathlib import Path
 
 from patrol.room import RoomState, RoomStateError, load_room_state
 
+#: 与 console 的 `PATROL_ANALYSIS` 同名同义：容器里用宿主网桥网关访问算法侧。
+ANALYSIS_URL_ENV = "PATROL_ANALYSIS"
+DEFAULT_ANALYSIS_URL = "http://172.17.0.1:8000"
+BATCHES_PATH = "/batches"
+HTTP_TIMEOUT_S = 10.0
+
 
 class FetchError(RuntimeError):
     """取数或解析失败——调用方据此**不写文件**（宁可留着旧值，也不要写半份）。"""
@@ -61,113 +62,135 @@ class FetchError(RuntimeError):
 
 @dataclass(frozen=True)
 class BatchRow:
-    """台账里的一行（只保留准入用得上的字段）。"""
+    """端点 ``batches[]`` 里的一行（只保留准入用得上的字段）。"""
 
     room_id: str
     entry_date: date
-    #: 入库包数。权威源里没有这个量 ⇒ 现存一律 None（**未知**，不是 0）。
-    #: 字段保留是为了 `room.yaml` 的形状不随取数源变（消费方 `patrol.room` 只看 `entry_date`）。
+    #: **派生名** `<room_id>_<YYYYMMDD>`——由端点给，本模块不自己拼。
+    batch_no: str | None = None
+    #: 业务名 `mogu-*`（端点字段 `display_name`）：缺映射 ⇒ None，**不编**。
+    display_name: str | None = None
+    #: 入库包数：台账里没有这个量 ⇒ 一律 None（**未知**，不是 0）。
     packages: int | None = None
 
     @property
     def batch_id(self) -> str:
-        """批次身份（ADR-0020）：``<room_id>|<entry_date>``。"""
+        """批次身份（ADR-0020）：``<room_id>|<entry_date>``——与端点同式。"""
         return f"{self.room_id}|{self.entry_date.isoformat()}"
 
-    @property
-    def batch_no(self) -> str:
-        """批次**显示名**：``<room_id>_<YYYYMMDD>``（派生，不是业务库主键）。
 
-        格式取自权威源自己已经在用的写法（``batch_yield_service`` 里
-        ``batch_id = f"{room_id}_{in_date:%Y%m%d}"``），不另造一套命名。
-        """
-        return f"{self.room_id}_{self.entry_date.strftime('%Y%m%d')}"
+# --------------------------------------------------------------------------- 取数（HTTP，只读）
+
+def analysis_base_url(url: str | None = None) -> str:
+    """端点基址：``--analysis-url`` → ``PATROL_ANALYSIS`` → 默认宿主网关。"""
+    for candidate in (url, os.environ.get(ANALYSIS_URL_ENV)):
+        text = (candidate or "").strip()
+        if text:
+            return text.rstrip("/")
+    return DEFAULT_ANALYSIS_URL
 
 
-# --------------------------------------------------------------------------- 取数（权威源）
-
-def ledger_rows_via_service(room_id: str, *, session=None, log=None) -> list[tuple]:
-    """**唯一**取数实现：调 ``utils.batch_yield_service.get_batch_ranges``。
-
-    返回 ``[(room_id, in_date), …]``。``session`` 可注入（测试用）；不注入时用权威源
-    自己的 pgsql engine（``global_const.global_const.pgsql_engine``）——连接串口径也归它，
-    本模块**不解析 DSN**。
-
-    权威口径 = **实时并集**（IoT 面板 ∪ `image_text_quality`）；物化缓存
-    `mushroom_batch_yield` **不作成员判据**，只用来把滞后记成一条可见的差异日志。
-    """
-    if session is None:
-        try:
-            from global_const.global_const import pgsql_engine
-            from sqlalchemy.orm import sessionmaker
-        except ImportError as exc:
-            raise FetchError(
-                f"巡检环境缺少权威取数依赖（{exc}）：镜像要带 `src/**` 与 sqlalchemy（票 17 §2/§4）"
-            ) from exc
-        session = sessionmaker(bind=pgsql_engine)()
+def _http_get_batches(base: str, room_id: str) -> dict:
+    """真的发一次只读 GET；``httpx`` 是 deploy 既有依赖（不新增驱动）。"""
     try:
-        from utils.batch_yield_service import get_batch_ranges
-    except ImportError as exc:
+        import httpx
+    except ImportError as exc:  # pragma: no cover - deploy 依赖里就有
+        raise FetchError(f"环境里没有 httpx：{exc}") from exc
+    url = f"{base}{BATCHES_PATH}"
+    try:
+        resp = httpx.get(url, params={"room_id": room_id}, timeout=HTTP_TIMEOUT_S)
+    except Exception as exc:
+        raise FetchError(f"读批次端点失败（{url}）：{exc}") from exc
+    if resp.status_code != 200:
+        raise FetchError(f"读批次端点失败（{url}）：HTTP {resp.status_code}")
+    try:
+        payload = resp.json()
+    except Exception as exc:
+        raise FetchError(f"批次端点返回的不是 JSON（{url}）：{exc}") from exc
+    return payload
+
+
+def fetch_ledger_payload(room_id: str, *, url: str | None = None, runner=None,
+                         log=None) -> dict:
+    """取端点载荷并做**结构级** fail-closed 校验；``runner`` 可注入（测试用）。"""
+    base = analysis_base_url(url)
+    payload = (runner or (lambda room: _http_get_batches(base, room)))(room_id)
+    if not isinstance(payload, dict):
+        raise FetchError(f"批次端点返回的不是对象：{payload!r}")
+    if payload.get("ok") is not True:
+        raise FetchError(f"批次端点 ok≠true（{payload.get('ok')!r}）：{payload.get('error') or ''}".strip())
+    if "stale" not in payload:
         raise FetchError(
-            "巡检环境没有 `utils.batch_yield_service`：取数口径只有这一处，"
-            "镜像必须带 `src/**`（票 17 §2/§4）——**不退回自写 SQL**"
-        ) from exc
-    try:
-        items = get_batch_ranges(session, room_ids=[room_id])
-    except Exception as exc:      # 读不到就报错，绝不返回空表
-        raise FetchError(f"读 pgsql 台账失败：{exc}") from exc
-    pairs = [(it["room_id"], it["in_date"]) for it in items]
-    _log_cache_diff(session, pairs, log=log)
-    return pairs
+            "批次端点没给 stale：判断不了台账是否陈旧 ⇒ 拒绝用它判准入（宁可不动）"
+        )
+    if payload["stale"] is True:
+        raise FetchError(
+            "台账陈旧（stale=true）：拒绝用它判准入；保留旧 room.yaml，等台账刷新后再取"
+        )
+    batches = payload.get("batches")
+    if not isinstance(batches, list):
+        raise FetchError(f"批次端点没给 batches 列表：{batches!r}")
+    _log_ledger_meta(payload, log=log)
+    return payload
 
 
-def _fmt_pairs(pairs: list[tuple[str, date]], limit: int = 5) -> str:
-    head = "、".join(f"{room}|{day}" for room, day in pairs[:limit])
-    return head + ("…" if len(pairs) > limit else "")
+def _log_ledger_meta(payload: dict, *, log=None) -> None:
+    """把端点的台账元数据记一行日志（**滞后/剪除/去重必须看得见**，不许静默）。
 
-
-def _log_cache_diff(session, realtime: list, *, log=None) -> dict | None:
-    """把"物化缓存 vs 实时并集"的差异记一条日志 + 计数，返回 ``dict``（测试用）。
-
-    **为什么要它**（Chief 2026-10-14 裁定）：`mushroom_batch_yield` 是派生表，只能滞后或
-    缺行；两侧用不同集合就是第二套口径。所以口径统一到实时并集，同时**让滞后看得见**——
-    "只在缓存里 / 只在实时里"各多少条、分别是哪些批次。
-
-    **差异观测失败不阻断取数**：准入依据是实时并集，这一段只是取证。悄悄降级也不行——
-    失败时同样打一条告警（否则"没日志"会被读成"没有差异"）。
+    缺字段时同样打一条告警：否则"没日志"会被读成"没有差异"。
     """
     if log is None:
         log = print
-    try:
-        from utils.create_table import MushroomBatchYield
-        rows = (session.query(MushroomBatchYield.room_id, MushroomBatchYield.in_date)
-                .distinct().all())
-    except Exception as exc:  # noqa: BLE001 - 取证失败不许拖垮准入
-        log(f"！物化缓存差异未能观测（{exc}）：本次取数照常，但滞后就看不见了")
-        return None
-
-    cache = {(str(room), _as_date(day)) for room, day in rows if room and day}
-    real = {(str(room), _as_date(day)) for room, day in realtime}
-    only_cache = sorted(cache - real)
-    only_realtime = sorted(real - cache)
-    log(f"台账差异：只在物化缓存里 {len(only_cache)} 条、只在实时并集里 {len(only_realtime)} 条"
-        "（权威=实时并集；物化缓存不作成员判据）")
-    if only_cache:
-        log(f"  只在缓存（滞后/残留）：{_fmt_pairs(only_cache)}")
-    if only_realtime:
-        log(f"  只在实时（缓存缺行）：{_fmt_pairs(only_realtime)}")
-    return {"cache_only": only_cache, "realtime_only": only_realtime}
+    refreshed = payload.get("ledger_refreshed_at")
+    rows = payload.get("ledger_n_rows")
+    pruned = payload.get("ledger_n_pruned")
+    dups = payload.get("duplicates")
+    if refreshed is None and rows is None:
+        log("！批次端点没给台账元数据（ledger_refreshed_at/ledger_n_rows）：滞后就看不见了")
+        return
+    extra = f"，去重 {dups}" if dups else ""
+    log(f"台账：刷新于 {refreshed or '(未给)'}，行数 {rows if rows is not None else '(未给)'}，"
+        f"剪除 {pruned if pruned is not None else '(未给)'}{extra}，stale=False")
 
 
-def fetch_ledger_rows(room_id: str, *, runner=None, log=None) -> list[tuple]:
-    """取台账原始行 ``(room_id, in_date)``。
+def rows_from_payload(payload: dict) -> list[BatchRow]:
+    """端点载荷 → `BatchRow` 列表；三个名字按裁定逐条核对，错位即报错。"""
+    out: list[BatchRow] = []
+    for lineno, item in enumerate(payload.get("batches") or [], 1):
+        if not isinstance(item, dict):
+            raise FetchError(f"第 {lineno} 条批次不是对象：{item!r}")
+        room = str(item.get("room_id") or "").strip()
+        if not room:
+            raise FetchError(f"第 {lineno} 条批次缺 room_id：{item!r}")
+        entry = _as_date(item.get("entry_date"))
+        batch_no = str(item.get("batch_no") or "").strip()
+        if not batch_no:
+            raise FetchError(
+                f"第 {lineno} 条批次缺 batch_no（派生名）——**不许自己拼**：{item!r}"
+            )
+        expected_id = f"{room}|{entry.isoformat()}"
+        got_id = str(item.get("batch_id") or "").strip()
+        if got_id and got_id != expected_id:
+            raise FetchError(
+                f"第 {lineno} 条批次的 batch_id={got_id!r} 与 (room_id, entry_date) 推出的 "
+                f"{expected_id!r} 不一致——命名口径对不上，拒绝继续"
+            )
+        display = item.get("display_name")
+        out.append(BatchRow(
+            room_id=room,
+            entry_date=entry,
+            batch_no=batch_no,
+            display_name=(str(display).strip() or None) if display is not None else None,
+        ))
+    out.sort(key=lambda r: (r.room_id, r.entry_date))
+    return out
 
-    ``runner`` 可注入（测试用；也是将来若改走算法侧只读端点时的**唯一**替换点，票 17 §2）。
-    默认 = 复用权威源，不自写 SQL；``log`` 默认打印（差异观测要落在日志里）。
-    """
-    if runner is not None:
-        return list(runner(room_id))
-    return ledger_rows_via_service(room_id, log=log if log is not None else print)
+
+def fetch_ledger_rows(room_id: str, *, url: str | None = None, runner=None,
+                      log=None) -> list[BatchRow]:
+    """取数一步到位：端点载荷 → `BatchRow` 列表。"""
+    payload = fetch_ledger_payload(room_id, url=url, runner=runner, log=log)
+    return rows_from_payload(payload)
 
 
 def _as_date(value) -> date:
@@ -176,35 +199,11 @@ def _as_date(value) -> date:
         return value.date()
     if isinstance(value, date):
         return value
-    text = str(value or "").strip()[:10]        # 库里两种写法：带/不带时分秒，都只取日期
+    text = str(value or "").strip()[:10]        # 端点给日期；带时分秒也接受
     try:
         return date.fromisoformat(text)
     except ValueError as exc:
         raise FetchError(f"入库日期不合法：{value!r}") from exc
-
-
-def rows_to_batch_rows(rows: list) -> list[BatchRow]:
-    """``(room_id, in_date)`` 行 → `BatchRow`；列数不对/缺库房/日期非法一律报错。
-
-    列数不对时报错而不是跳过：列错位会静默把"入库日期"当成库房号，这类错误只能靠
-    拒绝解析来暴露。
-    """
-    out: list[BatchRow] = []
-    for lineno, raw in enumerate(rows, 1):
-        try:
-            parts = tuple(raw)
-        except TypeError as exc:
-            raise FetchError(f"第 {lineno} 行不是行式数据：{raw!r}") from exc
-        if len(parts) != 2:
-            raise FetchError(
-                f"第 {lineno} 行有 {len(parts)} 列，期望 2 列（room_id, in_date）：{raw!r}"
-            )
-        room, in_date = parts
-        if not room:
-            raise FetchError(f"第 {lineno} 行缺 room_id：{raw!r}")
-        out.append(BatchRow(room_id=str(room), entry_date=_as_date(in_date)))
-    out.sort(key=lambda r: (r.room_id, r.entry_date))
-    return out
 
 
 # --------------------------------------------------------------------------- 离线 TSV（演练/无库环境）
@@ -213,8 +212,8 @@ def rows_to_batch_rows(rows: list) -> list[BatchRow]:
 def parse_tsv(text: str) -> list[BatchRow]:
     """解析**离线台账** TSV：每行两列 ``room_id<TAB>in_date``。
 
-    这是给演练与无库环境用的旁路（`--from`），**不是**取数通道：它不连任何库，
-    也不认识旧那套 7 列的业务库输出。
+    这是给演练与无库环境用的旁路（``--from``），**不是**取数通道：它不连任何库、
+    也不连端点。**离线旁路的 `batch_no` 在本机派生**（照端点同式），生产路径一律用端点给的。
     """
     rows: list[BatchRow] = []
     for lineno, line in enumerate(text.splitlines(), 1):
@@ -226,7 +225,9 @@ def parse_tsv(text: str) -> list[BatchRow]:
         room = parts[0].strip()
         if room in ("", "NULL", r"\N"):
             raise FetchError(f"第 {lineno} 行缺 room_id：{line!r}")
-        rows.append(BatchRow(room_id=room, entry_date=_as_date(parts[1].strip())))
+        entry = _as_date(parts[1].strip())
+        rows.append(BatchRow(room_id=room, entry_date=entry,
+                             batch_no=f"{room}_{entry.strftime('%Y%m%d')}"))
     return rows
 
 
@@ -255,7 +256,7 @@ def select_batch(rows: list[BatchRow], room_id: str, *, today: date) -> BatchRow
             f"台账里没有库房 {room_id!r} 的批次记录（现有库房：{known or '无'}）"
             "——读不到入库日期就不写文件"
         )
-    row = max(mine, key=lambda r: (r.entry_date, r.batch_no))
+    row = max(mine, key=lambda r: (r.entry_date, r.batch_no or ""))
     if row.entry_date > today:
         raise FetchError(
             f"库房 {room_id} 的入库日期 {row.entry_date} 在今天（{today}）之后——"
@@ -272,18 +273,19 @@ def render_room_yaml(row: BatchRow, *, today: date, now: datetime | None = None)
     allowed, reason = state.verdict(today)
     gate = "准入" if allowed else "不巡检"
     source = (f"deploy-fetch-room {now:%Y-%m-%d %H:%M:%S} "
-              f"(pgsql mushroom_algorithm / batch_yield_service, 身份 {row.batch_id}, "
-              f"在库第 {day} 天, {gate})")
+              f"(analysis /batches, 身份 {row.batch_id}, 在库第 {day} 天, {gate})")
     packages = row.packages if row.packages is not None else "null"
+    display = f'"{row.display_name}"' if row.display_name else "null"
     return (
         "# 库房在库状态——巡检准入门禁（由 deploy-fetch-room 生成，可手改）。\n"
         "#\n"
-        "# 数据来源：pgsql mushroom_algorithm 的批次台账（复用 batch_yield_service.get_batch_ranges）\n"
-        f"#   批次身份 = (room_id, entry_date) = ({row.room_id}, {row.entry_date.isoformat()})；"
-        "batch_no 是**派生**显示名（业务库已禁用，2026-10-14 裁定）\n"
+        "# 数据来源：算法侧只读端点 GET /batches?room_id=…（本模块不碰数据库）\n"
+        f"#   批次身份 = (room_id, entry_date) = ({row.room_id}, {row.entry_date.isoformat()})"
+        "（ADR-0020）\n"
+        f"#   batch_no 是**派生名**（端点给的）；display_name 是业务名 mogu-*，缺映射即 null，不编\n"
         "#   系统把入库当天记作第 01 天；本文件按「入库当天 = 第 0 天」计算"
         f"（本行对应系统口径第 {day + 1} 天）\n"
-        "#   packages 在 pgsql 台账里没有对应列、也无法可靠派生 ⇒ null（未知，不是 0）\n"
+        "#   packages 台账里没有这个量 ⇒ null（未知，不是 0）\n"
         f"#   本次判定：{reason}\n"
         f"#   本文件由脚本生成于 {now:%Y-%m-%d %H:%M:%S}\n"
         "\n"
@@ -291,6 +293,7 @@ def render_room_yaml(row: BatchRow, *, today: date, now: datetime | None = None)
         f"entry_date: {row.entry_date.isoformat()}\n"
         f"packages: {packages}\n"
         f'batch_no: "{row.batch_no}"\n'
+        f"display_name: {display}\n"
         f'source: "{source}"\n'
     )
 
@@ -343,13 +346,15 @@ def load_room_state_text(text: str) -> RoomState:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="deploy-fetch-room",
-        description="从批次台账（pgsql，复用权威源）取库房入库日期并写入 room.yaml（准入依据）",
+        description="从算法侧只读端点取库房入库日期并写入 room.yaml（准入依据）",
     )
     ap.add_argument("--room", required=True, help="库房号（如 611）")
     ap.add_argument("--out", default="room.yaml", help="写到哪里（默认 ./room.yaml）")
+    ap.add_argument("--analysis-url", default=None,
+                    help=f"算法侧基址（默认读 {ANALYSIS_URL_ENV}，再默认 {DEFAULT_ANALYSIS_URL}）")
     ap.add_argument("--from", dest="source", default=None,
                     help="**离线**台账 TSV（每行 room_id<TAB>in_date；'-' = stdin）——"
-                         "只用于演练/无库环境；默认走权威取数源")
+                         "只用于演练/无库环境；默认走只读端点")
     ap.add_argument("--today", default=None, help="覆盖‘今天’（YYYY-MM-DD，仅用于演练）")
     ap.add_argument("--print", dest="print_only", action="store_true",
                     help="只打印，不写文件")
@@ -363,7 +368,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.source:
             rows = parse_tsv(read_tsv(args.source))
         else:
-            rows = rows_to_batch_rows(fetch_ledger_rows(args.room))
+            rows = fetch_ledger_rows(args.room, url=args.analysis_url)
         row = select_batch(rows, args.room, today=today)
         text = render_room_yaml(row, today=today)
     except FetchError as e:
@@ -373,7 +378,9 @@ def main(argv: list[str] | None = None) -> int:
     state = load_room_state_text(text)
     allowed, reason = state.verdict(today)
     packages = row.packages if row.packages is not None else "—"
-    print(f"库房 {row.room_id}：入库 {row.entry_date}（批次 {row.batch_no}，包数 {packages}）")
+    display = row.display_name or "—"
+    print(f"库房 {row.room_id}：入库 {row.entry_date}（批次 {row.batch_no}，"
+          f"业务名 {display}，包数 {packages}）")
     print(f"准入判定：{reason} ⇒ {'本轮会巡检' if allowed else '本轮不巡检'}")
 
     if args.print_only:

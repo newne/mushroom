@@ -1,132 +1,114 @@
-# 17 — `deploy-fetch-room` 取数改走 pgsql（下线旧通路；**A′：复用权威源**）
+# 17 — `deploy-fetch-room` 取数改走**算法侧只读端点**（下线业务库通路）
 
-**用户裁定（2026-10-14）:** 业务库禁止使用；算法侧取数一律走 pgsql（compose 的 `postgres_db`，
-库 `mushroom_algorithm`）。
-**Chief 裁定（2026-10-14）:** ① `batch_no` **走权威源派生**（`(room_id, in_date)` 口径），
-**不许用业务库主键**；`packages` pgsql 侧没有、无法可靠派生 ⇒ **NULL（未知），绝不写 0**。
-② **走 A′**：deploy 直连 pgsql + **复用** `src/utils/batch_yield_service.get_batch_ranges`；
-**A 否**（自写一份 `(room_id, in_date)` 就是"第二套口径"）；A′ 的前提是**发版官评估
-"patrol 镜像带 `src/**`"的代价**，代价过大才退 **B**（算法侧现成只读 HTTP 端点，不许新增服务/端口）；
-C 否。③ analysis 侧环境官已做（`b1e29a4`），引用点清单按 HEAD 复核。
-**依据:** 票 14（方案票/引用点盘点）、`analysis/src/analysis/batches.py`、ADR-0020（批次身份）、
-`src/utils/batch_yield_service.py:105-130/266`、`docker/patrol-entrypoint.sh:29`（在巡检容器内跑）。
+**用户裁定（2026-10-14）:** 业务库禁止使用。
+**Chief 裁定（同日，两次）：** ① 先走 pgsql / A′；② **读端点形状已定并落地**（analysis `3c30feb`）⇒
+`fetch_room` 改 **HTTP 读 `GET /batches?room_id=…`**，**仍不许自己写 SQL / 解析连接串**。
+**依据:** 票 14（引用点盘点）、ADR-0020（批次身份）、`src/utils/batch_yield_service.py`、
+`analysis/src/analysis/batches.py`、`docker/patrol-entrypoint.sh:29`（在巡检容器内跑）。
 
 **Status:** 已实现（票 + 码同一提交）。**不碰 `analysis/**`；不连生产；不连业务库。**
 
 ---
 
-## 0. 结论（四条）
+## 0. 结论（五条）
 
-1. **取数换源 + 口径唯一**：删掉"借别人的容器 + 从容器环境读 root 口令 + 容器内跑查询客户端"
-   整条路（旧 `fetch_room.py:48-49`、`:233-254`、`:265-274`、`:287`），改调**权威源**
-   `utils.batch_yield_service.get_batch_ranges`。本模块**不写 SQL、不解析连接串**——连接串与
-   口径都归权威源（`global_const.pgsql_engine` / `get_batch_ranges`）。
-2. **显示名派生**：`batch_no = <room_id>_<YYYYMMDD>`（如 `611_20260930`）。格式不是我编的，
-   是权威源自己在用的写法（`batch_yield_service.py:266` 的 `batch_id = f"{room_id}_{in_date:%Y%m%d}"`）。
-   **`packages` → `null`（未知，不是 0）**（pgsql 侧没有入库包数）。
-3. **对外契约与 fail-closed 一字不变**：YAML 字段名/形状、`patrol.room` 可读回、取不到/解析失败/
-   未来日期/库房不存在 ⇒ 报错且**一个字节都不写**、原子落盘、`entry_date` 变更打印旧→新、
-   `--today`/`--print` 语义。
-4. **下游可见变化（需环境官/界面师同步）**：`rounds.batch_no` 从 `mogu-<业务库主键>` 变成
-   `<room>_<YYYYMMDD>`，`rounds.packages` 类信息不再有值（本来就是 null 形状）。
-   **筛选/展示不能再按 `mogu-…` 串匹配**，见 §5。
-5. **权威口径 + 滞后可观测**（Chief 2026-10-14 裁定）：唯一权威 = `get_batch_ranges` 的
-   **实时并集（IoT 面板 ∪ `image_text_quality`）**；`mushroom_batch_yield` 退为**物化缓存**、
-   **不作成员判据**。两侧都必须用同一个函数（analysis 侧由环境官改）。
-   每次取数**记一条差异日志 + 计数**："只在物化缓存里 N 条 / 只在实时并集里 M 条"并列前几条
-   （`_log_cache_diff`）；**差异观测失败只告警、不阻断**——准入依据是实时并集，取证不许拖垮准入，
-   但也不许静默（没日志会被读成"没有差异"）。
+1. **取数 = 只读端点**：`GET {base}/batches?room_id=<库房>`。`base` 取
+   `--analysis-url` → `PATROL_ANALYSIS` → 默认 `http://172.17.0.1:8000`（与 console 访问算法侧同一套路：
+   容器里走宿主网桥网关）。本模块**不写 SQL、不解析连接串、不 import 任何数据库驱动**。
+   ⇒ **A′ 那套前置（镜像带 `src/**` + sqlalchemy/loguru + `psycopg[binary]`）全部作废**，
+   连 `uv lock` 都不用动（`httpx` 本来就是 deploy 的依赖）。
+2. **三个名字分开**（Chief 裁定，端点已给全）：
+   * `batch_id` = `<规范库房号>|<入库日期>`（ADR-0020）——本模块与 `(room_id, entry_date)` 推出的值
+     **逐字核对**，不一致即报错；
+   * `batch_no` = **派生名** `<规范库房号>_<YYYYMMDD>`——**直接用端点给的，不自己拼**；
+   * `display_name` = 业务名 `mogu-*`，缺映射 ⇒ NULL，**不编**。
+   ⚠️ 库里那列虽然叫 `batch_no`、装的却是 `mogu-*`；端点上两者已分开命名，**别混用**。
+3. **准入 fail-closed 加一条**：**`stale=true` ⇒ 明确报"台账陈旧"、保留旧 `room.yaml`**，
+   绝不静默用旧值；端点**没给 `stale`** 也拒绝继续（判断不了就不动）。阈值由端点给（当前 26h）。
+4. **其余契约不变**：取不到/`ok≠true`/结构不对/未来日期/库房不存在 ⇒ 报错且**一个字节都不写**；
+   原子落盘；`entry_date` 变更打印旧→新。
+5. **台账元数据必须可见**：每次取数打一行"刷新于 / 行数 / 剪除 / 去重 / stale"；端点没给这些字段
+   **也打告警**（"没日志"不许被读成"没有差异"）。
 
 ---
 
-## 1. 字段口径（逐列）
+## 1. 端点返回（实测形状，`3c30feb`）
 
-| `room.yaml` 字段 | 旧来源（业务库 `mogu.mo_gu_batch`） | 新来源（pgsql `mushroom_algorithm`） | 变不变 |
-| --- | --- | --- | --- |
-| `room_id` | `code_num` | `room_id` | **不变** |
-| `entry_date` | `in_time`（截日期） | `in_date` | **不变** |
-| `packages` | `in_num`（9792） | **无对应、无法可靠派生** | → `null`（未知，**不写 0**） |
-| `batch_no` | `mogu-{业务库主键}` | **派生** `<room_id>_<YYYYMMDD>` | **值变**（口径按裁定，格式照权威源） |
-| `source` 里的设备号 | `info_code` | 无 | 去掉 |
-| `source` 里的系统天数 | `in_day_num` | 由日期派生（`day_on + 1`） | 值同、来源变 |
-| `source` 里的身份 | — | `room_id|entry_date`（ADR-0020） | 新增（可对账） |
+```json
+{"ok":true,"room_id":"611","room_label":"611",
+ "batches":[{"room_id":"611","room_id_raw":"611","entry_date":"2026-09-30",
+             "batch_id":"611|2026-09-30","batch_no":"611_20260930",
+             "display_name":"mogu-107","until":null}],
+ "n_batches":1,"ledger_refreshed_at":"2026-10-14T13:59:55","ledger_n_rows":2,
+ "ledger_n_pruned":0,"stale":false,"stale_after_h":26.0,"room_alias":{…},"duplicates":{…}}
+```
 
-## 2. 方案对比（Chief 裁定记录，留证）
-
-| 方案 | 判定 | 理由 / 代价 |
+| `room.yaml` 字段 | 来源 | 变不变 |
 | --- | --- | --- |
-| A：deploy 自写 SQL + 自解析 DSN | **否** | 那是第二套 `(room_id, in_date)` 口径，正是要消灭的东西 |
-| **A′：复用 `batch_yield_service.get_batch_ranges`** | **采用** | 口径唯一；代价＝巡检镜像要带 `src/**` 与 sqlalchemy（该函数还依赖 `loguru`、`global_const`、`utils.create_table`，并有惰性 IoT 分支）⇒ **发版官评估体积/依赖** |
-| B：算法侧现成只读 HTTP 端点 | 备选（A′ 代价过大时） | 不许新增服务/端口；替换点只有 `fetch_ledger_rows(runner=…)` 一处 |
-| C：别的自造通道 | 否 | — |
+| `room_id` | 端点 `room_id`（规范号） | 值口径可能被规范（别名归一），**这是好事** |
+| `entry_date` | 端点 `entry_date` | 不变 |
+| `batch_no` | 端点 `batch_no`（**派生名**） | **值变**：`mogu-107` → `611_20260930` |
+| `display_name` | 端点 `display_name` | **新增**（缺 ⇒ null） |
+| `packages` | 台账无此量 | `null`（未知，**不写 0**） |
+| `source` | 本模块 | 含身份 `room|date` + 准入判定 |
 
-**实现上为 A′/B 都留了门**：`ledger_rows_via_service()` 是默认实现（惰性 import + 注入 `session`），
-`fetch_ledger_rows(room_id, *, runner=…)` 是唯一替换点；import 不到时**报一条指名道姓的错**
-（"镜像要带 `src/**` 与 sqlalchemy"），**绝不退回自写取数**。
+## 2. 方案对比（留证）
 
-**权威口径已裁（Chief 2026-10-14）**：唯一权威 = `get_batch_ranges` 的**实时并集**
-（IoT 面板 ∪ `image_text_quality`）。理由：`mushroom_batch_yield` 是**派生表**（由那个并集灌出来），
-只能滞后或缺行，不能比源更权威；两侧用不同集合就是第二套口径。
-⇒ `mushroom_batch_yield` 退为**物化缓存、不作成员判据**；**两侧都必须用同一个函数**
-（巡检侧＝本模块已用；analysis 侧＝环境官改）；**差异必须可观测**（本模块已实现差异日志，见 §0.5）。
+| 方案 | 判定 | 理由 |
+| --- | --- | --- |
+| A：deploy 自写 SQL + 自解析 DSN | 否 | 第二套口径 |
+| A′：deploy 直连 pgsql + 复用 `batch_yield_service` | **已被 B 取代** | 需镜像带 `src/**` + sqlalchemy/loguru + `psycopg`；端点把同一口径搬到服务侧后，这些前置全免 |
+| **B：HTTP 读 analysis 只读端点** | **采用** | 零新依赖（httpx 已在）、零新密钥、零新驱动；口径唯一（端点自己管台账成员与刷新） |
+| C 别的自造通道 | 否 | — |
+
+**替换点**：`fetch_ledger_payload(room_id, *, url=None, runner=None, log=None)` ——
+`runner` 可注入，测试与将来换通道都只改这一处。
 
 ## 3. 变更清单
 
 | # | 位置 | 改什么 |
 | --- | --- | --- |
-| 1 | `deploy/src/deploy/fetch_room.py` | 删旧取数通路（容器检视/容器内查询/`subprocess`/TSV 解析的 7 列契约）；改为 `ledger_rows_via_service`（调权威源）+ `fetch_ledger_rows(runner=)`；`BatchRow.batch_no` 变**派生属性**、`packages` 固定 None；`--from` 改成**离线两列 TSV**（演练/无库环境）；`--dsn` 不提供（连接串归权威源） |
-| 2 | `deploy/tests/test_fetch_room.py` | 假权威源模块（注入 `session`）证明调用点与下游；runner 注入证明"无数据库也能取到批次与房间"；缺 `src/**`/缺依赖/权威源抛错三条 fail-closed；派生 `batch_no` 断言；**源码里不许出现 `subprocess`/`tools_mysql`/`docker`/`mysql`/`MYSQL_ROOT_PASSWORD`** 的守门用例 |
-| 3 | 本票 | 裁定记录、口径表、部署前置、下游影响 |
+| 1 | `deploy/src/deploy/fetch_room.py` | 删旧业务库通路与 A′ 的 pgsql/驱动代码；改为 `_http_get_batches` + `fetch_ledger_payload`（结构/`ok`/`stale` 校验）+ `rows_from_payload`（三个名字逐条核对）；`BatchRow` 增 `display_name`、`batch_no` 取自端点；`render_room_yaml` 增 `display_name:` 行；CLI 增 `--analysis-url`；离线 TSV 保留（演练用，旁路本机派生 `batch_no` 并注明） |
+| 2 | `deploy/tests/test_fetch_room.py` | 54 条：三个名字分开/取自端点/缺 `display_name` 不编、`stale=true` 拒写且保留旧文件、缺 `stale` 拒继续、`ok≠true`/结构错、`batch_id` 不一致、HTTP 层（URL/参数/非 200/非 JSON）、元数据日志与缺失告警、离线旁路、落盘/CLI、**源码守门** |
+| 3 | 本票 | 端点形状、命名裁定、`stale` 规则、部署与下游影响 |
 
-## 4. 部署前置（发版官；不做完生产取不到数）
+## 4. 部署前置（运维）
 
-1. **巡检镜像带 `src/**`**（`utils.batch_yield_service`、`utils.create_table`、`global_const`）
-   以及 `sqlalchemy` / `loguru`。**这就是 A′ 的前提**；评估不通过 ⇒ 改走 B（改一处调用点）。
-2. `src` 的 pgsql 连接串沿用权威源自己的配置路径（`global_const.pgsql_engine`），
-   本模块**不新增** DSN 环境变量，也不把口令搬进容器环境。
-3. 通路上**不再需要 `docker.sock`**（附带收益：少一处特权挂载面）。
-   `docker/patrol-entrypoint.sh:29` 的 `fetch-room` 入口本身不用改。
+1. **端点先在生产生效**：要等 **analysis 下次重建**（`3c30feb` 尚未在线上）。
+2. **台账定时刷新**：宿主 timer 已停、容器里还没设 `BATCH_AT` ⇒ **明天 07:20 起 `stale` 会变 true**；
+   运维在下次 analysis 重建时加 `BATCH_AT=05:20` 恢复容器内定时（Chief 已派）。
+3. **巡检容器要能访问算法侧**：`PATROL_ANALYSIS`（建议显式设，与 console 同值）或 `--analysis-url`；
+   默认 `http://172.17.0.1:8000` 走宿主网桥网关，与 `PROD_INGEST` 同一套路。
+4. **不再需要**：`docker.sock`、任何 MySQL/pgsql 通路、镜像里的 `src/**`/sqlalchemy/`psycopg`。
 
 ## 5. 下游影响（各归属方）
 
 | 影响 | 谁 |
 | --- | --- |
-| `rounds.batch_no` 值形态从 `mogu-<id>` 变 `<room>_<YYYYMMDD>` | 环境官（列语义/回填口径）、界面师（展示与筛选）、发版官（线上逐字段复验） |
-| `deploy/src/deploy/console.py:463`、`:998`、`deploy/src/deploy/patrol_serve.py:297` 只是透传该字段 | 界面师 |
-| `ADR-0020` 的"巡检侧 batch_no 来自 `mo_gu_batch.id`"需修订注 | Chief 已转测量师 |
-| `container-cutover.md:1356-1357` 等照抄旧做法的文档标作废 | 发版官（Chief 已转） |
-| `env-analysis/spec.md:97`、`gap-list.md`、`prod-deploy/issues/01`、`issues/12/13` 旧方案 | 环境官（Chief 已转） |
-
-**已按 HEAD 复核的 analysis 侧残留（报 Chief，不替它改）**：
-`analysis/src/analysis/batch_ingest.py:9-10` 的文档串仍写着"台账在宿主容器里、用容器内查询读
-（与 `deploy-fetch-room` 同一套做法）"；`analysis/src/analysis/api.py:308` 的文档串仍写
-"台账由 `analysis.batch_ingest` 从业务库同步"。**代码通路已不在**（`git grep` 只命中这两处注释
-与 `batches.py` 里"为什么不再走"的历史说明），属文档收尾，归环境官。
+| `room.yaml.batch_no` 从 `mogu-107` 变 `611_20260930`，业务名移到新字段 `display_name` ⇒ `rounds.batch_no`/页面展示与筛选口径要跟 | 环境官（列语义）、前端/界面（展示与筛选）、运维（线上逐字段复验） |
+| ADR-0020 的"巡检侧 batch_no 来自 `mo_gu_batch.id`"需修订注 | Chief 已转测量师 |
+| `container-cutover.md` 等照抄旧做法的文档标作废 | 运维（Chief 已转） |
+| `analysis/**` 的旧文档串（`batch_ingest.py:9-10`、`api.py:308`） | 环境官（Chief 已转，我不动） |
 
 ## 6. 验收（命令 + 判据）
 
-- `cd D:\code\mushroom\patrol-workspace && .\.venv\Scripts\python.exe -m pytest -q ../deploy/tests/test_fetch_room.py`
-  → **45 passed**（含"假权威源注入 session 取到批次与房间""runner 注入无数据库"
-  "缓存 vs 实时并集的差异日志/计数""差异取证失败只告警不阻断""源码守门"五类）；
-  `../deploy/tests` 全套 → **311 passed**。
-- `ruff check` 干净。
-- 生产侧（发版官，待部署前置完成）：`docker exec mushroom_patrol python3 -m deploy.fetch_room
-  --room 611 --print` → `entry_date` 与权威源该库房最新 `in_date` 一致，`batch_no` = `611_YYYYMMDD`，
-  `packages: null`，全程不出现任何业务库访问。
+- `pytest -q ../deploy/tests/test_fetch_room.py` → **54 passed**；
+  `pytest -q ../deploy/tests` → **323 passed**；`ruff check` 干净。
+- 生产侧（运维，端点生效后）：`docker exec mushroom_patrol python3 -m deploy.fetch_room --room 611 --print`
+  → `entry_date` 与端点一致、`batch_no` = 端点派生名、`display_name` = 业务名或 null、
+  `packages: null`；日志里有"台账：刷新于 …"。`stale=true` 时必须返回 **2** 且 **room.yaml 不变**。
 
 ## 7. 待裁
 
-1. 权威源（IoT ∪ 文本质量表）与分析侧（产量表 ∪ 文本质量表）的**集合差异**要不要统一（§2 末）。
-2. A′ 的镜像代价评估结论（发版官）：可接受 ⇒ 保持 A′；不可接受 ⇒ 我按 B 换那一个调用点。
-3. 显示名格式最终以权威源为准（本票已照 `batch_yield_service.py:266`），要改名由测量师定。
+1. `until`（下一批入库日）要不要也落进 `room.yaml`（本票暂不落，只透传不存）。
+2. 巡检容器的 `PATROL_ANALYSIS` 是否显式写进 compose（建议写，别依赖默认值）。
+3. `display_name` 缺映射时页面上显示什么（`room|date` 还是留空）——前端/环境官口径。
 
 ## Comments
 
-- 2026-10-14 巡检手：**权威口径裁定已落地**（Chief 同日）：唯一权威 = `get_batch_ranges` 实时并集；
-  `mushroom_batch_yield` 退为物化缓存、不作成员判据；两侧同函数（analysis 侧环境官改）；
-  **滞后可观测**由本模块实现——`_log_cache_diff` 每次取数打"只在缓存 N 条 / 只在实时 M 条"
-  并列出前 5 条，取证失败只告警不阻断（3 条新用例）。测试 45 passed、deploy 全套 311 passed、ruff 干净。
-- 2026-10-14 巡检手：立项 + 实现（同一提交）。Chief 三条裁定逐条落地：① 派生 `batch_no`
-  + `packages` NULL（§1）；② A′（§2，含 A 否、B 备选、唯一替换点）；③ analysis 侧按 HEAD 复核（§5 末）。
-- 旧通路下线证据：守门用例逐字扫源码里的 `subprocess` / 容器名 / 查询客户端名 / 口令变量名，
-  任一出现即红；旧版本里那四段代码已整段删除。
+- 2026-10-14 巡检手：**按端点形态重写并实现**（Chief 同日裁定）。要点：零新依赖（httpx 已在）、
+  **不碰数据库/驱动**；`stale=true` fail-closed（保留旧 room.yaml）；三个名字逐条核对；
+  元数据必须可见。源码守门用例扩到 10 个 token：`subprocess`/`tools_mysql`/`docker`/`mysql`/
+  `MYSQL_ROOT_PASSWORD`/`psycopg`/`sqlalchemy`/`PGSQL_DSN`/`batch_yield_service`/`SELECT `。
+- 2026-10-14 巡检手：前一版（A′ 复用 `batch_yield_service`）已随端点落地被取代，代码与用例整段替换，
+  不保留双通道（双通道＝第二套口径）。
