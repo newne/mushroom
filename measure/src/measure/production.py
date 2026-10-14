@@ -179,7 +179,8 @@ def row_from_stats(*, frame: FrameInput, room_id: str, stats: BoxStats,
                    scale_source: str | None = None,
                    mm_per_px: float | None = None,
                    scale_ref_mm: float | None = None,
-                   scale_ref_px: float | None = None) -> MeasurementRecord:
+                   scale_ref_px: float | None = None,
+                   n_instances: int | None = None) -> MeasurementRecord:
     """`BoxStats` → 线格式记录（字段名翻译的唯一钉点在 `MeasurementRecord`）。
 
     菌簇四列是平视单档下**唯一可用的长势量**（票 11 §1 的 2026-10-13 加列），必须真发；
@@ -188,14 +189,20 @@ def row_from_stats(*, frame: FrameInput, room_id: str, stats: BoxStats,
     证据列（票 20）由调用方传入——L1–L3 接线层要填 `estimated_fields`（哪些列是估的）、
     `scale_source`（标尺怎么来的）、`mm_per_px`/`scale_ref_mm`/`scale_ref_px`（可交叉复算）。
     **没有就留 NULL**：缺标尺不是"值 0"。
+
+    ``n_instances``（L3 接线后）：`n` 是**朵数/实例数**，而簇级检出会让 `n_used` 变成**簇数**
+    ⇒ 由接线层把实例数显式传进来，别让 `n` 悄悄改了含义。
     """
+    n = usable_instance_count(stats, flags=set(flags)) if n_instances is None else (
+        0 if LOW_CONFIDENCE_FLAG in (set(flags) | contract.parse_flags(stats.quality_flags))
+        else int(n_instances))
     return MeasurementRecord(
         ts=frame.ts,
         room_id=room_id,
         box_id=frame.box_id,
         station_id=frame.station_id,
         angle_profile=frame.angle_profile,
-        n=usable_instance_count(stats, flags=set(flags)),
+        n=n,
         # 菌盖直径 / 菌杆长度：单档平视下明确缺测 ⇒ 恒 NULL，禁止近似
         mean_len_mm=None,
         mean_cap_mm=None,
@@ -223,7 +230,7 @@ def rows_from_frames(
     frames: Iterable[dict | FrameInput],
     *,
     room_id: str,
-    mm_per_px: float,
+    mm_per_px: float | None = None,
     detector: Detector | None = None,
     fetch: Callable[[str], bytes] | None = None,
     decode: Callable[[bytes], np.ndarray] | None = None,
@@ -271,6 +278,7 @@ def rows_from_frames(
             return [row]
         dets: list[Detection] = []
         extra: set[str] = set()
+        evidence = None
         if fetch is None or decode is None or not frame.cloud_url:
             extra.add("no_detection")
             if not emit_empty:
@@ -293,7 +301,9 @@ def rows_from_frames(
                     if not emit_empty:
                         return []
                 else:
-                    dets = det.detect(image, mm_per_px=mm_per_px, box_id=frame.box_id)
+                    dets, evidence = _detect(det, image, frame=frame, mm_per_px=mm_per_px)
+                    if evidence is not None:
+                        extra |= set(evidence.flags)
                     if not dets:
                         extra.add("no_detection")
                         if not emit_empty:
@@ -302,8 +312,16 @@ def rows_from_frames(
         flags = detection_flags(dets) | extra
         stats = aggregate_box(dets)
         quality = quality_for(flags=flags, detected=detected)
-        rec = row_from_stats(frame=frame, room_id=room_id, stats=stats,
-                             quality=quality, notes=notes_for(detected), flags=flags)
+        rec = row_from_stats(
+            frame=frame, room_id=room_id, stats=stats,
+            quality=quality, notes=notes_for(detected), flags=flags,
+            estimated_fields=(evidence.estimated_fields if evidence else None),
+            scale_source=(evidence.scale_source if evidence else None),
+            mm_per_px=(evidence.mm_per_px if evidence else None),
+            scale_ref_mm=(evidence.scale_ref_mm if evidence else None),
+            scale_ref_px=(evidence.scale_ref_px if evidence else None),
+            n_instances=(evidence.n_instances if evidence else None),
+        )
         row = rec.to_row()
         row["kind"] = kind
         return [row]
@@ -320,24 +338,59 @@ def rows_from_frames(
         out.extend(produced)
     if durations:
         log(timing_summary(durations))
+    # 口径提示（Chief 2026-10-14 接线要求 2）：半年后得有人能看出竖直列是**未补偿**的
+    if any("height_uncorrected" in (r.get("quality") or "") for r in out):
+        log("测量：mean_cluster_h_mm 本批为「未做 cosθ 补偿的竖直投影跨度」"
+            "（height_uncorrected，不是长度）——只可作同站位/同档/同 imaging_profile 的相对比较；"
+            "现场 θ 测定后换口径（换标记、不跨比）")
     return out
 
 
-def make_measure_fn(*, room_id: str, mm_per_px: float,
+def _detect(det: Detector, image: np.ndarray, *, frame: FrameInput,
+            mm_per_px: float | None) -> tuple[list[Detection], object | None]:
+    """调用检出器：**优先** L1–L3 的 `detect_frame()`（带证据），否则退回旧 `detect()`。
+
+    接线的意义：生产路径从 `BaselineDetector` 切到 L1–L3（票 15 §14-2，Chief 批准）。
+    旧协议仍可用（保持测试与回退路径），但没有证据列。
+    """
+    detect_frame = getattr(det, "detect_frame", None)
+    if callable(detect_frame):
+        res = detect_frame(image, box_id=frame.box_id)
+        return list(res.detections), res.evidence
+    return list(det.detect(image, mm_per_px=mm_per_px or 0.0, box_id=frame.box_id)), None
+
+
+def make_measure_fn(*, room_id: str, mm_per_px: float | None = None,
                     detector: Detector | None = None,
                     fetch: Callable[[str], bytes] | None = None,
                     decode: Callable[[bytes], np.ndarray] | None = None,
                     quality_gate: Callable[[np.ndarray], tuple[bool, str]] = frame_quality,
                     emit_empty: bool = False,
+                    depression_deg: float | None = None,
+                    allow_uncorrected_height: bool = True,
                     log: Callable[[str], None] = print) -> Callable[[object], list[dict]]:
     """造 `PatrolDaemon(measure_fn=…)` 要的可调用对象。
 
     ``room_id`` 必填且**在装配时固定**：它来自 `room.yaml`（与巡检准入门禁同源），
     不该在每轮重新猜；调用方（deploy 侧）负责把它传进来。
+
+    **检出器默认 = L1–L3**（`measure.l3.L3Detector`，票 15 §14-2 接线）：
+    - ``mm_per_px``（站位标定值，ADR-0024）**优先**，给了就 `scale_source=calibration_target`；
+      不给则用菌包标准尺寸（`bag_standard`）；
+    - ``depression_deg``（现场竖直标尺测定）未注入 ⇒ 竖直列按
+      ``allow_uncorrected_height``（默认 True）出"**未做 cosθ 补偿的投影跨度**"+ `height_uncorrected`；
+    - 显式传 ``detector`` 则完全按传的来（测试/回退用）。
     """
     if not room_id:
         raise ValueError("room_id 必填（票 11）：measurements 的幂等键 "
                          "(ts, room_id, box_id) 需要它，且不允许 analysis 从 box_id 反推库房")
+
+    if detector is None:
+        from measure.l3 import detector_from_settings
+
+        detector = detector_from_settings(mm_per_px=mm_per_px,
+                                         depression_deg=depression_deg,
+                                         allow_uncorrected_height=allow_uncorrected_height)
 
     def measure_fn(report) -> list[dict]:
         frames = list(getattr(report, "results", []) or [])

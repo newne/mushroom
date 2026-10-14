@@ -100,13 +100,27 @@ def aggregate_box(detections: list[Detection]) -> BoxStats:
 
     per_box_scale = next((getattr(d, "mm_per_px", None) for d in used
                           if getattr(d, "mm_per_px", None)), None)
-    widths = to_mm([metric_of(d, "cluster_w_px") for d in used], per_box_scale)
-    heights = to_mm([metric_of(d, "cluster_h_px") for d in used], per_box_scale)
+
+    def scale_for(d: Detection, axis: str) -> float | None:
+        """**分方向的局部尺度**（L3 接线，票 15 §1.1/§14）：优先 metrics 里的
+        `mm_per_px_x`/`mm_per_px_y`，没有才回退到检出上的单一 `mm_per_px`。
+
+        为什么必须分方向：水平用袋长 240 mm、竖直用袋径 140 mm，且竖直还要 ÷cosθ；
+        拿一个 mm/px 乘两个方向，正是"同帧一个尺度"那个错法（实测差 2 倍以上）。
+        """
+        own = metric_of(d, f"mm_per_px_{axis}")
+        return float(own) if own else per_box_scale
+
+    widths = [float(v) * s for v, d in ((metric_of(d, "cluster_w_px"), d) for d in used)
+              for s in [scale_for(d, "x")] if v is not None and s]
+    heights = [float(v) * s for v, d in ((metric_of(d, "cluster_h_px"), d) for d in used)
+               for s in [scale_for(d, "y")] if v is not None and s]
     px_areas = [metric_of(d, "area_px") for d in used]
-    eq_ds = to_mm([metric_of(d, "eq_diameter_px") for d in used], per_box_scale)
+    eq_ds = [float(v) * s for v, d in ((metric_of(d, "eq_diameter_px"), d) for d in used)
+             for s in [scale_for(d, "x")] if v is not None and s]
     # 面积是**二次量**：单边换算一次（mm/px）再乘以同一条换算，才是 mm²
-    areas = [float(v) * per_box_scale * per_box_scale
-             for v in px_areas if v is not None and per_box_scale] if per_box_scale else []
+    areas = [float(v) * s * s for v, d in ((metric_of(d, "area_px"), d) for d in used)
+             for s in [scale_for(d, "x")] if v is not None and s]
     return BoxStats(
         box_id=detections[0].box_id,
         n_total=len(detections),

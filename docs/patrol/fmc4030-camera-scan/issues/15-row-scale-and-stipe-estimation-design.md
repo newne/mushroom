@@ -525,6 +525,47 @@ $py = 'D:\code\mushroom\patrol-workspace\.venv\Scripts\python.exe'
   已改成"只有袋（无钉）时 weak_retry 必须救回候选"。这也说明**零候选是真实可达的状态**，
   更要按上表分开，而不能靠"总会有候选"的假设。
 
+## 16. 接线记录（Chief 2026-10-14 批准，四条）——**接了线，但生产未开**
+
+| 要求 | 落到哪 | 证据 |
+| --- | --- | --- |
+| ① 生产路径切到 L1–L3（不再走 `BaselineDetector`） | 新增 `measure/l3.py`（`L3Detector.detect_frame`：L1 菌包 → 袋肩 ROI → L3 菇体 → **袋级菌簇**）；`production._detect()` **优先** `detect_frame()`，旧 `detect()` 保留为回退；`make_measure_fn()` 默认检出器 = L3 | 真机帧冒烟（下） |
+| ② `allow_uncorrected_height` 开启 + `height_uncorrected` 必出 + **轮日志能看出未补偿** | `L3Config.allow_uncorrected_height=True`；轮末日志打一条"未做 cosθ 补偿的竖直投影跨度（不是长度）…现场 θ 测定后换口径" | 冒烟日志 + `test_l3_wiring.py::test_round_log_says_the_height_column_is_uncorrected` |
+| ③ 生产 `--measure` 保持 **off** | **未动 `deploy/**` 一个字节**（`git status -- deploy` = 0 项）。开启三条件照旧：现场两个值测完 + 20 帧复核结论进票 + 专门发布（票 12 清单，含 `--measure-emit-empty`） | `git status -- deploy` 空 |
+| ④ 接线后跑全量门禁、单独一笔提交、票面写"接了线但生产未开" | `pytest measure/tests` **142 passed / 73 s**（134 + 新增 8 条接线测试） | 本节 |
+
+### 16.1 端到端冒烟（真机帧、离线、走 `make_measure_fn` 默认路径）
+
+帧 `20261013_S110_level0_152136.jpg`（2880×1616），耗时 **1.50 s**，产 1 行：
+
+```
+n=38  mean_cluster_w_mm=183.427  mean_cluster_h_mm=39.926
+mean_area_mm2=2327.917  mean_projected_d_mm=44.167  mean_len_mm/cap_mm=NULL
+quality='baseline+no_angle_profile+level_view+estimate+no_theta+height_uncorrected'
+estimated_fields='mean_cluster_w_mm+mean_cluster_h_mm'   scale_source='bag_standard'
+mm_per_px=1.0924   scale_ref_mm=240.0   scale_ref_px=220.0
+```
+
+**验收四条逐条过**：列数 **20**（+`kind`）✔；`estimated_fields` 是 **`+` 串** ✔；
+`scale_source` 用环境官枚举 ✔；`no_theta` **不在** `NON_USABLE_FLAGS`（`is_usable=True`）✔；
+缺标尺时证据列不写假值（`scale_source='none'`、其余 NULL、带 `no_scale`）✔（见测试）。
+
+**两个方向分别生效**（这是接线的关键改动）：`pipeline.aggregate_box()` 现在优先读
+`metrics.mm_per_px_x` / `mm_per_px_y`——水平用袋长 **240 mm**、竖直用袋径 **140 mm**（θ 注入后再 ÷cosθ）；
+拿一个 mm/px 乘两个方向正是 §1.1 那个错法（实测差 2 倍以上）。有测试专门钉住"竖直列若误用水平
+尺度会差 240/140 倍"。
+
+**`n` 的口径**：簇级检出让 `n_used` 会变成**簇数** ⇒ 接线层显式传实例数，
+`n` 仍是**朵数**（冒烟里 n=38）。测试钉住 `n == 证据里的 n_instances`。
+
+### 16.2 接线后仍未做 / 待确认
+
+1. **生产未开**：`--measure` 仍是 off（deploy 侧未动），上面三条件缺一不开；
+2. **`baseline` 标记的疑问（要 Chief/环境官一句话）**：`CONST_FLAGS=("baseline","level_view")` 是
+   "缺测基线帧"时代留下的，现在产的是**估算行**，`baseline` 字面像"定标帧、不是生长测量"——
+   它不在 `NON_USABLE_FLAGS`（不挡路），但容易误读。**我没擅自摘**（改它会动所有行的 quality）。
+3. **精度仍未知**：20 帧标注（票 21）复核前，L1/L3 的 P/R 一律"未知"。
+
 ## 15. 答复巡检手（票 16 三点，2026-10-14，附 218 帧证据）
 
 巡检手问：θ 可用上限、按排局部标尺够不够、换观察高度档要不要重测。**口径我定，现场判据他写。**
