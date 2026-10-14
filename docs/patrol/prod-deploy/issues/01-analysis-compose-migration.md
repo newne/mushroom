@@ -405,6 +405,102 @@ cd patrol-workspace && uv lock
 实证：`patrol/src/patrol/round.py` 工作区 `5dc9a4cb…`（14 547 B）= **镜像内** `5dc9a4cb…`，而 blob 是 `87a1b31d…`（14 288 B）。
 ⇒ 以后核"镜像内 = 仓库"**要么比工作区、要么先把 `\r` 去掉**，直接比 blob sha256 一定不等。
 
+### 8.4 票 12 §7 验收清单留痕（发版官 2026-10-14 10:26 只读实测）
+
+> 口径说明：Chief 口头说的"票 12 §8 清单"，在文件里实际是 **`env-analysis/issues/12` §7. 验收**。
+
+**A. 容器活着**
+
+- [x] `mushroom_analysis` **healthy**；`:8000/healthz` = **200**
+- [ ] `GET /ranges` = **`[]`** —— **旧镜像的口径**；§8.3 的重建落地后才该是信封，届时按新口径重验
+- [x] `/rounds?limit=1` = 200（返回 10-14 09:27 那轮）；`rounds` **73** 行 / `images` **3491** 行，逐轮未见跳变
+
+**B. 作业真的在跑**
+
+- [x] 容器日志有 `[ingest] 启动作业 env（每 300.0s）`、`[ingest] 启动作业 audit（每 600.0s）`、`[audit_ingest] 0 条`（上游静默）
+- [x] `environment` **2596 行**，`MAX(ts) = 2026-10-14T10:00:00`（推进到当前小时）
+- [x] `operations` **50 行**，`MAX(ts) = 2026-10-14T09:55:00`
+- [x] 环控登录：容器日志里 `EMS|login|鉴权` 命中 **0 行**（对照旧缺陷 2466 次/24 h）
+- [ ] ⚠️ **不满足**：**环境变量含明文口令** —— `docker inspect` 的 `Config.Env` 里 `EMS_URL` / `EMS_ACCOUNT` / `EMS_PASSWORD_MD5` 都在（`env_file:` 在**创建时**注入的必然代价）；`/etc/mushroom/` **没有**挂进容器。
+  与 §2 与 §7 里"值不进 compose、不进 `docker inspect`"的写法冲突 ⇒ 要么明确接受（宿主 root 可见，与 systemd 时代 `EnvironmentFile` 同级），要么另开票走 docker secret。
+
+**C. 幂等与重启**
+
+- [~] 重启幂等：本轮**没有重启**容器，未单独验证；`environment` 以 `(ts, zone)` 为 PK，未见重复行
+- [-] "未装 pandas 的镜像里 API 能启动"：**不适用** —— `PATROL_IMAGE` 里**有** pandas（容器内 `import pandas` 成功）。这条针对的是宿主 venv 形态
+
+**D. 过渡期（batch 暂停）**
+
+- [x] 容器里**没有** batch 作业（日志里 `batch` 只有 3 条 `GET /environment/batches` 的 HTTP 访问记录，无 `batch_ingest` 运行行）
+- [x] 补跑一次：待 Step 3（见 §8.2 ③ / §8.3）
+
+**同日补测（支撑票 06 的 A′ 判决）**：容器内 `psycopg` = `ModuleNotFoundError`；
+`sqlalchemy` / `redis` / `loguru` / `dynaconf` / `pgvector` / `sqlalchemy_utils` / `tenacity` / `mlflow` **全部不存在**。
+
+### 8.5 2026-10-14 11:34–11:36：analysis 重建落地（Chief 批 (c)：用现有锁先发）
+
+| 项 | 值 |
+| --- | --- |
+| revision | **`46ca2f2`**（门禁跑在 `3925e89`；两者是**快进**，中间只有 1 个 docs-only 提交） |
+| 门禁 | **1069 passed / 0 failed**，6 分 04 秒（`patrol-workspace` 的 `.venv`，构建点干净） |
+| 新镜像 | `registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261014112224-46ca2f2` |
+| image ID | `sha256:65f433472d72153fead97466585a913e11511c10cf7d881771279bd8f6e945e8`，748,057,905 B |
+| registry digest | `sha256:c1e3ded70b03ffec9d95ad243d78d43395fbb6a8035f567fdf3448799419bac1` |
+| 构建耗时 | **29 s**（层缓存命中，只有 COPY + `uv sync` 段重跑） |
+| 锁 | `patrol-workspace/uv.lock` sha256 `4bdbde21…`，**本次未重生成**（重生成被 §8.3 阻塞） |
+
+**镜像内自查（"生效"判据）**
+
+- `import psycopg` → **`ModuleNotFoundError`**（**如期**，锁里没有它）✓
+- 信封代码在：`never_computed` / `computed_at` / `ranges_state` 命中 `analysis/src/analysis/{api,db,align}.py`；`RANGES_AT` 命中 `jobs.py` ✓
+- **revision 归属**：逐文件比对 5 个样本（`analysis/…/api.py`、`db.py`、`deploy/…/console.py`、`patrol/…/round.py`、`measure/…/production.py`），
+  **镜像内字节去掉 `\r` 后 = `46ca2f2` 的 blob**，**5/5 一致** ✓（CRLF 口径见 §8.3 末段）
+
+**发布动作**（11:34:51 起；动手前 `GET /api/status` = `patrol.active=false` / `machine.state=IDLE` ⇒ 无轮次在飞）
+
+1. DB 备份：`PRAGMA wal_checkpoint(TRUNCATE)` → `(0, 0, 0)`；落 `/opt/mushroom-analysis/backups/pre-ranges-20261014-113451/mushrooms.db`（6,971,392 B，sha256 `fbda5ef6a22894c68a67429ffbcd7c2fe2121fad62c3c865dbcb14c6d99b2f34`）
+2. 备份 `mushroom_solution.yml`（`811da3c6…`）与 `.env`（`375b8d35…`）→ `*.bak-ranges-20261014-113451`
+3. compose 加 `RANGES_AT=05:10`（插在 `AUDIT_INTERVAL=600` 之后，带注释；`docker compose -f … config` = **OK**）
+4. `.env` 的 `PATROL_IMAGE` → 新 tag
+5. `docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_analysis` → **11:35:13** 重建完成
+
+**验收（11:35–11:36 实测）**
+
+- `GET :8000/ranges` → **信封**，键 = `ok / rows / count / state / state_text / detail / computed_at / metric / unit`（**不再是裸 `[]`**）✓
+- `ranges_state` 表**出现**，**1 行**：`computed_at = 2026-10-14T11:35:18`、`state = no_measurements`、`n_rows = 0` ✓
+- 日志：`[ingest] 启动作业 ranges（每天 05:10）`、`[ranges] 重算完成，0 行区间` ✓（**启动即跑了一次**，不是干等到 05:10）
+- 迁移核：表多了 `ranges_state`；`rounds` **73** / `images` **3491** 与重建前**逐条相等**；`environment` **2600**（重建前 2596，仍在增长）
+- 健康：analysis `/healthz` 200、console `/api/rounds` 200、页面 8002 200、**六容器 healthy**
+- **patrol / console 未动**，仍是 `89e4a54` ✓
+
+**⚠️ 两处与预期的差异（如实记）**
+
+1. **空态是 `no_measurements`，不是 `never_computed`**：Chief 的验收词是"库空时是 `never_computed`"。
+   实际 `state=no_measurements`、`state_text="样本不足：库房里还没有任何测量行（测量管线未接上）"`、`detail.n_environment=2600`。
+   ⇒ `ranges_state` **已有行**、库里**有环境数据**、只是 **0 行测量** ⇒ 落到"样本不足"这一档；
+   `never_computed` 应对应"从未重算过"。**信封与状态机是工作的**，只是这一档的名字与预期不同 —— 请票 05 归属方确认口径。
+2. `GET http://127.0.0.1:8002/api/ranges` = **404**：页面 nginx 的 `/api` 只反代到 **console:8001**，
+   而 `/ranges` 是 **analysis:8000** 的路由（不带 `/api` 前缀）。页面若要直接读 ranges，需 console 侧出路由或页面直连 8000。
+   **发布前后都如此，不是本次缺陷**，记一笔备查。
+
+**回滚路径**
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_service
+cp -a mushroom_solution.yml.bak-ranges-20261014-113451 mushroom_solution.yml
+cp -a .env.bak-ranges-20261014-113451 .env          # ← 指回 89e4a54
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_analysis
+# DB：/opt/mushroom-analysis/backups/pre-ranges-20261014-113451/
+```
+
+⚠️ `.env` 的 `PATROL_IMAGE` 现在指向新 tag，而 patrol/console 容器**仍在跑 `89e4a54`**（容器不会自己跟着变）。
+**这是已知且预期的漂移**；下次谁对 patrol/console 执行 `up -d` 会把它们带上来 —— 那一步才是三件套再次统一。
+
+**未做的一件事（要说明）**：Chief 说"DSN 文件与 `:ro` 挂载随这次 analysis 重建一起加"——**我没有加**。
+原因：宿主 `/etc/mushroom/` 现在**只有 `ems.env`**，`pgsql.dsn` 还不存在；**docker 对不存在的 bind 源会把该路径建成目录**，
+反而让代码读到目录而报错，还会在宿主留一个空目录。⇒ 等 DSN 文件（环境官提供、值不经过我）落到
+`/etc/mushroom/pgsql.dsn` 0600 之后，随下一次重建加挂载。
+
 ## Comments
 
 - 2026-10-13 发版官写票。全部数字来自现场只读实测（plink 只读，无 pull/重启/改文件）。
