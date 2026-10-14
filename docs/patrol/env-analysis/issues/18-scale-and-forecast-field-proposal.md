@@ -73,6 +73,17 @@
 把估算读成测量。**`estimate` 与 `verified` 正交**（像 `no_angle_profile`）：它不否定整行，
 但 `estimate` 单独出现**绝不算可用**。
 
+**本票引入的三个 `quality` flag（行级；与 `estimated_fields` 配合）：**
+
+| flag | 何时出现 | 处置 |
+| --- | --- | --- |
+| `estimate` | 该行有**任何**估算值（`estimated_fields` 非空） | **正交**：不否定整行；被 `estimated_fields` 指到的字段**不可用**（不进统计/建议） |
+| `no_scale` | **缺标尺**（`scale_source='none'` / `mm_per_px IS NULL`，Chief 2026-10-14 口径） | 所有 mm 量写 **NULL**（裁定 6：不许退化成像素量）；该行只可能承载实例数等无标尺量 |
+| `unreliable` | 远排 / 低置信（判据由测量师定） | 涉及的量写 **NULL**、**不可用**（与 `no_light` 同级，不是降权） |
+
+命名对齐：**列里放描述值（`scale_source='none'`），`quality` 里放行级 flag（`no_scale`）** ——
+与 `no_angle_profile`（列是 `angle_profile`）同一模式：只看 `quality` 的消费者不会漏判。
+
 **为什么不做"整行拉黑"**：平视下杆长恒为估算，整行拉黑等于清空区间表 —— 和删数据没区别
 （票 11 §3 的同一教训）。
 
@@ -105,6 +116,9 @@
 - `measurements` 主键不变 `(ts, room_id, box_id)`；新增列随行覆盖写。
 - 加列走 `ADDED_COLUMNS` 就地迁移，老行 NULL = "那时还没记"。
 - **顺序照旧：先落列 → 测量师发字段 → 下游启用过滤**（票 11/17 的既有纪律）。
+- **落列时机（Chief 2026-10-14）**：等测量师的 **L1–L3 代码**出来再定 —— 他那边已获准开工，
+  **不训练模型**，**缺标尺时写 NULL + `no_scale`**。所以在 L1–L3 定型前，本票只作为契约待命，
+  **不落 DDL**（避免列名/口径先落地、后被他的设计改一遍）。
 
 ## 5. 与其它票的关系
 
