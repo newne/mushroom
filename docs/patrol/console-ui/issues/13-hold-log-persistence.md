@@ -127,43 +127,58 @@ GET /api/patrol/hold/log?ts_from=<ISO>&ts_to=<ISO>&limit=<n>
 > 断言 1/2/4/5 必须用**可控时钟**（`deps.now` 可注入，见 `console.py:788-793` 的 Deps 构造），
 > 不用 `sleep`——墙钟相位的用例就是随机红灯。
 
-## 8. 待确认（**Chief 2026-10-14 已逐条答复，实现按此**）
+## 8. 待确认 → **Chief 2026-10-14 的最终答复（实现按此）**
 
-1. **`superseded` 算不算一次"结束"** ⇒ **算**（否则回查里永远缺结束时刻）；
-2. **`expired` 不落盘 + 回查标 `derived`** ⇒ **接受**（不给只读接口加副作用）；
-3. **"日志里没有 ≠ 没被延后过"** ⇒ **两个都做**：返回带 `log_created_at`（文件首行时间），
-   并在接口文档串/返回里写明"记录自本版本部署起"；
-4. **`reason`/`by` 长度** ⇒ **不截断**，超 200 字符另存 `reason_len`；凭据一律不写。
+1. **`superseded` 算一次"结束"并落盘**，`end_source="superseded"`；
+2. **到期不落盘**，回查按 `until` 推导并标 `end_source="derived"`（不给只读 GET 加写副作用）；
+   **加一条优先规则**：同一 `hold_id` 后来真落了 `cleared`/`superseded` ⇒ **以落盘的那条为准**，不再算 derived；
+3. **两者都要**：接口文档串与票面写明"**自本版本部署起才有日志**"，**且**每条返回行与响应都带
+   `log_created_at`（= 日志首行时间，机器可判覆盖范围）；`derived_endings` 计数保留；
+4. **`reason`/`by` 不截断**（回查要原文）、**凭据一律不写**；
+   **`reason_len` 不加** —— **决定，不是待办**：不截断时原长就是 `len(reason)`，多一个字段就多一个会漂的地方。
+   另加两条硬约束：**一行一条**（`by`/`reason` 里的换行必须转义，别把 JSONL 撑断）、**append-only 不回写**。
 
-> 第 4 条实现时按"不截断"落地，并**没有**加 `reason_len`——因为一旦不截断，原长就等于
-> `len(reason)`，再存一个长度字段是冗余（**多一个字段就多一个会漂的地方**）。
-> 这条偏离已在此写明；如 Chief 要留 `reason_len` 作显式标记，改动是一行。
+**`end_source` 的取值**（Chief 定，三个）：`cleared`（人工解除）/ `superseded`（被新的保持顶掉）/
+`derived`（按 `until` 推导出来的到期）。**落盘的永远优先**。
 
-## 9. 实现记录（2026-10-14）
+**`source` 的指派**：走 **(b) 信号侧仍调 `/api/patrol/hold` 并带 `source="signal"`** ——
+不新增第二个写者、不新增第二种格式；**`env-analysis/14` 落地前不实现该分支**（今天恒为 `manual`）。
+
+## 9. 实现记录（2026-10-14；含 Chief 复核后的一版修订）
 
 **落盘**：`deploy/src/deploy/console.py`
 - `ConsoleDeps.hold_dir`（默认 `/app/data/hold`）+ `PATROL_HOLD_DIR` 环境变量接线；
   **不写进 `trigger_dir`**（那里 `hold.json` 的写者身份是 `TriggerStore`）。
 - `HOLD_LOG_NAME` / `_hold_log_path` / `_append_hold_log`（一行一写 + flush）/
-  `_first_line_ts`（= 记录起点）/ `_hold_seconds` / `_open_hold_id` / `read_hold_log`。
-- `api_hold_set`：先看 `hold_summary()`，生效期内再设 ⇒ 落 `hold_end(superseded)` 再落新的
-  `hold_start`（两条 `ts` 相同）；`api_hold_clear`：**只有 `cleared is True` 才落** `hold_end(cleared)`；
-  新增只读 `GET /api/patrol/hold/log?ts_from&ts_to&limit`（区间反了 ⇒ 422）。
+  `_first_line_ts`（= 记录起点）/ `_hold_log_writable` / `_hold_seconds` / `_open_hold_id` / `read_hold_log`。
+- `api_hold_set`：先看 `hold_summary()`，生效期内再设 ⇒ 落 `hold_end(end_source="superseded")`
+  再落新的 `hold_start`（两条 `ts` 相同）；`api_hold_clear`：**只有 `cleared is True` 才落**
+  `hold_end(end_source="cleared")`；只读 `GET /api/patrol/hold/log?ts_from&ts_to&limit`（区间反了 ⇒ 422）。
 - `TriggerStore` 一个字节未动；没有定时器、没有后台线程。
 
-**两处实现选择（都在票面写明）**：
+**三处实现选择（都在票面写明）**：
 1. `superseded` 的配对 id 从**日志**里找（最后一个没有配对的 `hold_start`），不去改 `hold.json`
-   的形状——边界就是"不碰 `TriggerStore`"。本版本部署前设的保持日志里没有 start ⇒
-   **不凭空空编一条结束**；
-2. `reason_len` 未加，理由见 §8 的引用块。
+   的形状——边界就是"不碰 `TriggerStore`"。本版本部署前设的保持日志里没有 start ⇒ **不凭空编一条结束**；
+2. **不引入 `end_reason`**：`end_source` 三值已同时说明"发生了什么"与"是不是记到的"，
+   再加一个字段就是两处说同一件事（与 `reason_len` 同一个理由）；
+3. `reason_len` **不加**（§8 第 4 条：决定，不是待办）。
+
+**⚠️ 生产挂载已核对：记录目录必须单独 rw，否则写不进去**
+`docker/mushroom_solution.yml:240-250`：`/app/data` 是 **`:ro`**，只把 `data/trigger`、`data/cmd`
+单独放成 rw。所以 `/app/data/hold` 默认**不可写**，需要发版官加一条
+`../mushroom_patrol/data/hold:/app/data/hold:rw`（**不是我的领地，列在这里交办**）。
+**在那一行到位之前**，实现按"**写不进去也不许把 hold 弄失败**"落地：
+`_append_hold_log` 捕获 `OSError` 返回 `False`；端点照常 200、保持照常生效，
+只在事件里落一条 warn「hold 记录写不进去…」（否则操作者会收到 500，
+**而保持其实已经生效**——比不记日志危险得多）；回查返回 `writable: false` 如实说明。
 
 **验证（实测）**
 ```
-python -m pytest deploy/tests/test_console.py -q     → 78 passed（原 69 + 本票 9 条）
-python -m pytest deploy/tests -q                     → 292 passed
+python -m pytest deploy/tests/test_console.py -q     → 80 passed（原 69 + 本票 11 条）
+python -m pytest deploy/tests -q                     → 308 passed（全量，含别人当天新加的用例）
 ```
 
-**护栏自证 4 条（各自只打红对应用例）**
+**护栏自证 6 条（各自只打红对应用例）**
 
 | 把实现改回哪一步 | 红的用例 |
 | --- | --- |
@@ -171,12 +186,15 @@ python -m pytest deploy/tests -q                     → 292 passed
 | 顶掉时不记 `superseded` | `test_setting_twice_records_superseded_then_a_new_start` |
 | 空解除也当成"清掉了"（`cleared = True`） | `test_clearing_without_a_hold_writes_nothing` |
 | 记录改用漂亮打印（`indent=1`，一条记录变多行） | 8 条（含"一行一条"与"追加不覆盖"） |
+| **破坏"落盘优先"**（只要有 start 就算推导） | `test_recorded_end_wins_over_the_derived_one` |
+| **记录写不进去时让它抛出去**（去掉 `except OSError`） | `test_hold_still_works_when_the_log_dir_is_unwritable` |
 
-**新增 9 条用例**（`deploy/tests/test_console.py`，用可推进的假时钟 `_Clock`，**不 sleep**）：
+**新增 11 条用例**（`deploy/tests/test_console.py`，用可推进的假时钟 `_Clock`，**不 sleep**）：
 ① 设保持恰一行且字段齐全 ② 解除一行且时长按注入时钟算准 ③ 空解除不落行
 ④ 顶掉先记 `superseded` 再开新 ⑤ 到期不落盘但回查标 `derived` ⑥ 区间过滤 + 区间反了 422
-⑦ 一行一条（`reason` 带换行也留在一行内） ⑧ 追加不覆盖且顺序即发生顺序 ⑨ 两种行的字段集契约式断言。
+⑦ 一行一条（`reason` 带换行也留在一行内） ⑧ 追加不覆盖且顺序即发生顺序
+⑨ 两种行的字段集契约式断言（且**超长 reason 也不许出现 `reason_len`**）
+⑩ **落盘优先于推导** ⑪ **记录目录不可写时 hold 照常生效** + 事件里说清楚 + `writable: false`。
 
 **踩到的一条自证坑**（已记进票 10 §9）：替换片段用**多行**锚点会因 CRLF/LF 差异匹配不上，
 脚本会打印"找不到待改片段"就跳过——自证脚本必须把这个当失败报出来。
-
