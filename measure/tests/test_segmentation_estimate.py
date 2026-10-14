@@ -289,6 +289,53 @@ def test_no_theta_does_not_kill_the_row_but_no_scale_does():
     assert "no_theta" not in no_scale and "no_scale" in no_scale
 
 
+def test_uncorrected_height_is_off_by_default():
+    """裁定 (b) 的开关**默认关**：不开启时 θ 未注入仍写 NULL（保住 NULL 语义）。"""
+    gray, _ = synth_frame()
+    bags, _ = bags_of(gray)
+    fruits, _ = fruits_of(gray)
+    e = estimate_cluster(fruits, bags, depression_deg=None)
+    assert e.cluster_h_mm is None
+    assert "height_uncorrected" not in e.quality
+    assert "mean_cluster_h_mm" not in e.estimated_fields
+
+
+def test_uncorrected_height_switch_emits_projection_span():
+    """开启后竖直向出**未做 cosθ 补偿的投影跨度**：= 补偿值 × cosθ，且标记齐全。"""
+    gray, _ = synth_frame()
+    bags, _ = bags_of(gray)
+    fruits, _ = fruits_of(gray)
+    e_on = estimate_cluster(fruits, bags, depression_deg=None,
+                            allow_uncorrected_height=True)
+    e_theta = estimate_cluster(fruits, bags, depression_deg=30.0)
+    assert e_on.cluster_h_mm is not None and e_on.cluster_h_mm > 0
+    assert e_on.cluster_h_mm == pytest.approx(
+        e_theta.cluster_h_mm * math.cos(math.radians(30.0)), rel=1e-6)
+    # 标记齐全：estimate + no_theta + height_uncorrected，且**不许出现 verified**
+    flags = contract.parse_flags(e_on.quality)
+    assert {"estimate", "no_theta", "height_uncorrected"} <= flags
+    assert "verified" not in flags
+    assert "no_scale" not in flags
+    assert "mean_cluster_h_mm" in e_on.estimated_fields
+    assert "mean_cluster_w_mm" in e_on.estimated_fields
+    # 「未补偿」不许让整行不可用（字段级取舍交给 estimated_fields）
+    assert contract.is_usable(e_on.quality)
+    assert "投影跨度" in e_on.note and "不是长度" in e_on.note
+
+
+def test_uncorrected_height_differs_from_theta_corrected():
+    """θ 注入后是同列但**不同口径**：两者数值必须能区分，防止被混比。"""
+    gray, _ = synth_frame()
+    bags, _ = bags_of(gray)
+    fruits, _ = fruits_of(gray)
+    e_unc = estimate_cluster(fruits, bags, depression_deg=None,
+                             allow_uncorrected_height=True)
+    e_cor = estimate_cluster(fruits, bags, depression_deg=25.0)
+    assert e_unc.cluster_h_mm < e_cor.cluster_h_mm       # 未补偿必然偏小
+    assert "height_uncorrected" in e_unc.quality
+    assert "height_uncorrected" not in e_cor.quality
+
+
 def test_cluster_estimate_three_codes_still_distinct():
     gray, _ = synth_frame()
     bags, _ = bags_of(gray)

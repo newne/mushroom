@@ -45,6 +45,14 @@ QUALITY_FLAGS = (
                              # ⇒ 213/218 帧明明出了有效的 mean_cluster_w_mm 却被下游整行丢掉，
                              # 那是"把有数据说成没数据"。本标记**不进 NON_USABLE_FLAGS**：
                              # 它只说明"哪个修正项缺"，字段级取舍交给 estimated_fields（票 20）。
+    "height_uncorrected",    # **未做 cosθ 补偿的竖直投影跨度（mm）**——Chief 2026-10-14 裁定 (b)：
+                             # 竖直列在 θ 未注入时不再恒 NULL，而是出"投影跨度"并挂本标记。
+                             # 它**不是长度**：页面必须显示「估算（未做俯角补偿）」；
+                             # 与 `estimate` 并存，**不进 verified/区间表/建议层**；
+                             # 只在标注完成后允许**相对比较**（同站位、同档、同 imaging_profile）；
+                             # 将来 θ 注入后，补偿与未补偿的量**不得同列不加区分地比**。
+                             # 默认开关关（`allow_uncorrected_height=False`），保住 NULL 语义；
+                             # 开启时机由 Chief 在票 20 接线时定。**不进 NON_USABLE_FLAGS**。
 )
 
 #: 出现其中任意一个 ⇒ 这一行**没有可用测量**。

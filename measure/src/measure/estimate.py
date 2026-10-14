@@ -302,6 +302,7 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
                      bag_diameter_mm: float | None = BAG_DIAMETER_MM,
                      depression_deg: float | None,
                      row_reliable: callable | None = None,
+                     allow_uncorrected_height: bool = False,
                      cfg: EstimateConfig | None = None) -> ClusterEstimate:
     """一帧可信菇体 → 菌簇竖直跨度 / 横向范围（mm 估算）。
 
@@ -309,6 +310,9 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
       定 `mm_per_px_y` 作**交叉校验**，两者不一致超过 `SCALE_AGREE_TOL` 就在 note 里报；
     - 竖直跨度还要 **÷cosθ**：`depression_deg=None` ⇒ `cluster_h_mm` 写 NULL + **`no_theta`**
       （**不是 `no_scale`**：标尺是有的，只是投影项缺；横向仍可出，因为水平方向不受俯角影响）；
+    - `allow_uncorrected_height=True`（**默认关**，Chief 2026-10-14 裁定 (b)）：θ 未注入时
+      改为出**未做 cosθ 补偿的竖直投影跨度**（`h_px × mm_per_px_y`）+ 标记 `height_uncorrected`，
+      同时保留 `no_theta`。该值**不是长度**、只能作相对比较（同站位/同档/同 imaging_profile）。
     - 远排（`row_reliable` 为 False）/ 无实例 ⇒ 分别 `unreliable` / `no_detection`。
     """
     cfg = cfg or EstimateConfig()
@@ -371,7 +375,17 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
     if depression_deg is None:
         # **θ 缺 ≠ 没标尺**（Chief 2026-10-14）：水平量是有效值，不许整行标成不可用
         flags.add("no_theta")
-        note = "未注入俯角（deg）⇒ 竖直跨度写 NULL（水平仍可出：不受俯角影响）"
+        if allow_uncorrected_height:
+            # 裁定 (b)：出**未做 cosθ 补偿的竖直投影跨度**——不是长度、只作相对比较
+            h_mm = h_px * mpp_y
+            flags.add("height_uncorrected")
+            unc_h, unc_h_note = propagate_uncertainty(mean_len_px=h_px, ref_px=None,
+                                                      mm_per_px=mpp_y,
+                                                      depression_deg=None, cfg=cfg)
+            note = ("竖直为**未做 cosθ 补偿的投影跨度（mm）**，不是长度；"
+                    "仅可作相对比较（同站位/同档/同 imaging_profile）")
+        else:
+            note = "未注入俯角（deg）⇒ 竖直跨度写 NULL（水平仍可出：不受俯角影响）"
     else:
         cos_t = math.cos(math.radians(float(depression_deg)))
         h_mm = h_px * mpp_y / max(cos_t, 1e-6)

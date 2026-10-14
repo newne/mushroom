@@ -98,7 +98,7 @@ def evaluate_frame(gray: np.ndarray, *, roi_frac: float,
     # **袋级菌簇**（交付口径）：每个实例归到它自己那袋，按袋算跨度、
     # 用该袋自己的宽度定局部 mm/px。`estimate_cluster()` 给的是**整帧跨度**
     # （一帧 18 袋 ⇒ 2000+ mm，不是"菌簇直径"），这里两套都出数便于对照。
-    def bag_metrics(inst_list) -> tuple[list[float], list[float], int]:
+    def bag_metrics(inst_list) -> tuple[list[float], list[float], list[float], int]:
         per_bag: dict[int, list] = {}
         for i in inst_list:
             b = nearest_bag_in_same_row(bags, i.cy, bag_cfg, x=i.cx)
@@ -108,6 +108,7 @@ def evaluate_frame(gray: np.ndarray, *, roi_frac: float,
         bag_index = {id(b): k for k, b in enumerate(bags)}
         w_mm: list[float] = []
         h_px_list: list[float] = []
+        h_mm_list: list[float] = []      # **未做 cosθ 补偿**的竖直投影跨度（裁定 (b)）
         for bid, group in per_bag.items():
             bag = bags[bag_index[bid]]
             ref_px = float(bag.characteristic_width_px() or bag.width_px)
@@ -117,13 +118,15 @@ def evaluate_frame(gray: np.ndarray, *, roi_frac: float,
             span_h = max(i.y1 for i in group) - min(i.y0 for i in group)
             w_mm.append(span_w * (BAG_LENGTH_MM / ref_px))
             h_px_list.append(span_h)
-        return w_mm, h_px_list, len(per_bag)
+            h_mm_list.append(span_h * (BAG_DIAMETER_MM / ref_px))
+        return w_mm, h_px_list, h_mm_list, len(per_bag)
 
-    bag_w_mm, bag_h_px, n_bags_kept = bag_metrics(kept)
-    bag_w_mm_ungated, _, n_bags_ungated = bag_metrics(insts)
+    bag_w_mm, bag_h_px, bag_h_mm, n_bags_kept = bag_metrics(kept)
+    bag_w_mm_ungated, _, _, n_bags_ungated = bag_metrics(insts)
 
     est = estimate_cluster(kept or insts, bags,
                            depression_deg=None,
+                           allow_uncorrected_height=True,   # 离线评估要看这项的分布
                            row_reliable=lambda i: any(
                                row_is_reliable(bags, b.row_id, bag_cfg)
                                for b in bags if abs(b.centroid_y - i.cy) <= bag_cfg.row_band_px))
@@ -155,6 +158,8 @@ def evaluate_frame(gray: np.ndarray, *, roi_frac: float,
         "bag_cluster_w_mm_med_ungated": (float(np.median(bag_w_mm_ungated))
                                         if bag_w_mm_ungated else None),
         "bag_cluster_h_px_med": float(np.median(bag_h_px)) if bag_h_px else None,
+        "bag_cluster_h_mm_med": float(np.median(bag_h_mm)) if bag_h_mm else None,
+        "bag_cluster_h_mm_max": float(max(bag_h_mm)) if bag_h_mm else None,
         "frame_cluster_w_mm": est.cluster_w_mm,
         "frame_cluster_h_mm": est.cluster_h_mm,
         "mm_per_px_x": est.mm_per_px_x,
@@ -209,6 +214,9 @@ def _summary(rows: list[dict], frames: int, roi_frac: float) -> str:
         f"- **袋级菌簇直径（交付口径，开门后）**：中位 {stat('bag_cluster_w_mm_med', '{:.1f}')} mm"
         f"（最大袋中位 {stat('bag_cluster_w_mm_max', '{:.1f}')} mm）；"
         f"**门关对照** 中位 {stat('bag_cluster_w_mm_med_ungated', '{:.1f}')} mm",
+        f"- **竖直投影跨度（未做 cosθ 补偿；只能当量级/相对比较，不是长度）**："
+        f"袋级中位 {stat('bag_cluster_h_mm_med', '{:.1f}')} mm"
+        f"（最大袋中位 {stat('bag_cluster_h_mm_max', '{:.1f}')} mm）",
         f"- **帧级跨度对照**（`estimate_cluster()` 现实现 = 整帧所有实例跨度，**不是菌簇直径**）："
         f"{stat('frame_cluster_w_mm', '{:.1f}')} mm",
         f"- **交付量**：`mean_cluster_w_mm` 出值 **{scale_frames}/{frames}** 帧；"
