@@ -267,7 +267,7 @@ prod **4 核**、load ~1.7、**62 GiB（17 用 / 45 可用）**、`/` 98 G（**�
 | 项 | 状态 | 证据（一行） |
 | --- | --- | --- |
 | **X1 配置加载** | ✅ 类与帧级 flags 已生效；属性面板截图**待 GUI** | 客户端日志：`Updated config from CLI arguments: {'labels': ['bag','cluster','cap','bag_top','void'], 'flags': ['cap_clear','cap_not_clearly_formed','cap_indeterminate','q_low_contrast','q_bright_spot','q_blur','q_camera_moving','q_front_truncated','q_static_occlusion','q_empty_bag_present']}` |
-| **X2 帧** | ✅ 3 张就位，2880×1616 | `file` 实测 2880×1616；**P01 与 MinIO 同源 sha256 一致**：`mogu/20261013/B108_S108_level0_145300.jpg` 200 / 484,936 B / `9bda473d063ee6d0d305b7b47ba9e8088b68fef85cf122c77b74499b9c37ed33` = 本地（另一种命名 `…/S108_…` 为 404 ⇒ 对象名用 `B<layer><col>_<station>_…`） |
+| **X2 帧** | ✅ 3 张就位，2880×1616 | **帧来源 = 生产 MinIO 只读**（用户 2026-10-14 16:22 指令）：取图器 `/data/annot/pull-minio-frames.sh`，对象名规则 `mogu/<YYYYMMDD>/B<layer><col>_<station>_level0_<HHMMSS>.jpg`；清单 `/data/annot/labels/minio-manifest.tsv`。**三张全部同源一致**（MinIO 取回 = 本地 sha256）：`B406_S406…092634` 817,877 B `e29bef8a…`、`B209_S209…152232` 873,814 B `2dcc6c99…`、`B108_S108…145300` 484,936 B `9bda473d…`；落点 `/data/annot/images/20261013/`（**目录里已无仓库 `.scratch` 副本**） |
 | **X3 账号/目录/备份** | 路径 ✅，恢复演练待首份标注 | 非 root 账号 `annot`；`/data/annot/{artifacts,images,labels,exports,backup,config,logs}` |
 | **X4 离线** | 脚本 ✅，断网验证**待 GUI** | `/data/annot/start-annotate.sh` 含 `--no-auto-update-check` + `nice -n 19` + `taskset -c 2,3`；未装任何内置模型 |
 | **X5 试画 3 张** | ⛔ **阻塞** | GUI 在 prod 起不来（GL，见下） |
