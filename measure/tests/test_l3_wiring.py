@@ -167,6 +167,46 @@ def test_missing_reference_emits_enum_none_and_no_fabricated_values():
     assert not contract.is_usable(row["quality"])
 
 
+def synth_two_unequal_bags():
+    """两袋**不等宽**（200 / 300 px）+ 各一根细杆 ⇒ 能实测"标尺散布"（≥2 个尺度才可估）。
+
+    杆与袋顶之间**留 2px 间隙**：否则合成图里亮杆与袋会连成同一个连通域，
+    袋 bbox 被抬到杆顶、`bag_top` 算错，`filter_above_bag_top` 会把真杆判成"袋体内"。
+    """
+    img = np.full((400, 900), 30.0, np.float32)
+    img[260:, 50:250] = 200          # 袋 A：宽 200
+    img[260:, 500:800] = 200         # 袋 B：宽 300
+    img[228:258, 147:154] = 255      # A 上的细杆（底 257，与袋顶 260 隔 2px）
+    img[228:258, 647:654] = 255      # B 上的细杆
+    return img
+
+
+def test_scale_dispersion_reaches_the_round_log():
+    """标尺散布（主导误差项）**不是列**（一期不加列）⇒ 必须进轮日志，否则等于没测。
+
+    Chief 2026-10-14 裁定的一半：值留着、进日志/票面/复核材料，**不进页面**。
+    """
+    img = synth_two_unequal_bags()
+    fetch, decode = stubs(img)
+    logs: list[str] = []
+    rows_from_frames([frame_row()], room_id="611",
+                     detector=L3Detector(L3Config(bag_cfg=_bag_cfg())),
+                     fetch=fetch, decode=decode, log=logs.append)
+    res = L3Detector(L3Config(bag_cfg=_bag_cfg())).detect_frame(img, box_id="B105")
+    assert res.evidence.scale_dispersion is not None and res.evidence.scale_dispersion > 0
+    assert "仅袋宽分割项" in res.evidence.note
+    blob = "\n".join(logs)
+    assert "标尺散布 Δw/w" in blob and "仅袋宽分割项" in blob
+    assert "不是列" in blob, "日志要写清它不是 measurements 的列（一期不加列）"
+
+
+def test_station_calibration_has_no_scale_dispersion():
+    """站位标定值口径下所有实例共用一个常数 ⇒ 不报"袋宽散布"（避免误导）。"""
+    img = synth_frame()
+    res = detect(img, station_mm_per_px=0.5, depression_deg=None, bag_cfg=_bag_cfg())
+    assert res.evidence.scale_dispersion is None
+
+
 def test_all_rows_unreliable_yields_unreliable_not_no_detection():
     """**与上一条并排的反例**（Chief 2026-10-14）：整帧只剩不可信的排 ⇒ `unreliable`。
 

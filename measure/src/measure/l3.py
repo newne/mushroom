@@ -48,6 +48,7 @@ from measure.estimate import (
     BAG_LENGTH_MM,
     all_rows_unreliable,
     filter_above_bag_top,
+    scale_dispersion_rel_err,
 )
 from measure.fruitbody import FruitConfig, FruitInstance, find_fruitbodies
 from measure.pipeline import Detection
@@ -84,6 +85,11 @@ class FrameEvidence:
     flags: frozenset[str] = frozenset()
     n_instances: int = 0          # **朵数**（实例数），不是簇数
     note: str = ""
+    #: **标尺散布 Δw/w（只覆盖袋宽分割项）**：本帧逐袋局部 mm/px 的相对散布。
+    #: **不是 `measurements` 的列**（一期不加列）⇒ 只进**轮日志 + 票面 + 复核材料**；
+    #: 将来若要显示成数字，需新增一列（如 `scale_dispersion`）并单独报 Chief（票 15 §16.2 / 票 20）。
+    #: 显示时必须写明"仅袋宽分割项、不含投影(θ)与系统性偏差"，**不许写成通用的 ± 不确定度**。
+    scale_dispersion: float | None = None
 
 
 @dataclass
@@ -245,6 +251,11 @@ class L3Detector:
             if cfg.depression_deg is not None or cfg.allow_uncorrected_height:
                 fields.append("mean_cluster_h_mm")
         ref_med = float(np.median(refs)) if refs else None
+        # **标尺散布**（主导误差项，实测而非拍常数）：只覆盖袋宽分割项
+        # 站位标定值口径下所有实例共用一个常数 ⇒"袋宽散布"不存在，不报（避免误导）
+        disp = None if cfg.station_mm_per_px else scale_dispersion_rel_err(mpps)
+        if disp is not None:
+            note_bits.append(f"标尺散布 Δw/w={disp * 100:.0f}%（仅袋宽分割项）")
         ev = FrameEvidence(
             estimated_fields=tuple(fields),
             scale_source=scale_source,
@@ -254,6 +265,7 @@ class L3Detector:
             flags=frozenset(flags),
             n_instances=n_instances,
             note="；".join(note_bits),
+            scale_dispersion=disp,
         )
         return FrameResult(dets, ev)
 

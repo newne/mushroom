@@ -250,6 +250,7 @@ def rows_from_frames(
     det = detector or BaselineDetector(BaselineConfig())
     out: list[dict] = []
     durations: list[float] = []
+    dispersions: list[float | None] = []
 
     def one(raw) -> list[dict]:
         """处理一帧 → 该帧的行（0 或 1 行）。
@@ -327,6 +328,8 @@ def rows_from_frames(
         )
         row = rec.to_row()
         row["kind"] = kind
+        if evidence is not None:
+            dispersions.append(getattr(evidence, "scale_dispersion", None))
         return [row]
 
     for raw in frames:
@@ -341,6 +344,12 @@ def rows_from_frames(
         out.extend(produced)
     if durations:
         log(timing_summary(durations))
+    # 标尺散布（主导误差项）：**不是 measurements 的列**（一期不加列）⇒ 进轮日志供人追溯
+    disps = [d for d in dispersions if d is not None]
+    if disps:
+        log(f"测量：标尺散布 Δw/w 中位 {float(np.median(disps)) * 100:.0f}%"
+            f"（n={len(disps)} 帧；**仅袋宽分割项**，不含投影 θ 与系统性偏差；"
+            f"该值不是列，显示成数字需新增列——票 15 §16.2）")
     # 口径提示（Chief 2026-10-14 接线要求 2）：半年后得有人能看出竖直列是**未补偿**的
     if any("height_uncorrected" in (r.get("quality") or "") for r in out):
         log("测量：mean_cluster_h_mm 本批为「未做 cosθ 补偿的竖直投影跨度」"

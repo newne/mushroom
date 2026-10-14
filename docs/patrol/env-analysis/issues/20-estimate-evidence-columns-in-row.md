@@ -165,3 +165,18 @@ contract.field_is_usable(quality, estimated_fields, field) -> bool
 
 **证据**：`pytest analysis/tests` **211 passed**（新增 `test_evidence_columns.py` 12 条）；
 `pytest measure/tests analysis/tests` **345 passed**。
+
+## 9. 若将来要"数字型不确定度"：需要**新增一列**（测量侧补记，2026-10-14）
+
+Chief 2026-10-14 裁定的一半：测量侧已能**实测**主导误差项 `Δw/w`
+（**标尺散布** = 本帧逐实例局部 mm/px 的相对散布；现场注入值优先），
+实现见 `measure/estimate.scale_dispersion_rel_err()` 与 `l3.FrameEvidence.scale_dispersion`。
+
+- **一期它不进页面**：`scale_note` **不是 `measurements` 的列**（本票定的 20 列里没有）；
+  一期已裁定不加列 ⇒ 它只进 **轮日志 + 票面 + 复核材料**。
+  轮日志原文：`测量：标尺散布 Δw/w 中位 X%（n=… 帧；仅袋宽分割项，不含投影 θ 与系统性偏差；该值不是列…）`。
+- **将来要显示成数字 ⇒ 必须新增一列**（建议名 `scale_dispersion`，语义 = "**仅袋宽分割项**的相对散布"），
+  **届时单独报 Chief 决定**，别顺手加——这是把"为什么现在看不到数字型不确定度"记成**事实**，
+  免得后人以为漏了。
+- **即便开列，显示口径必须写明**："标尺散布 X%（**仅袋宽分割项**，不含投影 θ 与系统性偏差）"，
+  **不许写成通用的"± 不确定度"/置信区间**——把只覆盖一项的数字伪装成总误差，比不显示更糟。
