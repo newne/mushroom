@@ -44,4 +44,8 @@
 
 ## 5. 交给运维
 
-按 §1 的 `file` 列从生产**只读搬运干净原图**（2880×1616，不带 overlay）到客户端帧目录；先搬 P01–P03 开试画。
+- 取图：`pull-list-p1.tsv` 整批喂 `pull-minio-frames.sh`；**先只取 P01–P03 开试画，结论出来再取剩下 65 张**（别倒过来）。
+  MinIO 对象名是 **`B<layer><col>`**（S108→`B108`；`S108_…` 实测 404）；干净原图、不带 overlay；清单记 `/data/annot/labels/minio-manifest.tsv`。
+- 客户端阻塞（2026-10-14）：prod 的 xrdp 拿不到 `/dev/dri` ⇒ Qt `Could not initialize GLX`。
+  已 `usermod -aG video,render`（`annot` / `leapapp`），**Xvfb 验证不了**（GLX 无可用 FBConfig）⇒ **需用户断开重连一次 RDP** 才能出结论。
+  窗口一开先测两件：`attributes.json` 的 `"true"/"false"` 是否被属性面板接受、`cap_*` 帧级 flags 纯人工怎么设；随后画 P01–P03 回 3 个 JSON。
