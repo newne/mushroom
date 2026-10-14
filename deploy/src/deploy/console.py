@@ -211,18 +211,37 @@ def _hold_log_path(deps) -> Path:
     return Path(deps.hold_dir) / HOLD_LOG_NAME
 
 
-def _append_hold_log(deps, record: dict) -> None:
-    """一行一次写、写完就 flush。
+def _hold_log_writable(deps) -> bool:
+    """记录目录能不能写。**写给回查看的**：写不进去时必须明说，不许让人以为"没有记录 = 没发生过"。"""
+    d = Path(deps.hold_dir)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    return os.access(d, os.W_OK)
 
-    一行一次（而不是攒着批量写）是为了"崩了也不丢已经发生的事"；
-    `json.dumps` 会把值里的换行转义掉，所以**一条记录永远占一行**——回查按行解析才安全。
+
+def _append_hold_log(deps, record: dict) -> bool:
+    """落一条记录；**写不进去也不许把 hold 本身弄失败**（返回 False，由调用方如实上报）。
+
+    一行一次写、写完就 flush：崩了也不丢已经发生的事；`json.dumps` 会把值里的换行转义掉，
+    所以**一条记录永远占一行**——回查按行解析才安全。
+
+    ⚠️ 生产上 `/app/data` 是**只读**挂载，只把 `data/trigger`、`data/cmd` 单独放成 rw
+    （`docker/mushroom_solution.yml:240-250`）。记录目录要能写，得让发版官加一条
+    `../mushroom_patrol/data/hold:/app/data/hold:rw`；**在它到位之前这里绝不能炸**——
+    否则操作者按"设保持"会收到 500，而保持其实**已经生效**（比不记日志危险得多）。
     """
-    p = _hold_log_path(deps)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(record, ensure_ascii=False) + "\n"
-    with open(p, "a", encoding="utf-8") as fh:
-        fh.write(line)
-        fh.flush()
+    try:
+        p = _hold_log_path(deps)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(record, ensure_ascii=False) + "\n"
+        with open(p, "a", encoding="utf-8") as fh:
+            fh.write(line)
+            fh.flush()
+        return True
+    except OSError:
+        return False
 
 
 def _open_hold_id(deps) -> str:
@@ -248,6 +267,13 @@ def _hold_seconds(from_iso: str, to: datetime) -> float | None:
         return None
 
 
+HOLD_REASON_NOTE = (
+    "`reason`/`by` **不截断**（回查要原文）；**不另存长度标记**——不截断时原长就是 `len(reason)`，"
+    "多一个字段就多一个会漂的地方（Chief 2026-10-14 定）。**凭据一律不写**：这里不脱敏也不过滤，"
+    "靠的是调用方不往里填凭据。"
+)
+
+
 def _first_line_ts(path: Path) -> str | None:
     """日志文件的**第一行**的时间（= 记录起点）。用来表达"日志里没有 ≠ 没被延后过"。"""
     try:
@@ -263,11 +289,16 @@ def read_hold_log(deps, *, ts_from: str = "", ts_to: str = "", limit: int = HOLD
 
     `rows` 是原始记录（`hold_start`/`hold_end`），`derived_endings` 如实报
     "这里面有多少条结束时刻是**推导**出来的（到期自动失效）"——不让人把推导当记录。
+
+    `end_source` 取三值（Chief 2026-10-14 定）：`cleared`（人工解除，落盘的）/
+    `superseded`（被新的保持顶掉，落盘的）/ `derived`（**按 `until` 推导**出来的到期）。
+    **落盘的永远优先**：同一个 `hold_id` 只要真落了 `cleared`/`superseded`，就不再算 derived。
     """
     path = _hold_log_path(deps)
     rows = _read_jsonl_tail(path, limit=HOLD_LOG_SCAN)
     # 配对只看**全量**（窗口外的 start 也要能找到它的 end），过滤只作用于返回
     ended = {r.get("hold_id") for r in rows if r.get("kind") == "hold_end"}
+    log_created_at = _first_line_ts(path)
     now = deps.now()
     out = []
     for r in rows:
@@ -284,14 +315,15 @@ def read_hold_log(deps, *, ts_from: str = "", ts_to: str = "", limit: int = HOLD
             except ValueError:
                 expired = False
             if expired:            # 到期自动结束：**记录里没有**，如实标成推导
-                row["end_reason"] = "expired"
                 row["end_source"] = "derived"
                 row["duration_s"] = _hold_seconds(ts, datetime.fromisoformat(until))
+        row["log_created_at"] = log_created_at   # 每条都带：机器可判"这份日志覆盖到什么时候"
         out.append(row)
     out = out[-max(1, min(int(limit), HOLD_LOG_MAX)):]     # 顺序即发生顺序，超限取最近的
     return {"ok": True, "rows": out,
             "derived_endings": sum(1 for r in out if r.get("end_source") == "derived"),
-            "log_created_at": _first_line_ts(path),
+            "writable": _hold_log_writable(deps),
+            "log_created_at": log_created_at,
             "note": "记录自本版本部署起；**日志里没有 ≠ 没被延后过**"}
 
 
@@ -1273,20 +1305,27 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
         # 票 13：保持生效期内再设一次，`hold.json` 会被**静默顶掉**（os.replace）。
         # 不记这一条，回查里第一次保持永远没有结束时刻 —— 所以先补一条 superseded 结束。
         new_id = uuid.uuid4().hex[:12]
+        logged = True
         if before.get("active"):
             open_id = _open_hold_id(deps)
             if open_id:
-                _append_hold_log(deps, {
+                logged &= _append_hold_log(deps, {
                     "kind": "hold_end", "hold_id": open_id,
-                    "ts": hold["set_at"], "end_reason": "superseded", "end_source": "recorded",
+                    "ts": hold["set_at"], "end_source": "superseded",
                     "by": body.by, "reason": body.reason,
                     "duration_s": _hold_seconds(before.get("set_at"), deps.now()),
                 })
-        _append_hold_log(deps, {
+        logged &= _append_hold_log(deps, {
             "kind": "hold_start", "hold_id": new_id, "ts": hold["set_at"],
             "by": hold.get("set_by", body.by), "reason": hold.get("reason", body.reason),
+            # `source` 今天恒为 manual。信号侧（env-analysis/14）落地后走 **(b) 仍调本接口、
+            # 带 `source="signal"`**（Chief 2026-10-14 指派），**在那之前不实现该分支**——
+            # 没有生产者就实现消费方，只会得到一条永远为 manual 的字段。
             "source": "manual", "until": hold["until"], "defer_s": hold["defer_s"],
         })
+        if not logged:                       # 保持已经生效，只是没记下来——如实说，别静默
+            console.note("hold 记录写不进去（记录目录不可写）：保持本身已生效，但回查看不到这一笔",
+                         level="warn")
         console.note(f"设保持至 {hold['until']}（之后偏置 {hold['defer_s']:.0f}s，"
                      f"{body.reason or '未注明原因'}）")
         return {"ok": True, "hold": store.hold_summary(), "state": store.state()}
@@ -1301,13 +1340,17 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
         # 那是空动作，落进去只会把回查结果灌满噪音。
         if cleared:
             open_id = _open_hold_id(deps)
+            logged = True
             if open_id:
-                _append_hold_log(deps, {
+                logged = _append_hold_log(deps, {
                     "kind": "hold_end", "hold_id": open_id,
                     "ts": deps.now().isoformat(timespec="seconds"),
-                    "end_reason": "cleared", "end_source": "recorded", "by": "operator",
+                    "end_source": "cleared", "by": "operator",
                     "reason": "", "duration_s": _hold_seconds(before.get("set_at"), deps.now()),
                 })
+            if not logged:                   # 解除已生效，只是没记下来——如实说
+                console.note("hold 记录写不进去（记录目录不可写）：解除本身已生效，但回查看不到这一笔",
+                             level="warn")
         console.note("解除巡检保持" if cleared else "解除保持：本来就没有生效的保持")
         return {"ok": True, "cleared": cleared, "state": store.state()}
 
@@ -1315,9 +1358,11 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
     def api_hold_log(ts_from: str = "", ts_to: str = "", limit: int = 1000) -> dict:
         """hold 的持久记录（票 13，只读）。
 
-        回答的是"那一轮为什么被延后/中止"。三条口径：`superseded`（被新的保持顶掉）**算一次结束**；
-        到期自动失效**不落盘**、在这里标成 `end_source="derived"`（不给只读接口加写副作用）；
-        `log_created_at` 是日志首行时间——**日志里没有 ≠ 没被延后过**。
+        回答的是"那一轮为什么被延后/中止"。口径（Chief 2026-10-14 定）：
+        `superseded`（被新的保持顶掉）**算一次结束并落盘**；到期自动失效**不落盘**、
+        在这里标成 `end_source="derived"`（不给只读接口加写副作用），**落盘的那条永远优先**；
+        每条返回行与响应都带 `log_created_at`（= 日志首行时间），并在文档串里写明
+        "**自本版本部署起才有日志**"——**日志里没有 ≠ 没被延后过**。
         """
         if ts_from and ts_to and ts_from > ts_to:
             raise HTTPException(422, "ts_from 不能晚于 ts_to")

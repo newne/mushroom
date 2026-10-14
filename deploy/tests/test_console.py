@@ -1132,7 +1132,7 @@ def test_clearing_a_hold_writes_one_end_record_with_duration(tmp_path):
     assert [r["kind"] for r in rows] == ["hold_start", "hold_end"]
     start, end = rows
     assert end["hold_id"] == start["hold_id"]
-    assert end["end_reason"] == "cleared" and end["end_source"] == "recorded"
+    assert end["end_source"] == "cleared", end      # 落盘的那条：来源就是"人工解除"
     assert end["duration_s"] == 491.0, end
 
 
@@ -1161,8 +1161,8 @@ def test_setting_twice_records_superseded_then_a_new_start(tmp_path):
     rows = hold_log_rows(tmp_path)
     assert [r["kind"] for r in rows] == ["hold_start", "hold_end", "hold_start"]
     first, end, new = rows
-    assert end["hold_id"] == first["hold_id"] and end["end_reason"] == "superseded"
-    assert end["end_source"] == "recorded" and end["duration_s"] == 300.0
+    assert end["hold_id"] == first["hold_id"] and end["end_source"] == "superseded"
+    assert end["duration_s"] == 300.0, end
     assert new["hold_id"] != first["hold_id"] and new["reason"] == "第二次"
     # 两条 ts 相同：顶掉与新设是同一瞬间发生的两件事
     assert end["ts"] == new["ts"] == second["hold"]["set_at"]
@@ -1181,7 +1181,7 @@ def test_expiry_is_not_recorded_but_reported_as_derived(tmp_path):
     assert body["ok"] is True
     assert body["derived_endings"] == 1
     row = body["rows"][0]
-    assert row["end_reason"] == "expired" and row["end_source"] == "derived"
+    assert row["end_source"] == "derived", "到期是推出来的，不是记到的"
     assert row["duration_s"] == 1200.0, row
     assert body["log_created_at"] == NOW.isoformat(timespec="seconds")
     assert "部署起" in body["note"], "日志里没有 ≠ 没被延后过：这句必须跟着返回走"
@@ -1248,8 +1248,7 @@ def test_hold_log_appends_and_keeps_the_order(tmp_path):
 def test_hold_log_record_shape_is_pinned(tmp_path):
     """⑨ 字段集契约式断言：多一个字段就红——防"加了字段没人知道"（与页面侧 CONTRACT 同做法）。"""
     START_FIELDS = {"kind", "hold_id", "ts", "by", "reason", "source", "until", "defer_s"}
-    END_FIELDS = {"kind", "hold_id", "ts", "end_reason", "end_source", "by", "reason",
-                  "duration_s"}
+    END_FIELDS = {"kind", "hold_id", "ts", "end_source", "by", "reason", "duration_s"}
     clock = _Clock(NOW)
     deps = make_hold_deps(tmp_path, clock)
     with TestClient(create_app(deps)) as c:
@@ -1260,7 +1259,64 @@ def test_hold_log_record_shape_is_pinned(tmp_path):
     start, end = hold_log_rows(tmp_path)
     assert set(start) == START_FIELDS, set(start) ^ START_FIELDS
     assert set(end) == END_FIELDS, set(end) ^ END_FIELDS
+    # 超长 reason：**不截断、也不加长度标记**（原长可推导，多一个字段就多一个漂点）
+    long_reason = "长" * 201
+    with TestClient(create_app(deps)) as c:
+        c.put("/api/patrol/hold", json={"minutes": 10, "reason": long_reason})
+    assert set(hold_log_rows(tmp_path)[-1]) == START_FIELDS, "不许出现 reason_len"
+    assert hold_log_rows(tmp_path)[-1]["reason"] == long_reason
     # 回查返回的 body 形状也钉住（少了 key 页面会静默拿着 undefined 做事）
     with TestClient(create_app(deps)) as c:
         body = c.get("/api/patrol/hold/log").json()
-    assert set(body) == {"ok", "rows", "derived_endings", "log_created_at", "note"}, set(body)
+    assert set(body) == {"ok", "rows", "derived_endings", "writable", "log_created_at",
+                         "note"}, set(body)
+    assert body["writable"] is True, "目录可写时必须如实报可写"
+
+
+def test_hold_still_works_when_the_log_dir_is_unwritable(tmp_path):
+    """记录写不进去时，**hold 本身必须照常生效**，而且这件事要被如实报出来。
+
+    为什么单列一条：生产上 `/app/data` 是**只读**挂载，只把 `data/trigger`、`data/cmd`
+    单独放成 rw（`docker/mushroom_solution.yml:240-250`）。若记录目录还没加 rw 挂载，
+    旧写法会让"设保持"返回 500——**而保持其实已经生效了**，操作者会以为没生效再按一次。
+    这比不记日志危险得多，所以：接口不许炸 + 回查如实说"写不进去"。
+    """
+    blocker = tmp_path / "not-a-dir"          # 用一个普通文件挡住父路径 ⇒ mkdir 必失败
+    blocker.write_text("x", encoding="utf-8")
+    clock = _Clock(NOW)
+    deps = make_hold_deps(tmp_path, clock)
+    deps.hold_dir = str(blocker / "hold")
+
+    with TestClient(create_app(deps)) as c:
+        r = c.put("/api/patrol/hold", json={"minutes": 20, "reason": "加湿"})
+        assert r.status_code == 200, r.text
+        assert r.json()["hold"]["active"] is True, "保持必须真的生效"
+        assert c.get("/api/patrol/run").json()["hold"]["active"] is True
+        body = c.get("/api/patrol/hold/log").json()
+        assert body["rows"] == [] and body["writable"] is False, body
+        assert any("写不进去" in e.get("text", "") for e in c.get("/api/events").json()["events"]), \
+            "写不进去必须在事件里说清楚，不许静默"
+        # 解除同样不许因为记录写不进去而失败
+        assert c.delete("/api/patrol/hold").json()["cleared"] is True
+def test_recorded_end_wins_over_the_derived_one(tmp_path):
+    """落盘的那条**永远优先**：同一 `hold_id` 真被解除/顶掉后，不许再算成"到期推导"。
+
+    真实场景：保持已经越过 `until`（`hold()` 返回 None，页面显示"无保持"），但 `hold.json`
+    文件还在——这时按"解除"仍会落一条 `cleared`。回查必须认这条落盘的记录。
+    """
+    clock = _Clock(NOW)
+    deps = make_hold_deps(tmp_path, clock)
+    with TestClient(create_app(deps)) as c:
+        c.put("/api/patrol/hold", json={"minutes": 10, "reason": "加湿"})
+        clock.advance(minutes=30)                       # 早过 until 了
+        assert c.get("/api/patrol/run").json()["hold"]["active"] is False
+        assert c.delete("/api/patrol/hold").json()["cleared"] is True   # 文件还在 ⇒ 真落一条
+        body = c.get("/api/patrol/hold/log").json()
+
+    end = [r for r in hold_log_rows(tmp_path) if r["kind"] == "hold_end"]
+    assert len(end) == 1 and end[0]["end_source"] == "cleared", end
+    assert body["derived_endings"] == 0, "已经有落盘的结束，就不该再推导一条"
+    starts = [r for r in body["rows"] if r["kind"] == "hold_start"]
+    assert starts and "end_source" not in starts[0], "落盘过结束的 start 不许再被标成 derived"
+    assert all(r["log_created_at"] == NOW.isoformat(timespec="seconds") for r in body["rows"]), \
+        "每条返回行都要带 log_created_at（机器可判覆盖范围）"
