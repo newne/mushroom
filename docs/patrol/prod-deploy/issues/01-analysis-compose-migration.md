@@ -366,6 +366,45 @@ WantedBy=timers.target
 | ⚠️ 观察到的事实 | 映射键里有两组是 **`7\|…` 与 `8\|…`**（不是 `607`/`608`）——`batches` 表里这两个库房的 `room_id` 就是 `7`/`8`。**已报环境官**，别当成笔误 |
 | ⚠️ `.gitignore` | 仓库根 `.gitignore:93` 的通用 `data/` 会连它一起挡掉 ⇒ 已加**窄例外**（`!analysis/data/` + `!analysis/data/batch_no_map.json`）；实测 `.dockerignore` 的 `data` **不挡**子目录，镜像侧无需改动 |
 
+### 8.3 ⛔ 2026-10-14 analysis 重建**启动即阻塞**：`patrol-workspace/uv.lock` 重生成不了
+
+Chief 2026-10-14 批准"重生成锁 + 只重建 analysis"。**卡在第一步：锁生成失败。**
+
+**复现（两种工具/两套版本都试过）**
+
+```
+cd patrol-workspace && uv lock
+→ error: Failed to build `deploy @ file:///…/deploy`
+     cause: Failed to parse entry: `patrol`
+     cause: `patrol` references a workspace in `tool.uv.sources`
+            (e.g., `patrol = { workspace = true }`), but is not a workspace member
+```
+
+| 试过的组合 | 结果 |
+| --- | --- |
+| 宿主 `uv 0.12.20` + CPython 3.14.4 | 同样报错 |
+| **与镜像同版本** `uv 0.12.10` + Python 3.12.14（一次性容器，挂载仓库） | **同样报错** |
+
+**排除过的两个嫌疑（都实测证伪）**
+
+| 嫌疑 | 处置 | 结果 |
+| --- | --- | --- |
+| `patrol/uv.lock`（**未跟踪**，10-09 10:05 遗留，17 762 B，sha256 `a259de46…`）让 uv 把 `patrol` 当成独立 workspace 根 | 已挪到 `.scratch/prod-deploy/stray-patrol-uv.lock-20261009-100545`（**保留、未删**） | **仍然报错**，不是它 |
+| `analysis/uv.lock`（**已跟踪**，`5658570` 引入）让 `analysis` 变成独立根 | 临时移出后重跑，再原样还原 | **仍然报错**，不是它 |
+
+**现状**：`[tool.uv.workspace] members = ["../patrol", "../deploy", "../measure", "../analysis"]`
+（根 `pyproject.toml` **没有** `[tool.uv.workspace]`，四个成员目录里只有 `analysis/` 自带锁）。
+`deploy/pyproject.toml:11-12` 有 `patrol = { workspace = true }`。
+现有锁里明明有 `source = { editable = "../patrol" }` ⇒ **它是能用的（`uv sync --frozen` 在镜像构建里一直成功），但已经生成不出来了。**
+
+**⇒ 影响**：`analysis/pyproject.toml` 里的 `psycopg[binary]>=3.3.2` **进不了 `patrol-workspace/uv.lock`**，
+所以"镜像装 psycopg"这条前置在锁修好之前**做不到**。需要 workspace 布局的归属方（或 Chief）定：改 `members` 写法 / 把 workspace 根挪到仓库根 / 让成员目录不再各自留锁。
+
+**同日另一条实测（与 8.3 无关但影响"镜像内字节"判据）**：工作区文件是 **CRLF**、git blob 是 **LF**，
+而镜像一直是从**工作区**构建的 ⇒ **镜像内文件字节 = 工作区字节 ≠ git blob**。
+实证：`patrol/src/patrol/round.py` 工作区 `5dc9a4cb…`（14 547 B）= **镜像内** `5dc9a4cb…`，而 blob 是 `87a1b31d…`（14 288 B）。
+⇒ 以后核"镜像内 = 仓库"**要么比工作区、要么先把 `\r` 去掉**，直接比 blob sha256 一定不等。
+
 ## Comments
 
 - 2026-10-13 发版官写票。全部数字来自现场只读实测（plink 只读，无 pull/重启/改文件）。
