@@ -300,12 +300,17 @@ H_profile = (1/|V|) · Σ_{x∈V} [ b(x) − t(x) ]        # 单位：原图像�
    ⇒ **主档案 = XLABEL JSON**（无损：`attributes` + `group_id` + 顶层 `flags/checked/description` 都在），COCO 是**派生物**。
 2. **禁止把语义塞进文件名或类别名拼串**（不可回读、污染类别名，且改文件名=改图身份）。
 3. 回读判据按票 02 §6.2 四条执行：对象数与类别逐条一致；几何在容差内；**属性键值逐条一致或显式产出丢失清单（不许静默丢）**；坐标恒 `2880×1616`。
-4. 若实测 COCO 确实丢属性：训练导出只用 COCO 支持的位（类别 + 掩码），**属性由转换脚本按 `(filename, shape_index)` join 主档案补回**，
-   并要求 `join` **1:1 可断言**（对不上就报错，不许静默配错）——该转换器列 P1 待建。
+4. **实测结论（2026-10-14，运维跑 `xlabel2coco --mode segment`）**：COCO 的 annotation **只剩
+   `area/bbox/category_id/id/ignore/image_id/iscrowd/segmentation`** ⇒ **`attributes`、`group_id`、帧级 `flags` 全丢**。因此：
+   - **主档案 = XLABEL JSON（无损，唯一权威）**；COCO 只是训练派生物，**不许当归档**；
+   - **必须自建 join 转换器**（P1 待建；**写码按红线需 Chief 批，未批不写**）：
+     输入 = 图目录 + XLABEL JSON + `labels.txt`；输出 = COCO `segment` + 侧车 `objects.json`
+     （`filename` / `shape_index` / `label` / `group_id` / 全部属性 / 帧级 flags）；
+   - 硬规则：join 键 `(filename, shape_index)` **1:1 可断言**（对不上报错，不许静默配错）；
+     `review_status=rejected` 的对象**要么落 `iscrowd=1`、要么落侧车标记**，不许悄悄消失；类别顺序按 `labels.txt` 行序固定。
 5. **未实测项（P1 第一件）**：~~客户端实际版本与文档是否一致~~ ⇒ **已核（2026-10-14，无需 GUI）**：
    本文档依据的上游 commit `a7d2765` 里 `anylabeling/app_info.py` 的 `__version__ = "4.1.1"`，与客户端实测 `4.1.1 / CPU` 一致；
-   仍需实测：**帧级 flags 的手工设置路径**（文档只写模型预测后到 `Ctrl+3` 改，纯人工怎么设要实测；不行就退到 `View -> Image Tags`（`Ctrl+Shift+T`）写 `cap_state:clear` 这类固定串）；
-   **COCO 导出是否带属性/`group_id`**——`xanylabeling convert` 是 **CLI、不需要 OpenGL**，可在 GUI 被 GL 阻塞时用 `example-frame.xlabel.json` 先跑通（结果回填本节）。
+   仍需实测（**被 GUI 的 GL 阻塞**，等窗口能开）：**帧级 flags 的手工设置路径**（文档只写模型预测后到 `Ctrl+3` 改，纯人工怎么设要实测；不行就退到 `View -> Image Tags`（`Ctrl+Shift+T`）写 `cap_state:clear` 这类固定串）。
 
 ### 4.6 标注操作规范一页（给标注人，工具步骤 + 六条判据）
 

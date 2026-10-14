@@ -3,6 +3,8 @@
 - **归属：** 选帧与规范 = 测量师；搬帧/客户端 = 运维；**不写码、不动生产、不接生产**
 - **依据：** Plan §5.4 + 票 `01` §0.4/§4.5–4.7；执行走 X-AnyLabeling 客户端（prod 服务器 + RDP）
 - **池子文件：** `docs/patrol/growth-algo/annotation-config/sample-pool-p1.md`（入库版，68 行表）
+- **取图清单：** `docs/patrol/growth-algo/annotation-config/pull-list-p1.tsv`（68 行，`station<TAB>date<TAB>HHMMSS<TAB>pool_id<TAB>stratum`），
+  直接喂运维的 `pull-minio-frames.sh` 整批取；**帧一律从生产 MinIO 只读拉取，不带 overlay**
   机读副本 `.scratch/p1-pool/sample-pool-p1.csv`（`*.csv` 被 `.gitignore` 忽略，**未入库**）
 
 ## 1. 池子构成（可复算）
