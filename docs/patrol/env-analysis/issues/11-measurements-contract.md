@@ -31,6 +31,7 @@ analysis 侧只消费，不复制字段表（现在 `analysis/src/analysis/db.py
 | `mean_area_mm2` / `mean_projected_d_mm` | **缺** | **新增（2026-10-13）** | 菌簇面积均值（**mm²**）与投影径均值（**mm**）。**投影径不是菌盖直径**，不许互换 |
 | `p10_len` / `p90_len` | 有 | 可空 | 分位数，样本太小时允许 NULL |
 | `quality` | 有（自由文本） | 必填，枚举见 §3 | |
+| `source` | **缺** | **必填（新增，2026-10-14，排期）** | 帧来源：`capture`（抓拍链路）/ `preview`（预览流）。**不许用图像判据猜**是不是 preview；聚合只吃 `capture`（见票 17） |
 
 **`room_id` 由生产者填**：他手上有 round / room 上下文。
 **不许 analysis 侧从 `box_id` 猜库房** —— 今天没有权威的 `box_id → room_id` 映射源，
