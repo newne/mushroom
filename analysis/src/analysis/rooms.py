@@ -111,6 +111,20 @@ def canonical_room(raw, *, alias: dict[str, str] | None = None) -> str | None:
     return text if text in set(canonical_rooms()) else None
 
 
+def alias_codes_for(canonical, *, alias: dict[str, str] | None = None) -> tuple[str, ...]:
+    """**逆向**：哪些原始编号会被归一到这个规范库房号（升序）。
+
+    为什么需要逆向：映射/台账里的键可能是**任一**编码。只知道"7 → 607"不够 ——
+    拿到 `607` 时还要能想起"它的旧编号是 `7`"，否则按旧编码写的映射表永远查不中，
+    `batch_no` 会静默全空（2026-10-14 实测踩到）。
+    """
+    text = str(canonical or "").strip()
+    if not text:
+        return ()
+    table = load_room_alias() if alias is None else alias
+    return tuple(sorted(src for src, to in table.items() if to == text))
+
+
 def display_room(raw, *, alias: dict[str, str] | None = None) -> str:
     """给页面/报表用的**不洗白**标签（口径 3）。
 

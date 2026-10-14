@@ -115,6 +115,30 @@ def test_batch_no_comes_from_the_map_and_missing_stays_null():
     assert by_key["611|2026-08-16"]["batch_id"] == "611|2026-08-16", "派生 id 顶显示位"
 
 
+def test_batch_no_lookup_normalises_the_room_code():
+    """映射键是旧编号（`7|…`）、取数是 3 位（`607`）时**必须命中**。
+
+    真缺口（2026-10-14 发现）：映射文件是从我们库里既有行反推的，对 607/608 用的是旧编号；
+    而 pgsql 取数回来是 3 位。直接按原文查表 ⇒ **11 个历史批次的 `batch_no` 全变 NULL**，
+    看起来跟"还没生成映射"一模一样（正是最难发现的那种静默）。
+    """
+    rows = rows_to_batches([("607", date(2026, 10, 10))],
+                           batch_no_map={"7|2026-10-10": "mogu-110"})
+    assert rows[0]["batch_no"] == "mogu-110"
+    assert rows[0]["room_id"] == "607", "原始列照旧"
+    assert rows[0]["batch_id"] == "607|2026-10-10", "派生 id 用规范号（跨域身份）"
+
+    # 反向也要能命中：映射写成规范号、取数回来是旧编号（我们库里既有行就是这种）
+    back = rows_to_batches([("7", date(2026, 10, 10))],
+                           batch_no_map={"607|2026-10-10": "mogu-110"})
+    assert back[0]["batch_no"] == "mogu-110"
+    assert back[0]["room_id"] == "7"
+
+    # 两边都没有 ⇒ NULL（不编）
+    none = rows_to_batches([("607", date(2025, 12, 4))], batch_no_map={"7|2026-10-10": "mogu-110"})
+    assert none[0]["batch_no"] is None
+
+
 def test_missing_map_file_warns_and_returns_empty(tmp_path, capsys):
     from analysis.batches import load_batch_no_map
 

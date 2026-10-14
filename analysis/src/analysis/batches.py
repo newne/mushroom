@@ -121,7 +121,15 @@ def rows_to_batches(rows: list, *, batch_no_map: dict[str, str] | None = None) -
 
     **`batch_no` 从映射取**；映射里没有就写 **NULL**（编一个就是造假）——
     显示名缺失时页面用派生 id `库房号|入库日期`，见 `batch_id`。
+
+    **查找键要先归一到规范库房号**（2026-10-14）：映射文件是从**我们库里既有行**反推的，
+    对 607/608 两间用的是旧编号（`7|…`/`8|…`），而 pgsql 取数回来的是 3 位编号
+    （`607|…`）—— 直接拿原文查表会让**全部 11 个历史批次的 `batch_no` 静默变 NULL**，
+    看起来跟"还没生成映射"一模一样。所以三种键都试：**规范号** → 原文 →
+    **该规范号的旧编号**（映射的逆向，`alias_codes_for`）；都不中才算真缺。
     """
+    from analysis.rooms import alias_codes_for, canonical_room
+
     mapping = batch_no_map or {}
     out: list[dict] = []
     for row in rows:
@@ -131,12 +139,19 @@ def rows_to_batches(rows: list, *, batch_no_map: dict[str, str] | None = None) -
         date = _as_date(in_date)
         if not room:
             raise BatchFetchError(f"库房号为空的批次行：{row!r}")
-        key = f"{room}|{date}"
+        raw = str(room)
+        canonical = canonical_room(raw)
+        candidates = [
+            f"{canonical}|{date}" if canonical else None,
+            f"{raw}|{date}",
+            *(f"{code}|{date}" for code in alias_codes_for(canonical)),
+        ]
+        keys = list(dict.fromkeys(k for k in candidates if k))     # 去重保序
         out.append({
-            "room_id": str(room),
+            "room_id": raw,
             "entry_date": date,
-            "batch_no": mapping.get(key),
-            "batch_id": key,
+            "batch_no": next((mapping[k] for k in keys if k in mapping), None),
+            "batch_id": keys[0],
         })
     out.sort(key=lambda r: (r["room_id"], r["entry_date"]))
     return out
@@ -179,7 +194,7 @@ def fetch_batches_with_report(
         elif in_text and not in_yield:
             only_text.append(key)
 
-    missing = [f"{b['room_id']}|{b['entry_date']}" for b in batches if not b["batch_no"]]
+    missing = [b["batch_id"] for b in batches if not b["batch_no"]]
     report = {
         "n_total": len(sources_rows),
         "n_both": len(sources_rows) - len(only_yield) - len(only_text),
