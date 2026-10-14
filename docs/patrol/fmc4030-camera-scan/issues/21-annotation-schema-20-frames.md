@@ -113,10 +113,13 @@ python measure/tools/make_annotation_sheet.py --out .scratch/annotation-20 --n 2
 
 **文件**：`measure/tools/review_annotation.html`（**单个 HTML**，无服务、无依赖、**双击即开**，离线可用）。
 
-**⚠️ 验证状态（如实写）**：**视觉渲染未经真人/浏览器验证**——本机没有可驱动浏览器的工具，
-只做了**无头证据**（`node --check` 语法；纯函数往返：923→924 行、表头逐字相同、CRLF 保留、
-`gate_false_negative` 自动填；Python 侧读回 19 列一致并算出 P/R 骨架）。
-⇒ **"视觉渲染"这一条待用户打开（或在我的浏览器面板里打开、我用 `read_browser` 读那一页）后补成 PASS。**
+**⚠️ 验证状态（如实写）**：**渲染与静态 DOM 已由 Chief 用 headless Edge 核对**
+（证据 `.scratch/annotation-20/render-check.png` 1600×1000 截图 + `render-check-dom.html` DOM dump：
+顶栏/工具条/图例/说明面板齐全，`#folder`（`webkitdirectory multiple`）与 `#btnExport` 均在，
+脚本执行无致命错误）；**交互（拖拽改框 / 缩放 / 选目录后的实际导出）仍未经真人操作验证**。
+我这边另有无头证据：`node --check` 语法通过；纯函数往返 923→924 行、表头逐字相同、CRLF 保留、
+`gate_false_negative` 自动填；Python 侧读回 19 列一致并算出 P/R 骨架。
+⇒ **"交互"这一条待用户实际点一遍（或在我的浏览器面板里打开、我用 `read_browser` 读那一页）后补成 PASS。**
 
 **怎么用（三步）**：
 
