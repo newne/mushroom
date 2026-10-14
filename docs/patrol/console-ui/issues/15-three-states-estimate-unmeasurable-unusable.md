@@ -1,6 +1,6 @@
 # 15 · 三态显示：估算 / 不可测 / 不可用（菌簇长度与直径）
 
-**Status:** proposed（**只出票，未实现**——Chief 2026-10-14：出完票给我路径，**实现等我说**）
+**Status:** implemented（2026-10-14，Chief 批准后实现；四态判据出自 `bot-roles.md:89`）
 **唯一出处：** `CONTEXT.md:20`（角度档）与 `CONTEXT.md:62`（不可测/三态），提交 `9f4d707`。**本票不自造词。**
 **归属（实现）：** `web/console/index.html` + `docs/patrol/console-ui/verify-page.js`（界面师）
 **归属（我等的列）：** 标尺与估算标记（环境官票 18 §2 提案：`scale_source` / `mm_per_px` /
@@ -133,3 +133,50 @@
 - **不把估算写进统计/建议/区间**（那是 `verified` 的地盘）；
 - **不改 `no_angle_profile` 的数据语义**，只改**页面文案的适用条件**（这一条容易做反，写成断言钉住）；
 - **不动信息层级**：这两格的位置沿用票 14 的"排最前"，不重排卡片顺序。
+
+## 9. 实现记录（2026-10-14，Chief 批准后）
+
+**四态判据**（`measureState()`；出处 `bot-roles.md:89`，**判据只看 `quality` 与 `estimated_fields`，
+不写死列名表**）：`measureState()` 优先序 **不可用 > 标尺冲突 > 不可测 > 估算 > 实测**：
+
+| 态 | 判据 | 页面文案 |
+| --- | --- | --- |
+| 不可用 | `no_detection` / 门拒 / `NON_USABLE_FLAGS` / **`unreliable`** | 沿用既有话术：「没检出」/「该帧被判不可用（近黑…）」/「不可用（不可靠（远排或低置信））」 |
+| 标尺冲突 | `quality` 含 `scale_conflict` | 「标尺冲突（待核）」——**不静默取一个** |
+| 不可测 | `quality` 含 `no_scale`；或角度相关列 + `no_angle_profile`（且不是估算） | 「不可测（**无标尺**）」/「不可测（无角度档）」 |
+| 估算 | `estimated_fields` 列名匹配（**字段级**）；只有行级 `estimate` 而无清单时整行按估算算（兜底，注释写明） | 「估算（**标尺来源 [参考尺寸]**）」 |
+| 实测 | 以上都不是 | **零痕迹**（只有数 + 量纲） |
+
+**两个实现要点**：
+1. **先定态、再决定显不显示数字** —— 不可用/标尺冲突/不可测三态下**即使行里带了数也不显示**
+   （规范说这些情况下值必须 NULL；矛盾行按不可测如实说，绝不"有数就当一个正常值显示"）；
+2. **标尺来源带"用的是多大"**：`scale_source` 映射中文名 + `scale_ref_mm` ⇒「菌包标尺 **240 mm**」；
+   未知 `scale_source` **原样显示**，不翻译不归类。
+
+**分布 vs 误差预算**（§5.1 的裁定，写进代码与注释）：`distText()` 明写「**分布 P10–P90**」、
+`n<5` 只写「样本不足（n=X）」、**绝不写 `±`**、误差预算**今天不出数字**；
+**两格一期交付量没有分位列 ⇒ 不给分布**，不借杆长的分位（`p10_len`/`p90_len` 只对 `mean_len_mm`）。
+
+**列映射按 `bot-roles.md:91`（测量师裁定，权威）**：表头 `菌簇长度 mm` = `mean_cluster_h_mm`、
+`菌簇直径 mm` = `mean_cluster_w_mm` **排最前**；`mean_len_mm`/`mean_cap_mm`/`mean_projected_d_mm`
+是**探索项**，三列一律带「探索项」角标；四类计数按"列 × 行"写在表下
+（估算 N · 不可测 M · 不可用 K · 标尺冲突 J），**估算绝不并入已验证**。
+
+**契约登记**：`/api/measurements` 的 `CONTRACT` 与 `PAGE_CONSUMES` 补 `estimated_fields` /
+`scale_source` / `scale_ref_mm` / `mm_per_px`（值可 NULL ⇒ 不进 `required`），fixture 同步补上。
+
+**验证（实测）**
+```
+node docs/patrol/console-ui/verify-page.js web/console/index.html
+→ 376/385 通过，运行期错误：无（连跑 3 次同结果）
+   失败 9 条与 HEAD 逐条相同（Compare-Object 比过清单）
+```
+
+**护栏自证 3 条**（各自只打红对应用例）
+
+| 把实现改回哪一步 | 红的断言 |
+| --- | --- |
+| `isEstimated` 不看 `estimated_fields`（整行都算估算） | 「估算态：别的列不受影响」+ 两条分布（估算标签挤掉了分布） |
+| `measureCellText` 先显示数字（状态门失效） | 「不可测态：`no_scale` ⇒ 不可测（无标尺）」 |
+| `distText` 不管 `n`（`n<5` 也摆区间） | 「分布：`n<5` 只写样本不足」 |
+
