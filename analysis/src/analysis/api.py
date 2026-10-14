@@ -43,6 +43,7 @@ from analysis.environment import (
 )
 from analysis.growth import latest_delta, room_summary, series
 from analysis.rooms import canonical_room, canonical_rooms, display_room, resolve_rooms
+from analysis.setpoints import SetpointError, daily_states_from_db
 
 
 class IngestBody(BaseModel):
@@ -401,6 +402,49 @@ def create_app(
             "zone": zone or None,
             "rows": rows,
             "summary": summarize_operations(list(reversed(rows))),
+        }
+
+    @app.get("/setpoints/daily")
+    def setpoints_daily(
+        zone: str = "", start: str = "", end: str = "", entry_date: str = ""
+    ) -> dict:
+        """每日设定末态（票 09）：`(天 × 设备 × 点位) → 当天运行在什么设定上`。
+
+        事件源是 **`operations`**（逐条，`GET /operations` 那条链）；`device_setpoint_changes`
+        只作交叉验证（ADR-0022），不在这里读。
+
+        三态**必须分得开**（票 09 验收原话）：
+
+        - `changed`：当天有变更 ⇒ 末态 = 当天最后一条的 `value`；
+        - `carried`：当天没改 ⇒ **沿用**更早那条（`since`/`since_day` 指出是哪天的）——
+          这是"一直在用某个设定"，不是"不知道"；
+        - `unknown`：从没见过该点位的变更 ⇒ `value` 写 **NULL**（**不写 0、不填默认**）。
+
+        窗口**起点之前**的基线会一并取（否则第一天全是 `unknown`，"沿用"被错报成"未知"）。
+        `entry_date` 给了批次入库日就并列两个生长天数：`growth_day`（入库当天 = 0）与
+        `growth_day_prod`（入库当天 = `01`）+ `first_day`（票 19：三值并列、不平均、不合并；
+        首日剔除只发生在统计/学习侧，**这里一条原始行都不删**）。
+        """
+        zone = (zone or "").strip()
+        if not zone:
+            raise HTTPException(status_code=400, detail="每日设定末态要指定 zone（按库房算）")
+        if not (start and end):
+            raise HTTPException(status_code=400, detail="要给 start 与 end（YYYY-MM-DD）")
+        try:
+            result = daily_states_from_db(
+                conn, zone=zone, start=start, end=end, entry_date=entry_date or None
+            )
+        except SetpointError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "ok": True,
+            "zone": zone,
+            "start": start,
+            "end": end,
+            "entry_date": entry_date or None,
+            "days": result["days"],
+            "rows": result["rows"],
+            "summary": result["summary"],
         }
 
     @app.get("/ranges")

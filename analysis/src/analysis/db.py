@@ -434,6 +434,32 @@ def fetch_operations(
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def fetch_latest_operations_before(
+    conn: sqlite3.Connection, *, zone: str, before: str
+) -> list[dict]:
+    """每个 `(device_code, point_code)` 在 `before` **之前**的最后一条操作（票 09 的"沿前一日"）。
+
+    为什么要有它：窗口起点前的那条变更决定"当天没改"到底是**沿用**某个值还是**未知**。
+    只看窗口内的行会把"沿用"错报成"未知"——那是把缺数据当没设过，方向刚好反了。
+    同一时刻有多条（重复导入）时取 `rowid` 最大的一条。
+    """
+    cols = ", ".join(f"o.{f}" for f in OPERATION_FIELDS)
+    sql = f"""
+    SELECT {cols} FROM operations o
+    WHERE o.zone = ? AND o.ts < ?
+      AND NOT EXISTS (
+        SELECT 1 FROM operations n
+        WHERE n.zone = o.zone AND n.device_code = o.device_code
+          AND n.point_code = o.point_code AND n.ts < ?
+          AND (n.ts > o.ts OR (n.ts = o.ts AND n.rowid > o.rowid))
+      )
+    ORDER BY o.device_code, o.point_code
+    """
+    cur = conn.execute(sql, (zone, before, before))
+    names = [d[0] for d in cur.description]
+    return [dict(zip(names, row)) for row in cur.fetchall()]
+
+
 BATCH_FIELDS = ("room_id", "entry_date", "batch_no", "batch_id")
 
 
