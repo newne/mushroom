@@ -85,6 +85,29 @@ def field_is_usable(quality: str | None, estimated_fields: str | None,
 JOINER = "+"
 
 
+def format_estimated_fields(value) -> str | None:
+    """列名清单 → 入库用的 `+` 串（票 20，analysis 侧唯一形状）。
+
+    收 `["a", "b"]` / `"a+b"` / `None`；**去重保序**；空 ⇒ **None（入库 NULL）**，
+    不返回空串。语义与 `analysis/evidence.py` 的 `format_estimated_fields()` 一致——
+    那边是消费端归一，这边是生产端出口，**两边都不许把形状留给下游猜**。
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, str):
+        items = value.split(JOINER)
+    elif isinstance(value, (list, tuple, set)):
+        items = [str(v) for v in value]
+    else:
+        items = [str(value)]
+    out: list[str] = []
+    for item in items:
+        text = item.strip()
+        if text and text not in out:
+            out.append(text)
+    return JOINER.join(out) if out else None
+
+
 def parse_flags(quality: str | None) -> set[str]:
     """解析标记串 → 集合（**读兼容历史别名**：`underexposed` ≡ `no_light`）。"""
     from measure.quality import canonical_flag

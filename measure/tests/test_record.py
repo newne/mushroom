@@ -23,12 +23,15 @@ def make_stats(**kw):
 
 
 def test_record_fields_match_ticket_11():
-    """票 11 §1 的字段表，逐字逐序（菌簇四列见 2026-10-13 加列）。"""
+    """票 11 §1 的字段表 + 票 20 证据列，逐字逐序。"""
     assert RECORD_FIELDS == ("ts", "room_id", "box_id", "station_id", "angle_profile",
                              "n", "mean_len_mm", "mean_cap_mm",
                              "mean_cluster_w_mm", "mean_cluster_h_mm",
                              "mean_area_mm2", "mean_projected_d_mm",
-                             "p10_len", "p90_len", "quality")
+                             "p10_len", "p90_len", "quality",
+                             # 票 20 证据列（2026-10-14 环境官落列）
+                             "estimated_fields", "scale_source", "mm_per_px",
+                             "scale_ref_mm", "scale_ref_px")
 
 
 def test_record_fields_are_the_analysis_contract():
@@ -94,3 +97,64 @@ def test_ticket_11_acceptance_row_has_room_id_and_null_lengths():
     assert row["quality"] == "no_detection"
     assert row["n"] == 0
     assert "notes" not in row              # 不在契约字段表里，别偷渡
+
+
+# ---------- 票 20 证据列（估算行必须能回答"哪些列是估的、mm/px 从哪来"） ----------
+
+def test_evidence_fields_roundtrip_and_join_shape():
+    """`estimated_fields` 收 list ⇒ 出线统一成 `+` 串（analysis 侧形状），空 ⇒ NULL。"""
+    rec = MeasurementRecord.from_box_stats(
+        make_stats(), ts="t1", room_id="611",
+        estimated_fields=["mean_cluster_w_mm", "mean_cluster_h_mm"],
+        scale_source="bag_standard", mm_per_px=0.825,
+        scale_ref_mm=240.0, scale_ref_px=291)
+    row = rec.to_row()
+    assert row["estimated_fields"] == "mean_cluster_w_mm+mean_cluster_h_mm"
+    assert row["scale_source"] == "bag_standard"
+    assert row["mm_per_px"] == 0.825 and row["scale_ref_mm"] == 240.0
+    # 交叉复算：mm/px ≈ ref_mm / ref_px（生产端数值列按 3 位小数出线，故容差 1e-3）
+    assert row["mm_per_px"] == pytest.approx(row["scale_ref_mm"] / row["scale_ref_px"], abs=1e-3)
+    # 传串也接受、去重保序；空 ⇒ NULL（不是空串、不是 0）
+    assert MeasurementRecord(ts="t1", room_id="611", box_id="B",
+                             estimated_fields="a+b+a").to_row()["estimated_fields"] == "a+b"
+    assert MeasurementRecord(ts="t1", room_id="611", box_id="B").to_row()["estimated_fields"] is None
+    assert MeasurementRecord(ts="t1", room_id="611", box_id="B",
+                             estimated_fields=[]).to_row()["estimated_fields"] is None
+
+
+def test_evidence_columns_are_null_when_no_scale():
+    """缺标尺 ⇒ 证据列全 NULL（**不写 0**），`scale_source` 显式 none 时才标 none。"""
+    row = MeasurementRecord.from_box_stats(make_stats(), ts="t1", room_id="611").to_row()
+    for col in ("estimated_fields", "scale_source", "mm_per_px",
+                "scale_ref_mm", "scale_ref_px"):
+        assert row[col] is None, col
+    none_row = MeasurementRecord(ts="t1", room_id="611", box_id="B",
+                                 quality="no_detection+no_scale",
+                                 scale_source="none").to_row()
+    assert none_row["scale_source"] == "none" and none_row["mm_per_px"] is None
+
+
+def test_estimated_fields_agrees_with_the_filter_entry_point():
+    """出口形状必须能被**唯一过滤入口**读：估算列的 `field_is_usable()` 为 False。"""
+    from measure.contract import field_is_usable
+
+    row = MeasurementRecord.from_box_stats(
+        make_stats(), ts="t1", room_id="611",
+        estimated_fields=["mean_cluster_w_mm"]).to_row()
+    assert row["estimated_fields"] == "mean_cluster_w_mm"
+    assert field_is_usable("verified", row["estimated_fields"], "mean_cluster_w_mm") is False
+    assert field_is_usable("verified", row["estimated_fields"], "n") is True
+
+
+def test_scale_source_enum_matches_analysis_side():
+    """枚举名以环境官定稿为准（`analysis/evidence.py`）——两边不许漂。"""
+    from analysis.evidence import SCALE_SOURCES, normalize_scale_source
+
+    from measure.record import MeasurementRecord as Rec
+
+    for value in SCALE_SOURCES:
+        row = Rec(ts="t1", room_id="611", box_id="B", scale_source=value).to_row()
+        assert row["scale_source"] == value
+        assert normalize_scale_source(row["scale_source"]) == value
+    # 旧值 `bag_diameter` 由 analysis 归一（测量侧不再发它，但过线不炸）
+    assert normalize_scale_source("bag_diameter") == "bag_standard"

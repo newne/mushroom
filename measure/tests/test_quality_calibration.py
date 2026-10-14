@@ -20,7 +20,14 @@ import os
 
 import numpy as np
 import pytest
-from PIL import Image
+
+#: Pillow **在依赖里已声明**（根 `pyproject.toml:22,85` 的 `pillow>=12.0.0` + `uv.lock`），
+#: 本文件用它解码真机 JPEG。这里仍用 `importorskip` 兜一层：2026-10-14 实测过一次
+#: `uv sync --frozen` 恢复途中（PIL 尚未就位）**一个模块级 ImportError 让整个
+#: `pytest measure/tests` 直接中断**——一个可选解码依赖不该让全量门禁收不了集。
+#: 缺 Pillow ⇒ 本模块 skip（带原因），其余套照跑。
+pytest.importorskip("PIL", reason="标定回归需要 Pillow 解码真机帧")
+from PIL import Image  # noqa: E402
 
 from measure.quality import (
     DEFAULT_ABS_LAPVAR_FLOOR,

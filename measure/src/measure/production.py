@@ -174,11 +174,20 @@ def notes_for(detected: bool) -> str:
 
 def row_from_stats(*, frame: FrameInput, room_id: str, stats: BoxStats,
                    quality: str, notes: str,
-                   flags: Iterable[str] = ()) -> MeasurementRecord:
+                   flags: Iterable[str] = (),
+                   estimated_fields: object | None = None,
+                   scale_source: str | None = None,
+                   mm_per_px: float | None = None,
+                   scale_ref_mm: float | None = None,
+                   scale_ref_px: float | None = None) -> MeasurementRecord:
     """`BoxStats` → 线格式记录（字段名翻译的唯一钉点在 `MeasurementRecord`）。
 
     菌簇四列是平视单档下**唯一可用的长势量**（票 11 §1 的 2026-10-13 加列），必须真发；
     盖径/杆长仍恒 NULL。
+
+    证据列（票 20）由调用方传入——L1–L3 接线层要填 `estimated_fields`（哪些列是估的）、
+    `scale_source`（标尺怎么来的）、`mm_per_px`/`scale_ref_mm`/`scale_ref_px`（可交叉复算）。
+    **没有就留 NULL**：缺标尺不是"值 0"。
     """
     return MeasurementRecord(
         ts=frame.ts,
@@ -197,6 +206,11 @@ def row_from_stats(*, frame: FrameInput, room_id: str, stats: BoxStats,
         p10_len=None,
         p90_len=None,
         quality=quality,
+        estimated_fields=estimated_fields,
+        scale_source=scale_source,
+        mm_per_px=mm_per_px,
+        scale_ref_mm=scale_ref_mm,
+        scale_ref_px=scale_ref_px,
         notes=notes,
     )
 
