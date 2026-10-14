@@ -144,6 +144,11 @@ def estimate_stipe_length(instances: list[FruitInstance], bags: list[BagRegion],
     cfg = cfg or EstimateConfig()
     flags: set[str] = set()
     if not instances:
+        if all_rows_unreliable(bags):
+            return StipeEstimate(None, None, 0, 0, None, (),
+                                 contract.format_flags({"unreliable"}),
+                                 ScaleResult(None, "none", None, None, ["no_scale"]),
+                                 note="整帧只剩不可信的排（远排），不出测量")
         return StipeEstimate(None, None, 0, 0, None, (), contract.format_flags({"no_detection"}),
                              ScaleResult(None, "none", None, None, ["no_scale"]),
                              note="本帧没有菇体实例")
@@ -200,6 +205,32 @@ def median_or_none(instances: list[FruitInstance]) -> float | None:
     return None if not instances else float(np.median([i.height_px for i in instances]))
 
 
+def make_row_reliable(bags: list[BagRegion], bag_cfg=None):
+    """构造"该实例所在排是否可信"的判定回调（供发射层出 `unreliable`）。
+
+    实例 → 找同排菌包 → 该排可信否。找不到同排菌包 ⇒ 不可信（**不跨排借尺度**）。
+    """
+    from measure.bag_ruler import row_is_reliable
+
+    def _reliable(inst: FruitInstance) -> bool:
+        bag = nearest_bag_in_same_row(bags, inst.cy, bag_cfg, x=inst.cx)
+        if bag is None:
+            return False
+        return row_is_reliable(bags, bag.row_id, bag_cfg)
+
+    return _reliable
+
+
+def all_rows_unreliable(bags: list[BagRegion], bag_cfg=None) -> bool:
+    """整帧是否**只剩不可信的排**（用于"没实例也要出 unreliable 而不是 no_detection"）。"""
+    from measure.bag_ruler import row_is_reliable
+
+    if not bags:
+        return False
+    rows = {r.row_id for r in bags}
+    return not any(row_is_reliable(bags, rid, bag_cfg) for rid in rows)
+
+
 # ---------- 一期验收量：菌簇长度 / 菌簇直径（Chief 2026-10-14 裁定） ----------
 
 @dataclass
@@ -242,6 +273,11 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
     cfg = cfg or EstimateConfig()
     flags: set[str] = set()
     if not instances:
+        # **远排不许静默消失**：若整帧只剩不可信的排，出 `unreliable` 而不是 `no_detection`
+        if all_rows_unreliable(bags):
+            return ClusterEstimate(None, None, None, None, 0, None, None, (),
+                                   contract.format_flags({"unreliable"}),
+                                   None, None, note="整帧只剩不可信的排（远排），不出测量")
         return ClusterEstimate(None, None, None, None, 0, None, None, (),
                                contract.format_flags({"no_detection"}),
                                None, None, scale_note="", note="本帧没有菇体实例")

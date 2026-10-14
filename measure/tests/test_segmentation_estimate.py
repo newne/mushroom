@@ -233,3 +233,29 @@ def test_cluster_mm_is_none_not_zero_when_unmeasurable():
     e = estimate_cluster(fruits, [], depression_deg=20.0)      # 没有袋 ⇒ 无标尺
     assert e.cluster_w_mm is None and e.cluster_h_mm is None
     assert "no_scale" in e.quality
+
+
+def test_far_row_without_instances_reports_unreliable_not_no_detection():
+    """**远排不许静默消失**：整帧只剩不可信的排时，即使没实例也要出 `unreliable`。"""
+    from measure.estimate import all_rows_unreliable, make_row_reliable
+
+    # 造一个低对比"远排"：对比度/纹理都低于下限 ⇒ 该排不可信
+    gray, _ = synth_frame(bag_gray=80, bg_gray=60)
+    bags, _ = bags_of(gray, min_contrast=60.0, min_sigma=15.0)
+    assert bags and all_rows_unreliable(bags, BagConfig(min_contrast=60.0, min_sigma=15.0))
+    e = estimate_cluster([], bags, depression_deg=20.0)
+    assert "unreliable" in e.quality and "no_detection" not in e.quality
+    e2 = estimate_stipe_length([], bags, bag_diameter_mm=140.0, depression_deg=20.0)
+    assert "unreliable" in e2.quality
+
+    # 正常排 + 无实例 ⇒ 才是 no_detection
+    gray2, _ = synth_frame()
+    bags2, _ = bags_of(gray2)
+    assert not all_rows_unreliable(bags2)
+    e3 = estimate_cluster([], bags2, depression_deg=20.0)
+    assert "no_detection" in e3.quality
+
+    # 回调接线：实例 → 同排菌包 → 该排可信否
+    rel = make_row_reliable(bags2)
+    fruits2, _ = fruits_of(gray2)
+    assert all(rel(f) for f in fruits2)
