@@ -52,10 +52,21 @@ class RoomState:
     room_id: str
     entry_date: date
     packages: int | None = None          # 入库包数（生产系统台账里的量，供留档/报表）
-    batch_no: str | None = None          # 批次号（台账主键之一，便于与生产系统对账）
+    batch_no: str | None = None          # 批次**派生名**（`<库房>_<YYYYMMDD>`，由台账端点给）
+    display_name: str | None = None      # 批次**业务名** `mogu-*`（缺映射 ⇒ None，不编）
     source: str = ""                     # 这条记录是谁/何时写下的（排障时最想知道的事）
     min_day: int = MIN_DAY
     max_day: int = MAX_DAY
+
+    @property
+    def batch_label(self) -> str | None:
+        """写进 `rounds`/`images` 的批次标签：**优先业务名 `mogu-*`，缺则退回派生名**。
+
+        为什么优先业务名：库里那一列的既有语义就是 `mogu-*`（换台账来源后，业务名单独
+        叫 `display_name`）。直接换成派生名 `<库房>_<YYYYMMDD>` 会让历史对账与页面筛选
+        断掉；派生名也不丢——它仍在 `batch_no` 字段里，只是不作为首选的展示标签。
+        """
+        return self.display_name or self.batch_no
 
     def day_on(self, today: date) -> int:
         """在库天数：**入库当天 = 第 0 天**。
@@ -124,11 +135,17 @@ def parse_room_state(payload: dict) -> RoomState:
     if min_day > max_day:
         raise RoomStateError(f"min_day({min_day}) > max_day({max_day})，窗口为空")
 
+    raw_display = payload.get("display_name")
+    display_name = str(raw_display).strip() if raw_display is not None else ""
+    raw_batch_no = payload.get("batch_no")
+    batch_no = str(raw_batch_no).strip() if raw_batch_no is not None else ""
+
     return RoomState(
         room_id=str(payload.get("room_id") or "unset"),
         entry_date=entry,
         packages=packages,
-        batch_no=payload.get("batch_no"),
+        batch_no=batch_no or None,
+        display_name=display_name or None,
         source=str(payload.get("source") or ""),
         min_day=min_day,
         max_day=max_day,
@@ -166,8 +183,9 @@ def ensure_room_file(path: str | Path, *, room_id: str = "unset") -> Path:
         "# 现场/集成脚本把读到的值写到这里，或直接改这一行。\n"
         "#\n"
         "#   entry_date: 整库入库日期 YYYY-MM-DD（**必填**）\n"
-        "#   packages:   入库包数（台账量，留档用）\n"
-        "#   batch_no:   批次号（与生产系统对账用）\n"
+        "#   packages:   入库包数（台账量，留档用；台账没有这个量就是 null，**不写 0**）\n"
+        "#   batch_no:   批次**派生名** `<库房>_<YYYYMMDD>`（台账端点给）\n"
+        "#   display_name: 批次**业务名** `mogu-*`（缺映射 ⇒ null，不编）\n"
         "#   source:     谁/何时写的（排障时最想知道的事）\n"
         f"#   min_day/max_day: 准入窗口，默认 {MIN_DAY}–{MAX_DAY}（第 0/1 天不动、第 26 天起不自动巡检）\n"
         "\n"
@@ -175,6 +193,7 @@ def ensure_room_file(path: str | Path, *, room_id: str = "unset") -> Path:
         'entry_date: ""        # ← 填这里；留空则巡检不会启动\n'
         "packages: null\n"
         "batch_no: null\n"
+        "display_name: null\n"
         'source: ""\n',
         encoding="utf-8",
     )

@@ -7,7 +7,8 @@
 **前置票:** 票 17（`fetch_room` 改走 `GET {PATROL_ANALYSIS}/batches`，已实现 `f93133a`）；
 端点要在 **analysis 下次重建**后生产生效并验通，**实现排在那之后**。
 
-**Status:** 规划中（待 Chief 批；**零代码改动**）。
+**Status:** **已实现**（Chief 2026-10-14 15:45 批"开始写码"，属取数/调度线，不占量测线"先规划"红线）。
+落地见 Comments；部署由运维执行（代码先落地 → 重建 patrol → 重建 console）。
 
 ---
 
@@ -45,9 +46,12 @@
 **建议（要运维改 compose，属部署变更）**：
 * `room.yaml` 搬到**巡检容器可写、console 可读**的位置：`/app/data/room.yaml`
   （宿主 `mushroom_patrol/data/room.yaml`；巡检容器 `data:rw`、console 容器 `data:ro`）；
-* 两个角色都设 `PATROL_ROOM=/app/data/room.yaml`（compose `environment`，**不靠代码默认值**）；
-* 一次性迁移：宿主 `cp configs/room.yaml data/room.yaml`（configs 里那份留作历史，不删）；
-* console 侧（界面）同样指到新路径，否则页面显示的还是旧文件。
+* ⚠️ 运维 2026-10-14 只读核实：**`data/room.yaml` 已经存在，且与 `configs/room.yaml` 逐字节相同**
+  （sha256 `7f1641e8…`、683 B、10-06 21:01）⇒ **不需要 `cp` 迁移**，只设环境变量；
+* 两个角色都设 `PATROL_ROOM=/app/data/room.yaml`（compose `environment`，**不靠代码默认值**），
+  并给巡检容器设 `PATROL_ROOM_ID=611`（库房号；不设则退回读 room.yaml 里的 `room_id`，`unset` 视为没有）；
+* console 侧（界面）同样指到新路径，否则页面显示的还是旧文件；
+* **顺序**：代码先落地 → 重建 `mushroom_patrol` → 重建 `mushroom_console`。
 
 ### 2.2 每条路径的行为（Chief 五条 + 落地细节）
 
@@ -83,11 +87,15 @@
 
 ## 4. 验收（Chief 给的两条 + 真机）
 
-* 单测（实现后）：① **伪造批次变更** ⇒ 文件被原子更新且日志含旧→新；② **伪造端点不可用 / `stale=true`**
-  ⇒ 文件**字节不变**、日志含醒目告警 + 累计计数、且**这一轮照跑**（不停轮）。
-* 真机（端点生效后）：跑一轮 → 日志里有 `room-refresh` 行；`stat` 显示 `room.yaml` mtime 更新；
-  若端点不可用则看到告警行与计数。
-* 反向自证：把"失败即返回/抛错"改回来 ⇒ 用例红（证明"失败不停轮"是被测住的）。
+* **单测（已实现）**：① **伪造批次变更** ⇒ 文件被原子更新、`previous_entry_date`/`entry_date` 与
+  "旧→新"都在返回值里；② **伪造端点不可用 / `stale=true` / 未来日期** ⇒ 文件**字节不变**，
+  返回 `error`；③ **未变** ⇒ **不写**（连 `st_mtime_ns` 都不动）；④ **缺文件 + 端点可用 ⇒ 写一份**；
+  ⑤ **缺文件 + 端点不可用 ⇒ 不写**（daemon 读不到 ⇒ 按既有契约不动机构）；
+  ⑥ 轮次入口：**刷新失败本轮照起**（`m1_main` 一定被调用）+ 累计计数 + 成功清零；
+  ⑦ **反向自证**：把"失败即抛错/提前 return"改回去 ⇒ ⑥ 立刻红（用例里钉住的就是"照起"）。
+* 命令：`pytest -q ../patrol/tests ../deploy/tests` → **778 passed**；`ruff check` 干净。
+* 真机（运维，重建后）：跑一轮 → 日志里有 `room-refresh` 行；`stat` 显示 `room.yaml` mtime 更新；
+  端点不可用时看到告警行与累计计数。
 
 ## 5. 待裁（Chief）
 
@@ -117,6 +125,15 @@
 
 ## Comments
 
+- 2026-10-14 测试（原巡检手）：**已实现**（Chief 批示后）。落点：
+  `deploy/fetch_room.py::refresh_room_file`（取数→需要才写；**永不抛**；返回结构化结果）、
+  `deploy/patrol_serve.py`：`--room-id`/`PATROL_ROOM_ID` + `--no-room-refresh`（排障旁路）+
+  `RefreshStats` + `refresh_before_round` + `make_run_once`（轮次入口先刷新再起轮）、
+  `patrol/room.py`：`RoomState.display_name` + `batch_label`（业务名优先、缺则派生名）+
+  `ensure_room_file` 模板补两行、`patrol/daemon.py::_room_fields` 改用 `batch_label`。
+  **踩坑记录**：加 `--room-id` 后 `--room` 被 argparse 前缀缩写吃掉 ⇒ 两条既有透传用例当场红；
+  已用 `allow_abbrev=False` 关掉并加用例钉死（这是"新开关别抢老参数"的教科书坑）。
+  验收：`pytest -q ../patrol/tests ../deploy/tests` → **778 passed**；ruff 干净。
 - 2026-10-14 测试（原巡检手）：立项（**只写方案、零代码**）。根因复核：`patrol` role 不调用 fetch-room
   （`docker/patrol-entrypoint.sh:18-28`），fetch-room role 无人使用（`:29-31`）。
   另发现一条必须先解决的部署前提：**`/app/configs` 在容器里是只读挂载**，

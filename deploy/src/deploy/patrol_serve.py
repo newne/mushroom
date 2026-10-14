@@ -33,6 +33,7 @@ import os
 import signal
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 
 from deploy.patrol_trigger import RunRequest, TriggerStore
@@ -136,7 +137,11 @@ def parse_args(argv: list[str] | None = None):
     import argparse
 
     ap = argparse.ArgumentParser(prog="deploy.patrol_serve",
-                                 description="触发请求与手动指令的执行方（单实例，持有控制器）")
+                                 description="触发请求与手动指令的执行方（单实例，持有控制器）",
+                                 # ⚠️ 关掉前缀缩写：我们新加的 `--room-id` 会让 `--room`
+                                 # 被 argparse 当成它的缩写吃掉，而 `--room` 是**透传给 m1 的
+                                 # 路径**（2026-10-14 加 `--room-id` 时踩到：两条既有用例当场红）。
+                                 allow_abbrev=False)
     ap.add_argument("--trigger-dir", default=os.environ.get("PATROL_TRIGGER_DIR",
                                                             "/app/data/trigger"))
     ap.add_argument("--cmd-dir", default=os.environ.get("PATROL_CMD_DIR", "/app/data/cmd"),
@@ -150,6 +155,11 @@ def parse_args(argv: list[str] | None = None):
     ap.add_argument("--no-manual", action="store_true",
                     help="不接手动通道（只跑巡检；排障时用来排除干扰）")
     ap.add_argument("--max-rounds", type=int, default=None, help="跑够几轮就退出（调试用）")
+    ap.add_argument("--room-id", default=os.environ.get("PATROL_ROOM_ID", ""),
+                    help="库房号（如 611）：每轮开始前用它去台账端点刷新 room.yaml。"
+                         "没给就退回读 room.yaml 里的 room_id（unset 视为没给）")
+    ap.add_argument("--no-room-refresh", action="store_true",
+                    help="关掉『轮次前刷新 room.yaml』（排障用；默认开）")
     ap.add_argument("--dry-run", action="store_true",
                     help="只做预检：解析参数、装配执行方并打印结论后退出，"
                          "**不连控制器、不进循环**（上机第一步用它）")
@@ -210,12 +220,86 @@ def preflight(args, *, store: TriggerStore, manual=None, log=print,
     return 0
 
 
+def resolve_room_id(explicit: str, room_path: str) -> str:
+    """库房号：``--room-id``/``PATROL_ROOM_ID`` → room.yaml 里的 ``room_id``（``unset`` 不算）。
+
+    为什么要有显式来源：**文件缺失时也得知道去查哪个库房**（票 18 §2 第 5 条：
+    文件缺失 + 端点可用 ⇒ 写一份）。读不到就返回空串，调用方跳过刷新并告警，**不猜**。
+    """
+    from patrol.room import RoomStateError, load_room_state
+
+    text = (explicit or "").strip()
+    if text:
+        return text
+    try:
+        candidate = load_room_state(room_path).room_id.strip()
+    except (RoomStateError, OSError):
+        return ""
+    return "" if candidate in ("", "unset") else candidate
+
+
+@dataclass
+class RefreshStats:
+    """轮次前刷新的**进程内**计数（不新增持久化；票 18 §2.3）。"""
+
+    failures: int = 0
+    last_ok_note: str = ""
+    last_ok_at: str = ""
+
+
+def refresh_before_round(*, room_id: str, room_path: str, stats: RefreshStats,
+                         log=print, refresh=None) -> None:
+    """轮次前的台账刷新：**失败只告警 + 计数，绝不停轮**（Chief 2026-10-14 裁定）。
+
+    "失败也继续跑"的理由：停轮会丢掉用户要的连续影像数据；而"批次刚换 + 端点恰好不可用"
+    这个窗口会被下一次成功轮询在 ≤1 个轮间隔内抓到。**但不许静默**——每轮都要有一行。
+    """
+    if not room_id:
+        log("！room-refresh 跳过：没拿到库房号（--room-id / PATROL_ROOM_ID 都没给，"
+            "room.yaml 里也没有可用的 room_id）——本轮沿用现有 room.yaml")
+        return
+    fn = refresh or _default_refresh()
+    try:
+        result = fn(room_id, room_path, log=log)
+    except Exception as exc:      # noqa: BLE001 - 刷新自己出意外也不许拖垮巡检
+        result = {"error": f"{type(exc).__name__}: {exc}", "entry_date": None, "note": ""}
+    if result.get("error"):
+        stats.failures += 1
+        log(f"！room-refresh 失败第 {stats.failures} 次（{result['error']}）；"
+            f"沿用最后已知批次 entry_date={result.get('entry_date') or '(未知)'}，本轮照跑")
+        return
+    stats.failures = 0
+    stats.last_ok_note = str(result.get("note") or "")
+    stats.last_ok_at = f"{datetime.now():%Y-%m-%d %H:%M:%S}"
+    log(f"room-refresh ok：{stats.last_ok_note or result.get('entry_date')}；"
+        f"最后一次成功刷新 {stats.last_ok_at}")
+
+
+def _default_refresh():
+    from deploy.fetch_room import refresh_room_file
+
+    return refresh_room_file
+
+
+def make_run_once(*, m1_main, m1_args: list[str], room_id: str, room_path: str,
+                  stats: RefreshStats, log=print, refresh=None):
+    """轮次入口：**先刷新 room.yaml，再起这一轮**（票 18）。刷新失败不影响起轮。"""
+
+    def run_once() -> int:
+        refresh_before_round(room_id=room_id, room_path=room_path, stats=stats,
+                             log=log, refresh=refresh)
+        return m1_main(list(m1_args))
+
+    return run_once
+
+
 def main(argv: list[str] | None = None) -> int:
     """命令行入口（容器里的 `patrol-serve` 角色）。
 
     跑一轮用的就是 `deploy.m1 --once`：准入判定、软限位校验、急停链、取证与同步
     全都在那一条路径上，这里**不复制**任何一条——复制出来的第二份迟早会与第一份不一致。
     """
+    from deploy.m1 import build_parser as m1_parser
     from deploy.m1 import main as m1_main
 
     args = parse_args(argv)
@@ -237,9 +321,32 @@ def main(argv: list[str] | None = None) -> int:
     if "--trigger-dir" not in m1_args:
         m1_args += ["--trigger-dir", args.trigger_dir]
 
+    # 轮次入口：**先刷新 room.yaml，再起这一轮**（票 18）。房间路径与库房号都从 m1 的
+    # 同一套参数里取——两个进程读的必须是同一份 room.yaml，参数名一旦分叉就会各读各的。
+    m1_parsed = m1_parser().parse_args(list(m1_args))
+    stats = RefreshStats()
+
+    def log(msg: str) -> None:
+        print(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {msg}", flush=True)
+
+    if args.no_room_refresh:
+        log("！room-refresh 已关闭（--no-room-refresh）：本轮沿用现有 room.yaml")
+
+        def run_once() -> int:                    # 排障旁路：不刷新，直接起轮
+            return m1_main([*m1_args, "--once"])
+    else:
+        from deploy.fetch_room import analysis_base_url
+
+        room_id = resolve_room_id(args.room_id, m1_parsed.room)
+        log(f"room-refresh：库房 {room_id or '(未拿到)'}，文件 {m1_parsed.room}，"
+            f"端点 {analysis_base_url()}")
+        run_once = make_run_once(m1_main=m1_main, m1_args=[*m1_args, "--once"],
+                                 room_id=room_id, room_path=m1_parsed.room,
+                                 stats=stats, log=log)
+
     rounds = serve_forever(
         store=store,
-        run_once=lambda: m1_main([*m1_args, "--once"]),
+        run_once=run_once,
         manual=manual,
         poll_s=args.poll,
         manual_poll_s=args.manual_poll,

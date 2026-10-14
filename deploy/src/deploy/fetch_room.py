@@ -265,6 +265,55 @@ def select_batch(rows: list[BatchRow], room_id: str, *, today: date) -> BatchRow
     return row
 
 
+def refresh_room_file(room_id: str, path: str | Path, *, url: str | None = None,
+                      runner=None, log=None, today: date | None = None) -> dict:
+    """**轮次前的就地刷新**：取台账 → 需要才写盘；**永不抛**（票 18）。
+
+    调用方（`patrol-serve` 的轮次入口）按返回的 ``error`` 打告警 + 计数，
+    **失败也继续跑这一轮**（停轮会丢掉连续影像；"批次刚换 + 端点恰好不可用"的窗口
+    会被下一次成功轮询在 ≤1 个轮间隔内抓到）。
+
+    返回：``{"changed", "entry_date", "previous_entry_date", "note", "error"}``
+
+    行为（Chief 2026-10-14 裁定的硬边界）：
+    * 批次**变了** ⇒ 原子更新 + 打印旧→新；
+    * **未变** ⇒ **幂等不写**（不抖 mtime）；
+    * 端点不可用 / `stale=true` / 未来日期 ⇒ **不写**，保留旧文件（沿用最后已知批次继续跑）；
+    * 文件**缺失/坏** + 端点可用 ⇒ 写一份（首次接入）；+ 端点不可用 ⇒ 不写
+      （此时 daemon 读不到 room.yaml，按既有契约不动机构——fail-closed）。
+    """
+    today = today or date.today()
+    result: dict = {"changed": False, "entry_date": None, "previous_entry_date": None,
+                    "note": "", "error": None}
+    previous = _current_entry_date(path)
+    result["previous_entry_date"] = previous
+    try:
+        rows = fetch_ledger_rows(room_id, url=url, runner=runner, log=log)
+        row = select_batch(rows, room_id, today=today)
+    except FetchError as e:
+        result["error"] = str(e)
+        result["entry_date"] = previous          # 沿用最后已知批次
+        return result
+    result["entry_date"] = row.entry_date.isoformat()
+    if previous == result["entry_date"]:
+        result["note"] = f"entry_date 未变（{previous}）——幂等，不写文件"
+        return result
+    try:
+        result["note"] = write_room_yaml(path, render_room_yaml(row, today=today))
+        result["changed"] = True
+    except FetchError as e:                      # 生成的 YAML 过不了消费方校验
+        result["error"] = str(e)
+    return result
+
+
+def _current_entry_date(path: str | Path) -> str | None:
+    """旧文件里的入库日期；**缺失或坏 ⇒ None**（刷新按"要写一份新的"处理）。"""
+    try:
+        return load_room_state(path).entry_date.isoformat()
+    except (RoomStateError, OSError):
+        return None
+
+
 def render_room_yaml(row: BatchRow, *, today: date, now: datetime | None = None) -> str:
     """生成 ``room.yaml``：只写 ``patrol.room`` 认得的字段，外加人读注释。"""
     now = now or datetime.now()

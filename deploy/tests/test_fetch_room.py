@@ -31,6 +31,7 @@ from deploy.fetch_room import (
     main,
     parse_tsv,
     read_tsv,
+    refresh_room_file,
     render_room_yaml,
     rows_from_payload,
     select_batch,
@@ -468,6 +469,91 @@ def test_main_fails_closed_when_the_endpoint_is_unreachable(tmp_path, capsys, mo
     rc = main(["--room", "611", "--out", str(out), "--today", "2026-10-01"])
     assert rc == 2 and not out.exists()
     assert "connection refused" in capsys.readouterr().err
+
+
+# ---------- 轮次前的就地刷新（票 18） ----------
+
+
+def seed_room_file(tmp_path: Path, entry: date, *, room: str = "611") -> tuple[Path, bytes]:
+    """先放一份"旧文件"，返回 (路径, 旧字节)——后面用它断言"有没有被写"。"""
+    path = tmp_path / "room.yaml"
+    text = render_room_yaml(BatchRow(room_id=room, entry_date=entry,
+                                     batch_no=f"{room}_{entry.strftime('%Y%m%d')}"),
+                            today=entry)
+    path.write_text(text, encoding="utf-8")
+    return path, path.read_bytes()
+
+
+def test_refresh_updates_when_the_batch_changed(tmp_path: Path) -> None:
+    path, _old = seed_room_file(tmp_path, date(2026, 9, 30))
+    result = refresh_room_file("611", path, log=lambda _m: None,
+                               runner=lambda _r: payload([batch(entry="2026-10-08")]))
+
+    assert result["error"] is None and result["changed"] is True
+    assert result["previous_entry_date"] == "2026-09-30"
+    assert result["entry_date"] == "2026-10-08"
+    assert "2026-09-30 → 2026-10-08" in result["note"]
+    assert load_room_state(path).entry_date == date(2026, 10, 8)
+
+
+def test_refresh_is_idempotent_when_the_batch_is_unchanged(tmp_path: Path) -> None:
+    """未变 ⇒ **一个字节都不写**（不抖 mtime）。"""
+    path, old = seed_room_file(tmp_path, date(2026, 9, 30))
+    before = path.stat().st_mtime_ns
+
+    result = refresh_room_file("611", path, log=lambda _m: None,
+                               runner=lambda _r: payload())
+
+    assert result["error"] is None and result["changed"] is False
+    assert "未变" in result["note"]
+    assert path.read_bytes() == old
+    assert path.stat().st_mtime_ns == before
+
+
+def test_refresh_keeps_the_old_file_when_the_endpoint_fails(tmp_path: Path) -> None:
+    path, old = seed_room_file(tmp_path, date(2026, 9, 30))
+
+    def boom(_room):
+        raise FetchError("读批次端点失败：connection refused")
+
+    result = refresh_room_file("611", path, log=lambda _m: None, runner=boom)
+
+    assert result["changed"] is False and result["error"]
+    assert result["entry_date"] == "2026-09-30"          # 沿用最后已知批次
+    assert path.read_bytes() == old
+
+
+def test_refresh_keeps_the_old_file_when_the_ledger_is_stale(tmp_path: Path) -> None:
+    path, old = seed_room_file(tmp_path, date(2026, 9, 30))
+    result = refresh_room_file("611", path, log=lambda _m: None,
+                               runner=lambda _r: payload(stale=True))
+    assert "陈旧" in result["error"] and path.read_bytes() == old
+
+
+def test_refresh_keeps_the_old_file_on_a_future_entry_date(tmp_path: Path) -> None:
+    path, old = seed_room_file(tmp_path, date(2026, 9, 30))
+    result = refresh_room_file("611", path, log=lambda _m: None, today=date(2026, 9, 30),
+                               runner=lambda _r: payload([batch(entry="2026-11-01")]))
+    assert "之后" in result["error"] and path.read_bytes() == old
+
+
+def test_refresh_writes_a_missing_file_when_the_endpoint_is_ok(tmp_path: Path) -> None:
+    path = tmp_path / "room.yaml"
+    result = refresh_room_file("611", path, log=lambda _m: None,
+                               runner=lambda _r: payload())
+    assert result["error"] is None and result["changed"] is True
+    assert load_room_state(path).entry_date == date(2026, 9, 30)
+
+
+def test_refresh_does_not_write_a_missing_file_when_the_endpoint_fails(tmp_path: Path) -> None:
+    """文件缺失 + 端点不可用 ⇒ 不写（daemon 读不到 ⇒ 按既有契约不动机构）。"""
+    path = tmp_path / "room.yaml"
+
+    def boom(_room):
+        raise FetchError("读批次端点失败：timeout")
+
+    result = refresh_room_file("611", path, log=lambda _m: None, runner=boom)
+    assert result["error"] and not path.exists()
 
 
 # ---------- 守门：旧通路与"第二套取数"在源码里**不存在** ----------

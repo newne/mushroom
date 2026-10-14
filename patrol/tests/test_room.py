@@ -343,3 +343,59 @@ def test_daemon_with_missing_room_file_says_missing(tmp_path):
     allowed, reason = daemon._admission()
     assert allowed is False
     assert "不存在" in reason
+
+
+# ---------- 批次标签：派生名 / 业务名（票 18 第 7 条） ----------
+
+
+def test_display_name_is_parsed_and_wins_as_the_batch_label():
+    """`batch_no`=派生名、`display_name`=业务名；**展示标签优先业务名**。
+
+    为什么优先：库里 `rounds.batch_no` 那列的既有语义就是 `mogu-*`，直接换成
+    `<库房>_<YYYYMMDD>` 会让历史对账与页面筛选断掉；派生名也不丢，仍在 `batch_no` 里。
+    """
+    s = parse_room_state({
+        "room_id": "611", "entry_date": "2026-09-30",
+        "batch_no": "611_20260930", "display_name": "mogu-107",
+    })
+    assert s.batch_no == "611_20260930"
+    assert s.display_name == "mogu-107"
+    assert s.batch_label == "mogu-107"
+
+
+def test_batch_label_falls_back_to_the_derived_name_and_stays_none_without_both():
+    only_derived = parse_room_state({"room_id": "611", "entry_date": "2026-09-30",
+                                     "batch_no": "611_20260930"})
+    assert only_derived.display_name is None
+    assert only_derived.batch_label == "611_20260930"
+
+    neither = parse_room_state({"room_id": "611", "entry_date": "2026-09-30"})
+    assert neither.batch_no is None and neither.display_name is None
+    assert neither.batch_label is None
+
+
+def test_blank_display_name_is_treated_as_missing_not_as_a_name():
+    s = parse_room_state({"room_id": "611", "entry_date": "2026-09-30",
+                          "batch_no": "611_20260930", "display_name": "   "})
+    assert s.display_name is None and s.batch_label == "611_20260930"
+
+
+def test_rounds_carry_the_business_name(tmp_path):
+    """`daemon._room_fields()` 写进 rounds/images 的 `batch_no` = 业务名（缺则派生名）。"""
+    rs = RoomState(room_id="611", entry_date=date(2026, 9, 30),
+                   batch_no="611_20260930", display_name="mogu-107")
+    daemon, _ = make_daemon(tmp_path, rs, today=date(2026, 10, 1))
+    assert daemon._room_fields()["batch_no"] == "mogu-107"
+
+    daemon2, _ = make_daemon(tmp_path, RoomState(room_id="611",
+                                                 entry_date=date(2026, 9, 30),
+                                                 batch_no="611_20260930"),
+                             today=date(2026, 10, 1))
+    assert daemon2._room_fields()["batch_no"] == "611_20260930"
+
+
+def test_ensure_room_file_template_mentions_the_new_fields(tmp_path):
+    p = ensure_room_file(tmp_path / "room.yaml", room_id="611")
+    text = p.read_text(encoding="utf-8")
+    assert "display_name:" in text and "batch_no:" in text
+    assert "不写 0" in text          # packages 的"未知"口径写在模板注释里

@@ -403,7 +403,9 @@ class PatrolDaemon:
         return {
             "room_id": rs.room_id,
             "entry_date": rs.entry_date.isoformat(),
-            "batch_no": rs.batch_no,
+            # 优先业务名 `mogu-*`、缺则退回派生名：库里那列的既有语义就是业务名，
+            # 直接换成派生名会让历史对账与页面筛选断掉（`RoomState.batch_label` 的说明）。
+            "batch_no": rs.batch_label,
         }
 
     def _admission(self) -> tuple[bool, str]:

@@ -10,7 +10,12 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from deploy.patrol_serve import serve_forever
+from deploy.patrol_serve import (
+    RefreshStats,
+    make_run_once,
+    resolve_room_id,
+    serve_forever,
+)
 from deploy.patrol_trigger import TriggerStore
 
 T0 = datetime(2026, 9, 14, 10, 0, 0)
@@ -253,6 +258,19 @@ def test_our_own_flags_are_not_swallowed_by_the_passthrough():
     assert args.m1_args == ["--room", "/r.yaml"]
 
 
+def test_room_refresh_flags_do_not_eat_the_passthrough(tmp_path):
+    """`--room-id` / `--no-room-refresh` 是我们自己的开关；`--room` 必须原样透传。
+
+    （2026-10-14 陷阱记录：argparse 默认允许前缀缩写 ⇒ `--room` 会被 `--room-id` 吃掉，
+    两条既有用例当场红；已用 `allow_abbrev=False` 关掉，这条用例把它钉住。）
+    """
+    from deploy.patrol_serve import parse_args
+
+    args = parse_args(["--room-id", "611", "--no-room-refresh", "--room", "/r.yaml"])
+    assert args.room_id == "611" and args.no_room_refresh
+    assert args.m1_args == ["--room", "/r.yaml"]
+
+
 def test_dry_run_preflight_touches_nothing_and_reports_paths(tmp_path, capsys):
     """`--dry-run` 是上机第一道检查：把要用的路径与配置打出来，**不连控制器、不进循环**。"""
     from deploy.patrol_serve import parse_args, preflight
@@ -295,3 +313,108 @@ def test_preflight_fails_loudly_when_the_vendor_library_cannot_load(tmp_path):
     assert rc == 2
     assert "厂商库加载失败" in joined and "GLIBCXX" in joined
     assert "预检失败" in joined
+
+
+# ---------- 轮次入口：先刷新 room.yaml，再起轮（票 18） ----------
+
+
+def test_round_runs_even_when_the_refresh_fails(tmp_path):
+    """**失败也继续跑这一轮**——停轮会丢掉连续影像（Chief 2026-10-14 裁定）。
+
+    反向自证就在这条用例里：谁把"失败"改成抛错或提前 return，`m1_main` 就不会被调用，
+    本用例立刻红。
+    """
+    calls: list[list[str]] = []
+    logs: list[str] = []
+    stats = RefreshStats()
+
+    def failing_refresh(_room_id, _path, *, log=None):
+        return {"error": "读批次端点失败：connection refused", "entry_date": "2026-09-30"}
+
+    run_once = make_run_once(
+        m1_main=lambda argv: calls.append(list(argv)) or 0,
+        m1_args=["--once"], room_id="611", room_path=str(tmp_path / "room.yaml"),
+        stats=stats, log=logs.append, refresh=failing_refresh,
+    )
+    assert run_once() == 0
+    assert calls == [["--once"]]                      # 本轮照起
+    joined = "\n".join(logs)
+    assert "失败第 1 次" in joined and "本轮照跑" in joined
+
+
+def test_refresh_failures_are_counted_across_rounds(tmp_path):
+    logs: list[str] = []
+    stats = RefreshStats()
+    run_once = make_run_once(
+        m1_main=lambda _argv: 0, m1_args=["--once"], room_id="611",
+        room_path=str(tmp_path / "room.yaml"), stats=stats, log=logs.append,
+        refresh=lambda *_a, **_kw: {"error": "stale", "entry_date": None},
+    )
+    run_once()
+    run_once()
+    assert stats.failures == 2
+    assert "失败第 2 次" in "\n".join(logs)
+
+
+def test_a_successful_refresh_resets_the_counter_and_logs_ok(tmp_path):
+    logs: list[str] = []
+    stats = RefreshStats()
+    state = {"fail": True}
+
+    def refresh(*_a, **_kw):
+        if state["fail"]:
+            return {"error": "boom", "entry_date": None}
+        return {"error": None, "changed": True,
+                "note": "已写入 room.yaml：entry_date 2026-09-30 → 2026-10-08"}
+
+    run_once = make_run_once(
+        m1_main=lambda _argv: 0, m1_args=["--once"], room_id="611",
+        room_path=str(tmp_path / "room.yaml"), stats=stats, log=logs.append, refresh=refresh,
+    )
+    run_once()
+    assert stats.failures == 1
+    state["fail"] = False
+    run_once()
+    assert stats.failures == 0
+    joined = "\n".join(logs)
+    assert "room-refresh ok" in joined and "2026-09-30 → 2026-10-08" in joined
+    assert stats.last_ok_at and stats.last_ok_note
+
+
+def test_round_still_runs_when_there_is_no_room_id(tmp_path):
+    calls: list[int] = []
+    logs: list[str] = []
+    run_once = make_run_once(
+        m1_main=lambda _argv: calls.append(1) or 0, m1_args=["--once"], room_id="",
+        room_path=str(tmp_path / "room.yaml"), stats=RefreshStats(), log=logs.append,
+    )
+    assert run_once() == 0 and calls == [1]
+    assert "跳过" in "\n".join(logs)
+
+
+def test_a_refresh_that_blows_up_does_not_kill_the_round(tmp_path):
+    """刷新函数自己出意外（不是返回 error）也不许拖垮巡检。"""
+    params: dict = {}
+
+    def fake_main(_argv):
+        params["ran"] = True
+        return 0
+
+    run_once = make_run_once(
+        m1_main=fake_main, m1_args=["--once"],
+        room_id="611", room_path=str(tmp_path / "room.yaml"), stats=RefreshStats(),
+        log=lambda _m: None,
+        refresh=lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert run_once() == 0 and params["ran"] is True
+
+
+def test_resolve_room_id_prefers_explicit_then_the_file(tmp_path):
+    path = tmp_path / "room.yaml"
+    path.write_text('room_id: "611"\nentry_date: "2026-09-30"\n', encoding="utf-8")
+    assert resolve_room_id("612", str(path)) == "612"
+    assert resolve_room_id("", str(path)) == "611"
+
+    path.write_text('room_id: "unset"\nentry_date: "2026-09-30"\n', encoding="utf-8")
+    assert resolve_room_id("", str(path)) == ""          # 占位不算
+    assert resolve_room_id("", str(tmp_path / "missing.yaml")) == ""
