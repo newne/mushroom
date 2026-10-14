@@ -237,5 +237,64 @@
 2. 把唯一的正面证据（`n_duplicate`）也拿掉 ⇒ **必须**落「未核查（没有内容核查记录）」，
    且文案里不许出现"无重复/正常/干净/已核查"。
 
+## 10. 部署态验收（2026-10-14，真样本已到）
+
+样本：`D:\code\mushroom\.scratch\deploy-acceptance\`（发版官只读导出，地址类字段已脱敏；README 有三份样本的真形状表）。
+脚本：`docs/patrol/console-ui/verify-deploy-samples.js` —— 把**真行**喂给页面自己的
+`integrityOfRound()` / `frameDupInfo()`，并逐条打印实测类型。
+
+```
+NODE_PATH=<jsdom> node docs/patrol/console-ui/verify-deploy-samples.js \
+    web/console/index.html .scratch/deploy-acceptance
+→ 19 PASS / 0 FAIL
+```
+
+**先核了"发上去的到底是不是这一版"**（页面历史上出过静默上传失败）：
+仓库 blob（LF）sha256 = `acdefd525847751787287ad808a79d4d26b31068600915e44bb72392cc30cd69`，
+3922 行、219286 字节 —— **与 Chief 给的远端 `acdefd52…` 逐字节相同**。
+（本机工作区那份是 CRLF，所以本机 sha256 是 `97e519dd…`；去掉 `\r` 后两者完全相同，已用
+`loc.replace(b'\r\n', b'\n') == blob` 验过。）⇒ **这次没有踩静默上传的坑。**
+
+**真形状（实测，逐条打印在脚本输出里）**
+
+| 项 | 真值 | 页面判定 |
+| --- | --- | --- |
+| 正常轮 `73dd304c` / 最新轮 `485d126a` | `ok=1`、`n_frames_recorded=48`、`n_duplicate=0`、`suspect_duplicate=null`、`dup_groups=null` | **零痕迹**（ok） |
+| 事故轮 `12038e7a`（10-09） | `ok=1`、`n_frames_recorded=null`、`n_duplicate=null`、其余 NULL | **「未核查（那时没有内容核查）」** |
+| 帧级（正常/最新轮） | `duplicate_streak=1`、`frame_dup=null`、`same_as_previous=0`、`content_sha256` 48 个互不相同 | **0/48 判为重复帧** ✓ |
+| 帧级（事故轮） | 那批新列**全 NULL** | 0/48 判为重复帧 |
+| `dup_groups` 非空 | **真库里 0 行**（探针 `n_hit=0`／扫 73 轮） | 形状"对象数组"在真数据上**无法验证**，不造数据 |
+
+**负向钉子（用真数据钉的）**：两轮的 `ok` **都是 1**，判定却分别是「未核查」与「零痕迹」
+—— 证明「未核查」这条路**不是靠 `ok` 判的**，正是 10-09 那次"看不出异常"的根治点。
+
+### ⚠️ 真样本抓到的**第二个**真机 bug（已修）
+
+真机正常帧的 `duplicate_streak = 1`（48/48 帧全是 1）。我原来的判据是 `duplicate_streak > 0`
+⇒ **每一帧都会被标成「连续重复 1 张」——全站天天报警**，正是本票明令禁止的失败模式
+（真报警会被淹掉）。已改成 **`> 1`**（连续 ≥2 张同字节才算），并把真形状搬进 fixture：
+正常帧带 `duplicate_streak: 1` / `same_as_previous: 0` / `frame_dup: null`。
+
+**这里有一处口径要环境官/巡检手确认**：票 17 的判据写的是「一帧不可信 = `frame_dup=1`
+**或** `duplicate_streak>0`」；按真数据，**`1` 是"连续 1 张"＝它自己、是正常**，
+若坚持 `>0` 则每一帧都不可信。我按真数据改成 `>1`（页面侧），**请把票 17 的口径一并更正**。
+
+**护栏自证（部署态这条）**：把判据退回 `> 0` ⇒ 页面回归红 2 条
+（真机形状正常帧、正常帧详情区零痕迹），部署态验收红 2 条（正常轮/最新轮各 48 帧全被标）；
+复原后 19 PASS / 0 FAIL。
+
+### 这一版之后再上站点的指纹（发版官 scp 后照这个核）
+
+```
+修复版 page 仓库 blob（LF）：字节 219619 / 3926 行
+sha256 = 2d806d20fe46df7257c7c76a2138bc5d35ea53408a5aeda2642c29e949a1f787
+git blob(sha1) = 09700a3d7a03c20e37631409130d49ab0f45cbe2
+```
+⚠️ **站点上现在那份是修 `duplicate_streak` 之前的**（`acdefd52…`），也就是说
+**真机上每一帧都还被标着「连续重复 1 张」** —— 这一笔要尽快补上站。
+本机工作区是 CRLF，哈希与仓库 blob 不同；核对时**用仓库 blob**（或去 `\r` 后再算）。
+
+
+
 
 
