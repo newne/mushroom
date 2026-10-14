@@ -7,6 +7,11 @@ dependencies = [
     "fastapi>=0.115",
     "pandas>=2.2",
     "uvicorn>=0.30",
+    # 批次台账从 pgsql 取（票 13，用户 2026-10-14 裁定：业务库 MySQL 禁用）。
+    # `analysis/batches.py` 里是**惰性 import**，所以只用 API 时不装也能起；
+    # 但容器里跑 batch 作业必须有它。版本区间与根 pyproject.toml:25 一致。
+    # 注意：镜像构建以 `patrol-workspace/uv.lock` 为准，锁由发版官统一重生成。
+    "psycopg[binary]>=3.3.2",
 ]
 
 [build-system]

@@ -35,6 +35,8 @@ from pathlib import Path
 DEFAULT_DSN_ENV = "PGSQL_DSN"
 #: 更推荐的一条：DSN 放文件、进程运行时读（`env_file` 会把值注入 `docker inspect` 可见的环境变量）
 DEFAULT_DSN_FILE_ENV = "PGSQL_DSN_FILE"
+#: `batch_no` 映射文件（仓库里的数据文件；由 `python -m analysis.batch_map` 生成）
+DEFAULT_MAP_PATH = "analysis/data/batch_no_map.json"
 
 #: 两条来源的并集；只取"批次身份"要用的两列（ADR-0020：库房号 + 入库日期）。
 SQL = """
@@ -46,6 +48,24 @@ FROM (
     SELECT room_id, in_date FROM image_text_quality
     WHERE room_id IS NOT NULL AND in_date IS NOT NULL
 ) AS batches
+ORDER BY room_id, in_date
+""".strip()
+
+#: 只用来回答"**只出现在一张表里**的批次有哪些"（Chief 2026-10-14 的可观测性要求）。
+#: 两张表单独看都可能漏批：`mushroom_batch_yield` 是派生表（覆盖取决于它自己的作业跑没跑），
+#: `image_text_quality` 绑老链路。并集是当前唯一不丢批的口径，但**差异必须看得见**。
+SOURCES_SQL = """
+SELECT room_id, in_date,
+       bool_or(src = 'yield')       AS in_yield,
+       bool_or(src = 'text_quality') AS in_text
+FROM (
+    SELECT room_id, in_date, 'yield' AS src FROM mushroom_batch_yield
+    WHERE room_id IS NOT NULL AND in_date IS NOT NULL
+    UNION ALL
+    SELECT room_id, in_date, 'text_quality' AS src FROM image_text_quality
+    WHERE room_id IS NOT NULL AND in_date IS NOT NULL
+) AS batches
+GROUP BY room_id, in_date
 ORDER BY room_id, in_date
 """.strip()
 
@@ -67,13 +87,33 @@ def _as_date(value) -> str:
         raise BatchFetchError(f"入库日期不合法：{value!r}") from exc
 
 
-def rows_to_batches(rows: list) -> list[dict]:
+def load_batch_no_map(path: str | None = None) -> dict[str, str]:
+    """读 `(room_id|in_date) → batch_no` 映射（从**我们自己库里既有行**反推出来的，不碰 MySQL）。
+
+    文件缺失或损坏 ⇒ 返回 `{}` 并**打一行警告**：映射只影响显示名，
+    不该因为一个坏文件把批次取数整个挡住；但**也不许静默** —— "缺映射"要能被看见
+    （`fetch_batches_with_report` 会把它计数出来）。
+    """
+    target = Path(path or os.environ.get("BATCH_NO_MAP") or DEFAULT_MAP_PATH)
+    if not target.exists():
+        print(f"[batch_map] 没有映射文件 {target}：batch_no 一律留 NULL（不编值）")
+        return {}
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+        raw = data.get("map", data) if isinstance(data, dict) else {}
+        return {str(k): str(v) for k, v in raw.items() if v}
+    except (OSError, ValueError, AttributeError) as exc:
+        print(f"[batch_map] 映射文件读不了（{exc}）：batch_no 一律留 NULL")
+        return {}
+
+
+def rows_to_batches(rows: list, *, batch_no_map: dict[str, str] | None = None) -> list[dict]:
     """`(room_id, in_date)` 行 → 入库行。
 
-    **`batch_no` 是 NULL**：`mogu-<id>` 那个显示名来自业务库的主键，pgsql 这两张表里没有
-    对应 id，编一个就是造假。`batch_id` 用 `库房号|入库日期` 的既有写法（spec §2.6 表里
-    第三种），要显示名另议（见票 13 的未决项）。
+    **`batch_no` 从映射取**；映射里没有就写 **NULL**（编一个就是造假）——
+    显示名缺失时页面用派生 id `库房号|入库日期`，见 `batch_id`。
     """
+    mapping = batch_no_map or {}
     out: list[dict] = []
     for row in rows:
         if len(row) != 2:
@@ -82,25 +122,72 @@ def rows_to_batches(rows: list) -> list[dict]:
         date = _as_date(in_date)
         if not room:
             raise BatchFetchError(f"库房号为空的批次行：{row!r}")
+        key = f"{room}|{date}"
         out.append({
             "room_id": str(room),
             "entry_date": date,
-            "batch_no": None,
-            "batch_id": f"{room}|{date}",
+            "batch_no": mapping.get(key),
+            "batch_id": key,
         })
     out.sort(key=lambda r: (r["room_id"], r["entry_date"]))
     return out
 
 
-def fetch_batches(*, dsn: str | None = None, runner=None) -> list[dict]:
-    """从 pgsql 读台账。
+def fetch_batches(*, dsn: str | None = None, runner=None, map_path: str | None = None) -> list[dict]:
+    """从 pgsql 读台账（并集口径）。
 
     `runner` 可注入（测试用），形状：`(sql) -> list[tuple]`。
     生产走惰性 import 的 `psycopg`；连接串优先级：`--dsn` → `PGSQL_DSN_FILE` 文件内容
     → 环境变量 `PGSQL_DSN`。**没有就报错，绝不退回 `docker exec`、也绝不退回"按断档切段"。**
     """
     run = runner or _pgsql_runner(dsn)
-    return rows_to_batches(run(SQL))
+    return rows_to_batches(run(SQL), batch_no_map=load_batch_no_map(map_path))
+
+
+def fetch_batches_with_report(
+    *, dsn: str | None = None, runner=None, map_path: str | None = None,
+) -> tuple[list[dict], dict]:
+    """同 `fetch_batches`，但多跑一条"来源差异"查询并返回**可观测报告**。
+
+    报告字段：`n_total` / `n_both` / `only_in_batch_yield` / `only_in_text_quality` /
+    `n_missing_batch_no` / `missing_batch_no`。**每个单边批次打一行日志** ——
+    并集是当前唯一不丢批的口径，但差异必须看得见，等差异大了再收敛到真权威源。
+    """
+    run = runner or _pgsql_runner(dsn)
+    mapping = load_batch_no_map(map_path)
+    batches = rows_to_batches(run(SQL), batch_no_map=mapping)
+
+    only_yield: list[str] = []
+    only_text: list[str] = []
+    sources_rows = run(SOURCES_SQL)
+    for row in sources_rows:
+        if len(row) != 4:
+            raise BatchFetchError("来源差异查询返回列数不是 4（room_id, in_date, in_yield, in_text）")
+        room, in_date, in_yield, in_text = row
+        key = f"{room}|{_as_date(in_date)}"
+        if in_yield and not in_text:
+            only_yield.append(key)
+        elif in_text and not in_yield:
+            only_text.append(key)
+
+    missing = [f"{b['room_id']}|{b['entry_date']}" for b in batches if not b["batch_no"]]
+    report = {
+        "n_total": len(sources_rows),
+        "n_both": len(sources_rows) - len(only_yield) - len(only_text),
+        "only_in_batch_yield": only_yield,
+        "only_in_text_quality": only_text,
+        "n_missing_batch_no": len(missing),
+        "missing_batch_no": missing,
+    }
+    for key in only_yield:
+        print(f"[batch_ingest] 只出现在 mushroom_batch_yield：{key}")
+    for key in only_text:
+        print(f"[batch_ingest] 只出现在 image_text_quality：{key}")
+    print(f"[batch_ingest] 来源差异：共 {report['n_total']} 个批次，"
+          f"两表都有 {report['n_both']}，"
+          f"仅 yield {len(only_yield)}，仅 text_quality {len(only_text)}；"
+          f"缺 batch_no 映射 {len(missing)}（缺的写 NULL，不编值）")
+    return batches, report
 
 
 def _load_dsn(dsn: str | None = None) -> str:

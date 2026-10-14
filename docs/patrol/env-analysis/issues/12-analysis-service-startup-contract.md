@@ -84,6 +84,7 @@ API 的 db 路径缺省取 `ANALYSIS_DB`（容器里显式给，**不靠工作�
 | `EMS_URL` | 环控平台根地址（默认 `http://10.77.77.39`） | `analysis/audit_ingest.py:22,46` |
 | `EMS_ACCOUNT` / `EMS_PASSWORD_MD5` | 账号与**MD5**口令（明文会回 400200） | `analysis/audit_ingest.py:9-10,46-48` |
 | `PYTHONPATH` | 必须含 `src`（容器镜像若是 install 过的包则不需要） | `deploy/systemd/mushroom-analysis.service:12` |
+| **pgsql 驱动** | 容器里跑 batch 作业需要 `psycopg`：`analysis/pyproject.toml` 已声明 `psycopg[binary]>=3.3.2`（2026-10-14，票 13）；**锁由发版官统一重生成**（`patrol-workspace/uv.lock` 是共享 artifact） | 票 13 §3.3 |
 | 凭据来源 | 线上 `EnvironmentFile=/etc/mushroom/ems.env`（不进仓库） | `issues/09:23` |
 | **数据库** | 三个 ingest + API 共享同一文件，必须显式 `--db` + 挂载卷 | systemd 形态靠 `WorkingDirectory=/opt/mushroom-analysis` + 相对默认路径 `mushrooms.db` 决定落点（unit :9-11 注释）；**容器里不能靠工作目录，必须显式路径** |
 

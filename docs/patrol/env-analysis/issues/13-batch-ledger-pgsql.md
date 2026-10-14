@@ -115,8 +115,11 @@ SELECT room_id, max(in_date) FROM mushroom_batch_yield GROUP BY room_id;
 2. **`batch_no` 显示名**：`mogu-<id>` 来自业务库主键，pgsql 这两张表没有对应 id ⇒ 现在写 NULL
    （不编值），`batch_id` = `库房号|入库日期`。界面若需要显示名，得选"用 `库房号|入库日期`"
    还是"让生产侧在 pgsql 补一列"——**待裁定**。
-3. **镜像缺 `psycopg`**（发版官实测：`PATROL_IMAGE` 的 site-packages 里没有）⇒ Step 3 的硬前置 =
-   在 `docker/Dockerfile.patrol` 装 `psycopg[binary]` 并重建镜像。**在此之前不迁 batch 作业。**
+3. **镜像缺 `psycopg`**（发版官实测：`PATROL_IMAGE` 的 site-packages 里没有）⇒ Step 3 的硬前置：
+   `analysis/pyproject.toml` **已声明** `psycopg[binary]>=3.3.2`（2026-10-14 补，版本区间与根
+   `pyproject.toml:25` 一致）；**镜像构建以 `patrol-workspace/uv.lock` 为准**（`Dockerfile.patrol`
+   是 `uv sync --frozen`），所以**锁要由发版官统一重生成**（共享 artifact，我不动锁），
+   再重建镜像。**在此之前不迁 batch 作业。**
 4. **DSN 提供方式**：已实现 `PGSQL_DSN_FILE`（文件优先）；生产建议宿主 `0600` 文件 bind 进容器 `:ro`。
    （顺带记一条实况：现役 `EMS_*` 是走 `env_file` 注入的，**在 `docker inspect` 里可见** ——
    与"值不进 inspect"的原口径不符，是否一并迁到文件形态由 Chief/发版官定，不在本票范围。）

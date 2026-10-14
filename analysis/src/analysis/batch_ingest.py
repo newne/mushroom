@@ -23,15 +23,19 @@ import argparse
 import time
 from datetime import datetime, timedelta
 
-from analysis.batches import fetch_batches
+from analysis.batches import fetch_batches_with_report
 from analysis.db import connect, upsert_batches
 
 DEFAULT_DB = "mushrooms.db"
 
 
-def run_once(conn, *, runner=None) -> int:
-    """同步一次台账，返回条数。取不到就抛错——**不退回"按断档切段"**。"""
-    rows = fetch_batches(runner=runner)
+def run_once(conn, *, runner=None, map_path: str | None = None) -> int:
+    """同步一次台账，返回条数。取不到就抛错——**不退回"按断档切段"**。
+
+    用带报告的那条路径：会打印**来源差异**（只出现在一张表里的批次）与
+    **缺 `batch_no` 映射**的计数 —— 差异与缺口都要看得见，不静默。
+    """
+    rows, _report = fetch_batches_with_report(runner=runner, map_path=map_path)
     upsert_batches(conn, rows)
     return len(rows)
 

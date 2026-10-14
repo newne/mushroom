@@ -102,3 +102,85 @@ def test_window_of_uses_next_batch_as_upper_bound():
     windows = window_of(rows, room="611", limit=2)
     assert windows[0]["entry_date"] == "2026-09-30" and windows[0]["until"] is None
     assert windows[1]["entry_date"] == "2026-08-16" and windows[1]["until"] == "2026-09-30"
+
+
+# ---------- batch_no 映射（三步走第 1、2 步） ----------
+
+
+def test_batch_no_comes_from_the_map_and_missing_stays_null():
+    rows = rows_to_batches(ROWS, batch_no_map={"611|2026-09-30": "mogu-107"})
+    by_key = {r["batch_id"]: r for r in rows}
+    assert by_key["611|2026-09-30"]["batch_no"] == "mogu-107"
+    assert by_key["611|2026-08-16"]["batch_no"] is None, "没映射就 NULL，不编值"
+    assert by_key["611|2026-08-16"]["batch_id"] == "611|2026-08-16", "派生 id 顶显示位"
+
+
+def test_missing_map_file_warns_and_returns_empty(tmp_path, capsys):
+    from analysis.batches import load_batch_no_map
+
+    assert load_batch_no_map(str(tmp_path / "nope.json")) == {}
+    assert "没有映射文件" in capsys.readouterr().out, "缺文件要看得见，不静默"
+
+
+def test_map_file_round_trips(tmp_path):
+    from analysis.batches import load_batch_no_map
+    from analysis.batch_map import write_map
+
+    target = write_map({"611|2026-09-30": "mogu-107"}, str(tmp_path / "m.json"))
+    loaded = load_batch_no_map(str(target))
+    assert loaded == {"611|2026-09-30": "mogu-107"}
+
+
+def test_corrupt_map_file_warns_and_returns_empty(tmp_path, capsys):
+    from analysis.batches import load_batch_no_map
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert load_batch_no_map(str(bad)) == {}
+    assert "读不了" in capsys.readouterr().out
+
+
+def test_batch_map_is_built_from_our_own_db(tmp_path):
+    """映射来源是**我们自己的库**里既有行，不碰业务库。"""
+    from analysis.batch_map import build_map
+    from analysis.batches import fetch_batches as _unused  # noqa: F401  (名字不同的两条路径)
+    from analysis.db import connect, upsert_batches
+
+    path = str(tmp_path / "ours.db")
+    conn = connect(path)
+    upsert_batches(conn, [
+        {"room_id": "611", "entry_date": "2026-09-30", "batch_no": "mogu-107",
+         "batch_id": "107"},
+        {"room_id": "612", "entry_date": "2026-09-30", "batch_no": None, "batch_id": None},
+    ])
+    assert build_map(path) == {"611|2026-09-30": "mogu-107"}
+
+
+# ---------- 来源差异可观测（并集口径 + 差异看得见） ----------
+
+
+def sources_row(room, date, *, y, t):
+    return (room, date, y, t)
+
+
+def test_report_splits_one_sided_batches_and_prints(capsys, monkeypatch):
+    from datetime import date as _date
+
+    from analysis.batches import SOURCES_SQL, fetch_batches_with_report
+
+    def runner(sql):
+        if sql == SOURCES_SQL:
+            return [sources_row(611, _date(2026, 9, 30), y=True, t=True),
+                    sources_row(612, _date(2026, 9, 30), y=True, t=False),
+                    sources_row(607, _date(2026, 10, 10), y=False, t=True)]
+        return ROWS
+
+    batches, report = fetch_batches_with_report(
+        runner=runner, map_path=str(__import__("pathlib").Path(".") / "nope.json"))
+    out = capsys.readouterr().out
+    assert report["n_total"] == 3 and report["n_both"] == 1
+    assert report["only_in_batch_yield"] == ["612|2026-09-30"]
+    assert report["only_in_text_quality"] == ["607|2026-10-10"]
+    assert "只出现在 mushroom_batch_yield：612|2026-09-30" in out
+    assert "缺 batch_no 映射 3" in out, "缺映射要有可见计数"
+    assert len(batches) == 3
