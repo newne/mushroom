@@ -112,6 +112,65 @@ const CONSUMED = {
   out.push('INFO  `dup_groups` 是"对象数组"这条形状在真数据上**仍然无法验证**（一行都没有）；' +
            '由离线单测（巡检手 `aa9f51c`）与页面 fixture 覆盖，不为它造生产数据。');
 
+  // ---------- 4. `/api/ranges` 信封（票 05 §5，2026-10-14 破坏性变更） ----------
+  // 样本还没到就**明确跳过**（不是 FAIL）——它要等发版官那次 analysis 重建（`/api/ranges` 404→200）。
+  const rangesFile = 'ranges-raw.json';
+  if (!fs.existsSync(path.join(sampleDir, rangesFile))) {
+    out.push('SKIP  `' + rangesFile + '` 还没导出 ⇒ **`/api/ranges` 的部署态验收未做**' +
+             '（要等发版官那次 analysis 重建；`8002/api/ranges` 从 404 变 200 是验收硬指标）');
+  } else {
+    const doc = read(rangesFile);
+    const calls = doc.calls || [{ request: doc.provenance || '(单条)', body: doc.body }];
+    for (const c of calls) {
+      const b = c.body;
+      const label = c.request + '（http ' + (c.http === undefined ? '?' : c.http) + '）';
+      if (Array.isArray(b)) {
+        // 旧版裸列表：页面必须能读、且**不冒充"样本不足"**
+        const env = w.rangesEnvelope(b);
+        const html = w.rangesHtml(b);
+        check(`旧版形状仍能读：${label}`, env.legacy === true && env.count === b.length,
+              `legacy=${env.legacy} count=${env.count}`);
+        check(`旧版形状：如实说"不知道算没算过"，**不许**冒充"样本不足"`,
+              html.includes('旧版接口') && !html.includes('样本不足'), html.slice(0, 120));
+        continue;
+      }
+      const keys = Object.keys(b || {});
+      const missing = ['ok', 'rows', 'count', 'state', 'state_text', 'detail']
+        .filter(k => !(k in (b || {})));
+      check(`信封形状：${label} 六个必有键齐全`, missing.length === 0, missing.join(',') || keys.join(','));
+      check(`信封形状：${label} 的 rows 是 list（不是字符串/对象）`,
+            Array.isArray(b && b.rows), typeof (b && b.rows));
+      if (b && b.state) {
+        const html = w.rangesHtml(b);
+        check(`空态：原样显示后端的 state/state_text（六态具名）`,
+              html.includes(String(b.state)) && (!b.state_text || html.includes(String(b.state_text))),
+              html.slice(0, 140));
+        check(`空态：**不合并成"暂无数据"**（负向）`,
+              !/暂无数据|没有数据/.test(html.slice(html.indexOf('区间表'))), html.slice(0, 120));
+      }
+      const det = (b && b.detail) || {};
+      if (det.excluded_by_reason && Object.keys(det.excluded_by_reason).length) {
+        const html = w.rangesHtml(b);
+        const first = Object.keys(det.excluded_by_reason)[0];
+        check(`排除可见：按原因计数（${first} ×${det.excluded_by_reason[first]}）出现在页面上`,
+              html.includes(first) && html.includes(String(det.excluded_by_reason[first])),
+              html.slice(html.indexOf('已排除'), html.indexOf('已排除') + 140));
+        const smp = (det.excluded_samples || [])[0];
+        if (smp) {
+          check('排除可见：前 20 条**原文**带窗口与依据（可回答"排掉了哪一段、凭什么"）',
+                html.includes(String(smp.ts)) && (!smp.window || html.includes(String(smp.window)))
+                && (!smp.detail || html.includes(String(smp.detail))),
+                html.slice(html.indexOf('已排除'), html.indexOf('已排除') + 200));
+        }
+        check('排除可见：只列前 20 条时标出"只列前 20 条"（不让人以为这就是全部）',
+              !det.excluded_samples_truncated || html.includes('只列前 20 条'),
+              String(det.excluded_samples_truncated));
+      } else {
+        out.push(`INFO  ${label} 的 detail 里没有 excluded_by_reason（本轮没有被排除的行）`);
+      }
+    }
+  }
+
   console.log(out.join('\n'));
   const failed = out.filter(l => l.startsWith('FAIL')).length;
   console.log(`\n结果：${out.filter(l => l.startsWith('PASS')).length} PASS / ${failed} FAIL`);
