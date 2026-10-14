@@ -121,9 +121,38 @@ const CONSUMED = {
   } else {
     const doc = read(rangesFile);
     const calls = doc.calls || [{ request: doc.provenance || '(单条)', body: doc.body }];
+    /* 每条 call 的**路径归属**：页面看到的是 console:8002（nginx → console:8001 → analysis:8000）；
+       直连 analysis:8000 的形状**不能替页面那条路径背书**（旧形状就只存在于 8000，8002 从来是 404）。
+       来源优先级：call 自己的 `via` 字段 > call 的 `request` 里的端口 > 文档级 `provenance`（**仅当该
+       call 自己没带端口**）——每一条都在标签里写出**来源**，不做静默推断。
+       发版官补了每 call 的 `via`（`"console_8002"` / `"analysis_8000"`）之后，第一条优先级就会接管。 */
+    const portVia = n => n === '8002' ? 'console_8002' : n === '8000' ? 'analysis_8000' : 'unknown';
+    const portIn = s => (String(s || '').match(/[:/](8002|8000)\b/) || [])[1];
+    const docPort = portIn(doc.provenance);
+    const viaOf = c => {
+      const urlPort = portIn(c.request);
+      if (c.via !== undefined) {
+        const self = String(c.via);
+        return { via: self, source: 'via 字段', fromUrl: urlPort ? portVia(urlPort) : 'unknown',
+                 agree: !urlPort || portVia(urlPort) === self };
+      }
+      if (urlPort) return { via: portVia(urlPort), source: 'request 里的端口', fromUrl: portVia(urlPort) };
+      if (docPort) return { via: portVia(docPort), source: '文档 provenance（本 call 无端口）', fromUrl: 'unknown' };
+      return { via: 'unknown', source: '无（样本没说路径）', fromUrl: 'unknown' };
+    };
+    const vias = [];
+    const envelopeVias = [];
     for (const c of calls) {
       const b = c.body;
-      const label = c.request + '（http ' + (c.http === undefined ? '?' : c.http) + '）';
+      const v = viaOf(c);
+      vias.push(v.via);
+      if (!Array.isArray(b)) envelopeVias.push(v.via);
+      if (v.source === 'via 字段') {
+        check(`契约：\`${c.request}\` 的样本自述 \`via=${v.via}\` 与 URL 里的端口一致`,
+              v.agree, `自述 ${v.via} / 从 URL 读到 ${v.fromUrl}（不一致就是样本自己标错了路径）`);
+      }
+      const label = c.request + '（http ' + (c.http === undefined ? '?' : c.http)
+                  + '，' + v.via + ' ← ' + v.source + '）';
       if (Array.isArray(b)) {
         // 旧版裸列表：页面必须能读、且**不冒充"样本不足"**
         const env = w.rangesEnvelope(b);
@@ -138,8 +167,23 @@ const CONSUMED = {
       const missing = ['ok', 'rows', 'count', 'state', 'state_text', 'detail']
         .filter(k => !(k in (b || {})));
       check(`信封形状：${label} 六个必有键齐全`, missing.length === 0, missing.join(',') || keys.join(','));
+      // 契约登记的是**九**键：`metric`/`unit` 在空态就是 null，**"值为 null"不等于"字段不在"**
+      // （缺字段会让页面读到 undefined 而静默降级，这正是要钉的那种坏）
+      const NINE = ['ok', 'rows', 'count', 'state', 'state_text', 'detail',
+                    'computed_at', 'metric', 'unit'];
+      const miss9 = NINE.filter(k => !(k in (b || {})));
+      check(`契约：${label} 信封九键齐全（\`metric\`/\`unit\` 为 null 也算"在"）`,
+            miss9.length === 0, miss9.length ? '缺 ' + miss9.join(',') : '九键齐');
+      // 样本**自述**的键清单必须与真身一致——否则"样本写着九键"会替真形状背锅
+      if (Array.isArray(c.envelope_keys)) {
+        const same = NINE.every(k => c.envelope_keys.includes(k))
+                  && c.envelope_keys.every(k => NINE.includes(k));
+        check(`契约：${label} 样本自述 \`envelope_keys\` 与实际键集一致`,
+              same, JSON.stringify(c.envelope_keys));
+      }
       check(`信封形状：${label} 的 rows 是 list（不是字符串/对象）`,
-            Array.isArray(b && b.rows), typeof (b && b.rows));
+            Array.isArray(b && b.rows),
+            Array.isArray(b && b.rows) ? 'list(array)' : typeof (b && b.rows));
       if (b && b.state) {
         const html = w.rangesHtml(b);
         check(`空态：原样显示后端的 state/state_text（六态具名）`,
@@ -169,6 +213,11 @@ const CONSUMED = {
         out.push(`INFO  ${label} 的 detail 里没有 excluded_by_reason（本轮没有被排除的行）`);
       }
     }
+    // 这批样本里**必须有一条走页面同源路径的信封样本**，否则"验收"可能只在验一条页面永远看不到的直连形状
+    check('走**页面同源路径**（`console_8002`）的**信封**样本存在' +
+          '——直连 `analysis_8000` 的形状不能替页面那条路径背书',
+          envelopeVias.includes('console_8002'),
+          '信封 call 的路径归属：' + JSON.stringify(envelopeVias) + '；全部 call：' + JSON.stringify(vias));
   }
 
   console.log(out.join('\n'));
