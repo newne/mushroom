@@ -139,17 +139,20 @@ const MEASUREMENTS = {
       mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
       quality: 'verified+no_angle_profile',
       mean_cluster_w_mm: 58.0, mean_cluster_h_mm: 44.0,
-      mean_area_mm2: 3120.0, mean_projected_d_mm: 62.5 },
+      mean_area_mm2: 3120.0, mean_projected_d_mm: 62.5,
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, mm_per_px: null },
     { ts: '2026-09-13T09:30:00', room_id: '611', box_id: 'B102', n: 6,
       mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
       quality: 'verified+no_angle_profile',
       mean_cluster_w_mm: 64.0, mean_cluster_h_mm: 48.0,
-      mean_area_mm2: 3980.0, mean_projected_d_mm: 70.2 },
+      mean_area_mm2: 3980.0, mean_projected_d_mm: 70.2,
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, mm_per_px: null },
     { ts: '2026-09-14T09:30:00', room_id: '611', box_id: 'B102', n: 6,
       mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
       quality: 'verified+no_angle_profile',
       mean_cluster_w_mm: 66.0, mean_cluster_h_mm: 49.5,
-      mean_area_mm2: 4210.0, mean_projected_d_mm: 72.0 },
+      mean_area_mm2: 4210.0, mean_projected_d_mm: 72.0,
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, mm_per_px: null },
     // 两行是给三种"空"造的对照（环境官 2026-10-13 定的优先序：先判"这帧怎么了"，
     // 再判"这个量在角度档下不可测"——平视下几乎每行都带 no_angle_profile，
     // 先判它会盖掉更准确的原因）：
@@ -159,12 +162,14 @@ const MEASUREMENTS = {
       mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
       quality: 'no_light+no_angle_profile',
       mean_cluster_w_mm: null, mean_cluster_h_mm: null,
-      mean_area_mm2: null, mean_projected_d_mm: null },
+      mean_area_mm2: null, mean_projected_d_mm: null,
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, mm_per_px: null },
     { ts: '2026-09-12T09:30:00', room_id: '611', box_id: 'B102', n: 0,
       mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
       quality: 'no_detection+no_angle_profile',
       mean_cluster_w_mm: null, mean_cluster_h_mm: null,
-      mean_area_mm2: null, mean_projected_d_mm: null },
+      mean_area_mm2: null, mean_projected_d_mm: null,
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, mm_per_px: null },
   ],
 };
 
@@ -1316,12 +1321,20 @@ await sleep(150);
   check('曲线下方列出最近的测量值（含判词）',
     T('#growthnote').includes('70.2') && T('#growthnote').includes('在长'),
     T('#growthnote').slice(0, 90));
-  // 平视单档：杆长/菌盖直径 NULL + no_angle_profile ⇒ 不可测，不是 0、不是空格
+  // 平视单档：杆长/菌盖直径 NULL + no_angle_profile ⇒ 不可测（**探索项列**），不是 0、不是空格
   check('杆长/菌盖直径在表里标「不可测（无角度档）」，不写 0 也不留空',
     T('#growthnote').includes('不可测（无角度档）')
     && !/\b0\s*mm/.test(T('#growthnote')), T('#growthnote').slice(0, 120));
-  check('曲线区明说这两列不画曲线（换角之前）',
-    T('#growthnote').includes('不画这两条曲线'), T('#growthnote').slice(0, 140));
+  // 票 15：一期交付量与探索项必须能一眼分开（探索项列一律带角标）
+  check('一期交付量（菌簇长度/直径）排在表头最前，且说明里写清"进不进已验证"',
+    /<th>菌簇长度 mm<\/th><th>菌簇直径 mm<\/th>/.test(document.querySelector('#growthnote table').innerHTML)
+    && T('#growthnote').includes('一期交付量')
+    && T('#growthnote').includes('不进已验证统计'), T('#growthnote').slice(0, 160));
+  check('探索项三列都带「探索项」角标（不让它看起来像交付量）',
+    (() => { const tr = Array.from(document.querySelectorAll('#growthnote tr'))
+               .find(r => (r.textContent || '').includes('2026-09-14'));
+             return !!tr && [5, 6, 7].every(i => tr.children[i].textContent.includes('探索项')); })(),
+    T('#growthnote').slice(0, 160));
   // 「不可测」≠「不可用」≠「没检出」，三种"空"必须分得开，且**优先序**由环境官钉死：
   // ① 门拒（近黑/模糊/过曝）与 ② 没检出 排在 ③ 无角度档**之前**——平视下几乎每行都带
   // `no_angle_profile`，先判它会盖掉"这帧到底怎么了"这个更准确的原因。
@@ -1331,25 +1344,91 @@ await sleep(150);
     const cells = tr => Array.from(tr.children).map(td => td.textContent.trim());
 
     const okRow = rowOf('2026-09-13');
-    check('有检出 + 无角度档：菌簇量列有数、杆长列「不可测（无角度档）」',
-      !!okRow && okRow.children[1].textContent.includes('70.2')
-      && okRow.children[3].textContent.includes('不可测（无角度档）'),
+    check('有检出 + 无角度档：菌簇量列有数（一期交付量）、探索项杆长列「不可测（无角度档）」',
+      !!okRow && okRow.children[1].textContent.includes('48')
+      && okRow.children[5].textContent.includes('不可测（无角度档）'),
       okRow ? cells(okRow).join(' | ') : '(没有 09-13 那一行)');
 
     const gatedRow = rowOf('2026-09-11');
+    // [1,2] 一期交付量两列 + [5,6,7] 探索项三列，都说同一个原因；列 3/4 是"较上次/判词"，不参与
     check('被门拒的帧：量列都说「该帧被判不可用（近黑）」，不说"不可测"',
-      !!gatedRow && [1, 3, 4].every(i => cells(gatedRow)[i].includes('该帧被判不可用（近黑）'))
+      !!gatedRow && [1, 2, 5, 6, 7].every(i => cells(gatedRow)[i].includes('该帧被判不可用（近黑）'))
       && !gatedRow.textContent.includes('不可测'),
       gatedRow ? cells(gatedRow).join(' | ') : '(没有 09-11 那一行)');
     check('被门拒/没检出的帧不给"较上次"数字（没有可共用量就不显示）',
-      !!gatedRow && cells(gatedRow)[2] === '',
+      !!gatedRow && cells(gatedRow)[3] === '',
       gatedRow ? cells(gatedRow).join(' | ') : '(无)');
 
     const nodetRow = rowOf('2026-09-12');
     check('没检出的帧：量列都说「没检出」，不说"不可测"也不说"无角度档"',
-      !!nodetRow && [1, 3, 4].every(i => cells(nodetRow)[i] === '没检出')
+      !!nodetRow && [1, 2, 5, 6, 7].every(i => cells(nodetRow)[i].startsWith('没检出'))
       && !nodetRow.textContent.includes('不可测'),
       nodetRow ? cells(nodetRow).join(' | ') : '(没有 09-12 那一行)');
+  }
+  // ---- 票 15：四态（估算 / 不可测（无标尺）/ 不可用（原因）/ 标尺冲突（待核））----
+  // 判据全部来自 `quality` 与 `estimated_fields`（**不写死列名表**），
+  // 优先序：不可用 > 标尺冲突 > 不可测 > 估算；**没有估算也没有异常 ⇒ 零痕迹**。
+  {
+    const rows = MEASUREMENTS.B102;
+    const okRow = rows.find(r => String(r.ts).startsWith('2026-09-13'));
+    const base = { ...okRow };
+    const mc = window.measureCellText;
+    const st = window.measureState;
+
+    // ① 估算：`estimate` + `estimated_fields` + `scale_source` ⇒ 带标尺来源（含"用的是多大"）
+    const est = { ...base, estimated_fields: 'mean_cluster_h_mm', scale_source: 'bag_diameter',
+                  scale_ref_mm: 240, quality: 'verified+no_angle_profile+estimate' };
+    check('估算态：带「估算（菌包标尺 240 mm）」= 来源 + 参考尺寸（现场 1.7 倍不确定度就出在这）',
+      mc(est, 'mean_cluster_h_mm', 'mm').includes('估算（菌包标尺 240 mm）')
+      && mc(est, 'mean_cluster_h_mm', 'mm').includes('48 mm'),
+      mc(est, 'mean_cluster_h_mm', 'mm'));
+    check('估算态：**别的列**不受影响（字段级标记，不是整行拉黑）',
+      !mc(est, 'mean_cluster_w_mm', 'mm').includes('估算'), mc(est, 'mean_cluster_w_mm', 'mm'));
+    // ② 不可测（无标尺）：今天的默认写法
+    const noscale = { ...base, quality: 'verified+no_scale' };
+    check('不可测态：`no_scale` ⇒「不可测（无标尺）」，且不出现数字（更不许 0）',
+      mc(noscale, 'mean_cluster_h_mm', 'mm') === '不可测（无标尺）', mc(noscale, 'mean_cluster_h_mm', 'mm'));
+    // ③ 标尺冲突
+    const conflict = { ...base, quality: 'verified+scale_conflict' };
+    check('标尺冲突态：`scale_conflict` ⇒「标尺冲突（待核）」，**不许静默取一个**',
+      mc(conflict, 'mean_cluster_h_mm', 'mm') === '标尺冲突（待核）', mc(conflict, 'mean_cluster_h_mm', 'mm'));
+    // ④ 不可用优先：帧不可用时，不许说"标尺冲突"或"不可测"
+    const unusable = { ...base, quality: 'no_light+scale_conflict+no_scale' };
+    check('优先序：帧不可用 > 标尺冲突 > 不可测（近黑的帧不说"标尺冲突"）',
+      mc(unusable, 'mean_cluster_h_mm', 'mm').includes('该帧被判不可用（近黑）')
+      && !mc(unusable, 'mean_cluster_h_mm', 'mm').includes('标尺'),
+      mc(unusable, 'mean_cluster_h_mm', 'mm'));
+    // ⑤ `unreliable`（票 18：远排/低置信）也走"不可用（原因）"
+    const unrel = { ...base, quality: 'verified+unreliable', mean_cluster_h_mm: null };
+    check('不可用态：`unreliable`（远排/低置信）⇒「不可用（不可靠…）」，不是降权、不是 0',
+      mc(unrel, 'mean_cluster_h_mm', 'mm').includes('不可用（') && !mc(unrel, 'mean_cluster_h_mm', 'mm').includes('不可测'),
+      mc(unrel, 'mean_cluster_h_mm', 'mm'));
+    // ⑥ 零痕迹：没有估算、也没有异常 ⇒ 只有"数 + 量纲"，不贴任何标签
+    check('**零痕迹**：普通测量行不带任何态标签（估算/不可测/不可用/冲突一个字都不出现）',
+      mc(base, 'mean_cluster_h_mm', 'mm') === '48 mm'
+      && st(base, 'mean_cluster_h_mm') === 'measured', mc(base, 'mean_cluster_h_mm', 'mm'));
+    // ⑦ 分布：明写「分布」、n≥5 才给、**绝不写 ±**；n<5 只写「样本不足（n=X）」
+    // 杆长（`mean_len_mm`）今天走**估算**（票 18/`bot-roles.md:91`），所以这里造的是估算行；
+    // 分位列 `p10_len`/`p90_len` 只对杆长存在——一期两格（菌簇长度/直径）**没有**分位列，
+    // 所以**不拿杆长的分位去当它们的不确定度**（这正是"两者不合并"的那条）。
+    const dist = { ...base, mean_len_mm: 48, estimated_fields: 'mean_len_mm',
+                   scale_source: 'bag_diameter', scale_ref_mm: 240,
+                   p10_len: 40.1, p90_len: 55.9, n: 6 };
+    check('分布：`n≥5` 写「分布 P10–P90 40.1–55.9 mm」，**不含 `±`**',
+      mc(dist, 'mean_len_mm', 'mm').includes('分布 P10–P90 40.1–55.9 mm')
+      && !mc(dist, 'mean_len_mm', 'mm').includes('±'), mc(dist, 'mean_len_mm', 'mm'));
+    const few = { ...dist, n: 3 };
+    check('分布：`n<5` 只写「样本不足（n=3）」，**不摆区间**（2 个点摆区间是假精确）',
+      mc(few, 'mean_len_mm', 'mm').includes('样本不足（n=3）')
+      && !mc(few, 'mean_len_mm', 'mm').includes('P10'), mc(few, 'mean_len_mm', 'mm'));
+    // ⑧ 计数按"列 × 行"，四类相加 = 行数 × 列数
+    const cnt = window.measureCounts(MEASUREMENTS.B102, ['mean_cluster_h_mm', 'mean_cluster_w_mm']);
+    check('四类计数按"列 × 行"分，且四类相加 = 行数 × 列数（对不上就是有第 5 类没命名）',
+      (cnt.estimate + cnt.unmeasurable + cnt.unusable + cnt.scale_conflict + cnt.measured)
+        === MEASUREMENTS.B102.length * 2, JSON.stringify(cnt));
+    check('计数里的"估算"绝不并入已验证（本 fixture 没有估算行 ⇒ 估算计数为 0，但"已验证"不显示成 8）',
+      cnt.estimate === 0 && cnt.measured + cnt.unusable === MEASUREMENTS.B102.length * 2,
+      JSON.stringify(cnt));
   }
   check('速率带量纲显示（"每天" + 单位），不是裸数字',
     T('#curve').includes('/天') && /[+-]?\d+(\.\d+)? mm\/天/.test(T('#curve')),
@@ -1362,7 +1441,7 @@ await sleep(150);
   check('变化量落在单独的"较上次"列，且带单位', (() => {
     const tr = Array.from(document.querySelectorAll('#growthnote tr'))
       .find(r => (r.textContent || '').includes('2026-09-14'));
-    return !!tr && tr.children[2] && tr.children[2].textContent.trim() === '较上次 +1.8 mm';
+    return !!tr && tr.children[3] && tr.children[3].textContent.trim() === '较上次 +1.8 mm';
   })(), (() => {
     const tr = Array.from(document.querySelectorAll('#growthnote tr'))
       .find(r => (r.textContent || '').includes('2026-09-14'));
@@ -2266,7 +2345,9 @@ await sleep(150);
     '/api/measurements': { q: '?box_id=B102', pick: 'rows',
       fields: ['ts', 'room_id', 'box_id', 'station_id', 'angle_profile', 'n', 'mean_len_mm',
                'mean_cap_mm', 'mean_cluster_w_mm', 'mean_cluster_h_mm', 'mean_area_mm2',
-               'mean_projected_d_mm', 'p10_len', 'p90_len', 'quality'],
+               'mean_projected_d_mm', 'p10_len', 'p90_len', 'quality',
+               // 票 18 §2 的标尺/估算列（票 15 起页面按这四列判四态与标尺来源；值可 NULL）
+               'estimated_fields', 'scale_source', 'scale_ref_mm', 'mm_per_px'],
       required: ['ts', 'quality', 'mean_len_mm', 'mean_cap_mm', 'mean_projected_d_mm',
                  'mean_area_mm2', 'n'] },
     // deploy/console.py api_rounds → analysis/db.py:59-71（rounds 表列）+ 票 17 的内容可信度列
@@ -2325,7 +2406,9 @@ await sleep(150);
     '/api/growth': ['ts', 'metric', 'unit', 'd_value', 'rate_per_h', 'band_source',
                     'verdict', 'verdict_text'],
     '/api/measurements': ['ts', 'quality', 'mean_len_mm', 'mean_cap_mm', 'mean_projected_d_mm',
-                          'mean_area_mm2', 'n'],
+                          'mean_area_mm2', 'n', 'mean_cluster_w_mm', 'mean_cluster_h_mm',
+                          'p10_len', 'p90_len', 'estimated_fields', 'scale_source',
+                          'scale_ref_mm'],
     '/api/rounds': ['round_id', 'ts', 'ok', 'n_results', 'n_failures', 'room_id', 'entry_date',
                     'batch_no', 'suspect_duplicate', 'dup_groups', 'content_check_error',
                     'n_duplicate', 'n_frames_recorded'],

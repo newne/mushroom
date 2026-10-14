@@ -2894,7 +2894,70 @@ function unitLabel(unit){
 const ANGLE_BOUND_KEYS = new Set(['mean_len_mm', 'mean_cap_mm']);
 const NON_USABLE_FLAGS = ['no_detection', 'low_confidence', 'no_light', 'blurry', 'overexposed'];
 const FLAG_TEXT = { no_detection: '未检出', low_confidence: '置信度不足', no_light: '近黑',
-                    blurry: '模糊', overexposed: '过曝' };
+                    blurry: '模糊', overexposed: '过曝',
+                    // 2026-10-14 票 15：远排/低置信（票 18 §1.2）与"标尺冲突"都是**不可用级**，
+                    // 不是降权——值写 NULL，页面按「不可用（原因）」说。
+                    unreliable: '不可靠（远排或低置信）', scale_conflict: '标尺冲突' };
+
+/* ---- 四态（票 15，`bot-roles.md:89` 是唯一出处，四态各用各的词）----------------------
+   量分四态，**判据一律看 `quality` 与 `estimated_fields`，不写死列名表**：
+     估算     `estimate` + `estimated_fields` + `scale_source` ⇒「估算（标尺来源 [参考尺寸]）」
+     不可测   没有任何可用标尺或角度档 ⇒ NULL + `no_scale` ⇒「不可测（无标尺）」
+     不可用   帧或值不可信（`no_light`/`no_detection`/`low_confidence`/`unreliable`…）
+     标尺冲突 主来源＝现场标定常数 与自动检出交叉校验差异超阈值 ⇒ NULL + `scale_conflict`
+              ⇒「标尺冲突（待核）」，**不许静默取一个**
+   优先序（我定的，写在票 15）：**不可用 > 标尺冲突 > 不可测 > 估算**——帧都不可信了，
+   谈"标尺对不对"没有意义；反过来若先判标尺，会把"这帧近黑"盖掉。
+   **没有估算、也没有异常 ⇒ 零痕迹**（不贴任何标签）。 */
+const UNC_MIN_N = 5;                       // 样本不足阈值（可配置，理由见票 15 §5）
+const QUALITY_ESTIMATE = 'estimate';
+const QUALITY_NO_SCALE = 'no_scale';
+const QUALITY_UNRELIABLE = 'unreliable';
+const QUALITY_SCALE_CONFLICT = 'scale_conflict';
+/** 标尺来源的中文名；**未知值原样显示**（不翻译、不归类，免得把新来源读成已知的）。 */
+const SCALE_SOURCE_TEXT = { bag_diameter: '菌包标尺', calibration_target: '校准靶标' };
+
+/** 这一行的标尺来源标签：`菌包标尺 240 mm`；没有 `scale_source` ⇒ 空串。 */
+function scaleSourceLabel(row){
+  if(!row || !row.scale_source || row.scale_source === 'none') return '';
+  const name = SCALE_SOURCE_TEXT[row.scale_source] || String(row.scale_source);
+  // `scale_ref_mm` 就是参考物真实尺寸：把"用的是多大"写在脸上（现场 1.7 倍不确定度就来自这里）
+  const ref = (typeof row.scale_ref_mm === 'number') ? (' ' + row.scale_ref_mm + ' mm') : '';
+  return name + ref;
+}
+
+/** 这一列是不是**估算值**：字段级标记（票 18 §2），不写死列名表。 */
+function isEstimated(row, key){
+  if(!row) return false;
+  const list = String(row.estimated_fields || '').split('+').map(x => x.trim()).filter(Boolean);
+  if(list.length) return list.includes(String(key));   // **字段级**：列在里面的才算估算
+  // 没有列表、只有行级 `estimate`：那是生产者没写字段清单 ⇒ 整行按估算算（宁可标多，不标漏）
+  return qualityHas(row.quality, QUALITY_ESTIMATE);
+}
+
+/** 一个格子的四态（`measured` 表示"没有估算也没有异常"⇒**零痕迹**）。 */
+function measureState(row, key){
+  if(!row) return 'measured';
+  const flags = qualityFlags(row.quality);
+  if(flags.includes(QUALITY_SCALE_CONFLICT)) return 'scale_conflict';
+  const bad = flags.filter(f => NON_USABLE_FLAGS.includes(f) || f === QUALITY_UNRELIABLE);
+  if(bad.length || flags.includes('no_detection')) return 'unusable';
+  if(isEstimated(row, key)) return 'estimate';
+  if(flags.includes(QUALITY_NO_SCALE)) return 'unmeasurable';
+  if(ANGLE_BOUND_KEYS.has(key) && flags.includes(QUALITY_NO_ANGLE)) return 'unmeasurable';
+  return 'measured';
+}
+
+/** **分布**（不是不确定度！）：`P10–P90` 与 `±` 是两种东西，措辞绝不含糊、绝不写 `±`。
+ *  `n<5` 只写「样本不足（n=X）」——2 个点摆区间是假精确。 */
+function distText(row, unit){
+  if(!row) return '';
+  const n = (typeof row.n === 'number') ? row.n : null;
+  const has = (typeof row.p10_len === 'number') && (typeof row.p90_len === 'number');
+  if(n !== null && n < UNC_MIN_N) return '样本不足（n=' + n + '）';
+  if(!has) return '';
+  return '分布 P10–P90 ' + row.p10_len + '–' + row.p90_len + ' ' + unit;
+}
 
 function qualityFlags(quality){
   return String(quality || '').split('+').map(s => s.trim()).filter(Boolean);
@@ -2902,7 +2965,7 @@ function qualityFlags(quality){
 
 /** 这一行为什么不可用（返回中文原因；没有不可用标记就返回空串）。 */
 function unusableReason(quality){
-  const bad = qualityFlags(quality).filter(f => NON_USABLE_FLAGS.includes(f));
+  const bad = qualityFlags(quality).filter(f => NON_USABLE_FLAGS.includes(f) || f === QUALITY_UNRELIABLE);
   return bad.map(f => FLAG_TEXT[f] || f).join('、');
 }
 
@@ -2934,18 +2997,47 @@ function pickGrowthMetric(rows){
  *  **整个框一行都没有**才是「还没测到」（要等接线）——那是曲线级的空态，不在这。 */
 function measureCellText(row, key, unit){
   const v = row ? row[key] : undefined;
-  if(typeof v === 'number') return v + ' ' + unit;
-  if(!row) return '本次未测出';
-  const flags = qualityFlags(row.quality);
-  if(flags.includes('no_detection')) return '没检出';
-  const gated = flags.filter(f => GATE_FLAGS.includes(f));
-  if(gated.length) return '该帧被判不可用（' + gated.map(f => FLAG_TEXT[f] || f).join('、') + '）';
-  if(ANGLE_BOUND_KEYS.has(key) && flags.includes(QUALITY_NO_ANGLE)){
-    return '不可测（无角度档）';
+  const flags = row ? qualityFlags(row.quality) : [];
+  // ① **先定态**：不可用 / 标尺冲突 这两态一律不显示数字（帧都不可信了，数只会误导）
+  if(row){
+    if(flags.includes('no_detection')) return '没检出';
+    const gated = flags.filter(f => GATE_FLAGS.includes(f));
+    if(gated.length) return '该帧被判不可用（' + gated.map(f => FLAG_TEXT[f] || f).join('、') + '）';
+    if(flags.includes(QUALITY_SCALE_CONFLICT)) return '标尺冲突（待核）';
+    // ② 不可测：`no_scale` 是今天的默认写法；`no_angle_profile` 只在没有标尺时才用。
+    //    **即使行里带了数也不显示**（规范说这种情况下值必须 NULL；矛盾行按不可测如实说，
+    //    绝不"有数就当一个正常值显示"——那正是"禁止静默当验证值"）。
+    if(flags.includes(QUALITY_NO_SCALE)) return '不可测（无标尺）';
+    if(ANGLE_BOUND_KEYS.has(key) && flags.includes(QUALITY_NO_ANGLE)
+       && !isEstimated(row, key)) return '不可测（无角度档）';
   }
+  // ③ 估算 / 实测：**绝对值恒显示**，估算再带「估算（标尺来源 [参考尺寸]）」
+  if(typeof v === 'number'){
+    const tag = (row && isEstimated(row, key)) ? '估算（' + (scaleSourceLabel(row) || '标尺来源未知') + '）' : '';
+    const dist = (key === 'mean_len_mm') ? distText(row, unit) : '';   // 分位列只对杆长存在
+    return [v + ' ' + unit, tag, dist].filter(Boolean).join(' · ');
+  }
+  if(!row) return '本次未测出';
   const why = unusableReason(row.quality);
   if(why) return '不可用（' + why + '）';
   return '本次未测出';
+}
+
+/** 探索项格子：**永远**带「探索项」角标（票 18 把这几样降级为探索项，一期不交付），
+ *  免得它和一期交付量长得一样；值本身仍按四态说（估算/不可测/不可用）。 */
+function exploreCellText(row, key){
+  const body = measureCellText(row, key, 'mm');
+  return body + ' · 探索项';
+}
+
+/** 四类计数（**按"列 × 行"**，估算绝不并入已验证）：数字全部来自数据、不写死。
+ *  四类相加必须等于 `行数 × 列数`——对不上就说明有第 5 类没命名（票 15 §4）。 */
+function measureCounts(rows, keys){
+  const c = { estimate: 0, unmeasurable: 0, unusable: 0, scale_conflict: 0, measured: 0 };
+  for(const r of (rows || [])){
+    for(const k of keys) c[measureState(r, k)] = (c[measureState(r, k)] || 0) + 1;
+  }
+  return c;
 }
 
 /** 按天取一行测量（同一天可能有多行，取离这一轮时刻最近的那行）。 */
@@ -3076,23 +3168,33 @@ function drawCurve(){
         + '</b>——绝对量照常显示，但不要把它当成"长势判定正常"。'
       : ''}</div>`;
   const recent = rows.slice(-8).reverse();
-  // 杆长/菌盖直径两列照实说：平视单档下它们**不可测**，不写 0、不写空格。
-  // "较上次"这一列取的是 delta 的 **`d_value`**（环境官口径：真值在 `d_value`/`rate_per_h`，
-  // 旧 `d_len_mm` 只在量了杆长时才非空、不能当"没有数据"）——所以没有可共用量时不显示数字。
-  note.innerHTML = `<table class="meas"><tr><th>时间</th><th>${esc(metric.label)} ${esc(metric.unit)}</th>
-      <th>较上次</th><th>杆长 mm</th><th>菌盖直径 mm</th><th>判词</th></tr>
+  // 一期交付量 = **菌簇长度 `mean_cluster_h_mm` / 菌簇直径 `mean_cluster_w_mm`**
+  // （`bot-roles.md:91` 测量师裁定，权威），所以它们排在**最前面**；
+  // 杆长 / 菌盖直径是**探索项**（票 18 §1.1/§1.3 降级），细胞里带「探索项」角标，
+  // 免得被读成"也是交付量"。**绝对值恒显示**，只是带态标签（票 15 §5.1）。
+  const DELIVER_KEYS = ['mean_cluster_h_mm', 'mean_cluster_w_mm'];
+  const cnt = measureCounts(rows, DELIVER_KEYS);
+  // "较上次"取 delta 的 **`d_value`**（真值在 `d_value`/`rate_per_h`；旧 `d_len_mm` 只在量了
+  // 杆长时才非空，不能当"没有数据"）——没有可共用量就不显示数字。
+  note.innerHTML = `<table class="meas"><tr><th>时间</th><th>菌簇长度 mm</th><th>菌簇直径 mm</th>
+      <th>较上次</th><th>判词</th><th>杆长 mm（探索项）</th><th>菌盖直径 mm（探索项）</th>
+      <th>投影径 mm（探索项）</th></tr>
     ${recent.map(r => {
       const d = deltas.get(String(r.ts));
       return `<tr><td>${esc(String(r.ts).replace('T',' '))}</td>
-      <td>${esc(measureCellText(r, metric.key, metric.unit))}</td>
+      <td>${esc(measureCellText(r, 'mean_cluster_h_mm', 'mm'))}</td>
+      <td>${esc(measureCellText(r, 'mean_cluster_w_mm', 'mm'))}</td>
       <td>${esc(deltaText(d))}</td>
-      <td>${esc(measureCellText(r, 'mean_len_mm', 'mm'))}</td>
-      <td>${esc(measureCellText(r, 'mean_cap_mm', 'mm'))}</td>
-      <td>${esc((d && (d.verdict_text || d.verdict)) || '—')}</td></tr>`;
+      <td>${esc((d && (d.verdict_text || d.verdict)) || '—')}</td>
+      <td>${esc(exploreCellText(r, 'mean_len_mm'))}</td>
+      <td>${esc(exploreCellText(r, 'mean_cap_mm'))}</td>
+      <td>${esc(exploreCellText(r, 'mean_projected_d_mm'))}</td></tr>`;
     }).join('')}</table>
-    ${rows.some(r => qualityHas(r.quality, QUALITY_NO_ANGLE))
-      ? '<div class="empty" style="padding:4px 0 0">杆长 / 菌盖直径：<b>不可测（无角度档）</b>——现役单档平视，换角之前不画这两条曲线，也不按平视硬算。</div>'
-      : ''}`;
+    <div class="empty" style="padding:4px 0 0">一期交付量：<b>菌簇长度 / 菌簇直径</b>（估算时带
+      「估算（标尺来源）」与量纲，**不进已验证统计**）。
+      本区间计数：<b>估算 ${cnt.estimate} · 不可测 ${cnt.unmeasurable} · 不可用 ${cnt.unusable}
+      · 标尺冲突 ${cnt.scale_conflict}</b>（按"列 × 行"分，${rows.slice(-8).length} 行 × ${DELIVER_KEYS.length} 列）。
+      右三列是<b>探索项</b>（一期不交付）：${esc(metric.label)}绝对值另在上方曲线。</div>`;
 }
 
 async function loadHistory(force){
