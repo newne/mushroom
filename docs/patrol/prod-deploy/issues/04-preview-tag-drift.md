@@ -134,3 +134,25 @@ cp -a /tmp/env.now .env                   # ★ 立刻复原新 tag，否则 pat
 停机面：**只有 console 后端 :8001 约 10–20 s**；页面 8002 由 `console_web` 供应、**不重建、不受影响**。
 但 `PATROL_RUN_URL=http://mushroom_console:8001/api/patrol/run` 是**算法侧触发巡检的入口**
 ⇒ **别压在轮次边界**（轮次约每 3 小时、在 :27）。
+
+### 6.3 执行记录（2026-10-14 10:09–10:11，发版官）
+
+窗口：上轮 **09:27:47 结束**、下轮约 **12:27** ⇒ 10:09–10:11 **无轮次在飞**
+（事后复核 `GET /api/status` 的 `patrol.active=false` / `status=ok` / `machine.state=IDLE` 确认）。
+
+| 步 | 结果（实测） |
+| --- | --- |
+| 0 回滚路径先落票 | §6.1 / §6.2 + 本节 |
+| 1 备份 + 记 tag | 页面 → `index.html.bak-20261014-100904`（sha 与原文件**一致** `793c023c…`）；`.env` → `.env.bak-console-20261014-100904`；旧 tag = `b64027b` / `sha256:6d6e05b6f7ac…` |
+| 2 **先重建 console** | **10:09:58** → 现 `89e4a54`、`healthy`；`GET /api/measurements?room_id=611` = **200 且响应带 `rows`** |
+| 3 **再同步页面** | 传**仓库 HEAD blob**（219,286 B / 3922 行 / sha256 `acdefd52…`）；**远端 sha256 = 本地**（已核）；`未核查` 文案 **0 → 9 处**；页面 200 |
+| 4 前后健康检查 | 动手前后六容器全 `healthy`；页面 8002 = 200、console `/api/rounds` = 200、采图 `healthz` = 200 |
+| 复验（10:51 再核） | 仓库 **HEAD 的 blob** sha256 仍 = `acdefd525847751787287ad808a79d4d26b31068600915e44bb72392cc30cd69` ⇒ **页面至今未漂**；console 仍 `89e4a54` |
+
+**副产物**：`PATROL_IMAGE` 三件套（patrol / analysis / console）**统一到 `89e4a54`**，drift 消掉。
+**`CONSOLE_IMAGE` 解耦按 Chief 说的没做。** 没有一步红，未触发停手线。
+
+**⚠️ 一个比对陷阱（记下来，别再踩）**：仓库工作区里的 `web/console/index.html` **是 CRLF**（`core.autocrlf=true`），
+体积 223,208 B、sha256 `97e519dd…`；而 **git blob 是 LF**，219,286 B、sha256 `acdefd52…`。
+⇒ 核"远端页面 = 仓库"**必须比 `git cat-file blob HEAD:web/console/index.html` 的 sha256**，
+不能拿工作区文件直接比——否则会凭 3,922 B 的差值误判成"页面漂了"（我第一次比对就撞上）。

@@ -314,6 +314,58 @@ WantedBy=timers.target
 **已落盘的相关票**：`02-preview-channel-stability.md`（归属巡检手）、
 `03-tdengine-6041-exposure.md`（平台侧，我们不动）。
 
+### 8.2 2026-10-14 10:28 执行记录（Chief 裁定：合规优先 + 清隐患）
+
+**① batch timer 已停** —— `systemctl disable --now mushroom-batch-ingest.timer`
+
+| 项 | 值（实测） |
+| --- | --- |
+| 最后一次成功 | **2026-10-14 05:20:06 CST**，`ExecMainStatus=0`，日志 `[batch_ingest] 完成，22 个批次` |
+| 停之前 | `enabled` + `active`，NEXT = **2026-10-15 05:20:00** |
+| 停之后 | **`disabled` + `inactive`**；`systemctl list-timers --all` 里已无任何 mushroom timer |
+| **停更时段** | 起 = **2026-10-14 10:28:35 CST**（停用时刻）。今天 05:20 已跑过 ⇒ **第一个会缺的窗口 = 2026-10-15 05:20** |
+| **不会自己起来** | 三条都实测：`/etc/cron*` 无引用、`/etc/systemd/system/timers.target.wants/` 的软链已被 `disable` 移除、无其它 unit 引用它 |
+| **回补路径** | 代码**按窗口幂等**（全量覆盖 upsert）⇒ Step 3 落地后跑一次即可补齐缺失日期；**验** = `batches` 行数恢复 + `GET /environment/batches` 的"当前批次"正确（票 12 §7 D 两条） |
+| 回滚 | Step 3 落地前**两个 batch 单元文件留在盘上**；要临时顶一下 = `systemctl enable --now mushroom-batch-ingest.timer`（走的是旧通路，只在 Step 3 受阻时用） |
+
+**② 4 个 60 s 缺陷单元文件已清**（备份 → 移出 `/etc/systemd/system` → `daemon-reload`）
+
+| 单元 | 原 sha256 | 处理 |
+| --- | --- | --- |
+| `mushroom-analysis.service` | `8dc100c9e0ba54706ef6f8cd135d4e32776bc6cc1e1424114d5f6bd09ff8e40f` | 备份后移除 |
+| `mushroom-audit-ingest.service` | `3748fef7e936b570d86fdc3c7bc47431cb5524fd3e3e47f71d3f13f6673df750` | 备份后移除 |
+| `mushroom-audit-ingest.timer` | `f20e075acdfca5e9fb85e4053291700f0077ae3a90c9ac545934eb8234419cc6` | 备份后移除 |
+| `mushroom-env-ingest.service` | `36dd960cbfb0e6ded43e009bfe420f90bcadd80bb7d7989293a2c76032d269b0` | 备份后移除 |
+
+- 备份目录：**`/opt/mushroom-analysis/backups/unitfiles-20261014-102835/`**（4 个文件，逐个 sha256 与原件核对一致）
+- 处理后复验：四个 `systemctl is-enabled` 全 **`not-found`**；`list-unit-files | grep mushroom` 只剩 batch 两个
+- **单元文本另在票 01 §6 逐字留存** ⇒ 回滚 = 把备份拷回 `/etc/systemd/system/` + `systemctl daemon-reload`
+- 隐患消除：不会再出现"谁手一抖 `systemctl start` 一次 ⇒ 60 s 环控鉴权风暴 + 与容器内 audit **重复写 `operations`**"
+
+**③ Step 3 前置三条**（Chief 2026-10-14 定）
+
+1. `analysis/pyproject.toml` 加 `psycopg[binary]>=3.3.2` —— **环境官已完成**（提交 `eddfcf0`）；
+2. **`patrol-workspace/uv.lock` 由发版官统一重生成**（共享 artifact，别人不改锁）；
+3. 新镜像内自检：`python -c "import psycopg; print(psycopg.__version__)"`。
+
+**④ 宿主源码拷贝 `/opt/mushroom-analysis/src` 必须在 Step 3 落地后消失**
+
+它整目录停在 **10-12 19:07–19:19**（`batches.py` sha `98f39f52…` 仍是 `docker exec tools_mysql`），
+是今天**第四次**"仓库 ≠ 生产"、且这次是**合规面**。
+**"宿主为什么有一份源码拷贝"这件事本身记在本节**——它是一个未被版本管理、未随镜像走的影子副本。
+
+**⑤ 批次身份映射文件（`analysis.batch_map` 第 1 步，Chief 2026-10-14 派单）**
+
+| 项 | 值 |
+| --- | --- |
+| 落点 | 仓库 `analysis/data/batch_no_map.json`（= `analysis/batches.py:DEFAULT_MAP_PATH`） |
+| 生成方式 | **只读快照 + 跑他们的 CLI**：先 `sqlite3` backup API 从 `file:…?mode=ro` 备份到 `/tmp/mushrooms-snap.db`，再 `python -m analysis.batch_map --db <快照> --out …` |
+| **为什么必须走快照** | `analysis/db.py:connect()` 会 `executescript(SCHEMA)` + `migrate()` ⇒ **直接对生产库跑 CLI 会改生产库 schema**，与"只读"和部署节奏都冲突 |
+| 结果 | 快照里 `batches` **22 行 / 带 `batch_no` 22 行** ⇒ 映射 **22 条**；`generated_at=2026-10-14T10:47:12`、`source` 自证在文件里 |
+| sha256 | `9f69b9bfed6285186a2760341fac4aa61c49da00c8cbcf3d200b33d1b517e6a0`（远端 `cs` 与本地**逐字节一致**） |
+| ⚠️ 观察到的事实 | 映射键里有两组是 **`7\|…` 与 `8\|…`**（不是 `607`/`608`）——`batches` 表里这两个库房的 `room_id` 就是 `7`/`8`。**已报环境官**，别当成笔误 |
+| ⚠️ `.gitignore` | 仓库根 `.gitignore:93` 的通用 `data/` 会连它一起挡掉 ⇒ 已加**窄例外**（`!analysis/data/` + `!analysis/data/batch_no_map.json`）；实测 `.dockerignore` 的 `data` **不挡**子目录，镜像侧无需改动 |
+
 ## Comments
 
 - 2026-10-13 发版官写票。全部数字来自现场只读实测（plink 只读，无 pull/重启/改文件）。

@@ -91,6 +91,12 @@ Logs/
 src/Logs/*.log
 mlruns/
 data/
+# 例外（2026-10-14 发版官）：批次身份映射是**仓库自带的数据文件**，要随镜像发布
+# （`analysis.batch_map` 的产物，落点 = `analysis/batches.py:DEFAULT_MAP_PATH` = `analysis/data/batch_no_map.json`）。
+# 上面那条通用 `data/` 会连它一起挡掉；这里只放行这一个文件。
+# 已实测：`.dockerignore` 里的 `data` **不会**挡 `analysis/data/`（只匹配顶层同名目录），镜像侧无需改动。
+!analysis/data/
+!analysis/data/batch_no_map.json
 output/
 dist/
 .trae/
