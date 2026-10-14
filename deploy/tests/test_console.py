@@ -1320,3 +1320,50 @@ def test_recorded_end_wins_over_the_derived_one(tmp_path):
     assert starts and "end_source" not in starts[0], "落盘过结束的 start 不许再被标成 derived"
     assert all(r["log_created_at"] == NOW.isoformat(timespec="seconds") for r in body["rows"]), \
         "每条返回行都要带 log_created_at（机器可判覆盖范围）"
+
+
+# ---------- 票 16：`/api/ranges` 的信封透传（2026-10-14 破坏性形状变更） ----------
+# prod 改成信封（票 05 §5）；console 这里**原样透传**——不补默认值，
+# 否则会把"没重算过（never_computed）"洗成"样本不足（insufficient_samples）"。
+
+
+def test_ranges_passes_the_envelope_through_untouched(tmp_path):
+    """信封原样过去：state/state_text/detail 一个都不许被代理层改写或补默认值。"""
+    envelope = {"ok": True, "rows": [], "count": 0,
+                "state": "never_computed", "state_text": "还没重算过：区间表从未生成",
+                "detail": {"excluded_by_reason": {}, "n_kept": 0, "n_excluded": 0},
+                "computed_at": None, "metric": "mean_cluster_h_mm", "unit": "mm"}
+
+    def transport(url, *, params=None, body=None):
+        assert url.endswith("/ranges")
+        return envelope
+
+    with make_client(tmp_path, transport=transport) as c:
+        got = c.get("/api/ranges").json()
+    assert got == envelope, got
+
+
+def test_ranges_keeps_the_old_bare_list_shape(tmp_path):
+    """旧版线上是**裸列表**：代理层只补 `rows`/`count`，**绝不补 `state`**。
+
+    补一个 state 就等于替后端断言"算过/没算过"，而旧形状没有状态字段——页面据此如实说
+    "不知道算没算过"，不冒充"样本不足"（票 16 的负向钉子）。
+    """
+    rows = [{"metric": "mean_cluster_h_mm", "unit": "mm", "rate_per_h": 1.2}]
+
+    with make_client(tmp_path, transport=lambda url, **kw: rows) as c:
+        got = c.get("/api/ranges").json()
+    assert got["ok"] is True and got["rows"] == rows and got["count"] == 1, got
+    assert "state" not in got and "state_text" not in got, \
+        "旧形状没有状态字段 ⇒ 不许替后端断言『算过/没算过』"
+
+
+def test_ranges_reports_prod_failure_honestly(tmp_path):
+    """"取不到"与"取到了但是空的"必须分开：不通时 `ok:false` + 原因，**不返回空区间表顶替**。"""
+    def bad_transport(url, *, params=None, body=None):
+        raise ConnectionError("prod 不通")
+
+    with make_client(tmp_path, transport=bad_transport) as c:
+        got = c.get("/api/ranges").json()
+    assert got["ok"] is False and "prod 不通" in got["error"]
+    assert got["rows"] == [] and "state" not in got, "不许给一个假的 state 顶替"

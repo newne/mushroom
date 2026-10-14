@@ -1047,6 +1047,37 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
         latest = got.get("latest") if isinstance(got, dict) else None
         return {"ok": True, "box_id": box_id, "points": points, "latest": latest}
 
+    @app.get("/api/ranges")
+    def api_ranges(zone: str = "") -> dict:
+        """区间表（参数区间）——**代理 prod 的 `/ranges`**，页面不直连 prod。
+
+        2026-10-14 破坏性形状变更（环境官票 05 §5，`4ae422c`）：prod 从**裸列表**改成
+        **信封** `{ok, rows, count, state, state_text, detail, computed_at, metric, unit}`。
+        这里**原样透传信封**（页面按"两版都能读、信封优先"处理，所以旧版裸列表也能过去）——
+        **不在代理层补默认值**：`state`/`state_text` 是后端算出来的事实，代理给它编一个
+        等于把"没重算过"洗成"样本不足"（`never_computed` 与 `insufficient_samples` 是两句
+        不同的话，页面要能分开显示）。
+
+        prod 不通时如实报错（`ok:false` + `error`），**不返回一个"空区间表"顶替**——
+        "取不到"和"取到了但是空的（六态之一）"在现场是两件完全不同的事。
+        """
+        if deps.transport is None:
+            return {"ok": False, "error": "未接入 prod 分析服务（transport 未配置）", "rows": []}
+        q = urlencode({"zone": zone.strip()}) if zone.strip() else ""
+        try:
+            got = deps.transport(f"{deps.analysis_url}/ranges{('?' + q) if q else ''}")
+        except Exception as e:  # noqa: BLE001 - prod 不通不该让页面整页报错
+            return {"ok": False, "error": f"prod 查询失败：{e}", "rows": []}
+        if isinstance(got, dict):
+            return got                     # 信封原样透传（含 state/state_text/detail）
+        if isinstance(got, list):
+            # 旧版裸列表：**只补"拿到多少行"，绝不补 state**——补一个 state 就等于替后端
+            # 断言"算过/没算过"，而旧形状**没有状态字段**，我们并不知道（页面据此如实说
+            # "不知道算没算过"，不冒充"样本不足"）。
+            return {"ok": True, "rows": got, "count": len(got)}
+        return {"ok": False, "error": "prod 返回了看不懂的形状（既不是信封也不是列表）",
+                "rows": []}
+
     @app.get("/api/measurements")
     def api_measurements(
         box_id: str = "",
