@@ -171,6 +171,21 @@ INFO:     Uvicorn running on http://0.0.0.0:9213
 **一个人从零到第一张掩码（可照做）**：
 ① 装客户端（官方包或 pip）；② 从生产**人工搬运**帧到 `D:\xany-data\images\<日期>\`（**不做网络直连**）；③ 打开客户端 → **Open Dir** 选该目录；④ 选 **Polygon**（或 Brush）画菌包/菌簇轮廓、双击闭合；⑤ 标签用票 01 §4.1 的 `bag`/`cluster`/`cap`，属性用 flags（`occluded`/`truncated`/`association_valid`/`measurement_valid`/`rejection_reason`/`review_status`）——**属性怎么落进 XLABEL JSON 要实测一次**；⑥ Ctrl+S 存 JSON；⑦ 导出 `xanylabeling convert --task xlabel2coco` / `xlabel2mask`；⑧ 做 §6.2 的四条回读判据。
 
+**落点已更新（2026-10-14 15:5x 用户/Chief 裁定）**：**路径 (a)，但客户端装在蘑菇 prod（10.77.77.39）、由用户自己走 RDP 使用**（不是装在标注人机器上）。据此对上面这行成本表的差异：
+
+| 差异项 | 最终口径 |
+| --- | --- |
+| 分发 | **官方 release v4.1.1 的 `X-AnyLabeling-v4.1.1-Linux-CPU-Portable.tar.gz`**（**445,026,914 B**，sha256 `45354a08a2929eed0f1a581aba8809996b04f26308691dbd39206897fdeecbe9`，上游附 `.sha256`）；**CPU 版**（prod 无 NVIDIA GPU） |
+| 外网 | **prod 可直连**（`github.com`/`pypi.org`/`mirrors.aliyun.com` 全 200）⇒ 直接 `curl -LO` + `sha256sum -c`，**不需人工搬包** |
+| 安装路径 | **`/data/annot/xanylabeling-4.1.1/`**（`/data` 剩 1.5 T；`/` 只剩 49 G，不装 `/`）；数据 `/data/annot/{images,labels,exports}` |
+| 限流 | `nice -n 19` + `taskset -c 2,3`（4 核给 2 核），必要时 `systemd-run --scope -p CPUQuota=150%` |
+| systemd | **不写服务、不开机自启**（Chief 明令）；只在 RDP 会话里前台跑 |
+| RDP 注意 | 断连默认保会话 ⇒ **退出 RDP 前自己关客户端**；建议跑在专用非 root 账号 `annot` |
+| 避开巡检轮 | 实测节拍 **每 3 小时、常在 `:27`**（`15:27:44/12:27:45/09:27:47/06:27:45/03:27:57`）⇒ 避开 **`:18–:35`**（**不是** Chief 信里说的 7:40） |
+| 回传/备份 | `rpull.ps1` 拉回本机；`labels` 每日 tar 到 `/data/annot/backup/` 保留 30 天 |
+| 卸载 | `rm -rf /data/annot/xanylabeling-4.1.1`（自包含、无服务）；停进程 `pkill -f xanylabeling` |
+| 验收 | 按 Chief 第 4 条：RDP 启动截图+版本号 → 一袋一簇掩码+袋顶折线+一个帽掩码能画能存 → 导出 COCO 回读校验 → 资源实测 + 下一轮 `n_frames_recorded`/失败数对比 → 路径清单 |
+
 **我同意 (a) 的理由**：零服务端资源、不动生产机（4 核已在跑 49 个容器）、不需要管理员权限、不改系统网络配置；P0/P1 的人工标注量本来就够用；9213 的价值在 P2，不必此刻跨机。
 
 ### 7.2 (b) Web 集中标注路线（要浏览器多人协作才走）
