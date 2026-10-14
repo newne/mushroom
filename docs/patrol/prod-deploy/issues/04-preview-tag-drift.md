@@ -85,3 +85,52 @@ docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate 
   patrol / console / analysis，所以"谁重建谁换 tag"。**下次有人对 console 执行
   `docker compose up -d` 会顺手把它带到新 tag**——那是预期漂移，不是故障；要三者一致需单独批准一次
   console 重建（preview 已有独立变量，不受影响）。详见票 06 §H。
+
+## 6. 第二条同形状的交付通道：**页面靠 scp、后端靠镜像**（2026-10-14）
+
+`docker/mushroom_solution.yml:266-277`：`mushroom_console_web` 的页面**不打进镜像**，是宿主
+bind mount `../mushroom_patrol/web:/usr/share/nginx/html:ro`（注释写着"改页面只需 scp 一次"）。
+⇒ **页面源码在仓库、运行的字节在宿主**；而**后端 `console.py` 在镜像里**。两条通道生效时机不同
+⇒ 这是今天**第四条**"仓库有 ≠ 生产有"（前三条：`capture.py` bind-mount、measure/framing、analysis 加列）。
+
+**实测（2026-10-14 10:0x，只读）**：
+
+| 项 | 值 |
+| --- | --- |
+| 宿主页面 `.../mushroom_patrol/web/index.html` | 172 811 B / 3174 行 / sha256 `793c023c…` / mtime **10-13 14:48** |
+| 仓库 HEAD blob `web/console/index.html` | **219 286 B / 3922 行** / sha256 `acdefd52…`（工作区对该文件**无未提交改动**，已是 HEAD 内容） |
+| 票 12 的「**未核查**」文案 | 宿主页面 **0 命中** ⇒ **界面师那批 UI 与票 12 都还没进站点** |
+| 现役 console 路由 | 旧镜像 `b64027b` 的 `/api/measurements` = **404**（路由不存在） |
+| 字段透传 | `/api/rounds` **原样透传** `suspect_duplicate` / `dup_groups` / `content_check_error` / `n_duplicate` / `n_frames_recorded` ✓（不滤） |
+
+### 6.1 发布顺序（**不可颠倒**；Chief 2026-10-14 预批）
+
+**为什么不能先同步页面**：新页面要调 `/api/measurements`，而旧后端没有这条路由 ⇒
+**只同步页面会把"曲线"变成"查不到测量数据"**（假故障）。所以：
+
+1. 备份宿主页面（带时间戳）+ 记下 console 当前 tag；
+2. **先重建 `mushroom_console`**（同一 `PATROL_IMAGE` = `89e4a54`）；验收：`/api/measurements` **200 且响应带 `rows`**；
+3. **再同步页面**：只传 `web/console/index.html`（`verify-page.js` 是测试脚本、不进站点）；
+   上传后**核远端 sha256 = 本地**；
+4. 前后健康检查（六容器）、挑**无轮次在飞**的窗口；
+5. 任一步红即**停手回报**。
+
+本轮**不做 `CONSOLE_IMAGE` 解耦**（另一次改动）；只把这条交付通道记在这里，防下次又踩。
+
+### 6.2 回滚路径（本次发布）
+
+```bash
+# 页面（宿主机）：
+cp -a /home/sysadmin/algorithm/mushroom_patrol/web/index.html.bak-<ts> \
+      /home/sysadmin/algorithm/mushroom_patrol/web/index.html
+# 后端 console（单容器；PATROL_IMAGE 是共享变量，走完必须复原）：
+cd /home/sysadmin/algorithm/mushroom_service
+cp -a .env.bak-<ts> /tmp/env.now          # 记下发版前那份（PATROL_IMAGE=89e4a54）
+#   把 .env 的 PATROL_IMAGE 临时改成 b64027b，然后：
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_console
+cp -a /tmp/env.now .env                   # ★ 立刻复原新 tag，否则 patrol/analysis 下次重建会漂回旧版
+```
+
+停机面：**只有 console 后端 :8001 约 10–20 s**；页面 8002 由 `console_web` 供应、**不重建、不受影响**。
+但 `PATROL_RUN_URL=http://mushroom_console:8001/api/patrol/run` 是**算法侧触发巡检的入口**
+⇒ **别压在轮次边界**（轮次约每 3 小时、在 :27）。
