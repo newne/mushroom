@@ -57,15 +57,22 @@ def stubs(image):
 # ---------- 两个方向的局部尺度 ----------
 
 def test_cluster_detections_carry_two_direction_scales():
+    """水平用**袋宽**、竖直用**袋高**（两个不同参考物）——旧实现两向同用袋宽是退化的。"""
     img = synth_frame()
     res = detect(img, depression_deg=None, bag_cfg=_bag_cfg())
     assert res.detections, "接线后应至少出一个簇"
+    from measure.bag_ruler import find_bags
+
+    bags, _ = find_bags(img, _bag_cfg())
+    ref_w = float(bags[0].characteristic_width_px() or bags[0].width_px)
+    ref_h = float(bags[0].height_px)
     for d in res.detections:
         m = d.metrics
         assert m.cluster_w_px > 0 and m.cluster_h_px > 0
-        # 水平 240 mm、竖直 140 mm 各自除以同一个袋参考宽
-        assert m.mm_per_px_x == pytest.approx(240.0 / _ref_px(d), rel=0.35)
-        assert m.mm_per_px_y == pytest.approx(m.mm_per_px_x * 140.0 / 240.0, rel=1e-6)
+        assert m.mm_per_px_x == pytest.approx(240.0 / ref_w, rel=0.35)
+        assert m.mm_per_px_y == pytest.approx(140.0 / ref_h, rel=0.35)
+        # 退化值（竖直也除以袋宽）不许相等
+        assert m.mm_per_px_y != pytest.approx(m.mm_per_px_x * 140.0 / 240.0, rel=1e-3)
 
 
 def test_aggregate_uses_per_axis_scale_not_one_mm_per_px():
@@ -260,8 +267,13 @@ def test_theta_injected_applies_projection_to_vertical_only():
     d = res.detections[0]
     import math
 
+    from measure.bag_ruler import find_bags
+
+    bags, _ = find_bags(img, _bag_cfg())
+    ref_h = float(bags[0].height_px)
     assert d.metrics.mm_per_px_y == pytest.approx(
-        d.metrics.mm_per_px_x * 140.0 / 240.0 / math.cos(math.radians(30.0)), rel=1e-6)
+        140.0 / ref_h / math.cos(math.radians(30.0)), rel=0.35)
+    assert d.metrics.mm_per_px_x == pytest.approx(240.0 / float(bags[0].width_px), rel=0.35)
     assert "no_theta" not in res.evidence.flags
     assert "height_uncorrected" not in res.evidence.flags
 

@@ -317,18 +317,41 @@ def test_no_zero_is_written_for_missing_values():
 # ---------- 一期验收量：菌簇长度 / 菌簇直径（Chief 2026-10-14 裁定） ----------
 
 def test_cluster_estimate_uses_standard_bag_sizes():
-    """袋长 240mm 定水平、袋径 140mm 定竖直；真值：袋宽 200px ⇒ 水平 1.2 mm/px。"""
+    """水平 = 袋长240/袋**宽**；竖直 = 袋径140/袋**高**（**两个不同参考物**）。
+
+    回归点（Chief 2026-10-14 独立复现）：旧实现两向都用袋宽 ⇒ 交叉校验恒 `240/140 = 42%`，
+    那不是"两方向不自洽"，是**同一个数被量了两遍**（退化、无信息量）。
+    """
     gray, _ = synth_frame(bag_width=200)
     bags, _ = bags_of(gray)
     fruits, _ = fruits_of(gray)
     e = estimate_cluster(fruits, bags, depression_deg=0.0)
-    assert e.mm_per_px_x == pytest.approx(240.0 / 200, rel=0.05)
-    assert e.mm_per_px_y == pytest.approx(140.0 / 200, rel=0.05)
-    assert e.cluster_w_mm == pytest.approx(e.cluster_w_px * e.mm_per_px_x, rel=1e-6)
-    assert e.cluster_h_mm == pytest.approx(e.cluster_h_px * e.mm_per_px_y, rel=1e-6)
+    ref_w = float(np.median([b.characteristic_width_px() or b.width_px for b in bags]))
+    ref_h = float(np.median([b.height_px for b in bags]))
+    assert e.mm_per_px_x == pytest.approx(240.0 / ref_w, rel=0.05)
+    assert e.mm_per_px_y == pytest.approx(140.0 / ref_h, rel=0.05)
+    # 退化值（两向同用袋宽）必须**不等于**实测值——否则交叉校验又退化了
+    assert ref_h != pytest.approx(ref_w, rel=0.05), "合成帧的袋高应与袋宽不同，否则测不出退化"
+    assert e.mm_per_px_y != pytest.approx(e.mm_per_px_x * 140.0 / 240.0, rel=1e-3)
+    assert "交叉校验" in e.scale_note and "袋高" in e.scale_note
     assert "estimate" in e.quality
     assert "mean_cluster_w_mm" in e.estimated_fields and "mean_cluster_h_mm" in e.estimated_fields
-    assert "交叉校验" in e.scale_note
+
+
+def test_cluster_is_per_bag_not_whole_frame():
+    """**一袋一簇**（Chief 2026-10-14）：簇宽是袋内跨度，不是整帧外接范围。
+
+    旧实现拿整帧 `max(x1)-min(x0)` ⇒ 21 袋 482 实例横跨画面，算出 **2.4 米**。
+    这里用 3 袋横排的合成帧：整帧跨度 ≈ 3 袋 + 2 间隙，而袋级簇宽只有一袋的量级。
+    """
+    gray, _ = synth_frame(bag_width=200, n_bags=3)
+    bags, _ = bags_of(gray)
+    fruits, _ = fruits_of(gray)
+    e = estimate_cluster(fruits, bags, depression_deg=0.0)
+    frame_span_px = max(i.x1 for i in fruits) - min(i.x0 for i in fruits)
+    assert e.n_clusters >= 1 and e.n_clusters == e.n_bags
+    assert e.cluster_w_px < frame_span_px * 0.6, "簇宽仍是整帧跨度（没按袋分组）"
+    assert "每袋一簇" in e.note and f"{e.n_clusters} 簇" in e.note
 
 
 def test_cluster_height_needs_depression_but_width_does_not():

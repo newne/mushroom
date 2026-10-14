@@ -315,6 +315,62 @@ class ClusterEstimate:
     mm_per_px_y: float | None
     scale_note: str = ""
     note: str = ""
+    #: 本帧参与统计的**簇数 = 袋数**（每袋一簇）；`n` 是朵数，别把朵数当簇数（Chief 2026-10-14）
+    n_clusters: int = 0
+    n_bags: int = 0
+
+
+def cluster_by_bag(instances: list[FruitInstance], bags: list[BagRegion], *,
+                   cfg: EstimateConfig | None = None
+                   ) -> list[tuple[BagRegion, list[FruitInstance]]]:
+    """把菇体实例**按菌包分组**（同排 + 最近袋），返回 ``[(袋, 该袋上的实例), …]``。
+
+    **这是"菌簇"的定义**（Chief 2026-10-14）：用户要的"菌簇直径/长度"是**一袋一簇**，
+    不是"整帧所有实例的外接范围"。旧实现拿整帧 `max(x1)-min(x0)` 当簇宽，21 袋 482 实例
+    横跨整幅画面 ⇒ 算出 **2.4 米**（Chief 独立复现，`recon/e2e_cluster.py`）。
+    分组规则与 `L3Detector` **共用这一份**（避免"估计层有、接线层漏搬"那类分叉）。
+    """
+    groups: dict[int, tuple[BagRegion, list[FruitInstance]]] = {}
+    for inst in instances:
+        bag = nearest_bag_in_same_row(bags, inst.cy, None, x=inst.cx) if bags else None
+        if bag is None:
+            continue                      # 找不到同排袋 ⇒ **不猜归属**（fail-closed）
+        key = id(bag)
+        if key not in groups:
+            groups[key] = (bag, [])
+        groups[key][1].append(inst)
+    return list(groups.values())
+
+
+def bag_scale_refs(bag: BagRegion, *, bag_length_mm: float | None,
+                   bag_diameter_mm: float | None, depression_deg: float | None,
+                   station_mm_per_px: float | None = None
+                   ) -> tuple[float | None, float | None, float | None, float | None]:
+    """一袋的局部尺度 ``(mm_per_px_x, mm_per_px_y, ref_x_px, ref_y_px)``。
+
+    - **水平**：袋长（240 mm）/ **袋特征宽 px**；
+    - **竖直**：袋径（140 mm）/ **袋高 px** —— 注意**不是**再用袋宽！
+      旧实现两个方向都用袋宽 ⇒ 交叉校验恒为 `240/140 = 42%`（**退化、无信息量**），
+      这就是 Chief 看到"交叉差 42%"的根因（它不是在量两个对象，而是在量同一个数）。
+    - θ 注入时把投影补偿 **÷cosθ 折进 `mm_per_px_y`**（聚合层只管乘）；
+    - 站位标定值（ADR-0024）给了就用它、两方向同值（参考物尺寸无意义 ⇒ ref 返回 None）。
+    """
+    if station_mm_per_px:
+        mpp = float(station_mm_per_px)
+        return mpp, mpp, None, None
+    if bag_length_mm is None or bag_diameter_mm is None:
+        return None, None, None, None
+    ref_x = float(bag.characteristic_width_px() or bag.width_px)
+    ref_y = float(bag.height_px)
+    if ref_x <= 1 or ref_y <= 1:
+        return None, None, None, None
+    mpp_x = float(bag_length_mm) / ref_x
+    mpp_y = float(bag_diameter_mm) / ref_y
+    if depression_deg is not None:
+        cos_t = math.cos(math.radians(float(depression_deg)))
+        if cos_t > 1e-6:
+            mpp_y = mpp_y / cos_t
+    return mpp_x, mpp_y, ref_x, ref_y
 
 
 def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
@@ -323,22 +379,21 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
                      depression_deg: float | None,
                      row_reliable: callable | None = None,
                      allow_uncorrected_height: bool = False,
+                     station_mm_per_px: float | None = None,
                      cfg: EstimateConfig | None = None) -> ClusterEstimate:
-    """一帧可信菇体 → 菌簇竖直跨度 / 横向范围（mm 估算）。
+    """一帧可信菇体 → **袋级菌簇**的竖直跨度 / 横向范围（mm 估算）。
 
-    - **水平**用袋长标准值（240mm）定局部 `mm_per_px_x`；**竖直**用袋径标准值（140mm）
-      定 `mm_per_px_y` 作**交叉校验**，两者不一致超过 `SCALE_AGREE_TOL` 就在 note 里报；
-    - 竖直跨度还要 **÷cosθ**：`depression_deg=None` ⇒ `cluster_h_mm` 写 NULL + **`no_theta`**
-      （**不是 `no_scale`**：标尺是有的，只是投影项缺；横向仍可出，因为水平方向不受俯角影响）；
-    - `allow_uncorrected_height=True`（**默认关**，Chief 2026-10-14 裁定 (b)）：θ 未注入时
-      改为出**未做 cosθ 补偿的竖直投影跨度**（`h_px × mm_per_px_y`）+ 标记 `height_uncorrected`，
-      同时保留 `no_theta`。该值**不是长度**、只能作相对比较（同站位/同档/同 imaging_profile）。
+    **每袋一簇**（`cluster_by_bag`），再对"可靠袋"取**均值**；`n` 是**朵数**，
+    簇数/袋数写进 `note`（列不变，20 列里没有簇数）。
+
+    - 横向用袋长 240 mm / 袋特征宽；竖直用袋径 140 mm / **袋高**（交叉校验因此**真有信息量**）；
+    - θ 未注入：竖直列默认 NULL + `no_theta`；`allow_uncorrected_height=True` 时出
+      **未做 cosθ 补偿的投影跨度** + `height_uncorrected`（**不是长度**）；
     - 远排（`row_reliable` 为 False）/ 无实例 ⇒ 分别 `unreliable` / `no_detection`。
     """
     cfg = cfg or EstimateConfig()
     flags: set[str] = set()
     if not instances:
-        # **远排不许静默消失**：若整帧只剩不可信的排，出 `unreliable` 而不是 `no_detection`
         if all_rows_unreliable(bags):
             return ClusterEstimate(None, None, None, None, 0, None, None, (),
                                    contract.format_flags({"unreliable"}),
@@ -353,49 +408,69 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
                                contract.format_flags({"unreliable"}),
                                None, None, note="实例都在不可信的排上（远排），不出 mm")
 
-    ys = [i.cy for i in reliable]
-    xs = [i.cx for i in reliable]
-    w_px = (max(i.x1 for i in reliable) - min(i.x0 for i in reliable)) or 1
-    h_px = (max(i.y1 for i in reliable) - min(i.y0 for i in reliable)) or 1
-
-    if bag_length_mm is None or bag_diameter_mm is None:
+    groups = cluster_by_bag(reliable, bags, cfg=cfg)
+    if not groups:
         flags.add("no_scale")
-        return ClusterEstimate(None, None, h_px, w_px, len(instances), None, None, (),
+        return ClusterEstimate(None, None, None, None, len(instances), None, None, (),
                                contract.format_flags(flags), None, None,
-                               note="缺菌包标准尺寸 ⇒ mm 写 NULL")
+                               note="实例找不到同排菌包（禁止跨排借用尺度）⇒ mm 写 NULL")
 
-    # 每个实例只用**同排**菌包定局部尺度（水平用袋长、竖直用袋径）
-    sx, sy = [], []
-    for inst in reliable:
-        bag = nearest_bag_in_same_row(bags, inst.cy, None, x=inst.cx) if bags else None
-        if bag is None:
+    # 逐袋：像素跨度 + 该袋自己的局部尺度（水平 240/袋宽、竖直 140/袋高）
+    spans_w: list[float] = []
+    spans_h: list[float] = []
+    sx: list[float] = []
+    sy: list[float] = []
+    refs_x: list[float] = []
+    refs_y: list[float] = []
+    n_inst_in_clusters = 0
+    for bag, group in groups:
+        mpp_x, mpp_y, ref_x, ref_y = bag_scale_refs(
+            bag, bag_length_mm=bag_length_mm, bag_diameter_mm=bag_diameter_mm,
+            depression_deg=depression_deg, station_mm_per_px=station_mm_per_px)
+        if mpp_x is None or mpp_y is None:
             continue
-        ref_px = float(bag.characteristic_width_px() or bag.width_px)
-        if ref_px > 1:
-            sx.append(float(bag_length_mm) / ref_px)
-            sy.append(float(bag_diameter_mm) / ref_px)
-    if not sx:
+        spans_w.append(float(max(i.x1 for i in group) - min(i.x0 for i in group)))
+        spans_h.append(float(max(i.y1 for i in group) - min(i.y0 for i in group)))
+        sx.append(mpp_x)
+        sy.append(mpp_y)
+        if ref_x:
+            refs_x.append(ref_x)
+        if ref_y:
+            refs_y.append(ref_y)
+        n_inst_in_clusters += len(group)
+
+    n_clusters = len(sx)
+    if not n_clusters:
         flags.add("no_scale")
-        return ClusterEstimate(None, None, h_px, w_px, len(instances), None, None, (),
+        return ClusterEstimate(None, None, None, None, len(instances), None, None, (),
                                contract.format_flags(flags), None, None,
-                               note="找不到同排菌包（禁止跨排借用尺度）⇒ mm 写 NULL")
+                               note="菌包缺尺寸/袋宽不可用 ⇒ 无局部标尺，mm 写 NULL")
+
     mpp_x = float(np.median(sx))
     mpp_y = float(np.median(sy))
+    w_px = float(np.median(spans_w))
+    h_px = float(np.median(spans_h))
+    # **横向口径**：袋长 240 mm / 袋特征宽；**竖直口径**：袋径 140 mm / 袋高 —— 两个不同参考物，
+    # 交叉校验才有意义（旧实现两向同用袋宽 ⇒ 恒 42%，见 bag_scale_refs 注释）。
     disagree = abs(mpp_x - mpp_y) / max(mpp_x, mpp_y)
+    scale_note = (f"袋级簇 n={n_clusters}；水平 袋长240mm/袋宽{np.median(refs_x):.0f}px"
+                  f"→{mpp_x:.4f} mm/px；竖直 袋径140mm/袋高{np.median(refs_y):.0f}px"
+                  f"→{mpp_y:.4f} mm/px（**真交叉校验**，差 {disagree * 100:.0f}%）"
+                  if refs_x and refs_y else
+                  f"袋级簇 n={n_clusters}；站位标定 {mpp_x:.4f} mm/px（两方向同值）")
+    if disagree > SCALE_AGREE_TOL:
+        # 不新造 flag（契约面）：把不自洽写进 scale_note，供人与评估脚本读
+        scale_note += "；⚠️ 两方向不自洽：竖直向的「可见高=袋径」假设需现场确认"
 
-    # **标尺自身相对误差（Δw/w）**：优先用调用方注入的现场值，否则用本帧逐实例局部尺度的散布
-    # （2026-10-14 实测：这是主导项 20–30%，旧的 ref_px=None 写法把它整个漏掉了）
     ref_rel = (float(cfg.bag_diameter_rel_err) if cfg.bag_diameter_rel_err is not None
                else scale_dispersion_rel_err(sx))
     eff_cfg = cfg if ref_rel is None or ref_rel == cfg.bag_diameter_rel_err else dataclasses.replace(
         cfg, bag_diameter_rel_err=ref_rel)
-    scale_note = (f"袋长240mm→{mpp_x:.4f} mm/px（水平）；袋径140mm→{mpp_y:.4f} mm/px（竖直，"
-                  f"交叉校验，差 {disagree*100:.0f}%）")
     if ref_rel is not None:
-        src = "现场注入" if cfg.bag_diameter_rel_err is not None else "本帧逐实例局部尺度散布"
-        scale_note += f"；标尺相对误差 Δw/w={ref_rel*100:.0f}%（{src}，n={len(sx)}）"
+        src = "现场注入" if cfg.bag_diameter_rel_err is not None else "本帧逐袋局部尺度散布"
+        scale_note += f"；标尺相对误差 Δw/w={ref_rel * 100:.0f}%（{src}，n={n_clusters}）"
 
-    w_mm = w_px * mpp_x
+    w_mm = float(np.mean([s * m for s, m in zip(spans_w, sx)]))
     unc_w, unc_w_note = propagate_uncertainty(mean_len_px=w_px, ref_px=None,
                                               mm_per_px=mpp_x,
                                               depression_deg=None, cfg=eff_cfg)
@@ -403,11 +478,9 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
     h_mm = unc_h = None
     unc_h_note = ""
     if depression_deg is None:
-        # **θ 缺 ≠ 没标尺**（Chief 2026-10-14）：水平量是有效值，不许整行标成不可用
         flags.add("no_theta")
         if allow_uncorrected_height:
-            # 裁定 (b)：出**未做 cosθ 补偿的竖直投影跨度**——不是长度、只作相对比较
-            h_mm = h_px * mpp_y
+            h_mm = float(np.mean([s * m for s, m in zip(spans_h, sy)]))
             flags.add("height_uncorrected")
             unc_h, unc_h_note = propagate_uncertainty(mean_len_px=h_px, ref_px=None,
                                                       mm_per_px=mpp_y,
@@ -417,14 +490,15 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
         else:
             note = "未注入俯角（deg）⇒ 竖直跨度写 NULL（水平仍可出：不受俯角影响）"
     else:
-        cos_t = math.cos(math.radians(float(depression_deg)))
-        h_mm = h_px * mpp_y / max(cos_t, 1e-6)
+        h_mm = float(np.mean([s * m for s, m in zip(spans_h, sy)]))
         unc_h, unc_h_note = propagate_uncertainty(mean_len_px=h_px, ref_px=None,
                                                   mm_per_px=mpp_y,
                                                   depression_deg=depression_deg, cfg=eff_cfg)
         note = f"竖直 ÷cosθ（θ={float(depression_deg):.1f}°）"
     fields = tuple(f for f, v in (("mean_cluster_h_mm", h_mm),
                                   ("mean_cluster_w_mm", w_mm)) if v is not None)
+    note = (f"{len(instances)} 朵（落在可测簇内 {n_inst_in_clusters}）/ {n_clusters} 簇 / "
+            f"{n_clusters} 袋（每袋一簇）；" + note)
     if unc_w_note:
         note += f"；{unc_w_note}"
     if unc_h_note:
@@ -434,4 +508,5 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
         n_instances=len(instances), uncertainty_h_mm=unc_h, uncertainty_w_mm=unc_w,
         estimated_fields=fields, quality=contract.format_flags(flags),
         mm_per_px_x=mpp_x, mm_per_px_y=mpp_y, scale_note=scale_note, note=note,
+        n_clusters=n_clusters, n_bags=n_clusters,
     )

@@ -111,6 +111,8 @@ class L3Config:
     roi_frac: float = DEFAULT_ROI_FRAC
     bag_cfg: BagConfig = field(default_factory=BagConfig)
     fruit_cfg: FruitConfig = field(default_factory=FruitConfig)
+    #: 分组/尺度规则与 stimate 层共用同一份实现（cluster_by_bag / ag_scale_refs）
+    estimate_cfg: object = None
 
 
 class L3Detector:
@@ -123,33 +125,26 @@ class L3Detector:
 
     def _bag_clusters(self, kept: list[FruitInstance], bags: list[BagRegion]
                       ) -> dict[int, tuple[BagRegion, list[FruitInstance]]]:
-        groups: dict[int, tuple[BagRegion, list[FruitInstance]]] = {}
-        for inst in kept:
-            bag = nearest_bag_in_same_row(bags, inst.cy, self.cfg.bag_cfg, x=inst.cx)
-            if bag is None:
-                continue
-            key = id(bag)
-            if key not in groups:
-                groups[key] = (bag, [])
-            groups[key][1].append(inst)
-        return groups
+        """按袋分组 —— **与 `estimate.cluster_by_bag()` 同一份规则**（禁止各写一套）。"""
+        from measure.estimate import cluster_by_bag
+
+        return {id(bag): (bag, group)
+                for bag, group in cluster_by_bag(kept, bags, cfg=self.cfg.estimate_cfg)}
 
     def _scales(self, bag: BagRegion) -> tuple[float | None, float | None, float | None]:
-        """(x 尺度, y 尺度, 参考宽 px)。θ 未注入 ⇒ y 尺度不做投影补偿。"""
-        cfg = self.cfg
-        if cfg.station_mm_per_px:
-            mpp = float(cfg.station_mm_per_px)
-            return mpp, mpp, None
-        ref_px = float(bag.characteristic_width_px() or bag.width_px)
-        if ref_px <= 1:
-            return None, None, None
-        mpp_x = cfg.bag_length_mm / ref_px
-        mpp_y = cfg.bag_diameter_mm / ref_px
-        if cfg.depression_deg is not None:
-            cos_t = math.cos(math.radians(float(cfg.depression_deg)))
-            if cos_t > 1e-6:
-                mpp_y = mpp_y / cos_t
-        return mpp_x, mpp_y, ref_px
+        """一袋的局部尺度：**与 `estimate.bag_scale_refs()` 同一份实现**。
+
+        返回 ``(mm_per_px_x, mm_per_px_y, ref_x_px)``；竖直那一路用**袋高**（不是袋宽），
+        θ 注入时已折进 `mm_per_px_y`。旧实现两向都用袋宽 ⇒ 交叉校验恒 42%（退化）。
+        """
+        from measure.estimate import bag_scale_refs
+
+        mpp_x, mpp_y, ref_x, _ref_y = bag_scale_refs(
+            bag, bag_length_mm=self.cfg.bag_length_mm,
+            bag_diameter_mm=self.cfg.bag_diameter_mm,
+            depression_deg=self.cfg.depression_deg,
+            station_mm_per_px=self.cfg.station_mm_per_px)
+        return mpp_x, mpp_y, ref_x
 
     # ---- 对外协议 ----
 
@@ -264,7 +259,8 @@ class L3Detector:
             scale_ref_px=(ref_med if scale_source == "bag_standard" else None),
             flags=frozenset(flags),
             n_instances=n_instances,
-            note="；".join(note_bits),
+            note=(f"{n_instances} 朵 / {len(groups)} 簇 / {len(groups)} 袋（每袋一簇）；"
+                  + "；".join(note_bits)),
             scale_dispersion=disp,
         )
         return FrameResult(dets, ev)
