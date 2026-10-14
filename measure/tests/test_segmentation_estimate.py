@@ -188,9 +188,10 @@ def test_estimate_needs_both_injected_values():
     e1 = estimate_stipe_length(fruits, bags, bag_diameter_mm=None, depression_deg=20.0)
     assert e1.mean_len_mm is None and "no_scale" in e1.quality
     assert e1.mean_len_px is not None            # 像素量仍有（但不冒充 mm）
-    # 缺俯角
+    # 缺俯角 ⇒ no_theta（**不是 no_scale**：标尺有，只是投影项缺）
     e2 = estimate_stipe_length(fruits, bags, bag_diameter_mm=140.0, depression_deg=None)
-    assert e2.mean_len_mm is None and "no_scale" in e2.quality
+    assert e2.mean_len_mm is None
+    assert "no_theta" in e2.quality and "no_scale" not in e2.quality
     # 两个都给 ⇒ 出 mm + estimate
     e3 = estimate_stipe_length(fruits, bags, bag_diameter_mm=140.0, depression_deg=20.0)
     assert e3.mean_len_mm is not None and e3.mean_len_mm > 0
@@ -258,15 +259,34 @@ def test_cluster_estimate_uses_standard_bag_sizes():
 
 
 def test_cluster_height_needs_depression_but_width_does_not():
-    """水平不受俯角影响 ⇒ 缺 θ 时直径照出、长度写 NULL + no_scale。"""
+    """水平不受俯角影响 ⇒ 缺 θ 时直径照出、长度写 NULL + **`no_theta`（不是 `no_scale`）**。
+
+    Chief 2026-10-14：把"θ 缺"记成 `no_scale` 会让 213/218 帧的有效直径被下游整行丢掉。
+    """
     gray, _ = synth_frame()
     bags, _ = bags_of(gray)
     fruits, _ = fruits_of(gray)
     e = estimate_cluster(fruits, bags, depression_deg=None)
     assert e.cluster_w_mm is not None
     assert e.cluster_h_mm is None
-    assert "no_scale" in e.quality
+    assert "no_theta" in e.quality
+    assert "no_scale" not in e.quality          # 标尺是有的，不许说成没有
     assert "mean_cluster_h_mm" not in e.estimated_fields
+    # 行**不算不可用**：有有效值（w），只是缺投影修正项
+    assert contract.is_usable(e.quality), "no_theta 不许让整行变不可用"
+
+
+def test_no_theta_does_not_kill_the_row_but_no_scale_does():
+    """两个标记的处置必须不同：`no_theta` 只描述缺哪个修正项，`no_scale` 才是没标尺。"""
+    gray, _ = synth_frame()
+    bags, _ = bags_of(gray)
+    fruits, _ = fruits_of(gray)
+    with_theta = estimate_cluster(fruits, bags, depression_deg=20.0).quality
+    no_theta = estimate_cluster(fruits, bags, depression_deg=None).quality
+    no_scale = estimate_cluster(fruits, [], depression_deg=20.0).quality   # 没袋 ⇒ 真没标尺
+    assert contract.is_usable(with_theta) and contract.is_usable(no_theta)
+    assert not contract.is_usable(no_scale)
+    assert "no_theta" not in no_scale and "no_scale" in no_scale
 
 
 def test_cluster_estimate_three_codes_still_distinct():
@@ -276,7 +296,9 @@ def test_cluster_estimate_three_codes_still_distinct():
     assert "no_detection" in estimate_cluster([], bags, depression_deg=20.0).quality
     assert "unreliable" in estimate_cluster(fruits, bags, depression_deg=20.0,
                                             row_reliable=lambda i: False).quality
-    assert "no_scale" in estimate_cluster(fruits, bags, depression_deg=None).quality
+    # 第四条：θ 缺 = no_theta；真没标尺 = no_scale（两个不许混）
+    assert "no_theta" in estimate_cluster(fruits, bags, depression_deg=None).quality
+    assert "no_scale" in estimate_cluster(fruits, [], depression_deg=20.0).quality
 
 
 def test_cluster_mm_is_none_not_zero_when_unmeasurable():

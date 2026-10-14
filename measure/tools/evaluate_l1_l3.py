@@ -8,7 +8,7 @@
 - **自标对照**：同一排菌包"水平 240mm 口径"与"竖直 140mm 口径"推出的 mm/px 差异——
   两者在同深度下应一致，不一致就是透视/朝向问题（票 15 §12）。
 - **交付量**：`estimate_cluster()` 的 `mean_cluster_w_mm`（240mm 水平口径，缺 θ 也能出）
-  与 `mean_cluster_h_mm`（140mm 竖直 + ÷cosθ，未注入 θ ⇒ NULL + `no_scale`）。
+  与 `mean_cluster_h_mm`（140mm 竖直 + ÷cosθ，未注入 θ ⇒ NULL + `no_theta`）。
 
 用法（仓库根）：
 
@@ -189,6 +189,7 @@ def _summary(rows: list[dict], frames: int, roi_frac: float) -> str:
     scale_frames = sum(1 for r in rows if r["frame_cluster_w_mm"] is not None)
     h_frames = sum(1 for r in rows if r["frame_cluster_h_mm"] is not None)
     no_scale = sum(1 for r in rows if "no_scale" in (r["quality"] or ""))
+    no_theta = sum(1 for r in rows if "no_theta" in (r["quality"] or ""))
     unreliable = sum(1 for r in rows if "unreliable" in (r["quality"] or ""))
     no_det = sum(1 for r in rows if "no_detection" in (r["quality"] or ""))
     total_l1 = sum(r["l1_sec"] for r in rows)
@@ -212,7 +213,10 @@ def _summary(rows: list[dict], frames: int, roi_frac: float) -> str:
         f"{stat('frame_cluster_w_mm', '{:.1f}')} mm",
         f"- **交付量**：`mean_cluster_w_mm` 出值 **{scale_frames}/{frames}** 帧；"
         f"`mean_cluster_h_mm` 出值 **{h_frames}/{frames}** 帧（未注入 θ ⇒ 预期 0）",
-        f"- **失效码**：`no_scale` {no_scale} / `no_detection` {no_det} / `unreliable` {unreliable} 帧（三码分开计数）",
+        f"- **失效码**（四条分开计数）：`no_theta` {no_theta} / `no_scale` {no_scale} / "
+        f"`no_detection` {no_det} / `unreliable` {unreliable} 帧——"
+        f"θ 缺只记 `no_theta`（有值但缺修正项，**不算整行不可用**）；"
+        f"`no_scale` 只留给「完全没有标尺」",
         f"- **耗时**：L1 合计 {total_l1:.0f} s（均 {total_l1 / frames:.2f} s/帧）；"
         f"L3 ROI 合计 {total_l3:.0f} s（均 {total_l3 / frames:.2f} s/帧）；"
         f"**合计均 {(total_l1 + total_l3) / frames:.2f} s/帧**",

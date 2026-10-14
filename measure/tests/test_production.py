@@ -201,19 +201,30 @@ def test_frame_from_meta_keeps_station_and_angle():
 
 
 def test_timing_summary_counts_over_gate_frames():
+    from measure.production import MEASURE_TIME_GATE_S, timing_summary
+
+    # 门已改判：单帧 3.75 s / 轮 180 s（Chief 2026-10-14，票 15 §8.1）
+    assert MEASURE_TIME_GATE_S == pytest.approx(180.0 / 48)
+    line = timing_summary([0.9, 1.05, 4.4, 0.8], gate_s=1.1, round_gate_s=180.0)
+    assert "4 帧" in line and "超门(>1.10 s) 1 帧" in line
+    # 偶数帧数的中位数 = 中间两个的均值（[0.8, 0.9, 1.05, 4.4] ⇒ 0.975 ≈ 0.98）
+    assert "均 1.79 s/帧" in line and "中位 0.98 s" in line
+    assert "轮增量在门内" in line
+
+
+def test_timing_summary_flags_round_over_gate():
+    """轮增量超门（>180 s）必须自己喊出来，不能只报均值。"""
     from measure.production import timing_summary
 
-    line = timing_summary([0.9, 1.05, 1.4, 0.8], gate_s=1.1)
-    assert "4 帧" in line and "超门(>1.1 s) 1 帧" in line
-    # 偶数帧数的中位数 = 中间两个的均值（[0.8, 0.9, 1.05, 1.4] ⇒ 0.975 ≈ 0.98）
-    assert "均 1.04 s/帧" in line and "中位 0.98 s" in line
+    line = timing_summary([4.5] * 48, round_gate_s=180.0)
+    assert "轮增量超门" in line and "216 s vs ≤180 s" in line
 
 
 def test_timing_summary_handles_empty_and_all_under_gate():
     from measure.production import timing_summary
 
     assert "0 帧" in timing_summary([])
-    assert "超门(>1.1 s) 0 帧" in timing_summary([0.1, 0.2, 0.3])
+    assert "超门(>3.75 s) 0 帧" in timing_summary([0.1, 0.2, 0.3])
 
 
 def test_rows_from_frames_logs_timing_and_flags_over_gate():
@@ -226,11 +237,11 @@ def test_rows_from_frames_logs_timing_and_flags_over_gate():
 
     # 人为把单帧拖过门（慢 decode），验证超门那条路径真的会喊
     def slow_decode(data):
-        time.sleep(1.2)
+        time.sleep(3.9)
         return circle()
 
     logs2: list[str] = []
     rows_from_frames([frame()], room_id=ROOM, mm_per_px=MM_PER_PX, detector=DET,
                      fetch=fetch, decode=slow_decode, log=logs2.append)
     assert any("超门" in m for m in logs2), logs2
-    assert any("超门(>1.1 s) 1 帧" in m for m in logs2), logs2
+    assert any("超门(>3.75 s) 1 帧" in m for m in logs2), logs2

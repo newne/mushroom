@@ -52,16 +52,19 @@ LOW_CONFIDENCE_FLAG = "low_confidence"
 
 DEFAULT_MEASURE_KIND = "measurement"
 
-#: 在线单帧耗时门（票 15 §8.1，Chief 2026-10-14 裁定）：**超门必须看得见**，
-#: 不能只靠人感觉。推荐在线组合实测 1.02 s/帧，门给 1.1 s（约 8% 余量）。
-#: 注意：索引里的 `elapsed_s` 是**抓拍/运动**耗时（`patrol/round.py`），不是测量耗时，
-#: 所以测量侧的耗时必须由这里自己报出来。
-MEASURE_TIME_GATE_S: float = 1.1
+#: **单轮增量门**（Chief 2026-10-14 改判）：**一轮 48 站的测量增量 ≤180 s**。
+#: 历史：旧门是"在线 ≤1.1 s/帧"，那是在 **ROI + ds=2、无袋肩门** 的旧配置下定的数；
+#: 218 帧实测中位 2.10 s/帧（48 站 ≈ +101 s/轮），**旧门作废**（票 15 §8.1）。
+#: 不做能力裁剪（ds=4/裁带都会动近排质量，而近排是唯一交付的）。
+MEASURE_ROUND_GATE_S: float = 180.0
+#: 单帧超门阈值 = 轮门 / 48 站 ≈ 3.75 s（只用来**喊**，门以轮为准）。
+MEASURE_TIME_GATE_S: float = MEASURE_ROUND_GATE_S / 48.0
 
 
 def timing_summary(durations: Sequence[float],
-                   gate_s: float = MEASURE_TIME_GATE_S) -> str:
-    """一行"测量耗时"摘要：帧数 / 总耗时 / 均值 / 中位 / 超门帧数。
+                   gate_s: float = MEASURE_TIME_GATE_S,
+                   round_gate_s: float = MEASURE_ROUND_GATE_S) -> str:
+    """一行"测量耗时"摘要：帧数 / 总耗时 / 均值 / 中位 / 超门帧数 / 轮增量是否超门。
 
     纯函数，便于单测（不依赖真实计时）。超门帧数 >0 就是性能退化的信号，
     第一嫌疑永远是"有人把 L1/L3 退回全帧 / 没降采样"（票 15 §8.1 C1–C3）。
@@ -75,8 +78,10 @@ def timing_summary(durations: Sequence[float],
               else 0.5 * (ordered[n // 2 - 1] + ordered[n // 2]))
     total = sum(ordered)
     over = sum(1 for d in ds if d > gate_s)
+    round_verdict = ("轮增量超门" if total > round_gate_s else "轮增量在门内")
     return (f"测量：{n} 帧 共 {total:.2f} s（均 {total / n:.2f} s/帧，"
-            f"中位 {median:.2f} s，超门(>{gate_s:.1f} s) {over} 帧）")
+            f"中位 {median:.2f} s，超门(>{gate_s:.2f} s) {over} 帧）；"
+            f"{round_verdict}（{total:.0f} s vs ≤{round_gate_s:.0f} s）")
 
 
 @dataclass
@@ -295,7 +300,8 @@ def rows_from_frames(
         elapsed = time.monotonic() - t0
         durations.append(elapsed)
         if elapsed > MEASURE_TIME_GATE_S:
-            log(f"测量：单帧 {elapsed:.2f} s 超门（>{MEASURE_TIME_GATE_S:.1f} s/帧）"
+            log(f"测量：单帧 {elapsed:.2f} s 超门（>{MEASURE_TIME_GATE_S:.2f} s/帧 = "
+                f"{MEASURE_ROUND_GATE_S:.0f} s/48 站）"
                 f"——先查是否退回全帧/未降采样路径（票 15 §8.1 C1–C3）")
         out.extend(produced)
     if durations:

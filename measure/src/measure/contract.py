@@ -38,7 +38,13 @@ QUALITY_FLAGS = (
     # 估算/预测三码（Chief 2026-10-14 裁定 5；命名对齐票 18，不许混成一个）
     "estimate",              # 行级 fail-safe：本行有估算值（与 verified 正交，但单独出现不算可用）
     "unreliable",            # 远排/低置信 ⇒ 值写 NULL，处置=不可用（与 no_light 同级）
-    "no_scale",              # 缺标尺/俯角（或找不到同排菌包）⇒ mm 写 NULL
+    "no_scale",              # **完全没有标尺**（无参考物/找不到同排菌包/标准尺寸缺失）⇒ mm 写 NULL
+    "no_theta",              # **有标尺、只是缺俯角 θ** ⇒ 投影项无法补偿：竖直量写 NULL，
+                             # 水平量照出。**与 no_scale 严格分开**（Chief 2026-10-14）：
+                             # 旧实现把"θ 缺"也记成 no_scale，而 no_scale 属"整行不可用"
+                             # ⇒ 213/218 帧明明出了有效的 mean_cluster_w_mm 却被下游整行丢掉，
+                             # 那是"把有数据说成没数据"。本标记**不进 NON_USABLE_FLAGS**：
+                             # 它只说明"哪个修正项缺"，字段级取舍交给 estimated_fields（票 20）。
 )
 
 #: 出现其中任意一个 ⇒ 这一行**没有可用测量**。

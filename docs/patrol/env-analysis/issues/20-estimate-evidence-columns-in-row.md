@@ -57,6 +57,16 @@ contract.field_is_usable(quality, estimated_fields, field) -> bool
 2. **`scale_source` 的枚举**：`bag_standard`（菌包标准尺寸，用户 2026-10-14 口径）/
    `calibration_target`（每站位 `--mm-per-px`，ADR-0024 优先）/ `none`（无标尺 ⇒ 值 NULL + `no_scale`）。
    票 18 原文写的是 `bag_diameter`，标准尺寸口径下建议改名/加值，**由你定**。
+   3. **quality 枚举要拆出 `no_theta`（Chief 2026-10-14 裁定，已在测量侧实现，请落到契约）**：
+   - **`no_scale` 收窄为"完全没有标尺"**（无参考物 / 找不到同排菌包 / 标准尺寸没注入）；
+   - **新增 `no_theta` = "有标尺、只缺俯角 θ"**：它只说明**哪个修正项缺**，
+     竖直列写 NULL、水平列照出，**不进 `NON_USABLE_FLAGS`**（行仍然可用）；
+   - 为什么必须拆：218 帧实测里 **213 帧**出了有效的 `mean_cluster_w_mm`，却因为"θ 缺"
+     被整行记成 `no_scale` ⇒ 下游按"含 `no_scale` 即整行不可用"会**把有值的数据丢掉**
+     （"把有数据说成没数据"，Chief 原话）。测量侧已改：`contract.QUALITY_FLAGS` 加 `no_theta`、
+     `estimate.py` 的 θ 缺处罚改记 `no_theta`、`NON_USABLE_FLAGS` 不含它；三条测试钉住。
+   - 若你更倾向**字段级投影项**（如 `estimated_fields` 之外再记"哪些列缺修正项"）也可以，
+     但请**别让行级 flag 承担字段级语义**——那是这次返工的病根。
 3. **幂等键与既有行不变**：仍 `(ts, room_id, box_id)`；新列可空（历史行 NULL 表示"无证据"，不是 0）。
 
 ## 4. 我的义务（列一落地就做，不需要再开票）

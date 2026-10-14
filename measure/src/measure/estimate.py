@@ -3,9 +3,12 @@
 ## 铁律（Chief 2026-10-14 裁定）
 
 1. **没有任何内置猜测值**：菌包直径（mm）与俯角（deg）只能由调用方注入；
-   缺任一个 ⇒ 该量**写 NULL**（不写 0、不退化上报像素量）+ `no_scale`；
-2. **三码分开**，不许混成一个：
-   - `no_scale`：缺标尺/俯角（本帧无法给 mm）；
+   缺任一个 ⇒ 该量**写 NULL**（不写 0、不退化上报像素量）；
+2. **失效码不许混成一个**（四条，Chief 2026-10-14 追加第 4 条）：
+   - `no_scale`：**完全没有标尺**（无参考物 / 找不到同排菌包 / 标准尺寸没注入）⇒ mm 写 NULL；
+   - `no_theta`：**有标尺、只是缺俯角 θ** ⇒ 只影响竖直量（写 NULL），水平量照出；
+     **它与 `no_scale` 严格分开，且不算"整行不可用"**——旧实现把两者都记成 `no_scale`，
+     导致 213/218 帧明明出了有效的 `mean_cluster_w_mm` 却被下游整行丢弃（"把有数据说成没数据"）；
    - `no_detection`：本帧没有可用菇体实例；
    - `unreliable`：有实例但所在排不可信（远排）；
 3. 只要产出了估算值：字段级 `estimated_fields` + 行级 `quality` 含 `estimate`（票 18 §2），
@@ -213,7 +216,8 @@ def estimate_stipe_length(instances: list[FruitInstance], bags: list[BagRegion],
     ref_px = float(np.median([s.ref_px for s in ok_scales if s.ref_px]))
     cos_t = math.cos(math.radians(float(depression_deg))) if depression_deg is not None else None
     if cos_t is None or cos_t <= 0:
-        flags.add("no_scale")
+        # **θ 缺 ≠ 没标尺**（Chief 2026-10-14）：本帧标尺是有的，只是投影项补不了
+        flags.add("no_theta")
         return StipeEstimate(None, mean_len_px, len(instances), len(reliable), None, (),
                              contract.format_flags(flags | {"estimate"}),
                              ScaleResult(mm_per_px, "bag_diameter",
@@ -303,8 +307,8 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
 
     - **水平**用袋长标准值（240mm）定局部 `mm_per_px_x`；**竖直**用袋径标准值（140mm）
       定 `mm_per_px_y` 作**交叉校验**，两者不一致超过 `SCALE_AGREE_TOL` 就在 note 里报；
-    - 竖直跨度还要 **÷cosθ**：`depression_deg=None` ⇒ `cluster_h_mm` 写 NULL + `no_scale`
-      （横向仍可出，因为水平方向不受俯角影响）；
+    - 竖直跨度还要 **÷cosθ**：`depression_deg=None` ⇒ `cluster_h_mm` 写 NULL + **`no_theta`**
+      （**不是 `no_scale`**：标尺是有的，只是投影项缺；横向仍可出，因为水平方向不受俯角影响）；
     - 远排（`row_reliable` 为 False）/ 无实例 ⇒ 分别 `unreliable` / `no_detection`。
     """
     cfg = cfg or EstimateConfig()
@@ -365,7 +369,8 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
     h_mm = unc_h = None
     unc_h_note = ""
     if depression_deg is None:
-        flags.add("no_scale")
+        # **θ 缺 ≠ 没标尺**（Chief 2026-10-14）：水平量是有效值，不许整行标成不可用
+        flags.add("no_theta")
         note = "未注入俯角（deg）⇒ 竖直跨度写 NULL（水平仍可出：不受俯角影响）"
     else:
         cos_t = math.cos(math.radians(float(depression_deg)))
