@@ -5,7 +5,8 @@
 * ``z-frame``——搬**坐标框架**：原点从底端搬到顶端、第 1 层翻到最上（一次性）；
 * ``reanchor``——刷**锚点数值**：框架不动，按当前的 `col_y`/`layer_z` 重算每站的
   (y, z)。用户改层心/改列偏移（如 2026-10-12 第 8 列右移 40mm）之后用这个，
-  可反复执行（幂等）。
+  可反复执行（幂等）。`--view-stage` 换**观察高度档**（票 16，生长阶段 → 每层 Z 偏置），
+  档位数值由现场量相位后填，未填之前只有默认档 `surface`（全 0）。
 
 为什么单独给个命令而不是"跑个 python 片段"：这是**动生产配置**的操作，必须有
 "先看 diff、再落盘、落盘前自动备份"的固定动作，且能被写进上机手册里逐条执行。
@@ -14,6 +15,7 @@
     patrol-migrate z-frame  --stations configs/stations.yaml
     patrol-migrate reanchor --stations configs/stations.yaml --dry-run
     patrol-migrate reanchor --stations configs/stations.yaml
+    patrol-migrate reanchor --stations configs/stations.yaml --view-stage stipe --dry-run
 """
 
 from __future__ import annotations
@@ -25,10 +27,14 @@ from datetime import datetime
 from pathlib import Path
 
 from patrol.stations import (
+    DEFAULT_VIEW_STAGE,
+    GRID_VIEW_STAGE_Z_OFFSETS,
     Station,
+    load_station_table,
     load_stations,
     reanchor_in_file,
     retarget_z_in_file,
+    stage_consistency,
 )
 
 
@@ -85,14 +91,26 @@ def cmd_z_frame(args: argparse.Namespace) -> int:
 
 
 def cmd_reanchor(args: argparse.Namespace) -> int:
-    """按当前锚点重算 (y, z)——只改目标值，不改坐标框架（无需回零）。"""
+    """按当前锚点 + 观察高度档重算 (y, z)——只改目标值，不改坐标框架（无需回零）。"""
     path = Path(args.stations)
     if not path.exists():
         print(f"! 找不到站位表：{path}", file=sys.stderr)
         return 2
 
-    before = load_stations(str(path))
+    before, declared = load_station_table(str(path))
+    requested = getattr(args, "view_stage", None)
+    effective = (requested or declared).strip() or DEFAULT_VIEW_STAGE
+    known = ", ".join(sorted(GRID_VIEW_STAGE_Z_OFFSETS)) or "（空）"
     print(f"站位表：{path}（{len(before)} 个站位）")
+    print(f"  观察高度档：表里声明 {declared!r}"
+          + (f"，本次指定 {requested!r}" if requested else "（未指定，沿用表里的档）")
+          + f" ⇒ 本次按 {effective!r} 重算；档表里已定义的档：{known}")
+
+    mismatched = stage_consistency(before, effective)
+    if mismatched:
+        head = "、".join(f"{sid}(z={z:.1f}，锚点 {want:.1f})" for sid, z, want in mismatched[:3])
+        print(f"  提示：{len(mismatched)} 个站位的 z 与该档锚点不一致"
+              f"（含现场示教值，属正常）：{head}{'…' if len(mismatched) > 3 else ''}")
     for s in _first_per_layer(before):
         print(f"  重锚前 第 {s.layer} 层第 {s.col} 框：{s.id} y={s.y:.1f} z={s.z:.1f} "
               f"trim_y={s.trim_y:.1f} trim_z={s.trim_z:.1f}")
@@ -103,20 +121,24 @@ def cmd_reanchor(args: argparse.Namespace) -> int:
 
         with tempfile.TemporaryDirectory() as tmp:
             out = str(Path(tmp) / "stations.yaml")
-            moved = reanchor_in_file(str(path), out=out, log=print)
-            after = load_stations(out)
+            moved = reanchor_in_file(str(path), out=out, stage=effective, log=print)
+            after, after_stage = load_station_table(out)
         for s in _first_per_layer(after):
             print(f"  重锚后 第 {s.layer} 层第 {s.col} 框：{s.id} y={s.y:.1f} z={s.z:.1f}")
+        print(f"  档名写回：{after_stage!r}")
         print(f"（--dry-run：原文件未改动；落盘会有 {moved} 个站位有改动）")
         return 0
 
     bak = _backup(str(path), "reanchor")
     print(f"已备份：{bak}")
-    moved = reanchor_in_file(str(path), log=print)
-    for s in _first_per_layer(load_stations(str(path))):
+    moved = reanchor_in_file(str(path), stage=effective, log=print)
+    after, after_stage = load_station_table(str(path))
+    for s in _first_per_layer(after):
         print(f"  重锚后 第 {s.layer} 层第 {s.col} 框：{s.id} y={s.y:.1f} z={s.z:.1f}")
-    print(f"{moved} 个站位有改动。坐标框架未变（原点还在顶端），**不需要重新回零**；"
-          "下一轮巡检自动读新表生效")
+    print(f"{moved} 个站位有改动，观察高度档 {after_stage!r} 已写回表。"
+          "坐标框架未变（原点还在顶端），**不需要重新回零**；下一轮巡检自动读新表生效")
+    print("⚠️ console / 手动抓拍的\"最近格点\"归属是**进程启动时的快照** ⇒ 换档后要"
+          "重启 mushroom_patrol 才跟上")
     return 0
 
 
@@ -132,6 +154,8 @@ def main(argv: list[str] | None = None) -> int:
     a = sub.add_parser("reanchor", help="重锚：按当前 col_y/layer_z 重算表的 (y, z)，框架不变")
     a.add_argument("--stations", default="/app/configs/stations.yaml")
     a.add_argument("--dry-run", action="store_true", help="只看换算结果，不落盘")
+    a.add_argument("--view-stage", default=None,
+                   help="观察高度档（票 16）：默认沿用表里声明的档；换档会重算 z 并清 trim_z")
     a.set_defaults(func=cmd_reanchor)
 
     args = ap.parse_args(argv)

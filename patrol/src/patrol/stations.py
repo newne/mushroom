@@ -37,9 +37,16 @@ GRID_LAYERS = 4         # 竖向层数（沿 Z 短行程 −212…0mm，**第 1 
 #   完整证据见 docs/patrol/prod-deploy/station-retarget.md §6/§7。
 # ⚠️ 2026-10-10（晚）用户重定**初始锚点**：第 1…4 层 `z = −40 / −90 / −145 / −195`，
 #   即层心到顶端原点的距离 40 / 90 / 145 / 195mm（层距 50/55/50，**不等分**）。
-#   这是**起点不是终值**：当前生长阶段（蘑菇未长出菌包）要的是"俯拍看菌包表面"，
-#   长出菌包后要改成"平视看菌杆/菌盖/整体形态"——换角度＝重新固定相机支架，
-#   之后必须**重扫 z**（station-retarget.md §10）。均分格心之上只剩逐层偏移。
+#   这是**起点不是终值**：锚点随生长阶段重定属**票 16 的"观察高度档"**（纯代码，±25mm 相位窗内）。
+#   ⚠️ 2026-10-14 归一（旧注释把"取景取向"与"物理位姿"混成一件事，已删）：
+#   * **现役物理位姿 = 平视位**（2026-10-10 现场确认；票 09 §3）。相机没有云台/电动变角。
+#   * "前期俯拍看菌包表面 / 后期平视看菌杆菌盖"是**取景取向**（哪个阶段要看什么，
+#     station-retarget.md §10.2），**不是**"现在装的是俯拍"。**换角度档 = 现场重新固定支架
+#     + 重扫 z（§10.3，顺序不能反）**；那是机械量，代码只能记。
+#   * 10-13 真机帧定性：视轴与袋顶面成**小夹角**（掠视）、相机在袋顶面**之上**、上半幅是
+#     上层货架底面 ⇒ 现役是"略俯的掠视"，**不是**正对菌杆的侧视。要让"与蘑菇平行"：
+#     纯代码只能改**视轴高度**（票 16），改不了**视轴方向**（那要动支架）。
+#   均分格心之上只剩逐层偏移。
 GRID_LAYER_Z_OFFSETS = (13.5, 10.5, 12.5, 9.5)
 # 第 8 列的横向偏移。2026-10-12 由 −80 → **−40**：这一列挨着一根货架立柱，
 # 前两次各右移 40mm（§9）后仍挡住画面中右部。本次移动量是**量出来的**不是估的：
@@ -69,6 +76,34 @@ CAMERA_IP = "192.168.1.238"
 # 双档写法 ("top0", "top45") 本身仍可用（站位 id 会自动加角度后缀），但只在前两条落实后才有意义。
 GRID_ANGLES = ("level0",)
 DEFAULT_ANGLE = GRID_ANGLES[0]
+
+# ---------- 观察高度档（票 16）：生长阶段 → 每层 Z 偏置 ----------
+#
+# 为什么要有这一维：用户 2026-10-14 要求"菌杆长出菌袋表面后保持与蘑菇平行的视角"。
+# **两件事必须分开**（票 16 §0）：
+#   * 视轴**方向**（俯仰/偏航）= 机械量，Z 平移永远改不了 ⇒ 只能现场重新固定支架（票 09 §4）；
+#   * 视轴**高度**（落在菌杆的哪一段）= 本表这一维，纯代码可做。
+#
+# 硬窗 ±25mm，两条独立依据（票 16 §3.3）：
+#   * 图像自相似**周期 52.0 mm**（实测，见上面 `GRID_LAYER_Z_OFFSETS` 的复盘）⇒ 半周期 26mm；
+#   * 层距 50/55/50 ⇒ 半格 25/27.5/25mm，越界就是"看着隔壁层"。
+# 逐层的行程余量不同（§3.2）：**第 4 层向下只剩 17mm**（−195 → 行程下限 −212），
+# 第 1 层向上虽剩 40mm，但 2026-10-12 实测 −57→−40（+17mm）画面已变差（货架结构从上侵入）。
+#
+# ⚠️ 现场定值，**不许猜**：没有现场量出来的相位之前，档表里只有默认档 `surface`（全 0），
+# 行为与引入本维之前**一字不差**。现场量完（station-retarget.md §7.2 的 5mm 步距流程）
+# 再加档，见 docs/patrol/fmc4030-camera-scan/issues/16-view-height-stage-and-parallel-view.md。
+#
+# 档名语义（**不要**编进 `angle_profile`，那是角度档，编进去＝索引里的角度档是假的）：
+#   surface 袋顶面 + 菇针（现役锚点所在相位）
+#   pin     菇针变长、能看出杆身
+#   stipe   视轴落在杆中段（杆在画面里竖直、不缩短）
+#   cluster 整体形态／视轴必须离开袋顶层（这时纯代码已到边界，要动支架）
+DEFAULT_VIEW_STAGE = "surface"
+MAX_VIEW_STAGE_OFFSET_MM = 25.0
+GRID_VIEW_STAGE_Z_OFFSETS: dict[str, tuple[float, ...]] = {
+    "surface": (0.0, 0.0, 0.0, 0.0),
+}
 
 
 @dataclass
@@ -110,25 +145,74 @@ class Station:
         return replace(self, trim_y=trim[0], trim_z=trim[1], trim_note=note or self.trim_note)
 
 
-def layer_z(layer: int, profile: MotionProfile = M1) -> float:
+def view_stage_z_offsets(stage: str | None = None) -> tuple[float, ...]:
+    """取某个观察高度档的**逐层 Δz**（4 个数，第 1…4 层），并当场校验。
+
+    三条 fail-closed 规则（票 16 §2.5），任何一条不满足都**抛错**、绝不静默取 0：
+
+    1. 档名必须在 `GRID_VIEW_STAGE_Z_OFFSETS` 里（现场量完才加档，不预填、不猜值）；
+    2. 必须正好 4 个数（每层一个）；
+    3. 每个 |Δz| ≤ `MAX_VIEW_STAGE_OFFSET_MM`（相位窗，见模块里那一节的依据）。
+
+    ⚠️ 落点是否在行程内**不在这里判**——那是 `layer_z` 的事（它知道层号与 profile）。
+    """
+    name = (stage or DEFAULT_VIEW_STAGE).strip() or DEFAULT_VIEW_STAGE
+    try:
+        offsets = GRID_VIEW_STAGE_Z_OFFSETS[name]
+    except KeyError:
+        known = ", ".join(sorted(GRID_VIEW_STAGE_Z_OFFSETS)) or "（空）"
+        raise ValueError(
+            f"未定义的观察高度档 {name!r}：档表里只有 {known}。"
+            "现场按 5mm 步距量出相位后，把该档写进 GRID_VIEW_STAGE_Z_OFFSETS（票 16 §3）——不许猜值"
+        ) from None
+    if len(offsets) != GRID_LAYERS:
+        raise ValueError(
+            f"观察高度档 {name!r} 要 {GRID_LAYERS} 个数（每层一个 Δz），实际 {len(offsets)} 个"
+        )
+    for layer, value in enumerate(offsets, start=1):
+        if abs(value) > MAX_VIEW_STAGE_OFFSET_MM + 1e-9:
+            raise ValueError(
+                f"观察高度档 {name!r} 第 {layer} 层 Δz={value:+.1f}mm 超过相位窗 "
+                f"±{MAX_VIEW_STAGE_OFFSET_MM:.0f}mm（票 16 §3.3：半周期 26mm／半层距 25–27.5mm）"
+            )
+    return tuple(float(v) for v in offsets)
+
+
+def view_stage_z_offset(stage: str | None, layer: int) -> float:
+    """某一层在某个观察高度档下的 Δz（已过 `view_stage_z_offsets` 的三条校验）。"""
+    if not 1 <= layer <= GRID_LAYERS:
+        raise ValueError(f"层号越界 {layer}（1…{GRID_LAYERS}）")
+    return view_stage_z_offsets(stage)[layer - 1]
+
+
+def layer_z(layer: int, profile: MotionProfile = M1, *, stage: str | None = None) -> float:
     """层号 → 该层中心的 Z 坐标（第 1 层在最上，即最靠近 Z 原点 = 顶端）。
 
     以均分格心为基准叠加逐层实拍标定偏移；实际层间距不要求相等。
     当前锚点（2026-10-10 用户给定）：层心到顶端原点的距离 40 / 90 / 145 / 195mm，
     即 ``z = −40 / −90 / −145 / −195``（层距 50/55/50）。
 
+    ``stage`` = **观察高度档**（票 16）：在该层锚点上再叠一个逐层 Δz，
+    用来把视轴挪到"菌杆高度带"（长势阶段变了就换档）。默认 ``None`` = 默认档 `surface`
+    （全 0）⇒ 行为与没有这一维时完全一致。
+
     从**原点那一侧**起算：Z 的原点在顶端、`+Z` 向上，所以层号越大、离原点越远、z 越小
     （越负）。``distance`` 是该层中心到顶端原点的**距离** mm（为正），坐标取 ``home_position − distance``。
+
+    ⚠️ 档位偏置**改变不了视轴方向**（俯仰/偏航是机械量）——它只把"看哪一段"挪对（票 16 §0）。
     """
     if not 1 <= layer <= GRID_LAYERS:
         raise ValueError(f"层号越界 {layer}（1…{GRID_LAYERS}）")
     pitch = profile.z.travel_span / GRID_LAYERS
     distance = (layer - 0.5) * pitch + GRID_LAYER_Z_OFFSETS[layer - 1]
-    z = profile.z.home_position - distance
+    offset = view_stage_z_offset(stage, layer)
+    z = profile.z.home_position - distance + offset
     if not profile.z.contains(z):
+        where = f"（含观察高度档 {stage!r} 的 {offset:+.1f}mm）" if offset else ""
         raise ValueError(
-            f"第 {layer} 层的 z={z} 不在行程 {profile.z.travel_min}…{profile.z.travel_max} 内："
-            "第 1 层应当贴近顶端的 Z 原点（Z 需向上回零）"
+            f"第 {layer} 层的 z={z} 不在行程 {profile.z.travel_min}…{profile.z.travel_max} 内{where}："
+            "第 1 层应当贴近顶端的 Z 原点（Z 需向上回零）；"
+            "若是观察高度档把落点顶出行程，就减小该层 Δz（第 4 层向下只剩 17mm，票 16 §3.2）"
         )
     return z
 
@@ -172,8 +256,12 @@ def build_grid(
     *,
     angles: tuple[str, ...] = GRID_ANGLES,
     camera_ip_of: Callable[[int, int], str] | None = None,
+    view_stage: str | None = None,
 ) -> list[Station]:
     """按布局生成站位表，顺序为**蛇形遍历序**（层内走完一列再折返）。
+
+    ``view_stage`` = 观察高度档（票 16）；默认 ``None`` = 默认档 `surface`（Δz 全 0，
+    与没有这一维时一致）。档名未定义/超窗会在 `layer_z` 里当场报错，不静默取 0。
 
     蛇形不是美观问题：按层号顺序直走的话，换层时要从轨道最右端折回最左端
     （11 × 374 ≈ 4.1m 空程）；4 层的折返走法可省约 12.3m 横向空程。
@@ -195,7 +283,7 @@ def build_grid(
                         id=f"S{layer}{col:02d}{suffix}",
                         box_id=box_id,
                         y=col_y(col, profile, layer=layer),
-                        z=layer_z(layer, profile),
+                        z=layer_z(layer, profile, stage=view_stage),
                         angle_profile=angle,
                         camera_ip=camera_ip_of(layer, col)
                         if camera_ip_of
@@ -236,18 +324,53 @@ def fill_camera_ip(stations: list[Station], camera_ip: str = CAMERA_IP) -> tuple
     return out, filled
 
 
-def load_stations(path: str) -> list[Station]:
+def declared_view_stage(path: str) -> str:
+    """读站位表**顶层**声明的观察高度档（票 16）；文件不存在或没写 ⇒ 默认档。
+
+    只读不校验——校验留给调用点（`load_station_table` / `save_stations`），
+    这样"读出来是什么"与"能不能用"两件事不会糊在一起。
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        return DEFAULT_VIEW_STAGE
+    value = str(data.get("view_stage") or "").strip()
+    return value or DEFAULT_VIEW_STAGE
+
+
+def load_station_table(path: str) -> tuple[list[Station], str]:
+    """读站位表，返回 ``(stations, 观察高度档)``。
+
+    **档名 fail-closed**（票 16 §2.5）：表里声明了一个没有定义的档 ⇒ 当场报错，
+    不去猜、也不静默当成默认档——否则"表里写着 stipe、实际按 surface 跑"这种谎最难查。
+    没写顶层 `view_stage` 的老表一律按默认档 `surface` 读（向后兼容）。
+    """
     with open(path, encoding="utf-8") as fh:
         data = yaml.safe_load(fh) or {}
+    stage = str(data.get("view_stage") or DEFAULT_VIEW_STAGE).strip() or DEFAULT_VIEW_STAGE
+    view_stage_z_offsets(stage)          # 未定义 / 层数不对 / 超相位窗 ⇒ 报错
     stations = [Station(**item) for item in data.get("stations", [])]
     ids = [s.id for s in stations]
     if len(ids) != len(set(ids)):
         raise ValueError(f"站位 id 重复: {ids}")
-    return stations
+    return stations, stage
 
 
-def save_stations(stations: list[Station], path: str) -> None:
-    payload = yaml.safe_dump({"stations": [asdict(s) for s in stations]},
+def load_stations(path: str) -> list[Station]:
+    return load_station_table(path)[0]
+
+
+def save_stations(stations: list[Station], path: str, *, view_stage: str | None = None) -> None:
+    """写站位表；``view_stage=None`` 时**沿用目标文件里已声明的档**。
+
+    为什么默认是"沿用"而不是"默认档"：`patrol-teach save` 等调用方只关心坐标，
+    不知道档这回事。若这里默认写成 `surface`，一次示教保存就会把表从 `stipe`
+    **静默还原**成默认档——正是票 16 §2.4 点名要防的那种回退。
+    """
+    stage = view_stage if view_stage is not None else declared_view_stage(path)
+    view_stage_z_offsets(stage)          # 不写一份"档名非法"的表出去
+    payload = yaml.safe_dump({"view_stage": stage, "stations": [asdict(s) for s in stations]},
                              allow_unicode=True, sort_keys=False)
     Path(path).write_text(payload, encoding="utf-8")
 
@@ -302,10 +425,13 @@ def retarget_z_in_file(path: str, *, out: str | None = None,
 
     防重复执行：新框架的 z 必然 ≤ 0，所以表里若已全是 `z ≤ 0` 就认定迁过了并抛错，
     而不是再算一遍（再算结果相同，但会让人以为"上一次没生效"）。
+
+    ⚠️ 顶层的观察高度档（票 16）**原样带过去**：框架迁移与"现在是什么生长阶段"无关，
+    顺手把它丢掉就等于一次迁移把档静默还原成默认档。
     """
     if M1.z.travel_max > 1e-6:
         raise ValueError("这条迁移假设 Z 原点在顶端（travel_max=0）；先改 motion_profile 再迁表")
-    stations = load_stations(path)
+    stations, declared = load_station_table(path)
     if not stations:
         raise ValueError(f"{path} 里没有站位，不迁移")
     if all(s.z <= 1e-6 for s in stations):
@@ -314,8 +440,8 @@ def retarget_z_in_file(path: str, *, out: str | None = None,
     if beyond:
         raise ValueError(f"{path} 里有超出旧行程的 z（{beyond[:3]}…），这份表不对劲，先人工看")
 
-    migrated = [replace(s, z=layer_z(s.layer)) if s.layer else s for s in stations]
-    save_stations(migrated, out or path)
+    migrated = [replace(s, z=layer_z(s.layer, stage=declared)) if s.layer else s for s in stations]
+    save_stations(migrated, out or path, view_stage=declared)
     log(f"Z 框架迁移：{path} → {out or path}，{len(migrated)} 个站位（按层号重算 z，"
         "第 1 层改为最上；层心位置集合不变）")
     return len(migrated)
@@ -324,7 +450,28 @@ def retarget_z_in_file(path: str, *, out: str | None = None,
 # ---------- 重锚：按当前锚点刷新已落盘的表（2026-10-12 起两轴都刷） ----------
 
 
-def reanchor_in_file(path: str, *, out: str | None = None,
+def stage_consistency(stations: list[Station], stage: str | None = None,
+                      *, tolerance: float = 0.5) -> list[tuple[str, float, float]]:
+    """列出 **z 与"该档锚点"不一致**的站位，返回 ``(id, 表里的 z, 锚点算出的 z)``。
+
+    给**写盘点**（`patrol-migrate reanchor`）当预检用，回答"表里写着 stipe、坐标却还是
+    surface 的位置？"这种"标签撒谎"（票 16 §2.5）。
+
+    **刻意不做装载期警告**：现场示教（`patrol-teach record`）会把某几站挪到手标的真实位置，
+    那是**有效标定**，拿公式去"纠正"它才是错的；真正的口径追溯靠**逐帧记录的实际 z**
+    （`images.y/z`），不是靠"表里的 z 必须等于公式"。所以这条只在"准备按档重写表"时提示。
+    """
+    out: list[tuple[str, float, float]] = []
+    for s in stations:
+        if not (s.layer and s.col):
+            continue
+        want = layer_z(s.layer, stage=stage)
+        if abs(s.z - want) > tolerance:
+            out.append((s.id, s.z, want))
+    return out
+
+
+def reanchor_in_file(path: str, *, out: str | None = None, stage: str | None = None,
                      log: Callable[[str], None] = print) -> int:
     """把站位表的 `(y, z)` 重算成**当前的锚点**（`col_y` / `layer_z`），返回改动数。
 
@@ -336,22 +483,27 @@ def reanchor_in_file(path: str, *, out: str | None = None,
 
     做五件事：
 
-    1. `y` 按 `col_y(col, layer)` 重算，`z` 按 `layer_z(layer)` 重算；
+    1. `y` 按 `col_y(col, layer)` 重算，`z` 按 `layer_z(layer, stage=档)` 重算
+       （**档 = 观察高度档**，票 16：`stage` 给了就用它，没给就沿用表里声明的档）；
     2. **只清零"锚点真的动了"的那个轴的 trim**——`trim_*` 是相对旧锚点学到的微调，
        锚点没动的轴上它仍然有效。只调了第 8 列的 Y 时，其余 47 站的 `trim_y` 不该被
-       牵连清零（那是现场一点一点挪出来的有效标定）；
+       牵连清零（那是现场一点一点挪出来的有效标定）；**换档会动 z ⇒ 清 trim_z**，这是有意的；
     3. 单角度档配置下把 `angle_profile` 归一成 `DEFAULT_ANGLE`（多档时不动：那张表
        本来就该有多个档，全刷成一个等于偷偷把双档改成单档）；
-    4. `id` / `box_id` / 相机与曝光字段原样保留；
+    4. `id` / `box_id` / 相机与曝光字段原样保留；**顶层的档名按本次用的档写回**
+       （否则下次 `reanchor` 会把档静默还原成默认档，票 16 §2.4）；
     5. **不需要重新回零**：坐标框架没动（原点还在顶端、行程还是 −212…0），动的只是
        目标值——这一点与 Z 框架迁移正相反，别照那次的开机清单做。
 
     防呆：表里每个站位都得带层号与框号（示教残留可能没有），否则报错并列出来，
-    而不是跳过——跳过等于"悄悄少改几个站"。
+    而不是跳过——跳过等于"悄悄少改几个站"。档名未定义/Δz 超相位窗/落点出行程
+    一律在本函数里当场报错（fail-closed）。
     """
-    stations = load_stations(path)
+    stations, declared = load_station_table(path)
     if not stations:
         raise ValueError(f"{path} 里没有站位，不重锚")
+    effective = (stage or declared).strip() or DEFAULT_VIEW_STAGE
+    view_stage_z_offsets(effective)          # 档名/层数/相位窗：未定义就当场报错
     unknown = [s.id for s in stations if not (s.layer and s.col)]
     if unknown:
         raise ValueError(
@@ -359,12 +511,18 @@ def reanchor_in_file(path: str, *, out: str | None = None,
             "无从按锚点重算——用 patrol-teach record 补上层号/框号再来"
         )
 
+    mismatched = stage_consistency(stations, effective)
+    if mismatched:
+        head = "、".join(f"{sid}(z={z:.1f}，锚点 {want:.1f})" for sid, z, want in mismatched[:3])
+        log(f"提示：{len(mismatched)} 个站位的 z 与档 {effective!r} 的锚点不一致"
+            f"（含现场示教值，属正常）：{head}{'…' if len(mismatched) > 3 else ''}")
+
     single_angle = len(GRID_ANGLES) == 1
     moved = 0
     out_stations: list[Station] = []
     for s in stations:
         y = col_y(s.col, layer=s.layer)
-        z = layer_z(s.layer)
+        z = layer_z(s.layer, stage=effective)
         trim_y, trim_z = s.trim_y, s.trim_z
 
         # 日志每行都带站位 id：现场是把日志整段贴出来看的，缩进归属在粘贴/截图里会丢
@@ -395,9 +553,9 @@ def reanchor_in_file(path: str, *, out: str | None = None,
             angle_profile=DEFAULT_ANGLE if single_angle else s.angle_profile,
         ))
 
-    save_stations(out_stations, out or path)
+    save_stations(out_stations, out or path, view_stage=effective)
     log(f"重锚：{path}，{len(out_stations)} 个站位按当前锚点重算 (y, z)"
-        f"（{moved} 个站位有改动；框架未变，不需要重新回零）")
+        f"（观察高度档 {effective!r}，{moved} 个站位有改动；框架未变，不需要重新回零）")
     return moved
 
 
