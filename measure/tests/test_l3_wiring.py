@@ -167,6 +167,42 @@ def test_missing_reference_emits_enum_none_and_no_fabricated_values():
     assert not contract.is_usable(row["quality"])
 
 
+def test_all_rows_unreliable_yields_unreliable_not_no_detection():
+    """**与上一条并排的反例**（Chief 2026-10-14）：整帧只剩不可信的排 ⇒ `unreliable`。
+
+    两条必须成对存在：零候选是"没找到东西"（`no_detection`），
+    有候选但判不可信是"找到了但不可靠"（`unreliable`）——后人别把其中一条"简化"掉。
+    """
+    from measure.bag_ruler import row_is_reliable
+
+    # 低对比档：菌包仍能被分出候选，但每排都判不可信（对比 20）
+    img = synth_frame(bag_gray=80, bg_gray=60)
+    res = detect(img, depression_deg=None, bag_cfg=_bag_cfg(), fruit_cfg=_fruit_cfg())
+    bags, _ = __import__("measure.bag_ruler", fromlist=["find_bags"]).find_bags(img, _bag_cfg())
+    assert bags, "低对比排也必须先有候选（L1 不许静默丢排）"
+    assert not any(row_is_reliable(bags, b.row_id, _bag_cfg()) for b in bags)
+    flags = set(res.evidence.flags)
+    assert "unreliable" in flags
+    assert "no_detection" not in flags
+
+    # 端到端：空帧也要留痕，且**不许**混成 no_detection
+    fetch, decode = stubs(img)
+    rows = rows_from_frames([frame_row()], room_id="611",
+                            detector=L3Detector(L3Config(bag_cfg=_bag_cfg())),
+                            fetch=fetch, decode=decode, emit_empty=True, log=lambda *_: None)
+    assert len(rows) == 1
+    q = contract.parse_flags(rows[0]["quality"])
+    assert "unreliable" in q and "no_detection" not in q
+    assert rows[0]["mean_cluster_w_mm"] is None and rows[0]["mean_cluster_h_mm"] is None
+    assert "unreliable" in contract.NON_USABLE_FLAGS and not contract.is_usable(rows[0]["quality"])
+
+
+def _fruit_cfg():
+    from measure.fruitbody import FruitConfig
+
+    return FruitConfig(downscale=2)
+
+
 def test_station_calibration_takes_priority_over_bag_standard():
     """ADR-0024：站位 `--mm-per-px` 有值就优先，`scale_source=calibration_target`。"""
     img = synth_frame()

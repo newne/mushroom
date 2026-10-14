@@ -43,7 +43,12 @@ from measure.bag_ruler import (
     nearest_bag_in_same_row,
     row_is_reliable,
 )
-from measure.estimate import BAG_DIAMETER_MM, BAG_LENGTH_MM, filter_above_bag_top
+from measure.estimate import (
+    BAG_DIAMETER_MM,
+    BAG_LENGTH_MM,
+    all_rows_unreliable,
+    filter_above_bag_top,
+)
 from measure.fruitbody import FruitConfig, FruitInstance, find_fruitbodies
 from measure.pipeline import Detection
 
@@ -202,8 +207,16 @@ class L3Detector:
             ))
             n_instances += len(group)
 
-        # 袋存在但一个簇都没定出来 ⇒ 没有候选可判（**不是** unreliable）
+        # 袋存在但一个簇都没定出来：**分两种情况**（与 estimate 层同一口径）
         if not dets:
+            if all_rows_unreliable(bags):
+                # 整帧只剩不可信的排（远排）⇒ `unreliable`，**不是**"没检出"
+                flags.add("unreliable")
+                ev = FrameEvidence(
+                    estimated_fields=(), scale_source="none", flags=frozenset(flags),
+                    n_instances=0,
+                    note="整帧只剩不可信的排（远排）⇒ 不出 mm；" + "；".join(note_bits))
+                return FrameResult([], ev)
             flags.add("no_scale")
             flags.add("no_detection")
             ev = FrameEvidence(

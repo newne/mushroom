@@ -550,6 +550,21 @@ mm_per_px=1.0924   scale_ref_mm=240.0   scale_ref_px=220.0
 `scale_source` 用环境官枚举 ✔；`no_theta` **不在** `NON_USABLE_FLAGS`（`is_usable=True`）✔；
 缺标尺时证据列不写假值（`scale_source='none'`、其余 NULL、带 `no_scale`）✔（见测试）。
 
+**这一节的用途（Chief 2026-10-14 提醒）**：以上是"**接了线**"这件事的**唯一证据**，
+不是聊天里的口头结论——复核/发版的人只看这里。四条列为可勾选项：
+
+- [x] 行仍是 **20 列**（`RECORD_FIELDS`，+`kind`）；
+- [x] `estimated_fields` 出线是 **`+` 串**（`mean_cluster_w_mm+mean_cluster_h_mm`）；
+- [x] `scale_source` 走**环境官枚举**（`bag_standard`；站位标定则 `calibration_target`；无标尺 `none`）；
+- [x] `no_theta` **不在不可用集**（`is_usable=True`，行仍可用）；`height_uncorrected` 同样不挡路；
+- [x] **缺标尺五列不写假值**（`estimated_fields`/`mm_per_px`/`scale_ref_mm`/`scale_ref_px` 为 NULL，
+      `scale_source='none'`）。
+
+**两条边界成对留在同一测试文件**（Chief 要求，防后人"简化"掉一条）：
+`test_missing_reference_emits_enum_none_and_no_fabricated_values`（零候选 ⇒ `{no_scale, no_detection}`，
+**不含** `unreliable`）与 `test_all_rows_unreliable_yields_unreliable_not_no_detection`
+（整帧只剩不可信排 ⇒ **`unreliable`**，不含 `no_detection`）——`test_l3_wiring.py` 里并排。
+
 **两个方向分别生效**（这是接线的关键改动）：`pipeline.aggregate_box()` 现在优先读
 `metrics.mm_per_px_x` / `mm_per_px_y`——水平用袋长 **240 mm**、竖直用袋径 **140 mm**（θ 注入后再 ÷cosθ）；
 拿一个 mm/px 乘两个方向正是 §1.1 那个错法（实测差 2 倍以上）。有测试专门钉住"竖直列若误用水平
@@ -561,6 +576,9 @@ mm_per_px=1.0924   scale_ref_mm=240.0   scale_ref_px=220.0
 ### 16.2 接线后仍未做 / 待确认
 
 1. **生产未开**：`--measure` 仍是 off（deploy 侧未动），上面三条件缺一不开；
+   **⚠️ 那一次发布必须同时重建 `patrol` 镜像**——`measure/**` 是**打进 patrol 镜像**的
+   （见 `docs/patrol/prod-deploy/` 的装配与「生效判据=镜像内字节」那条铁律），
+   **只重建 analysis 不够**；发布后按"镜像内 sha256 自查 + prod 库逐列实测"验收。
 2. **`baseline` 标记的疑问（要 Chief/环境官一句话）**：`CONST_FLAGS=("baseline","level_view")` 是
    "缺测基线帧"时代留下的，现在产的是**估算行**，`baseline` 字面像"定标帧、不是生长测量"——
    它不在 `NON_USABLE_FLAGS`（不挡路），但容易误读。**我没擅自摘**（改它会动所有行的 quality）。
