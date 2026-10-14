@@ -262,6 +262,21 @@ prod **4 核**、load ~1.7、**62 GiB（17 用 / 45 可用）**、`/` 98 G（**�
 
 ---
 
+## 10. X1–X5 落地状态 + 两条 CLI 实测（2026-10-14 16:2x，短表）
+
+| 项 | 状态 | 证据（一行） |
+| --- | --- | --- |
+| **X1 配置加载** | ✅ 类与帧级 flags 已生效；属性面板截图**待 GUI** | 客户端日志：`Updated config from CLI arguments: {'labels': ['bag','cluster','cap','bag_top','void'], 'flags': ['cap_clear','cap_not_clearly_formed','cap_indeterminate','q_low_contrast','q_bright_spot','q_blur','q_camera_moving','q_front_truncated','q_static_occlusion','q_empty_bag_present']}` |
+| **X2 帧** | ✅ 3 张就位，2880×1616 | `file` 实测 2880×1616；**P01 与 MinIO 同源 sha256 一致**：`mogu/20261013/B108_S108_level0_145300.jpg` 200 / 484,936 B / `9bda473d063ee6d0d305b7b47ba9e8088b68fef85cf122c77b74499b9c37ed33` = 本地（另一种命名 `…/S108_…` 为 404 ⇒ 对象名用 `B<layer><col>_<station>_…`） |
+| **X3 账号/目录/备份** | 路径 ✅，恢复演练待首份标注 | 非 root 账号 `annot`；`/data/annot/{artifacts,images,labels,exports,backup,config,logs}` |
+| **X4 离线** | 脚本 ✅，断网验证**待 GUI** | `/data/annot/start-annotate.sh` 含 `--no-auto-update-check` + `nice -n 19` + `taskset -c 2,3`；未装任何内置模型 |
+| **X5 试画 3 张** | ⛔ **阻塞** | GUI 在 prod 起不来（GL，见下） |
+| **③ COCO 保真（CLI 实测，不需 GUI）** | **属性全丢** | `X-AnyLabeling convert --task xlabel2coco --mode segment` → rc=0；**6 shape → 5 annotation**（`bag_top` 的 `linestrip` 不进 COCO）；annotation 键仅 `area/bbox/category_id/id/ignore/image_id/iscrowd/segmentation` ⇒ **`attributes`（对象属性）、`group_id`、帧级 `flags/tags/checked` 全部丢失**。⇒ **主档案必须是 XLABEL JSON**；属性回读要靠 `(filename, shape_index)` join 主档案（转换器待算法写） |
+| **GL 阻塞根因** | 未解（**等 Chief 批**） | `/dev/dri/card1` = `root:video 660`、`renderD128` = `root:render 660`；`leapapp` 组只有 `leapapp,users` ⇒ `~/.xorgxrdp.10.log`：`(EE) systemd-logind: failed to take device /dev/dri/card1: Operation not permitted` ⇒ Qt `Failed to finding matching FBConfig` → `Could not initialize GLX` → Abort。**Xvfb 与真实 :10 会话同错**；mesa/swrast 库齐全 ⇒ 不是缺库。建议修法：`usermod -aG video,render`（`leapapp`+`annot`）+ 重连 RDP；回退 `gpasswd -d`。
+| **RDP 前置** | ✅ 成立 | `/var/log/xrdp.log` 16:08:37：`login successful for user leapapp on display 10`、`client_ip=::ffff:10.77.77.47`；`xrdp` active+enabled，`*:3389` |
+
+---
+
 ## Comments
 
 - 2026-10-14 发版官写票 + 实施。依据用户当日指令（改用 X-AnyLabeling、装 server、端口 9213）与 Plan §5.1。
