@@ -147,6 +147,9 @@ class ConsoleDeps:
     transport: object | None = None
     # 触发请求的落盘目录（跑一轮的入口；见 deploy/patrol_trigger.py）
     trigger_dir: str = "/app/data/trigger"
+    # hold 的**持久记录**目录（票 13）：只写 console 自己的 JSONL，不碰 trigger_dir 里的
+    # `hold.json`——那个文件的写者身份是 `TriggerStore`，我不在那个目录里新增文件。
+    hold_dir: str = "/app/data/hold"
     # 手动指令的落盘目录（console 只写，执行方 patrol-serve 领走执行）
     cmd_dir: str = "/app/data/cmd"
     # 实时预览上游（ADR-0017：浏览器只连 console，相机地址与口令不进页面）
@@ -189,6 +192,107 @@ def _read_jsonl_tail(path: Path, limit: int = 400) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return out
+
+
+# ---------- hold 的持久记录（票 13，2026-10-14 Chief 批） --------------------------------
+# 为什么要有：hold 只有**当前状态**（`trigger/hold.json`），再设一次会被 `os.replace` 静默顶掉、
+# 到期结束又不经过任何调用 ⇒ 事后答不了"那一轮为什么被延后/中止"。这里只**追加记录**，
+# 不改 hold 语义（`TriggerStore` 一个字节不动），也不做第二调度源。
+#
+# 三种"结束"必须分开（票 13 §3.1）：cleared / superseded 落盘（recorded）；
+# **expired 不落盘**——唯一能落的地方是只读接口，等于给 GET 加写副作用；而到期是可复算的
+# （`until` 就在 start 行里），回查时标 `end_source="derived"` 比伪造一条"我记到了"诚实。
+HOLD_LOG_NAME = "hold-log.jsonl"
+HOLD_LOG_MAX = 1000          # 回查一次最多给多少行
+HOLD_LOG_SCAN = 20000        # 配对时最多回看多少行
+
+
+def _hold_log_path(deps) -> Path:
+    return Path(deps.hold_dir) / HOLD_LOG_NAME
+
+
+def _append_hold_log(deps, record: dict) -> None:
+    """一行一次写、写完就 flush。
+
+    一行一次（而不是攒着批量写）是为了"崩了也不丢已经发生的事"；
+    `json.dumps` 会把值里的换行转义掉，所以**一条记录永远占一行**——回查按行解析才安全。
+    """
+    p = _hold_log_path(deps)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(record, ensure_ascii=False) + "\n"
+    with open(p, "a", encoding="utf-8") as fh:
+        fh.write(line)
+        fh.flush()
+
+
+def _open_hold_id(deps) -> str:
+    """日志里**最后一个没有配对的** `hold_start` = 当前生效的那次保持的 id。
+
+    为什么不去 `hold.json` 里找：那个文件是 `TriggerStore` 的，我不改它的形状（票 13 的边界）。
+    为什么可能为空：那次保持是**本版本部署之前**设的，日志里根本没有它的 start——那就没有
+    可配对的对象，`superseded` 这一条也不该凭空编一个 id。
+    """
+    rows = _read_jsonl_tail(_hold_log_path(deps), limit=HOLD_LOG_SCAN)
+    ended = {r.get("hold_id") for r in rows if r.get("kind") == "hold_end"}
+    for r in reversed(rows):
+        if r.get("kind") == "hold_start" and r.get("hold_id") not in ended:
+            return str(r.get("hold_id") or "")
+    return ""
+
+
+def _hold_seconds(from_iso: str, to: datetime) -> float | None:
+    """两个时刻差多少秒；解析不了就**不给数**（不编 0）。"""
+    try:
+        return round((to - datetime.fromisoformat(from_iso)).total_seconds(), 1)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_line_ts(path: Path) -> str | None:
+    """日志文件的**第一行**的时间（= 记录起点）。用来表达"日志里没有 ≠ 没被延后过"。"""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            first = fh.readline().strip()
+        return str(json.loads(first).get("ts")) if first else None
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+def read_hold_log(deps, *, ts_from: str = "", ts_to: str = "", limit: int = HOLD_LOG_MAX) -> dict:
+    """按时间区间回查 hold 记录（票 13 §4）。
+
+    `rows` 是原始记录（`hold_start`/`hold_end`），`derived_endings` 如实报
+    "这里面有多少条结束时刻是**推导**出来的（到期自动失效）"——不让人把推导当记录。
+    """
+    path = _hold_log_path(deps)
+    rows = _read_jsonl_tail(path, limit=HOLD_LOG_SCAN)
+    # 配对只看**全量**（窗口外的 start 也要能找到它的 end），过滤只作用于返回
+    ended = {r.get("hold_id") for r in rows if r.get("kind") == "hold_end"}
+    now = deps.now()
+    out = []
+    for r in rows:
+        ts = str(r.get("ts") or "")
+        if ts_from and ts < ts_from:
+            continue
+        if ts_to and ts > ts_to:
+            continue
+        row = dict(r)
+        if row.get("kind") == "hold_start" and row.get("hold_id") not in ended:
+            until = str(row.get("until") or "")
+            try:
+                expired = bool(until) and datetime.fromisoformat(until) <= now
+            except ValueError:
+                expired = False
+            if expired:            # 到期自动结束：**记录里没有**，如实标成推导
+                row["end_reason"] = "expired"
+                row["end_source"] = "derived"
+                row["duration_s"] = _hold_seconds(ts, datetime.fromisoformat(until))
+        out.append(row)
+    out = out[-max(1, min(int(limit), HOLD_LOG_MAX)):]     # 顺序即发生顺序，超限取最近的
+    return {"ok": True, "rows": out,
+            "derived_endings": sum(1 for r in out if r.get("end_source") == "derived"),
+            "log_created_at": _first_line_ts(path),
+            "note": "记录自本版本部署起；**日志里没有 ≠ 没被延后过**"}
 
 
 def latest_run(runs_dir: str) -> tuple[dict | None, list[dict]]:
@@ -791,6 +895,7 @@ def deps_from_env() -> ConsoleDeps:
         transport=HttpxTransport(allowed_hosts={host_port(analysis_url)}),
         trigger_dir=os.environ.get("PATROL_TRIGGER_DIR", "/app/data/trigger"),
         cmd_dir=os.environ.get("PATROL_CMD_DIR", "/app/data/cmd"),
+        hold_dir=os.environ.get("PATROL_HOLD_DIR", "/app/data/hold"),
         preview_url=os.environ.get("PATROL_PREVIEW", "http://mushroom_preview:8003"),
         # 巡检中允许看预览（2026-10-12 实测后放开）。置 0 恢复旧行为——见 preview_block
         # 的实测记录；"0/false/no" 一律当关，别让一个拼写差异把开关悄悄留在开的状态。
@@ -1159,11 +1264,29 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
         else:
             raise HTTPException(422, "给 minutes 或 until 之一")
         store = TriggerStore(dir_path=deps.trigger_dir, now=deps.now)
+        before = store.hold_summary()          # 顶掉旧的之前先看一眼（下面要落一条 superseded）
         try:
             hold = store.set_hold(until=until, defer_s=body.defer_s,
                                   reason=body.reason, by=body.by)
         except ValueError as e:
             raise HTTPException(422, str(e)) from e
+        # 票 13：保持生效期内再设一次，`hold.json` 会被**静默顶掉**（os.replace）。
+        # 不记这一条，回查里第一次保持永远没有结束时刻 —— 所以先补一条 superseded 结束。
+        new_id = uuid.uuid4().hex[:12]
+        if before.get("active"):
+            open_id = _open_hold_id(deps)
+            if open_id:
+                _append_hold_log(deps, {
+                    "kind": "hold_end", "hold_id": open_id,
+                    "ts": hold["set_at"], "end_reason": "superseded", "end_source": "recorded",
+                    "by": body.by, "reason": body.reason,
+                    "duration_s": _hold_seconds(before.get("set_at"), deps.now()),
+                })
+        _append_hold_log(deps, {
+            "kind": "hold_start", "hold_id": new_id, "ts": hold["set_at"],
+            "by": hold.get("set_by", body.by), "reason": hold.get("reason", body.reason),
+            "source": "manual", "until": hold["until"], "defer_s": hold["defer_s"],
+        })
         console.note(f"设保持至 {hold['until']}（之后偏置 {hold['defer_s']:.0f}s，"
                      f"{body.reason or '未注明原因'}）")
         return {"ok": True, "hold": store.hold_summary(), "state": store.state()}
@@ -1172,9 +1295,33 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
     def api_hold_clear() -> dict:
         """解除保持。**不动已偏置的请求**：那条请求的 `not_before` 是它自己的事实。"""
         store = TriggerStore(dir_path=deps.trigger_dir, now=deps.now)
+        before = store.hold_summary()          # 解除之后就读不到了，先留一份
         cleared = store.clear_hold()
+        # 票 13：只有**状态真的变了**才落一条结束记录。"本来就没有保持"不落——
+        # 那是空动作，落进去只会把回查结果灌满噪音。
+        if cleared:
+            open_id = _open_hold_id(deps)
+            if open_id:
+                _append_hold_log(deps, {
+                    "kind": "hold_end", "hold_id": open_id,
+                    "ts": deps.now().isoformat(timespec="seconds"),
+                    "end_reason": "cleared", "end_source": "recorded", "by": "operator",
+                    "reason": "", "duration_s": _hold_seconds(before.get("set_at"), deps.now()),
+                })
         console.note("解除巡检保持" if cleared else "解除保持：本来就没有生效的保持")
         return {"ok": True, "cleared": cleared, "state": store.state()}
+
+    @app.get("/api/patrol/hold/log")
+    def api_hold_log(ts_from: str = "", ts_to: str = "", limit: int = 1000) -> dict:
+        """hold 的持久记录（票 13，只读）。
+
+        回答的是"那一轮为什么被延后/中止"。三条口径：`superseded`（被新的保持顶掉）**算一次结束**；
+        到期自动失效**不落盘**、在这里标成 `end_source="derived"`（不给只读接口加写副作用）；
+        `log_created_at` 是日志首行时间——**日志里没有 ≠ 没被延后过**。
+        """
+        if ts_from and ts_to and ts_from > ts_to:
+            raise HTTPException(422, "ts_from 不能晚于 ts_to")
+        return read_hold_log(deps, ts_from=ts_from, ts_to=ts_to, limit=limit)
 
     # ---------- 手动控制：会话 / 指令 / 急停（ADR-0013 的语义） ----------
 

@@ -1052,3 +1052,215 @@ async def test_preview_stream_keeps_flowing_when_a_round_starts(tmp_path):
     for _ in range(PREVIEW_RECHECK_CHUNKS * 2):
         got.append(await anext(body))
     assert len(got) == 1 + PREVIEW_RECHECK_CHUNKS * 2, "轮内不断流：块数照发"
+
+
+# ---------- 票 13：hold 的持久记录（2026-10-14，Chief 批） ----------
+# 回答的是"那一轮为什么被延后/中止"。三条口径（票 13 §3.1）：
+#   cleared / superseded 落盘（recorded）；**expired 不落盘**、回查标 derived。
+# 断言用**可推进的时钟**，不 sleep —— 墙钟相位的用例就是随机红灯。
+
+
+class _Clock:
+    """可推进的假时钟：`deps.now` 直接用它，测试里想走多久走多久。"""
+
+    def __init__(self, t: datetime):
+        self.t = t
+
+    def __call__(self) -> datetime:
+        return self.t
+
+    def advance(self, **kw) -> datetime:
+        self.t = self.t + timedelta(**kw)
+        return self.t
+
+
+def make_hold_deps(tmp_path, clock) -> ConsoleDeps:
+    room = tmp_path / "room.yaml"
+    write_room(room, "2026-09-04")
+    stations = tmp_path / "stations.yaml"
+    stations.write_text("stations: []\n", encoding="utf-8")
+    return ConsoleDeps(room_path=str(room), stations_path=str(stations),
+                       outbox_path=str(tmp_path / "outbox.jsonl"),
+                       runs_dir=str(tmp_path / "runs"),
+                       trigger_dir=str(tmp_path / "trigger"), cmd_dir=str(tmp_path / "cmd"),
+                       hold_dir=str(tmp_path / "hold"), now=clock)
+
+
+def hold_log_lines(tmp_path) -> list[str]:
+    p = tmp_path / "hold" / "hold-log.jsonl"
+    if not p.exists():
+        return []
+    return [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def hold_log_rows(tmp_path) -> list[dict]:
+    return [json.loads(ln) for ln in hold_log_lines(tmp_path)]
+
+
+def test_setting_a_hold_writes_exactly_one_start_record(tmp_path):
+    """① 设保持 ⇒ 恰好一行 `hold_start`，字段齐全且与请求一致（`source` 今天只有 manual）。"""
+    clock = _Clock(NOW)
+    deps = make_hold_deps(tmp_path, clock)
+    with TestClient(create_app(deps)) as c:
+        r = c.put("/api/patrol/hold",
+                  json={"minutes": 20, "defer_s": 1200.0, "reason": "加湿段", "by": "op1"})
+        assert r.status_code == 200, r.text
+
+    rows = hold_log_rows(tmp_path)
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["kind"] == "hold_start"
+    assert len(row["hold_id"]) == 12 and all(ch in "0123456789abcdef" for ch in row["hold_id"])
+    assert row["ts"] == NOW.isoformat(timespec="seconds")
+    assert row["until"] == (NOW + timedelta(minutes=20)).isoformat(timespec="seconds")
+    assert row["defer_s"] == 1200.0
+    assert row["by"] == "op1" and row["reason"] == "加湿段"
+    assert row["source"] == "manual", "没有生产者就实现'信号'分支，只会得到一条永远为 manual 的字段"
+
+
+def test_clearing_a_hold_writes_one_end_record_with_duration(tmp_path):
+    """② 解除 ⇒ 一行 `hold_end`，与 start 同 `hold_id`，时长按注入时钟算得准。"""
+    clock = _Clock(NOW)
+    deps = make_hold_deps(tmp_path, clock)
+    with TestClient(create_app(deps)) as c:
+        c.put("/api/patrol/hold", json={"minutes": 30, "reason": "加湿"})
+        clock.advance(minutes=8, seconds=11)
+        r = c.delete("/api/patrol/hold")
+        assert r.status_code == 200 and r.json()["cleared"] is True
+
+    rows = hold_log_rows(tmp_path)
+    assert [r["kind"] for r in rows] == ["hold_start", "hold_end"]
+    start, end = rows
+    assert end["hold_id"] == start["hold_id"]
+    assert end["end_reason"] == "cleared" and end["end_source"] == "recorded"
+    assert end["duration_s"] == 491.0, end
+
+
+def test_clearing_without_a_hold_writes_nothing(tmp_path):
+    """③ 本来就没有保持 ⇒ 不落行（空动作落进去只会把回查灌满噪音）。"""
+    clock = _Clock(NOW)
+    deps = make_hold_deps(tmp_path, clock)
+    with TestClient(create_app(deps)) as c:
+        r = c.delete("/api/patrol/hold")
+        assert r.json()["cleared"] is False
+    assert hold_log_rows(tmp_path) == []
+
+
+def test_setting_twice_records_superseded_then_a_new_start(tmp_path):
+    """④ 生效期内再设一次 ⇒ 先记账 `superseded` 再开新的。
+
+    `hold.json` 会被 `os.replace` **静默顶掉**：不记这一条，回查里第一次保持永远没有结束时刻。
+    """
+    clock = _Clock(NOW)
+    deps = make_hold_deps(tmp_path, clock)
+    with TestClient(create_app(deps)) as c:
+        c.put("/api/patrol/hold", json={"minutes": 30, "reason": "第一次"})
+        clock.advance(minutes=5)
+        second = c.put("/api/patrol/hold", json={"minutes": 30, "reason": "第二次"}).json()
+
+    rows = hold_log_rows(tmp_path)
+    assert [r["kind"] for r in rows] == ["hold_start", "hold_end", "hold_start"]
+    first, end, new = rows
+    assert end["hold_id"] == first["hold_id"] and end["end_reason"] == "superseded"
+    assert end["end_source"] == "recorded" and end["duration_s"] == 300.0
+    assert new["hold_id"] != first["hold_id"] and new["reason"] == "第二次"
+    # 两条 ts 相同：顶掉与新设是同一瞬间发生的两件事
+    assert end["ts"] == new["ts"] == second["hold"]["set_at"]
+
+
+def test_expiry_is_not_recorded_but_reported_as_derived(tmp_path):
+    """⑤ 到期自动结束**不落盘**；回查按 `until` 推导并标 `derived`，时长也照算。"""
+    clock = _Clock(NOW)
+    deps = make_hold_deps(tmp_path, clock)
+    with TestClient(create_app(deps)) as c:
+        c.put("/api/patrol/hold", json={"minutes": 20, "reason": "加湿"})
+        clock.advance(minutes=21)          # 静悄悄地到期了，没有任何调用发生
+        assert len(hold_log_rows(tmp_path)) == 1, "到期不该写任何东西（不给只读接口加副作用）"
+        body = c.get("/api/patrol/hold/log").json()
+
+    assert body["ok"] is True
+    assert body["derived_endings"] == 1
+    row = body["rows"][0]
+    assert row["end_reason"] == "expired" and row["end_source"] == "derived"
+    assert row["duration_s"] == 1200.0, row
+    assert body["log_created_at"] == NOW.isoformat(timespec="seconds")
+    assert "部署起" in body["note"], "日志里没有 ≠ 没被延后过：这句必须跟着返回走"
+
+
+def test_hold_log_filters_by_time_range_and_rejects_a_reversed_range(tmp_path):
+    """⑥ 按 `ts` 过滤（闭区间）；区间反了 ⇒ 422，而不是给个空结果让人以为"没有"。"""
+    clock = _Clock(NOW)
+    deps = make_hold_deps(tmp_path, clock)
+    with TestClient(create_app(deps)) as c:
+        c.put("/api/patrol/hold", json={"minutes": 10, "reason": "早"})
+        clock.advance(seconds=1)          # 让"解除"落在下一秒，区间判据才不含糊
+        c.delete("/api/patrol/hold")
+        clock.advance(hours=3)
+        c.put("/api/patrol/hold", json={"minutes": 10, "reason": "晚"})
+
+        early = NOW.isoformat(timespec="seconds")
+        late = clock.t.isoformat(timespec="seconds")
+        only_late = c.get("/api/patrol/hold/log", params={"ts_from": late}).json()
+        only_early = c.get("/api/patrol/hold/log", params={"ts_to": early}).json()
+        bad = c.get("/api/patrol/hold/log", params={"ts_from": late, "ts_to": early})
+
+    assert [r["reason"] for r in only_late["rows"]] == ["晚"]
+    assert [r["reason"] for r in only_early["rows"]] == ["早"]
+    assert bad.status_code == 422
+
+
+def test_hold_log_is_one_record_per_line_even_with_a_multiline_reason(tmp_path):
+    """⑦ 一行一条：`reason` 里带换行也必须留在一行内，否则回查按行解析直接崩。
+
+    （`json.dumps` 会转义换行；这条断言钉住"别哪天改成漂亮打印"。）
+    """
+    clock = _Clock(NOW)
+    deps = make_hold_deps(tmp_path, clock)
+    with TestClient(create_app(deps)) as c:
+        c.put("/api/patrol/hold", json={"minutes": 10, "reason": "第一行\n第二行"})
+        clock.advance(minutes=1)
+        c.delete("/api/patrol/hold")
+
+    lines = hold_log_lines(tmp_path)
+    assert len(lines) == 2 == len(hold_log_rows(tmp_path))
+    assert all("\n" not in ln for ln in lines)
+    assert hold_log_rows(tmp_path)[0]["reason"] == "第一行\n第二行", "原文要留住，不许截断"
+
+
+def test_hold_log_appends_and_keeps_the_order(tmp_path):
+    """⑧ 追加不覆盖：连设/解 3 轮 ⇒ 6 行都在，顺序就是发生顺序。"""
+    clock = _Clock(NOW)
+    deps = make_hold_deps(tmp_path, clock)
+    with TestClient(create_app(deps)) as c:
+        for i in range(3):
+            c.put("/api/patrol/hold", json={"minutes": 10, "reason": f"第{i}轮"})
+            clock.advance(minutes=2)
+            c.delete("/api/patrol/hold")
+            clock.advance(minutes=2)
+
+    rows = hold_log_rows(tmp_path)
+    assert len(rows) == 6
+    assert [r["reason"] for r in rows if r["kind"] == "hold_start"] == ["第0轮", "第1轮", "第2轮"]
+    assert [r["ts"] for r in rows] == sorted(r["ts"] for r in rows)
+    assert [r["kind"] for r in rows] == ["hold_start", "hold_end"] * 3
+
+
+def test_hold_log_record_shape_is_pinned(tmp_path):
+    """⑨ 字段集契约式断言：多一个字段就红——防"加了字段没人知道"（与页面侧 CONTRACT 同做法）。"""
+    START_FIELDS = {"kind", "hold_id", "ts", "by", "reason", "source", "until", "defer_s"}
+    END_FIELDS = {"kind", "hold_id", "ts", "end_reason", "end_source", "by", "reason",
+                  "duration_s"}
+    clock = _Clock(NOW)
+    deps = make_hold_deps(tmp_path, clock)
+    with TestClient(create_app(deps)) as c:
+        c.put("/api/patrol/hold", json={"minutes": 10, "reason": "加湿"})
+        clock.advance(minutes=1)
+        c.delete("/api/patrol/hold")
+
+    start, end = hold_log_rows(tmp_path)
+    assert set(start) == START_FIELDS, set(start) ^ START_FIELDS
+    assert set(end) == END_FIELDS, set(end) ^ END_FIELDS
+    # 回查返回的 body 形状也钉住（少了 key 页面会静默拿着 undefined 做事）
+    with TestClient(create_app(deps)) as c:
+        body = c.get("/api/patrol/hold/log").json()
+    assert set(body) == {"ok", "rows", "derived_endings", "log_created_at", "note"}, set(body)
