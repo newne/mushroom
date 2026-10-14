@@ -248,15 +248,24 @@ def _readme(pre_version: str, n_frames: int, n_inst: int) -> str:
 - 帧数：{n_frames}｜实例行：{n_inst}（**不含**被袋肩门丢掉的候选——它们在 overlay 里画红框）
 - 坐标单位：**原图像素**（2880×1616）。**禁止**在降采样工作坐标里标。
 
-## 谁做什么
+## 谁做什么：人**只做四件事**
 
-1. **团队（已做）**：跑 `measure/tools/make_annotation_sheet.py` 出预标注框与 overlay；
-2. **人（复核）**：逐帧看 `overlays/<frame_id>.jpg`，对 `instances.csv` 里每个框只做四件事之一——
-   - `review_status=confirmed`：框对、分类对；
-   - `review_status=rejected`：这是假阳（袋面纹理等）⇒ **保留行**并写一句 `reviewer_note`；
-   - `review_status=edited`：改框/改端点（同时改 `bbox_*`、`base_y`/`tip_y`）；
-   - 在 CSV 里**新增一行**，`source=human_added`、`review_status=confirmed`：预标注漏掉的（红框是真菇、或红框里没画到的）；
-3. `frames.csv` 每个站位/帧填 `reviewer`、`review_date`。
+| # | 动作 | 怎么记 | 为什么必须这么记 |
+| --- | --- | --- | --- |
+| 1 | **确认** | `review_status=confirmed` | 预标注正确，进 precision 的分子 |
+| 2 | **改框** | `review_status=edited` + 改 `bbox_*`/`base_y`/`tip_y`/`bag_id` + 一句 note | 改前的框算错、改后的算对 |
+| 3 | **删** | `review_status=rejected` + 一句 note（**行必须留**） | **删行 = 把假阳率洗白**；留着才能算假阳率 |
+| 4 | **补漏** | **新增一行**：`source=human_added`、`review_status=confirmed` | 预标注漏掉的；这是 recall 的分子 |
+| 4b | 补的是**被袋肩门丢掉的真菇**（overlay 红框） | 同上，并写 **`reviewer_note=gate_false_negative`** | **直接量化袋肩门的漏检** |
+
+**两条不许动**：`ignore=1` 的行**必须保留**（删了漏检率的分母就错）；
+`truncated=1 ⇒ height_valid=0`，但该实例**仍算检出、参与 recall**（切掉的是杆高，不是"有没有菇"）。
+
+**红线**：坐标一律**原图 px**、`w_px/h_px` 一律 **2880×1616**；**禁止在 `ds=2` 工作坐标里标**。
+
+**最容易被跳过、但价值最高的样本**：**"看起来明显没有菇"的帧也要逐框复核**——
+尤其是 overlay 里满是红框的帧（例：工单里的 F01，候选全被袋肩门判掉），
+它们是**袋肩门假阴/假阳判据**的来源；跳过它，就等于放弃对门本身的检验。
 
 ## 边界情况判据（**必须照此**，否则 precision/recall 没法解释）
 
