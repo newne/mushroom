@@ -932,6 +932,63 @@ function requestErrorText(error){
   return error && error.code === 'TIMEOUT' ? '请求超时，请检查 console 服务' : '接口不可达：' + error.message;
 }
 
+/* ---- 区间表 `/api/ranges`（票 05 §5，2026-10-14 **破坏性形状变更**：裸列表 → 信封）----
+   新形状：`{ok, rows, count, state, state_text, detail, computed_at, metric, unit}`（行形状不变，
+   仍带 `metric`/`unit`/`rate_per_h`）。**旧版线上还是裸列表**，所以两种都要能读、**信封优先**：
+   - 裸列表 ⇒ 只当"拿到了 N 行"，**没有状态字段** ⇒ 如实说"不知道算没算过"，**不许**说成"样本不足"；
+   - 信封 ⇒ 空态**原样显示后端给的 `state_text`**（六态各自具名：`no_measurements` /
+     `all_excluded` / `no_environment` / `no_growth_metric` / `insufficient_samples` / `never_computed`）
+     —— **绝不把"样本不足"和"没重算过"合并成"暂无数据"**（"未知要说未知"）；
+   - **排除要可见**：`detail.excluded_by_reason` 是计数、`detail.excluded_samples` 是前 20 条原文
+     （含 `window` 与 `detail`）——"排除了多少"和"排掉了哪一段、凭什么"都要能答。 */
+function rangesEnvelope(payload){
+  if(Array.isArray(payload)) return { ok: true, rows: payload, count: payload.length,
+                                      state: null, state_text: '', detail: {}, legacy: true };
+  const e = (payload && typeof payload === 'object') ? payload : {};
+  return { ok: e.ok !== false, rows: e.rows || [],
+           count: (typeof e.count === 'number') ? e.count : (e.rows || []).length,
+           state: e.state || null, state_text: e.state_text || '', detail: e.detail || {},
+           computed_at: e.computed_at || null, metric: e.metric || null, unit: e.unit || null,
+           legacy: false };
+}
+
+function rangesHtml(payload){
+  if(payload === undefined || payload === null)
+    return '<div class="empty" style="padding:2px 0 0">区间表：<b>还没取到</b>（不是"没有数据"）。</div>';
+  if(payload.ok === false)
+    return '<div class="empty" style="padding:2px 0 0">区间表取不到：'
+      + esc(payload.error || '未知原因') + '</div>';
+  const e = rangesEnvelope(payload);
+  const bits = [];
+  if(e.state) bits.push('<b>' + esc(e.state) + '</b>：' + esc(e.state_text || '（后端没给说明）'));
+  // 措辞刻意**不含**"样本不足"四个字：断言据此判"有没有把'不知道'冒充成'样本不足'"
+  else if(e.legacy) bits.push('旧版接口（裸列表、没有状态字段）：返回 ' + e.count
+    + ' 行 —— **不知道**算没算过（旧形状没有状态字段，无从判断），不许当成"样本不够"');
+  if(e.ok && e.state === 'ok' && e.rows.length){
+    const cols = ['metric', 'unit', 'rate_per_h'];
+    bits.push('<table class="meas"><tr><th>量</th><th>单位</th><th>速率</th></tr>'
+      + e.rows.slice(0, 8).map(r => '<tr>' + cols.map(c => '<td>' + esc(
+          (r && r[c] !== undefined && r[c] !== null) ? String(r[c]) : '—') + '</td>').join('') + '</tr>')
+        .join('') + '</table>');
+  }
+  const ex = e.detail.excluded_by_reason || {};
+  const reasons = Object.keys(ex);
+  if(reasons.length){
+    bits.push('已排除 ' + ((e.detail.n_excluded !== undefined) ? e.detail.n_excluded : '?')
+      + ' 条：' + reasons.map(k => esc(k) + ' ' + esc(String(ex[k]))).join('、'));
+    const samples = e.detail.excluded_samples || [];
+    if(samples.length){
+      bits.push(samples.map(x => esc([x.ts, x.zone, x.reason, x.window, x.detail]
+        .filter(Boolean).join(' · '))).join('<br>')
+        + (e.detail.excluded_samples_truncated ? '<br>…（只列前 20 条）' : ''));
+    }
+  }
+  if(e.detail.n_kept !== undefined) bits.push('参与计算的测量行 ' + esc(String(e.detail.n_kept)) + ' 条');
+  return '<div class="empty" style="padding:2px 0 0">区间表：'
+    + (bits.length ? bits.join('<br>') : '返回了 ' + e.count + ' 行，但没给状态字段')
+    + '</div>';
+}
+
 /* 控制类请求统一走这里：**不把 4xx 当异常**——403/409/400 是后端正常的业务回答
    （没接管 / 巡检中 / 参数不合法），页面必须原样把话术显示出来，而不是一句"失败"。 */
 async function jsend(url, method, body){
@@ -2915,7 +2972,11 @@ const QUALITY_NO_SCALE = 'no_scale';
 const QUALITY_UNRELIABLE = 'unreliable';
 const QUALITY_SCALE_CONFLICT = 'scale_conflict';
 /** 标尺来源的中文名；**未知值原样显示**（不翻译、不归类，免得把新来源读成已知的）。 */
-const SCALE_SOURCE_TEXT = { bag_diameter: '菌包标尺', calibration_target: '校准靶标' };
+// 票 20（`3365eb2`）定名：`bag_standard`（菌包标准尺寸 240/140）/ `calibration_target` /
+// `bag_detected`（只有自动检出可用，**仍是估算、绝不进 verified**）/ `none`（没标尺）。
+// 旧值 `bag_diameter` 由后端归一 + 报警；**未知值原样显示**（不猜、不归类）。
+const SCALE_SOURCE_TEXT = { bag_standard: '菌包标准尺寸', calibration_target: '校准靶标',
+                            bag_detected: '自动检出（估算）' };
 
 /** 这一行的标尺来源标签：`菌包标尺 240 mm`；没有 `scale_source` ⇒ 空串。 */
 function scaleSourceLabel(row){
@@ -2929,7 +2990,11 @@ function scaleSourceLabel(row){
 /** 这一列是不是**估算值**：字段级标记（票 18 §2），不写死列名表。 */
 function isEstimated(row, key){
   if(!row) return false;
-  const list = String(row.estimated_fields || '').split('+').map(x => x.trim()).filter(Boolean);
+  // ⚠️ 票 20（`3365eb2`）：接口读回来是 **list**（不是 `+` 串！）。两种都认——
+  // 按 `analysis/evidence.py` 的做法只做形状适配，**判据不在页面自己拼**。
+  const ef = row.estimated_fields;
+  const list = Array.isArray(ef) ? ef.map(x => String(x).trim()).filter(Boolean)
+                                 : String(ef || '').split('+').map(x => x.trim()).filter(Boolean);
   if(list.length) return list.includes(String(key));   // **字段级**：列在里面的才算估算
   // 没有列表、只有行级 `estimate`：那是生产者没写字段清单 ⇒ 整行按估算算（宁可标多，不标漏）
   return qualityHas(row.quality, QUALITY_ESTIMATE);
@@ -2950,6 +3015,13 @@ function measureState(row, key){
 
 /** **分布**（不是不确定度！）：`P10–P90` 与 `±` 是两种东西，措辞绝不含糊、绝不写 `±`。
  *  `n<5` 只写「样本不足（n=X）」——2 个点摆区间是假精确。 */
+/** 竖直列是否**未做 cosθ 补偿**（测量师 2026-10-14：`height_uncorrected` 的行 =
+ *  "竖直投影跨度"，**不是长度**）。换口径（将来注入 θ）后同列会出现"已补偿"的行，
+ *  **两种量不得画同一条趋势线、不得混比**——页面给的判据就是这个标记。 */
+function isHeightUncorrected(row){
+  return !!row && qualityFlags(row.quality).includes('height_uncorrected');
+}
+
 function distText(row, unit){
   if(!row) return '';
   const n = (typeof row.n === 'number') ? row.n : null;
@@ -3013,7 +3085,12 @@ function measureCellText(row, key, unit){
   }
   // ③ 估算 / 实测：**绝对值恒显示**，估算再带「估算（标尺来源 [参考尺寸]）」
   if(typeof v === 'number'){
-    const tag = (row && isEstimated(row, key)) ? '估算（' + (scaleSourceLabel(row) || '标尺来源未知') + '）' : '';
+    // 测量师 2026-10-14：`height_uncorrected` = **未做 cosθ 补偿的竖直投影跨度**，**不是长度**。
+    // 带这个标记时标签必须写「未做俯角补偿」——只写"长度"会让人把它当已补偿的量读。
+    const uncorrected = flags.includes('height_uncorrected');
+    const tag = (row && isEstimated(row, key))
+      ? (uncorrected ? '估算（未做俯角补偿）'
+                     : '估算（' + (scaleSourceLabel(row) || '标尺来源未知') + '）') : '';
     const dist = (key === 'mean_len_mm') ? distText(row, unit) : '';   // 分位列只对杆长存在
     return [v + ' ' + unit, tag, dist].filter(Boolean).join(' · ');
   }
@@ -3153,6 +3230,9 @@ function drawCurve(){
       const last = deltas.get(String(pts[pts.length-1].ts));
       const bits = [];
       if(last) bits.push('最新判词：' + ((last.verdict_text || last.verdict) || '—'));
+      const unc = pts.filter(r => isHeightUncorrected(r)).length;
+      if(unc && unc < pts.length)
+        bits.push('两种口径混在一条线上（' + unc + ' 行未做俯角补偿）：**不跨比**，只显示点');
       const change = deltaText(last);
       if(change) bits.push(change);
       const rate = rateText(last);
@@ -3470,7 +3550,8 @@ async function loadGrowth(){
    口径见 docs/patrol/env-analysis/spec.md：主体是**实际参数**（小时级温/湿/CO₂/补光），
    不是设定值。补光的 lamp_state 是**设备状态**（0=自动 1=手动 2=停止 3=关闭），
    分类量，画成状态色带而不是折线——对它求平均没有意义（ADR-0021）。 */
-const env = { range: '72', data: null, summary: null, ops: null, batches: null, error: '' };
+const env = { range: '72', data: null, summary: null, ops: null, batches: null,
+              ranges: null, error: '' };   // ranges = 区间表信封（票 05 §5）；null = 还没取到
 let envRequestSeq = 0;
 
 const ENV_PARAMS = [
@@ -3546,6 +3627,16 @@ async function loadEnv(){
     }catch(e){
       if(requestId !== envRequestSeq) return;
       env.batches = { ok: false, error: String((e && e.message) || e) };
+    }
+    // 区间表（票 05 §5 的信封）：**失败也要记下来**——`undefined` 显示"还没取到"，
+    // 与"取到了但是空的（六态之一）"是两件事。
+    try{
+      const r = await jget('/api/ranges');
+      if(requestId !== envRequestSeq) return;
+      env.ranges = r;
+    }catch(e){
+      if(requestId !== envRequestSeq) return;
+      env.ranges = { ok: false, error: String((e && e.message) || e) };
     }
     if(env.error){
       box.className = 'empty'; box.textContent = '查不到环境数据';
@@ -3826,8 +3917,8 @@ function drawBatches(){
         + esc(String(data.data_to || '').slice(5, 16).replace('T', ' ')) + '）'
         + '——更早的批次只有窗口没有数据，所以要比"覆盖天数"栏</div>' : ''))
     + '<div class="empty" style="padding:2px 0 0">'
-    + '「最优参数设定」要等区间表（05 号票）接上才能给——今天 ranges 还是空的，'
-    + '这里只做批次之间的实际参数对比，不编一个"最优"出来。</div>';
+    + '这里只做批次之间的实际参数对比，<b>不编一个"最优"出来</b>。</div>'
+    + rangesHtml(env.ranges);
 }
 
 function drawOps(){

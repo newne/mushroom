@@ -140,19 +140,22 @@ const MEASUREMENTS = {
       quality: 'verified+no_angle_profile',
       mean_cluster_w_mm: 58.0, mean_cluster_h_mm: 44.0,
       mean_area_mm2: 3120.0, mean_projected_d_mm: 62.5,
-      estimated_fields: null, scale_source: null, scale_ref_mm: null, mm_per_px: null },
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, scale_ref_px: null,
+      mm_per_px: null },
     { ts: '2026-09-13T09:30:00', room_id: '611', box_id: 'B102', n: 6,
       mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
       quality: 'verified+no_angle_profile',
       mean_cluster_w_mm: 64.0, mean_cluster_h_mm: 48.0,
       mean_area_mm2: 3980.0, mean_projected_d_mm: 70.2,
-      estimated_fields: null, scale_source: null, scale_ref_mm: null, mm_per_px: null },
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, scale_ref_px: null,
+      mm_per_px: null },
     { ts: '2026-09-14T09:30:00', room_id: '611', box_id: 'B102', n: 6,
       mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
       quality: 'verified+no_angle_profile',
       mean_cluster_w_mm: 66.0, mean_cluster_h_mm: 49.5,
       mean_area_mm2: 4210.0, mean_projected_d_mm: 72.0,
-      estimated_fields: null, scale_source: null, scale_ref_mm: null, mm_per_px: null },
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, scale_ref_px: null,
+      mm_per_px: null },
     // 两行是给三种"空"造的对照（环境官 2026-10-13 定的优先序：先判"这帧怎么了"，
     // 再判"这个量在角度档下不可测"——平视下几乎每行都带 no_angle_profile，
     // 先判它会盖掉更准确的原因）：
@@ -163,13 +166,15 @@ const MEASUREMENTS = {
       quality: 'no_light+no_angle_profile',
       mean_cluster_w_mm: null, mean_cluster_h_mm: null,
       mean_area_mm2: null, mean_projected_d_mm: null,
-      estimated_fields: null, scale_source: null, scale_ref_mm: null, mm_per_px: null },
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, scale_ref_px: null,
+      mm_per_px: null },
     { ts: '2026-09-12T09:30:00', room_id: '611', box_id: 'B102', n: 0,
       mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
       quality: 'no_detection+no_angle_profile',
       mean_cluster_w_mm: null, mean_cluster_h_mm: null,
       mean_area_mm2: null, mean_projected_d_mm: null,
-      estimated_fields: null, scale_source: null, scale_ref_mm: null, mm_per_px: null },
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, scale_ref_px: null,
+      mm_per_px: null },
   ],
 };
 
@@ -233,6 +238,9 @@ const state = {
   env_error: false,                           // 让 /api/environment 回"prod 查不到"
   env_empty: false,                           // 让 /api/environment 回"窗口内没有数据"
   ops_error: false,                           // 让 /api/operations 回"prod 查不到"
+  ranges_state: null,                         // 区间表六态；null ⇒ 假后端默认 all_excluded
+  ranges_error: false,                        // 让 /api/ranges 回 ok:false
+  ranges_legacy: false,                       // 让 /api/ranges 回**旧版裸列表**（线上现役形状）
   preview_down: false,                        // 让 /api/preview/status 回"预览服务连不上"
   preview_frame_age: 0.4,                     // 上游"最新一帧多久之前"（>3 秒 = 卡住）
   preview_frames: 42,                         // 上游累计帧计数（只增不减；页面只拿它算 fps 差值）
@@ -400,6 +408,35 @@ function route(method, url, body) {
   if (path === '/api/environment/batches') {
     return json(200, { ok: true, zone: '611', batches: BATCHES,
                        data_from: '2026-09-17T10:00:00', data_to: '2026-10-12T18:00:00' });
+  }
+  if (path === '/api/ranges') {
+    // 票 05 §5 的信封：{ok, rows, count, state, state_text, detail, computed_at, metric, unit}
+    if (state.ranges_legacy) {                      // 旧版线上形状：**裸列表**（没有 state）
+      return json(200, state.ranges_legacy_rows || []);
+    }
+    if (state.ranges_error) return json(200, { ok: false, error: '区间表查询失败：不通', rows: [] });
+    const st = state.ranges_state || 'all_excluded';
+    const TEXT = {
+      ok: '区间表已算好（0 行）',
+      no_measurements: '样本不足：库房里还没有任何测量行（测量管线未接上）',
+      all_excluded: '样本不足：测量行全部落在被排除的可疑轮/复制帧窗口内（见 detail.excluded_by_reason）',
+      no_environment: '样本不足：还没有环境小时聚合，长势速率无法与环境对齐',
+      no_growth_metric: '样本不足：没有可用的长势量（平视单档下杆长恒缺测，需要菌簇量）',
+      insufficient_samples: '样本不足：每个参数分箱的有效样本 < 5（相邻整点的速率段不够），暂不输出区间',
+      never_computed: '还没重算过：区间表从未生成（RANGES_AT 还没生效）',
+    };
+    const detail = (st === 'all_excluded')
+      ? { n_kept: 0, n_excluded: 3, excluded_by_reason: { legacy_excluded: 1, suspect_round: 2 },
+          excluded_samples: [
+            { ts: '2026-10-09T18:20:05', zone: '611', reason: 'legacy_excluded',
+              window: '2026-10-09T18:20:05~18:27:34', detail: '批准：Chief 2026-10-14' },
+            { ts: '2026-10-09T18:26:11', zone: '611', reason: 'suspect_round',
+              window: '2026-10-09T18:20:05~18:27:34', detail: '重复帧窗口' }],
+          excluded_samples_truncated: false }
+      : {};
+    return json(200, { ok: true, rows: state.ranges_rows || [], count: (state.ranges_rows || []).length,
+                       state: st, state_text: TEXT[st] || '', detail,
+                       computed_at: '2026-10-14T03:00:00', metric: 'mean_cluster_h_mm', unit: 'mm' });
   }
   if (path === '/api/operations') {
     if (state.ops_error) return json(200, { ok: false, error: 'prod 查询失败：不通', rows: [] });
@@ -857,8 +894,9 @@ check('环境模式：批次对比说明数据覆盖起点（更早的批次只�
 check('环境模式：批次对比显示各批次的补光周期（秒档与分档都认）',
       T('#envbatches').includes('开 2 秒') && T('#envbatches').includes('停 120 分'),
       T('#envbatches').slice(-60));
-check('环境模式：没有区间表就直说，不编一个"最优"出来',
-      T('#batchnote').includes('05 号票') && T('#batchnote').includes('ranges'), T('#batchnote').slice(0, 60));
+check('环境模式：不编一个"最优"出来（区间表由 /api/ranges 真读，见下面那组断言）',
+      T('#batchnote').includes('不编一个') && T('#batchnote').includes('区间表'),
+      T('#batchnote').slice(0, 80));
 check('环境模式：左栏站位表让位（单列看数据）',
       document.querySelector('main').classList.contains('envmode')
       && window.getComputedStyle(document.querySelector('main>section:first-child')).display === 'none',
@@ -1376,10 +1414,12 @@ await sleep(150);
     const st = window.measureState;
 
     // ① 估算：`estimate` + `estimated_fields` + `scale_source` ⇒ 带标尺来源（含"用的是多大"）
-    const est = { ...base, estimated_fields: 'mean_cluster_h_mm', scale_source: 'bag_diameter',
-                  scale_ref_mm: 240, quality: 'verified+no_angle_profile+estimate' };
+    // 票 20：`estimated_fields` 从接口读回来是 **list**（不是 `+` 串）——fixture 照真形状写
+    const est = { ...base, estimated_fields: ['mean_cluster_h_mm'], scale_source: 'bag_standard',
+                  scale_ref_mm: 240, scale_ref_px: 1200,
+                  quality: 'verified+no_angle_profile+estimate' };
     check('估算态：带「估算（菌包标尺 240 mm）」= 来源 + 参考尺寸（现场 1.7 倍不确定度就出在这）',
-      mc(est, 'mean_cluster_h_mm', 'mm').includes('估算（菌包标尺 240 mm）')
+      mc(est, 'mean_cluster_h_mm', 'mm').includes('估算（菌包标准尺寸 240 mm）')
       && mc(est, 'mean_cluster_h_mm', 'mm').includes('48 mm'),
       mc(est, 'mean_cluster_h_mm', 'mm'));
     check('估算态：**别的列**不受影响（字段级标记，不是整行拉黑）',
@@ -1407,12 +1447,29 @@ await sleep(150);
     check('**零痕迹**：普通测量行不带任何态标签（估算/不可测/不可用/冲突一个字都不出现）',
       mc(base, 'mean_cluster_h_mm', 'mm') === '48 mm'
       && st(base, 'mean_cluster_h_mm') === 'measured', mc(base, 'mean_cluster_h_mm', 'mm'));
+    // ⑥a 形状兼容：接口给 list（票 20）、老 fixture 给 `+` 串，两种都必须认
+    check('`estimated_fields` 是 list（票 20 真形状）时也认得出估算（否则真机会整列漏标）',
+      mc({ ...est, estimated_fields: ['mean_cluster_w_mm'] }, 'mean_cluster_w_mm', 'mm')
+        .includes('估算（'), mc({ ...est, estimated_fields: ['mean_cluster_w_mm'] }, 'mean_cluster_w_mm', 'mm'));
+    check('`estimated_fields` 是 `+` 串（旧形状）时也认得出（形状适配，判据不自己拼）',
+      mc({ ...est, estimated_fields: 'mean_cluster_h_mm' }, 'mean_cluster_h_mm', 'mm').includes('估算（'),
+      mc({ ...est, estimated_fields: 'mean_cluster_h_mm' }, 'mean_cluster_h_mm', 'mm'));
+    // ⑥b 竖直列未做俯角补偿：标签必须写明，**不是"长度"**
+    const unc = { ...base, estimated_fields: ['mean_cluster_h_mm'], scale_source: 'bag_standard',
+                  quality: 'verified+no_angle_profile+estimate+height_uncorrected' };
+    check('`height_uncorrected`：标签写「估算（未做俯角补偿）」——**那不是长度**',
+      mc(unc, 'mean_cluster_h_mm', 'mm').includes('估算（未做俯角补偿）'),
+      mc(unc, 'mean_cluster_h_mm', 'mm'));
+    check('未补偿的行**不是"测量失败"**（`no_theta` 只说明缺投影修正，仍照常显示估算值）',
+      mc(unc, 'mean_cluster_h_mm', 'mm').includes('48 mm')
+      && !/不可用|不可测|失败/.test(mc(unc, 'mean_cluster_h_mm', 'mm')),
+      mc(unc, 'mean_cluster_h_mm', 'mm'));
     // ⑦ 分布：明写「分布」、n≥5 才给、**绝不写 ±**；n<5 只写「样本不足（n=X）」
     // 杆长（`mean_len_mm`）今天走**估算**（票 18/`bot-roles.md:91`），所以这里造的是估算行；
     // 分位列 `p10_len`/`p90_len` 只对杆长存在——一期两格（菌簇长度/直径）**没有**分位列，
     // 所以**不拿杆长的分位去当它们的不确定度**（这正是"两者不合并"的那条）。
-    const dist = { ...base, mean_len_mm: 48, estimated_fields: 'mean_len_mm',
-                   scale_source: 'bag_diameter', scale_ref_mm: 240,
+    const dist = { ...base, mean_len_mm: 48, estimated_fields: ['mean_len_mm'],
+                   scale_source: 'bag_standard', scale_ref_mm: 240,
                    p10_len: 40.1, p90_len: 55.9, n: 6 };
     check('分布：`n≥5` 写「分布 P10–P90 40.1–55.9 mm」，**不含 `±`**',
       mc(dist, 'mean_len_mm', 'mm').includes('分布 P10–P90 40.1–55.9 mm')
@@ -1429,6 +1486,59 @@ await sleep(150);
     check('计数里的"估算"绝不并入已验证（本 fixture 没有估算行 ⇒ 估算计数为 0，但"已验证"不显示成 8）',
       cnt.estimate === 0 && cnt.measured + cnt.unusable === MEASUREMENTS.B102.length * 2,
       JSON.stringify(cnt));
+  }
+  // ---- 区间表（`/api/ranges`，票 05 §5 的信封；2026-10-14 破坏性形状变更）----
+  {
+    const noteOf = () => T('#batchnote');
+    // 负向检查只看**区间表那一段**：批次说明里本来就有"更早的批次没有数据"这句
+    const rangesPart = () => { const txt = noteOf(); const i = txt.indexOf('区间表');
+                               return i < 0 ? '' : txt.slice(i); };
+    const toEnv = async () => { const b = document.querySelector('[data-mode="env"]');
+                                if(b) await click('[data-mode="env"]');
+                                await sleep(500); };
+    // 六态具名：假后端默认 all_excluded ⇒ 后端给的 state_text **原样显示**
+    await toEnv();                          // 切到环境模式（触发 loadEnv）
+    check('区间表空态：原样显示后端的 `state` 与 `state_text`（六态具名，不合并成"暂无数据"）',
+      noteOf().includes('all_excluded') && noteOf().includes('测量行全部落在被排除的可疑轮/复制帧窗口内'),
+      noteOf().slice(0, 160));
+    check('区间表空态：**不说**"暂无数据/没有数据"（"未知要说未知"）',
+      rangesPart().length > 0 && !/暂无数据|没有数据/.test(rangesPart()),
+      rangesPart().slice(0, 160));
+    // 排除可见：计数 + 前 20 条原文（含 window 与"批准：Chief 2026-10-14"）
+    check('排除可见：按原因计数（legacy_excluded 1 / suspect_round 2）都显示出来',
+      noteOf().includes('legacy_excluded 1') && noteOf().includes('suspect_round 2'),
+      noteOf().slice(0, 200));
+    check('排除可见：前 20 条**原文**带窗口与依据（可回答"排掉了哪一段、凭什么"）',
+      noteOf().includes('2026-10-09T18:20:05') && noteOf().includes('18:27:34')
+      && noteOf().includes('批准：Chief 2026-10-14'), noteOf().slice(0, 220));
+    // "没重算过"与"样本不足"必须是两句不同的话
+    state.ranges_state = 'never_computed';
+    await click('#reloadbtn'); await sleep(400); await toEnv();
+    check('`never_computed`（没重算过）与"样本不足"是**两句不同的话**，不许合并',
+      noteOf().includes('还没重算过') && !noteOf().includes('样本不足'), noteOf().slice(0, 160));
+    // 旧版裸列表：能读、但**不许**读成"样本不足"（那时没有状态字段，我们并不知道）
+    state.ranges_state = null; state.ranges_legacy = true; state.ranges_legacy_rows = [];
+    await click('#reloadbtn'); await sleep(400); await toEnv();
+    check('旧版裸列表（线上现役形状）：能读、且**不冒充**"样本不足"，如实说没有状态字段',
+      noteOf().includes('旧版接口') && !/样本不足/.test(rangesPart()),
+      rangesPart().slice(0, 180));
+    state.ranges_legacy = false; state.ranges_legacy_rows = null;
+    state.ranges_error = true;
+    await click('#reloadbtn'); await sleep(400); await toEnv();
+    check('取不到区间表时如实说原因（不假装"没有数据"）',
+      noteOf().includes('区间表取不到') && noteOf().includes('区间表查询失败'),
+      noteOf().slice(0, 160));
+    state.ranges_error = false;
+    // 切回历史模式并重新选中站位：下面那组曲线断言要在**历史模式 + 有选中站位**下才成立
+    const back = document.querySelector('[data-mode="history"]');
+    if(back) await click('[data-mode="history"]');
+    await sleep(500);
+    await click('#reloadbtn'); await sleep(500);
+    // 注意：`waitCell` 在脚本后面才声明（const）⇒ 这里不能前向引用，用 waitFor 等价写法
+    await waitFor(() => !!document.querySelector('#timeline .mosaic-cell[data-station-id="S102"]'),
+                  6000, 100);
+    await click('#timeline .mosaic-cell[data-station-id="S102"]');
+    await sleep(300);
   }
   check('速率带量纲显示（"每天" + 单位），不是裸数字',
     T('#curve').includes('/天') && /[+-]?\d+(\.\d+)? mm\/天/.test(T('#curve')),
@@ -2347,7 +2457,7 @@ await sleep(150);
                'mean_cap_mm', 'mean_cluster_w_mm', 'mean_cluster_h_mm', 'mean_area_mm2',
                'mean_projected_d_mm', 'p10_len', 'p90_len', 'quality',
                // 票 18 §2 的标尺/估算列（票 15 起页面按这四列判四态与标尺来源；值可 NULL）
-               'estimated_fields', 'scale_source', 'scale_ref_mm', 'mm_per_px'],
+               'estimated_fields', 'scale_source', 'scale_ref_mm', 'scale_ref_px', 'mm_per_px'],
       required: ['ts', 'quality', 'mean_len_mm', 'mean_cap_mm', 'mean_projected_d_mm',
                  'mean_area_mm2', 'n'] },
     // deploy/console.py api_rounds → analysis/db.py:59-71（rounds 表列）+ 票 17 的内容可信度列
@@ -2360,6 +2470,12 @@ await sleep(150);
                'n_frames_recorded'],
       required: ['round_id', 'ts', 'ok', 'n_results', 'n_failures', 'room_id', 'entry_date',
                  'batch_no'] },
+    // analysis 票 05 §5（2026-10-14 **破坏性变更**：裸列表 → 信封）
+    // 行形状不变（仍带 metric/unit/rate_per_h）；六态具名，空态用 state_text 原文。
+    '/api/ranges': { q: '', pick: 'top',
+      fields: ['ok', 'rows', 'count', 'state', 'state_text', 'detail', 'computed_at',
+               'metric', 'unit'],
+      required: ['ok', 'rows', 'count', 'state', 'state_text', 'detail'] },
     // deploy/console.py api_environment → analysis/environment.py:28-32 FIELDS（小时聚合）
     '/api/environment': { q: '?zone=611&granularity=hour', pick: 'rows',
       fields: ['ts', 'zone', 'temp_c', 'temp_min', 'temp_max', 'rh_pct', 'rh_min', 'rh_max',
@@ -2405,6 +2521,7 @@ await sleep(150);
   const PAGE_CONSUMES = {
     '/api/growth': ['ts', 'metric', 'unit', 'd_value', 'rate_per_h', 'band_source',
                     'verdict', 'verdict_text'],
+    '/api/ranges': ['ok', 'rows', 'count', 'state', 'state_text', 'detail'],
     '/api/measurements': ['ts', 'quality', 'mean_len_mm', 'mean_cap_mm', 'mean_projected_d_mm',
                           'mean_area_mm2', 'n', 'mean_cluster_w_mm', 'mean_cluster_h_mm',
                           'p10_len', 'p90_len', 'estimated_fields', 'scale_source',
