@@ -156,3 +156,23 @@ cp -a /tmp/env.now .env                   # ★ 立刻复原新 tag，否则 pat
 体积 223,208 B、sha256 `97e519dd…`；而 **git blob 是 LF**，219,286 B、sha256 `acdefd52…`。
 ⇒ 核"远端页面 = 仓库"**必须比 `git cat-file blob HEAD:web/console/index.html` 的 sha256**，
 不能拿工作区文件直接比——否则会凭 3,922 B 的差值误判成"页面漂了"（我第一次比对就撞上）。
+
+### 6.4 第二次页面热同步（2026-10-14 10:56:59，Chief 批准）
+
+**起因**：界面师用 `.scratch/deploy-acceptance/` 的真机样本抓到第二个真机 bug——
+**真机正常帧的 `duplicate_streak` 就是 `1`**（48/48），页面旧判据 `> 0` ⇒ **每个格子都标「连续重复 1 张」，全站天天报警**。
+已修成 `> 1`（实现 `f2773bf`，票 `console-ui/issues/12` §10）。
+统计侧 `analysis/integrity.py` 用的是 `frame_dup`（0/1），**没有**误用 `duplicate_streak` ⇒ 只影响页面显示，不影响入库与排除。
+
+**本次只换一个文件，不重建容器**（页面是宿主 bind mount）：
+
+| 步 | 结果（实测 10:56:59） |
+| --- | --- |
+| 窗口 | `GET /api/status` → `machine.state=IDLE` / `connected:false` / `patrol.active=false`（上轮 09:27:47 已结束，下轮约 12:27）⇒ 无轮次在飞 |
+| 备份 | `index.html.bak-20261014-105659`，sha256 = `acdefd52…`（**与替换前原件逐个一致**） |
+| 上传件 | 仓库 **HEAD blob**（LF）：**219,619 B / 3926 行** / sha256 **`2d806d20fe46df7257c7c76a2138bc5d35ea53408a5aeda2642c29e949a1f787`**，本地与远端上传件 sha256 相同 |
+| 替换后远端 | sha256 = **`2d806d20…`**（**= 本地**）✓、219,619 B、3926 行 |
+| 判据检查 | `streak > 1` 出现 **4** 处；`streak > 0` 出现 **0** 处（页面里唯一的 `>0` 文本在解释性注释里）⇒ **「连续重复 1 张」角标在正常轮不会再出现** |
+| 验收 | 页面 8002 = **200**；`/api/rounds?limit=1` = 200；`/api/measurements?room_id=611` = 200；**六容器全 healthy** |
+
+回滚：`cp -a index.html.bak-20261014-105659 index.html`（前一份备份 `index.html.bak-20261014-100904` 也还在，指向更早的 `793c023c…`）。
