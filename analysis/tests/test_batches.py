@@ -71,8 +71,30 @@ def test_the_forbidden_business_db_route_is_gone():
 
 def test_missing_dsn_fails_loudly_instead_of_returning_nothing(monkeypatch):
     monkeypatch.delenv("PGSQL_DSN", raising=False)
+    monkeypatch.delenv("PGSQL_DSN_FILE", raising=False)
     with pytest.raises(BatchFetchError, match="PGSQL_DSN"):
         fetch_batches(runner=None)
+
+
+def test_dsn_can_come_from_a_file_and_the_file_wins(monkeypatch, tmp_path):
+    """推荐形态：DSN 放文件、进程运行时读 —— 值不进 `docker inspect` 的 `Config.Env`。"""
+    from analysis.batches import _load_dsn
+
+    secret = tmp_path / "pgsql.dsn"
+    secret.write_text("postgresql://ro@postgres_db/mushroom_algorithm\n", encoding="utf-8")
+    monkeypatch.setenv("PGSQL_DSN_FILE", str(secret))
+    monkeypatch.setenv("PGSQL_DSN", "postgresql://env-value/db")
+    assert _load_dsn() == "postgresql://ro@postgres_db/mushroom_algorithm"
+    assert _load_dsn("postgresql://explicit/db") == "postgresql://explicit/db"
+
+
+def test_dsn_file_that_cannot_be_read_is_an_error_not_a_fallback(monkeypatch, tmp_path):
+    from analysis.batches import _load_dsn
+
+    monkeypatch.setenv("PGSQL_DSN_FILE", str(tmp_path / "missing.dsn"))
+    monkeypatch.setenv("PGSQL_DSN", "postgresql://env-value/db")
+    with pytest.raises(BatchFetchError, match="PGSQL_DSN_FILE"):
+        _load_dsn()
 
 
 def test_window_of_uses_next_batch_as_upper_bound():

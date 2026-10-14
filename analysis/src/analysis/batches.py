@@ -30,8 +30,11 @@ from __future__ import annotations
 import json
 import os
 from datetime import date, datetime
+from pathlib import Path
 
 DEFAULT_DSN_ENV = "PGSQL_DSN"
+#: 更推荐的一条：DSN 放文件、进程运行时读（`env_file` 会把值注入 `docker inspect` 可见的环境变量）
+DEFAULT_DSN_FILE_ENV = "PGSQL_DSN_FILE"
 
 #: 两条来源的并集；只取"批次身份"要用的两列（ADR-0020：库房号 + 入库日期）。
 SQL = """
@@ -93,20 +96,42 @@ def fetch_batches(*, dsn: str | None = None, runner=None) -> list[dict]:
     """从 pgsql 读台账。
 
     `runner` 可注入（测试用），形状：`(sql) -> list[tuple]`。
-    生产走惰性 import 的 `psycopg`；DSN 取 `--dsn` / 环境变量 `PGSQL_DSN`
-    （凭据不进仓库，见票 12 的挂载口径）。
+    生产走惰性 import 的 `psycopg`；连接串优先级：`--dsn` → `PGSQL_DSN_FILE` 文件内容
+    → 环境变量 `PGSQL_DSN`。**没有就报错，绝不退回 `docker exec`、也绝不退回"按断档切段"。**
     """
     run = runner or _pgsql_runner(dsn)
     return rows_to_batches(run(SQL))
 
 
+def _load_dsn(dsn: str | None = None) -> str:
+    """连接串：显式参数 → 文件 → 环境变量。
+
+    **为什么推荐文件**：`env_file` 是 compose 在创建容器时读文件并**注入成环境变量**的，
+    值会出现在 `docker inspect` 的 `Config.Env`（发版官 2026-10-14 实测）。要满足
+    "值不进 `docker inspect`"只有一条路：DSN 放文件、进程运行时自己读
+    （宿主 0600 文件 bind 进容器 `:ro`；挂一个文件卷不算新增 service）。
+    """
+    if dsn and dsn.strip():
+        return dsn.strip()
+    path = (os.environ.get(DEFAULT_DSN_FILE_ENV) or "").strip()
+    if path:
+        try:
+            text = Path(path).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise BatchFetchError(f"读 {path} 失败（{DEFAULT_DSN_FILE_ENV}）：{exc}") from exc
+        if text:
+            return text
+    env = (os.environ.get(DEFAULT_DSN_ENV) or "").strip()
+    if env:
+        return env
+    raise BatchFetchError(
+        f"没有 pgsql 连接串：设 {DEFAULT_DSN_FILE_ENV}（文件，推荐）或 {DEFAULT_DSN_ENV}（环境变量）。"
+        "**不退回 docker exec / 不退回按断档切段**"
+    )
+
+
 def _pgsql_runner(dsn: str | None):
-    dsn = dsn or os.environ.get(DEFAULT_DSN_ENV, "").strip()
-    if not dsn:
-        raise BatchFetchError(
-            f"没有 pgsql 连接串：设 {DEFAULT_DSN_ENV}（或 --dsn）。"
-            "**不退回 docker exec / 不退回按断档切段**"
-        )
+    resolved = _load_dsn(dsn)
 
     def run(sql: str) -> list:
         try:
@@ -116,7 +141,7 @@ def _pgsql_runner(dsn: str | None):
                 "analysis 环境没有 psycopg：镜像要装 psycopg[binary]（票 13）"
             ) from exc
         try:
-            with psycopg.connect(dsn) as conn, conn.cursor() as cur:
+            with psycopg.connect(resolved) as conn, conn.cursor() as cur:
                 cur.execute(sql)
                 return cur.fetchall()
         except Exception as exc:  # noqa: BLE001 - 连不上就报错，绝不返回空表
