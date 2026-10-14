@@ -159,7 +159,12 @@ CREATE TABLE IF NOT EXISTS ranges (
   param        TEXT NOT NULL,      -- temp_c / rh_pct / co2_ppm / lamp_on_min
   lo           REAL,
   hi           REAL,
-  rate_mm_per_h REAL,
+  -- 速率必须带量纲（Chief 2026-10-13 硬要求）：平视下杆长缺测，长势量可能是
+  -- 面积（mm²/h）或投影径（mm/h）。`metric` 是源测量列名，**由它唯一决定量纲**。
+  metric       TEXT,               -- mean_area_mm2 / mean_projected_d_mm / mean_len_mm …
+  unit         TEXT,               -- mm2/h 或 mm/h
+  rate_per_h   REAL,               -- 速率数值（单位见 unit）
+  rate_mm_per_h REAL,              -- **只在 unit='mm/h' 时有效**，否则必须 NULL（旧字段，兼容保留）
   n            INTEGER,
   computed_at  TEXT NOT NULL,
   PRIMARY KEY (stage, param)
@@ -229,6 +234,12 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "mean_cluster_h_mm": "REAL",
         "mean_area_mm2": "REAL",
         "mean_projected_d_mm": "REAL",
+    },
+    # 区间表加量纲三列（票 05；Chief 2026-10-13 硬要求）。老行 NULL = "那时还没标量纲"。
+    "ranges": {
+        "metric": "TEXT",
+        "unit": "TEXT",
+        "rate_per_h": "REAL",
     },
 }
 
@@ -667,20 +678,34 @@ def fetch_rounds(
 
 
 def replace_ranges(conn: sqlite3.Connection, rows: list[dict], computed_at: str) -> None:
-    """批处理结果整体替换（评审 #6：区间表化，API 只读）。"""
+    """批处理结果整体替换（评审 #6：区间表化，API 只读）。
+
+    **量纲铁律**：`rate_mm_per_h` 只在 `unit='mm/h'` 时写值，其余量纲一律 NULL ——
+    一个叫 `_mm_` 的字段不许承载 mm²/h（票 05 / CONTEXT.md）。
+    """
     conn.execute("DELETE FROM ranges")
+    payload = []
+    for row in rows:
+        unit = row.get("unit")
+        rate = row.get("rate_per_h")
+        payload.append({
+            **row,
+            "computed_at": computed_at,
+            "rate_mm_per_h": rate if unit == "mm/h" else None,
+        })
     conn.executemany(
-        "INSERT INTO ranges (stage, param, lo, hi, rate_mm_per_h, n, computed_at) "
-        "VALUES (:stage, :param, :lo, :hi, :rate_mm_per_h, :n, :computed_at)",
-        [{**r, "computed_at": computed_at} for r in rows],
+        "INSERT INTO ranges (stage, param, lo, hi, metric, unit, rate_per_h, "
+        "rate_mm_per_h, n, computed_at) VALUES (:stage, :param, :lo, :hi, :metric, "
+        ":unit, :rate_per_h, :rate_mm_per_h, :n, :computed_at)",
+        payload,
     )
     conn.commit()
 
 
 def fetch_ranges(conn: sqlite3.Connection) -> list[dict]:
     cur = conn.execute(
-        "SELECT stage, param, lo, hi, rate_mm_per_h, n, computed_at FROM ranges "
-        "ORDER BY stage, param"
+        "SELECT stage, param, lo, hi, metric, unit, rate_per_h, rate_mm_per_h, n, "
+        "computed_at FROM ranges ORDER BY stage, param"
     )
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]

@@ -10,19 +10,45 @@ from __future__ import annotations
 
 import pandas as pd
 
+from analysis.growth import GROWTH_METRICS
+
 MIN_SAMPLES_PER_BIN = 3  # 样本不足的区间不输出（避免误导）
 
 
-def hourly_rates(measurements: pd.DataFrame, *, verified_only: bool = True) -> pd.DataFrame:
-    """按 (库房, 框) 重采样为小时级生长曲线，差分得生长速率（mm/h）。
+def _pick_metric(m: pd.DataFrame, metric: str | None = None) -> tuple[str, str]:
+    """选一个**有值**的长势量（列名, 单位）。
 
-    输入列: ts, room_id, box_id, mean_len_mm[, quality]
-    输出列: ts(小时), room_id, box_id, level_mm, rate_mm_per_h
+    默认按 `GROWTH_METRICS` 的优先级找第一个有值的：平视单档下 `mean_len_mm` 恒 NULL，
+    实际会落到 `mean_projected_d_mm`（mm）或 `mean_area_mm2`（mm²）。
+    一个都没有 ⇒ 报错（让上层说"样本不足"，不要硬算）。
+    """
+    for name, unit in GROWTH_METRICS:
+        if metric and name != metric:
+            continue
+        if name in m.columns and m[name].notna().any():
+            return name, unit
+    raise ValueError(
+        f"没有任何可用的长势量（{metric or '按优先级找'}）："
+        f"平视下杆长恒 NULL，需要菌簇量（{', '.join(n for n, _ in GROWTH_METRICS)}）"
+    )
 
-    **`room_id` 是必需的**（票 11）：缺库房维度时，`box_id` 只是库房内编号，
-    两个库房的同一个框号会被串成一条曲线，差分出根本不存在的速率。
-    `verified_only`：只吃 `quality` 里含 `verified` 的行（票 11 §3），
-    缺测/近似/低置信的行落在库里但不进统计。
+
+def hourly_rates(
+    measurements: pd.DataFrame,
+    *,
+    verified_only: bool = True,
+    metric: str | None = None,
+) -> pd.DataFrame:
+    """按 (库房, 框) 重采样为小时级生长曲线，差分得速率。
+
+    输入列: ts, room_id, box_id[, quality] + 长势量（至少一个）
+    输出列: room_id, box_id, hour, level_mm(该量的均值), `rate_per_h`、`rate_mm_per_h`、
+    `metric`、`unit`
+
+    - **量纲（票 05 / Chief 硬要求）**：帧里带 `metric`/`unit`；`rate_mm_per_h`
+      **只在 `unit == 'mm'` 时非空**，面积口径下为 NaN —— 绝不让 `_mm_` 字段承载 mm²。
+    - **只吃 `verified`**（票 11 §3）；`metric` 缺省按 `GROWTH_METRICS` 优先级取第一个有值的量。
+    - **只在相邻整点间差分**：任一侧缺测（含被过滤掉的）⇒ 该段无速率，**不凑数**。
     """
     m = measurements.copy()
     if "room_id" not in m.columns:
@@ -41,23 +67,28 @@ def hourly_rates(measurements: pd.DataFrame, *, verified_only: bool = True) -> p
             "box_id": pd.Series(dtype="object"),
             "hour": pd.Series(dtype="datetime64[ns]"),
             "level_mm": pd.Series(dtype="float64"),
+            "rate_per_h": pd.Series(dtype="float64"),
             "rate_mm_per_h": pd.Series(dtype="float64"),
+            "metric": pd.Series(dtype="object"),
+            "unit": pd.Series(dtype="object"),
         })
-    hourly = (m.groupby(["room_id", "box_id", "hour"])["mean_len_mm"]
+
+    metric_name, unit = _pick_metric(m, metric)
+    hourly = (m.groupby(["room_id", "box_id", "hour"])[metric_name]
               .mean().reset_index(name="level_mm"))
     hourly = hourly.sort_values(["room_id", "box_id", "hour"])
-    # **只允许相邻整点之间差分**（Chief 2026-10-13 前向要求）：
-    # `groupby.diff()` 会跨缺口把"2 小时的增长"算成"每小时的增长"——那是最难发现的一种假速率。
-    # 任一侧缺测（含被 verified 过滤掉的）⇒ 该段 `rate` 留 NULL = "样本不足"，不凑数。
     grouped = hourly.groupby(["room_id", "box_id"])
     prev_hour = grouped["hour"].shift(1)
     prev_level = grouped["level_mm"].shift(1)
     one_hour = pd.Timedelta(hours=1)
-    hourly["rate_mm_per_h"] = (hourly["level_mm"] - prev_level).where(
-        (hourly["hour"] - prev_hour) == one_hour
-    )
-    return hourly.dropna(subset=["rate_mm_per_h"])[
-        ["room_id", "box_id", "hour", "level_mm", "rate_mm_per_h"]
+    rate = (hourly["level_mm"] - prev_level).where((hourly["hour"] - prev_hour) == one_hour)
+    hourly["rate_per_h"] = rate
+    hourly["rate_mm_per_h"] = rate if unit == "mm" else float("nan")
+    hourly["metric"] = metric_name
+    hourly["unit"] = unit
+    return hourly.dropna(subset=["rate_per_h"])[
+        ["room_id", "box_id", "hour", "level_mm", "rate_per_h", "rate_mm_per_h",
+         "metric", "unit"]
     ]
 
 
@@ -105,10 +136,16 @@ PARAM_COLS = ("temp_c", "rh_pct", "co2_ppm", "lamp_on_min")
 
 
 def best_ranges(merged: pd.DataFrame, *, n_bins: int = 4) -> list[dict]:
-    """对齐数据 → 最佳参数区间表（分位数分箱，取平均速率最高且样本充足的箱）。"""
+    """对齐数据 → 最佳参数区间表（分位数分箱，取平均速率最高且样本充足的箱）。
+
+    输出的每一行都带 **`metric` / `unit` / `rate_per_h`**（量纲随行走，票 05）；
+    `rate_mm_per_h` 不再由这里给 —— 由 `db.replace_ranges` 按 `unit=='mm/h'` 决定写不写。
+    """
     out: list[dict] = []
     if merged.empty:
         return out
+    metric = str(merged["metric"].iloc[0]) if "metric" in merged.columns else None
+    unit = str(merged["unit"].iloc[0]) if "unit" in merged.columns else None
     for stage, group in merged.groupby("stage"):
         for param in PARAM_COLS:
             if param not in group or group[param].isna().all():
@@ -117,7 +154,7 @@ def best_ranges(merged: pd.DataFrame, *, n_bins: int = 4) -> list[dict]:
                 bins = pd.qcut(group[param], q=n_bins, duplicates="drop")
             except ValueError:
                 continue
-            stats = group.groupby(bins, observed=True)["rate_mm_per_h"].agg(["mean", "count"])
+            stats = group.groupby(bins, observed=True)["rate_per_h"].agg(["mean", "count"])
             stats = stats[stats["count"] >= MIN_SAMPLES_PER_BIN]
             if stats.empty:
                 continue
@@ -128,7 +165,9 @@ def best_ranges(merged: pd.DataFrame, *, n_bins: int = 4) -> list[dict]:
                 "param": param,
                 "lo": round(float(lo), 2),
                 "hi": round(float(hi), 2),
-                "rate_mm_per_h": round(float(stats.loc[best, "mean"]), 4),
+                "metric": metric,
+                "unit": unit,
+                "rate_per_h": round(float(stats.loc[best, "mean"]), 4),
                 "n": int(stats.loc[best, "count"]),
             })
     return out

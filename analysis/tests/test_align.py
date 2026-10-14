@@ -47,11 +47,49 @@ def test_best_ranges_finds_hot_bin():
     ranges = best_ranges(merged)
     temp_rows = [r for r in ranges if r["param"] == "temp_c"]
     assert temp_rows, "应产出温度区间行"
-    best = max(temp_rows, key=lambda r: r["rate_mm_per_h"])
+    best = max(temp_rows, key=lambda r: r["rate_per_h"])
     # 最优温度区间应落在 24–26℃ 一带（分箱边界允许 ±1.5 浮动）
     assert 22.5 <= best["lo"] <= 26.0
-    assert best["rate_mm_per_h"] == pytest.approx(0.6, abs=0.1)
+    assert best["rate_per_h"] == pytest.approx(0.6, abs=0.1)
     assert best["n"] >= 3
+    # 量纲随行走（票 05）：这一组数据量的是杆长，所以 mm/h 且旧字段也有值
+    assert (best["metric"], best["unit"]) == ("mean_len_mm", "mm")
+
+
+def test_best_ranges_carries_area_dimension_without_mm_rate():
+    """面积口径下 `rate_mm_per_h` 不许有值（旧字段只在 unit='mm/h' 时有效）。
+
+    这里直接构造 align 之后的形状（固定一个 stage）——本用例钉的是**量纲怎么跟着走**，
+    不是分箱本身（分箱由 make_data 那组用例覆盖）。
+    """
+    import os
+    import tempfile
+
+    from analysis.db import connect, fetch_ranges, replace_ranges
+
+    merged = pd.DataFrame({
+        "room_id": ["611"] * 12,
+        "box_id": ["B01"] * 12,
+        "stage": ["阶段A"] * 12,
+        "level_mm": [100_000.0 + i * 2 for i in range(12)],
+        "rate_per_h": [2500.0] * 12,
+        "metric": ["mean_area_mm2"] * 12,
+        "unit": ["mm2"] * 12,
+        "temp_c": [22.0, 23.0, 24.0, 25.0, 26.0, 27.0, 22.5, 23.5, 24.5, 25.5,
+                   26.5, 27.5],
+    })
+    ranges = best_ranges(merged)
+    assert ranges, "有 12 条样本、分箱后应产出区间行"
+    assert {r["unit"] for r in ranges} == {"mm2"}
+    assert all(r["metric"] == "mean_area_mm2" for r in ranges)
+
+    conn = connect(os.path.join(tempfile.mkdtemp(), "r.db"))
+    replace_ranges(conn, ranges, computed_at="2026-10-14T00:00:00")
+    stored = fetch_ranges(conn)
+    assert stored[0]["unit"] == "mm2"
+    assert stored[0]["rate_per_h"] is not None
+    assert stored[0]["rate_mm_per_h"] is None, "mm²/h 不许塞进一个叫 _mm_ 的字段"
+    assert stored[0]["rate_mm_per_h"] is None, "mm²/h 不许塞进一个叫 _mm_ 的字段"
 
 
 def test_stage_bucketing():
