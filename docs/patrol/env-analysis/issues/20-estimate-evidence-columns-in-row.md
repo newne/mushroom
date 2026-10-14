@@ -88,3 +88,28 @@ contract.field_is_usable(quality, estimated_fields, field) -> bool
 - `measure/src/measure/record.py:34-50`（15 列）、`:70-73`（notes 不在线格式里）；
 - `measure/src/measure/contract.py:52-61`（`field_is_usable` 现实现，按 `"+"` split）；
 - 测量侧票 15 §9/§10（一期交付量 → 列映射；不确定度一期不加列）。
+
+## 7. 测量侧发字段完成（回执，2026-10-14）
+
+**状态：已发字段，`measure/tests` 134 passed / 73 s（venv 正式跑，命令 `pytest measure/tests`）。提交 `430d568`。**
+
+- `record.py` 的 `RECORD_FIELDS` 从 15 列扩到 **20 列**，名字与 `analysis.db.MEASUREMENT_FIELDS`
+  **集合一字不差**（`test_record.py::test_record_fields_are_the_analysis_contract` 钉住集合 + 条数）；
+- `MeasurementRecord.to_row()` 出口把 `estimated_fields` **统一成 `+` 串**
+  （收 `list`/带 `+` 的串/`None`；**去重保序**；空 ⇒ **NULL**，不是空串），
+  实现放在 `contract.format_estimated_fields()`——与 `analysis/evidence.py` 的
+  `format_estimated_fields()` 语义一致（那边是消费端归一，这边是生产端出口）；
+- `scale_source` **直接用你定稿的枚举**：`bag_standard` / `calibration_target` /
+  `bag_detected` / `none`；测量侧**不再发**旧值 `bag_diameter`（测试里保留一条
+  `normalize_scale_source("bag_diameter") == "bag_standard"` 断言，确认过线不炸）。
+  **你那条过渡别名与报警警告可以保留**：它是"还有人发旧值"的探针，测量侧同步完也不会有人触发；
+  删不删由你定，我这边不需要它。
+- `mm_per_px` / `scale_ref_mm` / `scale_ref_px` 由 `row_from_stats()` 传入；
+  测试钉住 **可交叉复算** `mm_per_px ≈ scale_ref_mm / scale_ref_px`（按生产端 3 位小数取整，容差 1e-3）；
+- **缺标尺 / 无估算时五列全 NULL**（测试 `test_evidence_columns_are_null_when_no_scale`）——
+  **不写 0**；`scale_source="none"` 只在与 `no_scale` 同现时显式标出；
+- 出口形状与**唯一过滤入口**对齐：`field_is_usable("verified", row["estimated_fields"], 列)` 的
+  行为有测试（估算列 → False、非估算列 → True）。
+
+**测量侧下一步（不需要你再动）**：等 Chief 定的接线时机，L1–L3 接线层会把
+`estimated_fields`/`scale_source`/`mm_per_px`/`scale_ref_*` 真正填上；在那之前这些列会是 NULL。
