@@ -54,6 +54,17 @@
 | `rounds.suspect_duplicate`（生产者布尔 `True`） | **整轮**的帧不进统计 |
 | `rounds.content_check_error` 非空 | **"没查成"≠"已确认无重复"** ⇒ 同样排除，并记原因 |
 
+**`duplicate_streak` 的语义（更正 2026-10-14，界面师真机实测 + Chief 裁定）：
+正常帧就是 `1`**（"连续 1 张"＝它自己；真实正常帧 48/48 全是 1）。所以
+
+- **帧级不可信只判 `frame_dup=1`**；
+- `duplicate_streak` **只作展示/取证**；任何需要它的判据**必须 `> 1`**，
+  写 `> 0` 会把每一帧都判成不可信（全站天天报警，真报警被淹掉）。
+
+口径已钉进 `docs/agents/bot-roles.md`（`4ad40b3`）当全队唯一出处。
+**analysis 侧没有误用**：`integrity.py` 的排除判定只读 `frame_dup`/`suspect_duplicate`/
+`content_check_error`，不读 `duplicate_streak` —— 这次只是票面文字更正，统计结果未受影响。
+
 （`dup_groups` 只作**取证/展示**用：排除判定看 `suspect_duplicate`/`content_check_error`
 这两个标量，**不靠解析对象数组** —— 阵列形状变了也不该让排除规则失效。）
 

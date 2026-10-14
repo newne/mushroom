@@ -90,6 +90,7 @@ def default_jobs(conn, db_path: str) -> list[IngestJob]:
     | `ENV_INGEST_INTERVAL` | 环境入库 | 不跑 |
     | `AUDIT_INTERVAL` | 操作日志入库 | 不跑 |
     | `BATCH_AT` | 批次台账同步 | 不跑（迁移过渡期暂停，见票 13） |
+    | `RANGES_AT` | 区间表重算（票 05） | 不跑 |
     """
     jobs: list[IngestJob] = []
 
@@ -147,5 +148,15 @@ def default_jobs(conn, db_path: str) -> list[IngestJob]:
             print(f"[batch_ingest] {n} 个批次")
 
         jobs.append(IngestJob("batch", run_batch, daily_at=batch_at))
+
+    ranges_at = (os.environ.get("RANGES_AT") or "").strip()
+    if ranges_at:
+        from analysis.align import refresh_ranges
+
+        def run_ranges() -> None:
+            n = refresh_ranges(db_path)
+            print(f"[ranges] 重算完成，{n} 行区间")
+
+        jobs.append(IngestJob("ranges", run_ranges, daily_at=ranges_at))
 
     return jobs

@@ -163,16 +163,50 @@ def test_ingest_idempotent(client):
 
 
 def test_ranges_empty_db(client):
-    # 批处理未运行时 ranges 表为空，端点只读不重算
-    assert client.get("/ranges").json() == []
+    """批处理未运行时 ranges 表为空，端点只读不重算 —— 但**不许只说"空"**。
+
+    票 05：`[]` 分不清"从没重算过"和"样本不足"，所以给信封 + 具名状态。
+    """
+    body = client.get("/ranges").json()
+    assert body["rows"] == []
+    assert body["count"] == 0
+    assert body["state"] == "never_computed", "从来没人算过 ≠ 样本不足"
+    assert "重算" in body["state_text"]
+    assert body["computed_at"] is None
 
 
-def test_ranges_reads_materialized_table(client, db_path):
-    """评审 #6：批处理写入 ranges 表，API 只读该表（不再每请求重算）。"""
+def test_ranges_empty_state_says_why(client, db_path):
+    """重算过但要空（没有测量行）⇒ 状态要能说出是**哪一步**空的。"""
     from analysis.align import refresh_ranges
-    from analysis.db import connect, fetch_ranges, upsert_environment
 
-    # 灌 24h 合成数据（温度在 22/26 间交替，保证分箱可分）
+    refresh_ranges(db_path, computed_at="2026-08-02T00:00:00")
+
+    body = client.get("/ranges").json()
+    assert body["rows"] == []
+    assert body["state"] == "no_measurements"
+    assert body["state_text"].startswith("样本不足")
+    assert body["detail"]["n_measurements"] == 0
+    assert body["computed_at"] == "2026-08-02T00:00:00"
+
+
+def test_ranges_state_survives_a_metric_filter_removal(client, db_path):
+    """（票 05 收口）`/ranges` 不提供 `metric` 过滤参数 —— 行上带 `metric`/`unit` 就够，
+    多的查询参数是没人要的契约面。这条测试钉住"别再加回去"。"""
+    from analysis.align import refresh_ranges
+
+    _seed_24h_growth(db_path)
+    refresh_ranges(db_path, computed_at="2026-08-02T00:00:00")
+
+    body = client.get("/ranges").json()
+    assert body["state"] == "ok"
+    assert body["count"] >= 1
+    assert all(r["metric"] == "mean_len_mm" and r["unit"] == "mm" for r in body["rows"])
+
+
+def _seed_24h_growth(db_path):
+    """24h 合成数据：温度 22/26 交替、杆长逐小时 +1mm。"""
+    from analysis.db import connect, insert_measurements, upsert_environment
+
     conn = connect(db_path)
     rows = []
     for i in range(24):
@@ -182,13 +216,25 @@ def test_ranges_reads_materialized_table(client, db_path):
         upsert_environment(conn, [{"ts": ts, "zone": "room1",
                                    "temp_c": 22.0 + (i % 2) * 4.0,
                                    "rh_pct": 85.0, "co2_ppm": 800.0, "lamp_state": 2.0}])
-    from analysis.db import insert_measurements
-
     insert_measurements(conn, rows)
+
+
+def test_ranges_reads_materialized_table(client, db_path):
+    """评审 #6：批处理写入 ranges 表，API 只读该表（不再每请求重算）。"""
+    from analysis.align import refresh_ranges
+    from analysis.db import connect, fetch_ranges
+
+    _seed_24h_growth(db_path)
 
     n = refresh_ranges(db_path, computed_at="2026-08-02T00:00:00")
     assert n >= 1
 
-    ranges = client.get("/ranges").json()
-    assert ranges == fetch_ranges(connect(db_path))
-    assert ranges[0]["computed_at"] == "2026-08-02T00:00:00"
+    body = client.get("/ranges").json()
+    assert body["rows"] == fetch_ranges(connect(db_path))
+    assert body["rows"][0]["computed_at"] == "2026-08-02T00:00:00"
+    assert body["state"] == "ok"
+    assert body["count"] == n
+    assert body["metric"] == "mean_len_mm" and body["unit"] == "mm"
+    assert body["detail"]["n_rows"] == n
+    # 速率必须带量纲（票 05）：行上 metric/unit/rate_per_h 三列齐全
+    assert all(r["metric"] and r["unit"] and r["rate_per_h"] is not None for r in body["rows"])

@@ -15,6 +15,10 @@
 | 轮行 | `rounds.suspect_duplicate`（生产者发布尔 `True`）+ `dup_groups`（**对象数组**：`[{"sha256_12","n","stations"}, …]`，无重复时 NULL 或 `[]`） | **整轮**的帧不许进统计 |
 | 轮行 | `rounds.content_check_error` 非空 | **"没查成"不是"已确认无重复"** ⇒ 同样排除，并说明原因 |
 
+**别拿 `duplicate_streak` 当排除判据**（Chief 2026-10-14，界面师真机实测）：它的**正常值就是 1**
+（"连续 1 张"＝它自己），`> 0` 会把每一帧都判成不可信；它只作展示/取证，要用必须 `> 1`。
+本模块的排除判定只读 `frame_dup`/`suspect_duplicate`/`content_check_error` 三个标量。
+
 ## 为什么按"轮窗口"排除
 
 测量行只有 `(ts, room_id, box_id)`，**没有 `round_id`**（票 11 的线格式里没有），

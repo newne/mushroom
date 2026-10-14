@@ -113,20 +113,36 @@ SELECT room_id, max(in_date) FROM mushroom_batch_yield GROUP BY room_id;
    代码取**并集**（保留那 6 行 2025-11…2026-02 的老批次，零成本）。
    "当前批次"仍按 spec §2.6「该库房最近一条入库日期不晚于今天」判。
 2. **`batch_no` 显示名**：`mogu-<id>` 来自业务库主键，pgsql 这两张表没有对应 id ⇒ 现在写 NULL
-   （不编值），`batch_id` = `库房号|入库日期`。界面若需要显示名，得选"用 `库房号|入库日期`"
-   还是"让生产侧在 pgsql 补一列"——**待裁定**。
-3. **镜像缺 `psycopg`**（发版官实测：`PATROL_IMAGE` 的 site-packages 里没有）⇒ Step 3 的硬前置：
+   （不编值），`batch_id` = `库房号|入库日期`。**已按 Chief 2026-10-14 的三步走落地**：
+   ① 从**我们自己库里既有行**反推映射（`analysis/data/batch_no_map.json`，22 条，
+   `generated_at=2026-10-14T10:47:12`，生成器 `python -m analysis.batch_map`；
+   只读快照由发版官取，提交 `e6b2b56`）；② 映射缺失写 NULL + **"缺映射"可见计数**；
+   ③ 长期解（生产侧在 pgsql 补真批次 id）待协调，不归我们单方面决定。
+3. **⚠️ 库房号身份不一致（2026-10-14 发现，未决）**：映射文件里 607/608 两个库房的键是
+   **`7|…` / `8|…`**，不是 `607|…` / `608|…` —— 即 `batches`（生产）侧的库房号对这两间用的是
+   **旧编号 `7`/`8`**，而 `environment.zone`、`measurements.room_id`、`audit` 的库房映射
+   （`audit.py:31`、`env/tdengine.py:36`）用的是 **`607`/`608`**。⇒ 「库房号+入库日期」这个身份
+   在**跨域 join 时会静默对不上**（试点 611/612 不受影响：它们两侧一致）。
+   **不做静默别名替换**（会再造一个"看不见的默认"）：要么由生产侧统一，要么在 analysis 侧
+   建一份**显式别名表**并在 join 失败时计数可见 —— **待 Chief 裁定**。
+4. **镜像缺 `psycopg`**（发版官实测：`PATROL_IMAGE` 的 site-packages 里没有）⇒ Step 3 的硬前置：
    `analysis/pyproject.toml` **已声明** `psycopg[binary]>=3.3.2`（2026-10-14 补，版本区间与根
    `pyproject.toml:25` 一致）；**镜像构建以 `patrol-workspace/uv.lock` 为准**（`Dockerfile.patrol`
    是 `uv sync --frozen`），所以**锁要由发版官统一重生成**（共享 artifact，我不动锁），
    再重建镜像。**在此之前不迁 batch 作业。**
-4. **DSN 提供方式**：已实现 `PGSQL_DSN_FILE`（文件优先）；生产建议宿主 `0600` 文件 bind 进容器 `:ro`。
+5. **DSN 提供方式**：已实现 `PGSQL_DSN_FILE`（文件优先）；生产建议宿主 `0600` 文件 bind 进容器 `:ro`。
    （顺带记一条实况：现役 `EMS_*` 是走 `env_file` 注入的，**在 `docker inspect` 里可见** ——
    与"值不进 inspect"的原口径不符，是否一并迁到文件形态由 Chief/发版官定，不在本票范围。）
-5. **⚠️ 生产还在跑旧通路**（发版官发现）：宿主 `/opt/mushroom-analysis/src` 停在 10-12 19:07，
-   其 `batches.py` 仍是 `docker exec tools_mysql`，`mushroom-batch-ingest.timer` 每天 05:20 还在跑
-   （2026-10-14 05:20 已访问过一次，`ExecMainStatus=0`）⇒ **这是对"禁止使用业务库"红线的持续违反**，
-   需要立即停掉该 timer 或尽快换到 pgsql 版；宿主 venv 没有 psycopg，**不能只拷文件**。
+6. ~~**⚠️ 生产还在跑旧通路**（发版官发现）~~ **已停**（发版官 2026-10-14 10:28:35，
+   `systemctl disable --now mushroom-batch-ingest.timer`；LAST=10-14 05:20:06 status=0，
+   首个缺失窗口 10-15 05:20，窗口幂等可回补）——对"禁止使用业务库"红线的持续违反已终止。
+7. **取集合还没同源**（`batches.py` 现在是 `mushroom_batch_yield ∪ image_text_quality` 的
+   **临时 SQL**，已在文件头标注"待替换、不再扩展"）。权威 = `get_batch_ranges` 的实时并集，
+   切换路线（Chief 2026-10-14 收窄后）：① A′ **实测失败**（发版官票 06：镜像里
+   `ModuleNotFoundError: No module named 'utils'`；代价 7 依赖 24 MB + mlflow 闭包 610 MB
+   ⇒ 破"Dockerfile.patrol 不背 mlflow"的底线）→ ② **让算法侧既有作业把实时并集物化成表/文件**
+   （`mushroom_batch_yield` 就是这个物化产物：把刷新做成"入库即刷" + **新鲜度可见**），
+   两侧读同一份物化结果 → ③ 才是新增只读端点。**选哪条由 Chief 定**；三条都不许自己写第二份 SQL。
 
 ## 4. 验收
 
@@ -135,7 +151,7 @@ SELECT room_id, max(in_date) FROM mushroom_batch_yield GROUP BY room_id;
 - [x] DSN 文件优先（`PGSQL_DSN_FILE`），文件读不到即报错、**不退回环境变量**（有用例钉住）
 - [x] §1.2 盘点结果回填（表清单、四库房覆盖、差集、按 `created_at` 判停更）
 - [ ] 镜像装 `psycopg[binary]`（发版官的 `Dockerfile.patrol`）后重建
-- [ ] 停掉宿主那份每天 05:20 跑旧 `docker exec` 通路的 timer（违反红线，见 §3.5）
+- [x] 停掉宿主那份每天 05:20 跑旧 `docker exec` 通路的 timer（2026-10-14 10:28:35，见 §3.6）
 - [ ] 过渡期结束后补跑一次 `python -m analysis.batch_ingest --db <db> --once`：`batches` 行数与盘点一致（四库房最近入库日 607=10-10 / 608=09-27 / 611=09-30 / 612=09-30）
 - [ ] `GET /environment/batches` 的"当前批次"与盘点结论一致（611 = `mogu-107` / 2026-09-30）
 

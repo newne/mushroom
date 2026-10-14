@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-INGEST_ENV = ("ENV_INGEST_INTERVAL", "AUDIT_INTERVAL", "BATCH_AT", "ANALYSIS_DB")
+INGEST_ENV = ("ENV_INGEST_INTERVAL", "AUDIT_INTERVAL", "BATCH_AT", "RANGES_AT", "ANALYSIS_DB")
 
 
 @pytest.fixture(autouse=True)

@@ -29,14 +29,17 @@ def test_jobs_are_assembled_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("EMS_ACCOUNT", "acct")
     monkeypatch.setenv("EMS_PASSWORD_MD5", "md5")
     monkeypatch.setenv("BATCH_AT", "05:20")
+    monkeypatch.setenv("RANGES_AT", "05:40")
     path = str(tmp_path / "jobs.db")
 
     jobs = {job.name: job for job in default_jobs(connect(path), path)}
-    assert set(jobs) == {"env", "audit", "batch"}
+    assert set(jobs) == {"env", "audit", "batch", "ranges"}
     assert jobs["env"].interval_s == 300
     assert jobs["audit"].interval_s == 600
     assert jobs["batch"].daily_at == "05:20"
     assert jobs["batch"].base_delay_s() > 0, "daily_at 要换算成到下一个 05:20 的秒数"
+    # 票 05：区间表重算接进同一套每日任务链（不再是"全仓库只有测试调用"）
+    assert jobs["ranges"].daily_at == "05:40"
 
 
 def test_failures_back_off_with_a_cap():

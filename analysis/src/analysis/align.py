@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pandas as pd
 
 from analysis.growth import GROWTH_METRICS
@@ -174,10 +176,60 @@ def best_ranges(merged: pd.DataFrame, *, n_bins: int = 4) -> list[dict]:
 
 
 def run_from_db(db_path: str) -> list[dict]:
-    """从 SQLite 读两表跑全流程（保留：只读式计算，不落表）。
+    """从 SQLite 读两表跑全流程（只读式计算，不落表）。返回区间行，**不返回为什么空**。
 
-    **先过滤**（票 13）：可疑轮/复制帧内的测量行不进统计 —— 复制帧会让长势曲线
-    看起来正常，那种错误比缺数据更难发现。
+    要"为什么空"请用 `compute_ranges`（票 05 的空态标注）——它给同一批行 + 状态。
+    """
+    return compute_ranges(db_path).rows
+
+
+#: 区间表重算的状态机（票 05）。**空表必须说得出为什么空**：
+#: "从没跑过" / "没有测量" / "全被排除" / "没有环境数据" / "平视下没有可用长势量" /
+#: "样本不足" 是六件不同的事，前五件靠再跑一次是好不了的，页面不能都显示成"暂无数据"。
+STATE_OK = "ok"
+STATE_NO_MEASUREMENTS = "no_measurements"
+STATE_ALL_EXCLUDED = "all_excluded"
+STATE_NO_ENVIRONMENT = "no_environment"
+STATE_NO_GROWTH_METRIC = "no_growth_metric"
+STATE_INSUFFICIENT_SAMPLES = "insufficient_samples"
+
+#: 每个状态一句人话（页面直接显示，不用自己拼，也别让四个页面各写一份）。
+STATE_TEXT = {
+    STATE_OK: "区间表已算好（{n} 行）",
+    STATE_NO_MEASUREMENTS: "样本不足：库房里还没有任何测量行（测量管线未接上）",
+    STATE_ALL_EXCLUDED: (
+        "样本不足：测量行全部落在被排除的可疑轮/复制帧窗口内（见 detail.excluded_by_reason）"
+    ),
+    STATE_NO_ENVIRONMENT: "样本不足：还没有环境小时聚合，长势速率无法与环境对齐",
+    STATE_NO_GROWTH_METRIC: (
+        "样本不足：没有可用的长势量（平视单档下杆长恒缺测，需要菌簇量）"
+    ),
+    STATE_INSUFFICIENT_SAMPLES: (
+        "样本不足：每个参数分箱的有效样本 < {min}（相邻整点的速率段不够），暂不输出区间"
+    ),
+}
+
+
+@dataclass
+class RangesRun:
+    """一次重算的**全部结果**：区间行 + 状态 + 明细计数。
+
+    `detail` 里的计数是"排除必须可见"的落点（票 17）：被 10-09 那条显式排除清单排掉的行
+    要能在这里数出来，不许静默消失。
+    """
+
+    rows: list[dict]
+    state: str
+    state_text: str
+    detail: dict
+
+
+def compute_ranges(db_path: str, *, metric: str | None = None) -> RangesRun:
+    """从 SQLite 读两表跑全流程，返回 **区间行 + 为什么空**（票 05）。
+
+    - **先过滤**（票 13/17）：可疑轮、复制帧、以及显式排除清单命中的测量行不进统计 ——
+      复制帧会让长势曲线看起来正常，那种错误比缺数据更难发现。
+    - 每一步失败都映射成一个**具名状态**，绝不返回一个无解释的空列表。
     """
     from analysis.db import connect, fetch_measurements, fetch_rounds
     from analysis.integrity import partition
@@ -187,27 +239,99 @@ def run_from_db(db_path: str) -> list[dict]:
     environment = pd.read_sql(
         "SELECT ts, zone, temp_c, rh_pct, co2_ppm, lamp_on_min FROM environment", conn
     )
-    if measurements.empty or environment.empty:
-        return []
+    detail: dict = {
+        "n_measurements": int(len(measurements)),
+        "n_environment": int(len(environment)),
+        "n_kept": 0,
+        "n_excluded": 0,
+        "excluded_by_reason": {},
+        "min_samples_per_bin": MIN_SAMPLES_PER_BIN,
+    }
+
+    def done(state: str, extra: dict | None = None) -> RangesRun:
+        detail.update(extra or {})
+        text = STATE_TEXT[state].format(n=0, min=MIN_SAMPLES_PER_BIN)
+        return RangesRun(rows=[], state=state, state_text=text, detail=dict(detail))
+
+    if measurements.empty:
+        return done(STATE_NO_MEASUREMENTS)
 
     kept, dropped = partition(measurements.to_dict("records"), fetch_rounds(conn))
+    detail["n_kept"] = len(kept)
+    detail["n_excluded"] = len(dropped)
+    by_reason: dict[str, int] = {}
+    for item in dropped:
+        by_reason[item.reason] = by_reason.get(item.reason, 0) + 1
+    detail["excluded_by_reason"] = by_reason
+    # 前 20 条原文（带人话原因）——"排除了多少"之外还要能回答"排掉了哪一段、凭什么"
+    detail["excluded_samples"] = [
+        {"ts": d.ts, "zone": d.zone, "reason": d.reason, "window": d.window, "detail": d.detail}
+        for d in dropped[:20]
+    ]
+    detail["excluded_samples_truncated"] = len(dropped) > 20
     if dropped:
-        print(f"[ranges] 排除 {len(dropped)} 条落在可疑轮窗口内的测量行（票 13）")
+        print(f"[ranges] 排除 {len(dropped)} 条落在可疑轮窗口内的测量行（票 13/17）")
+
     if not kept:
-        return []
-    return best_ranges(align(hourly_rates(pd.DataFrame(kept)), environment))
+        return done(STATE_ALL_EXCLUDED)
+    if environment.empty:
+        return done(STATE_NO_ENVIRONMENT)
+
+    kept_df = pd.DataFrame(kept)
+    try:
+        metric_name, unit = _pick_metric(kept_df, metric)
+    except ValueError as e:
+        # 平视单档下这条现在是**常态**（`mean_len_mm` 恒 NULL，菌簇四列还没有生产者）：
+        # 必须说清是"没有长势量"，而不是笼统的"样本不足"。
+        detail["error"] = str(e)
+        return done(STATE_NO_GROWTH_METRIC)
+    detail["metric"] = metric_name
+    detail["unit"] = unit
+
+    rates = hourly_rates(kept_df, metric=metric_name)
+    detail["n_rate_rows"] = int(len(rates))
+    merged = align(rates, environment)
+    detail["n_aligned_hours"] = int(len(merged))
+    rows = best_ranges(merged)
+
+    if not rows:
+        return done(STATE_INSUFFICIENT_SAMPLES)
+
+    detail["n_rows"] = len(rows)
+    return RangesRun(
+        rows=rows,
+        state=STATE_OK,
+        state_text=STATE_TEXT[STATE_OK].format(n=len(rows)),
+        detail=dict(detail),
+    )
 
 
-def refresh_ranges(db_path: str, *, computed_at: str | None = None) -> int:
-    """每日批处理入口：计算最佳参数区间并整体替换 ranges 表（评审 #6）。
+def refresh_ranges(
+    db_path: str, *, computed_at: str | None = None, metric: str | None = None
+) -> int:
+    """每日批处理入口（票 05）：计算最佳参数区间并整体替换 ranges 表（评审 #6）。
 
     API 的 GET /ranges 只读本表——重算与读取分离，请求代价为 O(表大小)。
+
+    **同一事务里写区间行与状态**：行与状态不许对不上（"有 12 行"却写着 `样本不足`）。
     """
     from datetime import datetime
 
-    from analysis.db import connect, replace_ranges
+    from analysis.db import connect, replace_ranges, write_ranges_state
 
-    rows = run_from_db(db_path)
+    stamp = computed_at or datetime.now().isoformat(timespec="seconds")
+    run = compute_ranges(db_path, metric=metric)
     conn = connect(db_path)
-    replace_ranges(conn, rows, computed_at or datetime.now().isoformat(timespec="seconds"))
-    return len(rows)
+    replace_ranges(conn, run.rows, stamp)
+    write_ranges_state(
+        conn,
+        state=run.state,
+        state_text=run.state_text,
+        computed_at=stamp,
+        detail=run.detail,
+        n_rows=len(run.rows),
+        metric=run.detail.get("metric"),
+        unit=run.detail.get("unit"),
+    )
+    print(f"[ranges] state={run.state} rows={len(run.rows)} {run.state_text}")
+    return len(run.rows)

@@ -30,6 +30,7 @@ from analysis.db import (
     fetch_images,
     fetch_measurements,
     fetch_ranges,
+    fetch_ranges_state,
     fetch_rounds,
     insert_images,
     insert_measurements,
@@ -363,8 +364,33 @@ def create_app(
         }
 
     @app.get("/ranges")
-    def ranges() -> list[dict]:
-        """最佳控制参数区间表（只读 ranges 表；由每日批处理 refresh_ranges 写入）。"""
-        return fetch_ranges(conn)
+    def ranges() -> dict:
+        """最优参数区间表（只读 `ranges` 表；由每日任务 `refresh_ranges` 写入）。
+
+        **形状（票 05，2026-10-14）**：从裸列表改成信封。理由：裸列表表达不了空态 ——
+        `[]` 分不清"从没重算过"、"没有测量"、"平视下没有可用长势量"、"样本不足"，
+        而这四件事页面要说给用户听、且处置完全不同。所以与 `/operations` 一致给信封：
+
+        - `rows`：区间行（每行带 `metric`/`unit`/`rate_per_h`，速率必须显示量纲）；
+        - `state`：`ok` / `never_computed` / `no_measurements` / `all_excluded` /
+          `no_environment` / `no_growth_metric` / `insufficient_samples`；
+        - `state_text`：人话，页面直接显示；
+        - `detail`：计数与排除明细（`n_excluded`、`excluded_by_reason`、前 20 条原文）
+          —— **排除必须可见，不静默消失**；
+        - `computed_at` / `metric` / `unit`：最近一次重算的戳与量纲。
+        """
+        state = fetch_ranges_state(conn)
+        rows = fetch_ranges(conn)
+        return {
+            "ok": True,
+            "rows": rows,
+            "count": len(rows),
+            "state": state["state"],
+            "state_text": state["state_text"],
+            "detail": state["detail"],
+            "computed_at": state["computed_at"],
+            "metric": state["metric"],
+            "unit": state["unit"],
+        }
 
     return app

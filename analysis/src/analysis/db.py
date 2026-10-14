@@ -169,6 +169,23 @@ CREATE TABLE IF NOT EXISTS ranges (
   computed_at  TEXT NOT NULL,
   PRIMARY KEY (stage, param)
 );
+
+-- 区间表的**重算状态**（票 05）：空表本身说不出为什么空 —— "从没跑过"（批处理没接线）、
+-- "没有测量"（检出模型未到位）、"平视下杆长恒缺测没有可用长势量"、"样本不足（每箱 <3）"
+-- 是完全不同的四件事，页面上必须长得不一样。所以每次重算把**最近一次**的状态落一行，
+-- `/ranges` 把它随区间一起返回。
+CREATE TABLE IF NOT EXISTS ranges_state (
+  id          INTEGER PRIMARY KEY CHECK (id = 1),  -- 单行表：只记最近一次重算
+  computed_at TEXT,
+  state       TEXT NOT NULL,     -- ok / no_measurements / all_excluded / no_environment
+                                 -- / no_growth_metric / insufficient_samples
+  state_text  TEXT NOT NULL,     -- 人话，页面直接显示，不用自己拼
+  detail      TEXT,              -- JSON：计数 + 排除明细（**不许只有一句"样本不足"**）
+  n_rows      INTEGER NOT NULL DEFAULT 0,
+  metric      TEXT,              -- 本次用的长势量（决定量纲），没有则 NULL
+  unit        TEXT,
+  updated_at  TEXT NOT NULL
+);
 """
 
 
@@ -709,3 +726,77 @@ def fetch_ranges(conn: sqlite3.Connection) -> list[dict]:
     )
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+#: "区间表从来没人算过"—— **不要把"没算过"说成"样本不足"**：
+#: 前者是接线问题（票 05 的 `refresh_ranges` 没排期），后者是数据问题。
+RANGES_STATE_NEVER_COMPUTED = "never_computed"
+
+_RANGES_STATE_COLS = (
+    "computed_at", "state", "state_text", "detail", "n_rows", "metric", "unit", "updated_at",
+)
+
+
+def write_ranges_state(
+    conn: sqlite3.Connection,
+    *,
+    state: str,
+    state_text: str,
+    computed_at: str | None = None,
+    detail: dict | None = None,
+    n_rows: int = 0,
+    metric: str | None = None,
+    unit: str | None = None,
+    updated_at: str | None = None,
+) -> None:
+    """落最近一次重算的状态（单行表，整体替换）。
+
+    `detail` 一律 JSON 序列化存库：调用方读回来就是 `dict`，不用自己解字符串。
+    """
+    from datetime import datetime
+
+    conn.execute(
+        "INSERT OR REPLACE INTO ranges_state "
+        "(id, computed_at, state, state_text, detail, n_rows, metric, unit, updated_at) "
+        "VALUES (1, :computed_at, :state, :state_text, :detail, :n_rows, :metric, :unit, :updated_at)",
+        {
+            "computed_at": computed_at,
+            "state": state,
+            "state_text": state_text,
+            "detail": json.dumps(detail or {}, ensure_ascii=False),
+            "n_rows": int(n_rows),
+            "metric": metric,
+            "unit": unit,
+            "updated_at": updated_at or datetime.now().isoformat(timespec="seconds"),
+        },
+    )
+    conn.commit()
+
+
+def fetch_ranges_state(conn: sqlite3.Connection) -> dict:
+    """读最近一次重算的状态。**库是空的时候也返回一条**（`never_computed`）——
+
+    这样 `/ranges` 的调用方永远拿到同一个形状，不用自己判断"表不存在"。
+    """
+    cur = conn.execute(
+        f"SELECT {', '.join(_RANGES_STATE_COLS)} FROM ranges_state WHERE id = 1"
+    )
+    row = cur.fetchone()
+    if row is None:
+        return {
+            "computed_at": None,
+            "state": RANGES_STATE_NEVER_COMPUTED,
+            "state_text": "区间表还没有重算过（每日任务未接线或从未成功跑过）",
+            "detail": {},
+            "n_rows": 0,
+            "metric": None,
+            "unit": None,
+            "updated_at": None,
+        }
+    out = dict(zip(_RANGES_STATE_COLS, row))
+    try:
+        out["detail"] = json.loads(out["detail"]) if out["detail"] else {}
+    except (TypeError, ValueError):
+        # 存坏了也别把端点打崩：原文留着，让排查看得到
+        out["detail"] = {"raw_detail": out["detail"], "detail_parse_error": True}
+    return out

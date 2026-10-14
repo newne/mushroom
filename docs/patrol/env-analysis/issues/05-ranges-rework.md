@@ -30,7 +30,8 @@
 > 不许只写"每天长 320"）——否则会被读成毫米。`CONTEXT.md` 的"长势"词条已按同一口径改，
 > 本票与它对齐。
 
-**Status:** ready-for-agent
+**Status:** in-progress —— **量纲三列 + 空态标注 + 每日重算接线已落地**（§5，2026-10-14）；
+两张表（`kind`）、D 分档、产量列仍待做。
 
 - [ ] 实际参数区间（主）：按 D 分档（可切图像 4 阶段）× 长势分层，统计 `temp_c / rh_pct / co2_ppm / lamp_on_min` 的 median / q25 / q75 / n，并列该层生长速率
 - [ ] 设定区间（次）：同一分层下设定值的分布 + 该层变更汇总（频次、幅度、主要点位，数据来自 09 号票）
@@ -48,6 +49,46 @@
       （整簇不可分时那面积/投影径是**估出来的**）：`align.hourly_rates` 的
       `verified_only=True` 是唯一入口，任何绕过它的读取路径都要在评审时挡掉
 - [ ] 引用速率处**同时**给 `metric` 与 `unit`（量纲显示），`rate_mm_per_h` 仅在 `unit='mm/h'` 时非空
+
+## 5. 空态标注 + 每日重算接线（2026-10-14 落地）
+
+**问题**：`ranges` 长期 0 行，而"0 行"至少对应**六件不同的事**：从没重算过（接线问题）、
+没有测量行、全被排除、没有环境数据、**平视下没有可用长势量**、样本不足。
+以前 `GET /ranges` 只返回 `[]`，页面只能说"暂无数据" —— 把接线问题和数据问题混成同一个沉默的空，
+和"未知字段被静默忽略"是同一类错误。
+
+**实现**（`analysis/**`，全在环境官领地）：
+
+1. **状态机**（`align.py`）：`compute_ranges(db_path)` 返回 `RangesRun(rows, state, state_text, detail)`，
+   六个具名状态 `ok` / `no_measurements` / `all_excluded` / `no_environment` /
+   `no_growth_metric` / `insufficient_samples`（+ 存储层的 `never_computed`）。
+   每一步的空都带**计数**（`n_measurements` / `n_kept` / `n_excluded` / `n_environment` /
+   `n_rate_rows` / `n_aligned_hours` / `min_samples_per_bin`）。
+2. **排除可见**（票 17 的硬要求）：`detail.excluded_by_reason` 按原因计数，
+   `detail.excluded_samples` 给前 20 条原文（`ts`/`zone`/`window`/人话 `detail`）。
+   10-09 那轮命中时**现场证据**：`{"legacy_excluded": 1}`，窗口
+   `2026-10-09T18:20:05~2026-10-09T18:27:34`，明细里带"批准：Chief 2026-10-14"。
+3. **状态落库**（`db.py` 新表 `ranges_state`，单行、只记最近一次重算）：
+   `refresh_ranges` 在**同一处**写区间行与状态，避免"有 12 行却写着样本不足"。
+   读到库是空的时候也返回 `never_computed` 一条，调用方形状恒定。
+4. **每日重算接线**（票 12 的同一套机制）：`analysis/jobs.py` 新增 `RANGES_AT`（设了才跑，
+   `daily_at`），与 env/audit/batch 同容器、同 lifespan —— 本票的"`refresh_ranges` 全仓库只有
+   测试调用"到此结束。**生产要生效还需 compose 加一行 `RANGES_AT`**（`docker/` 不属我领地，
+   已请 Chief/发版官裁定；compose 是创建时注入，改了就重建容器）。
+5. **`GET /ranges` 响应形状变更（破坏性，需界面师同步）**：裸列表 → 信封
+   `{ok, rows, count, state, state_text, detail, computed_at, metric, unit}`，与 `/operations`
+   风格一致。裸列表**表达不了空态**，这是换形状的唯一理由；`rows` 里的行形状没变
+   （仍带 `metric`/`unit`/`rate_per_h`）。
+   **不加** `?metric=` 之类没人要的查询参数（行上带量纲就够了）—— 有用例钉住"别再加回去"。
+   ⚠️ `docs/patrol/env-analysis/spec.md:194`（`ranges` / `GET /ranges` | 0 行 / `[]`）**还没改**，
+   该文件不在我领地，已报 Chief 指派更新。
+6. **未做**（本票剩余）：两张表（`measured`/`setpoint` 的 `kind`）、D 分档、产量列
+   （`yield_median`/`yield_n`）—— 本期只交付"量纲三列 + 空态 + 调度"，其余按原计划。
+
+**验收证据**：`analysis/tests/test_ranges_state.py`（9 条：六态各一条 + 排除可见 +
+状态随数据翻转）、`test_api.py` 三条、`test_jobs.py` 装配断言；
+全量 `pytest analysis/tests` **176 passed**（本轮前 165）。
+可复验脚本（把六态信封原样打出来）：`ranges_states_demo.py`（在环境官工作目录，不在仓库）。
 
 ## Comments
 
