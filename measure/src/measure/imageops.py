@@ -30,6 +30,38 @@ def shift(arr: np.ndarray, dy: int, dx: int, *, fill: bool = False) -> np.ndarra
     return out
 
 
+def bbox_of(mask: np.ndarray, pad: int = 0) -> tuple[int, int, int, int] | None:
+    """掩膜外接框 ``(y0, x0, y1, x1)``（含端点）；全空返回 None。"""
+    ys, xs = np.nonzero(mask)
+    if len(ys) == 0:
+        return None
+    h, w = mask.shape
+    return (max(0, int(ys.min()) - pad), max(0, int(xs.min()) - pad),
+            min(h, int(ys.max()) + 1 + pad), min(w, int(xs.max()) + 1 + pad))
+
+
+def crop(mask_or_gray: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
+    y0, x0, y1, x1 = box
+    return mask_or_gray[y0:y1, x0:x1]
+
+
+def block_downscale(arr: np.ndarray, factor: int) -> np.ndarray:
+    """块平均降采样（``factor=1`` 原样返回）。
+
+    为什么需要：真机帧 2880×1616 = 4.65 MPx，而距离变换/洪泛这些是逐行 Python 实现，
+    全帧会是分钟级（实测 1/3 缩小都要 108 s）。**帧内标尺只需要袋级精度**，
+    降到 1/2–1/4 后坐标再乘回来，误差远小于袋宽的不确定度。
+    """
+    if factor <= 1:
+        return arr
+    h, w = arr.shape[:2]
+    h2, w2 = h // factor * factor, w // factor * factor
+    core = arr[:h2, :w2]
+    if arr.ndim == 2:
+        return core.reshape(h2 // factor, factor, w2 // factor, factor).mean(axis=(1, 3))
+    return core.reshape(h2 // factor, factor, w2 // factor, factor, -1).mean(axis=(1, 3))
+
+
 def erode(mask: np.ndarray, radius: int = 1) -> np.ndarray:
     """腐蚀；``radius <= 0`` 原样返回。"""
     out = mask
@@ -238,24 +270,42 @@ def local_maxima(a: np.ndarray, window: int = 3) -> np.ndarray:
 
 def pick_seeds(dist: np.ndarray, *, min_distance: int = 12, abs_min: float = 4.0,
                max_seeds: int = 64) -> np.ndarray:
-    """距离图峰值 → NMS 后的种子 ``[[y, x, dist], ...]``（按峰值降序）。"""
-    peaks = local_maxima(dist, 2 * max(1, min_distance // 2) + 1) & (dist >= abs_min)
+    """距离图峰值 → NMS 后的种子 ``[[y, x, dist], ...]``（按峰值降序）。
+
+    NMS 用**网格哈希**（格子边长 = `min_distance`，只查相邻 9 格）而不是全对比较：
+    真机帧的 top-hat 掩膜上峰值可上万，全对比较是 O(P²) ⇒ 分钟级（实测卡死过）；
+    网格法把每步降到 O(1)，整体 O(P log P)（排序）。
+    """
+    peaks = local_maxima(dist, 3) & (dist >= abs_min)
     ys, xs = np.nonzero(peaks)
     if len(ys) == 0:
         return np.zeros((0, 3), np.float32)
     vals = dist[ys, xs]
     order = np.argsort(-vals)
     ys, xs, vals = ys[order], xs[order], vals[order]
-    chosen: list[tuple[float, float]] = []
+    cell = max(1, int(min_distance))
     r2 = float(min_distance) ** 2
-    for y, x in zip(ys, xs):
-        if all((cy - y) ** 2 + (cx - x) ** 2 >= r2 for cy, cx in chosen):
-            chosen.append((float(y), float(x)))
+    occupied: dict[tuple[int, int], list[tuple[float, float]]] = {}
+    chosen: list[tuple[float, float, float]] = []
+    for y, x, v in zip(ys, xs, vals):
+        cy, cx = int(y) // cell, int(x) // cell
+        ok = True
+        for gy in (cy - 1, cy, cy + 1):
+            for gx in (cx - 1, cx, cx + 1):
+                for (py, px) in occupied.get((gy, gx), ()):  # noqa: E501
+                    if (py - y) ** 2 + (px - x) ** 2 < r2:
+                        ok = False
+                        break
+                if not ok:
+                    break
+            if not ok:
+                break
+        if ok:
+            chosen.append((float(y), float(x), float(v)))
+            occupied.setdefault((cy, cx), []).append((float(y), float(x)))
         if len(chosen) >= max_seeds:
             break
-    dists = [float(dist[int(cy), int(cx)]) for cy, cx in chosen]
-    return np.asarray([(cy, cx, dv) for (cy, cx), dv in zip(chosen, dists)],
-                      np.float32).reshape(-1, 3)
+    return np.asarray(chosen, np.float32).reshape(-1, 3)
 
 
 def paint_seeds(shape: tuple[int, int], seeds: np.ndarray) -> np.ndarray:

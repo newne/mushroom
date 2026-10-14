@@ -35,11 +35,31 @@ QUALITY_FLAGS = (
     "level_view",            # **平视口径的旁白**：视角事实的权威字段是 `angle_profile`；
                              # 本标记**不参与可用性判定**，也不决定任何行为（票 11 §3）
     "no_light",              # 整帧近黑（灯未亮/无信息量）⇒ 该帧不可用，不是降权
+    # 估算/预测三码（Chief 2026-10-14 裁定 5；命名对齐票 18，不许混成一个）
+    "estimate",              # 行级 fail-safe：本行有估算值（与 verified 正交，但单独出现不算可用）
+    "unreliable",            # 远排/低置信 ⇒ 值写 NULL，处置=不可用（与 no_light 同级）
+    "no_scale",              # 缺标尺/俯角（或找不到同排菌包）⇒ mm 写 NULL
 )
 
-#: 出现其中任意一个 ⇒ 这一行没有可用测量。
-#: `no_light` 同属"不可用"（Chief 2026-10-13：近黑帧没有信息量，降权会污染统计）。
-NON_USABLE_FLAGS = ("no_detection", "low_confidence", "no_light", "blurry", "overexposed")
+#: 出现其中任意一个 ⇒ 这一行**没有可用测量**。
+#: `no_light` / `unreliable` / `no_scale` 都是"不可用"（值应为 NULL），
+#: 而不是降权；`estimate` **不在此列**——它与 `verified` 正交（票 18 §2），
+#: 但"只有 estimate 没有 verified"的行仍不得进统计，见 `field_is_usable()`。
+NON_USABLE_FLAGS = ("no_detection", "low_confidence", "no_light", "unreliable",
+                    "no_scale", "blurry", "overexposed")
+
+
+def field_is_usable(quality: str | None, estimated_fields: str | None,
+                    field: str) -> bool:
+    """票 18 §2 的过滤规则：字段 X 可用 ⇔ `quality` 含 `verified` 且 X 不在估算清单里。
+
+    这是**区间表/建议层/统计**的唯一入口；只看展示的消费者可以不用它。
+    """
+    flags = parse_flags(quality)
+    if "verified" not in flags:
+        return False
+    estimated = {f for f in (estimated_fields or "").split("+") if f}
+    return field not in estimated
 
 #: 多标记连接符（票 11 §3）。
 JOINER = "+"
