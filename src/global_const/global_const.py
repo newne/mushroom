@@ -21,8 +21,8 @@ static_settings = _config_loader.static_settings
 
 DB_CONNECT_TIMEOUT = _db_engines.DB_CONNECT_TIMEOUT
 DB_POOL_TIMEOUT = _db_engines.DB_POOL_TIMEOUT
-engine_url = _db_engines.engine_url
-mysql_engine = _db_engines.mysql_engine
+# 2026-10-14：`engine_url`（mysql）与 `mysql_engine` 已删——用户裁定算法侧禁用
+# `tools_mysql`，且全仓零调用者（详见 `db_engines.py` 顶部注释）。
 pg_engine_url = _db_engines.pg_engine_url
 pgsql_engine = _db_engines.pgsql_engine
 
@@ -82,8 +82,6 @@ __all__ = [
     "redis_key",
     "mushroom_redis_key",
     "add_reduction_chiller_key",
-    "engine_url",
-    "mysql_engine",
     "pg_engine_url",
     "pgsql_engine",
 ]

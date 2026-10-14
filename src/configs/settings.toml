@@ -32,12 +32,10 @@ host = "10.77.77.39"
 port = 5432
 database_name = "mushroom_algorithm"
 
-[development.mysql]
-database_type = "mysql"
-driver = "pymysql"
-host = "10.77.77.39"
-port = 3306
-database_name = "lenovo_algorithm_db"
+# 2026-10-14 用户裁定：`tools_mysql`（业务库）**算法侧禁止使用**，取数一律走 pgsql。
+# `[development.mysql]` / `[production.mysql]` 两段已删；全仓已无调用者
+# （原来是 `src/global_const/db_engines.py` 的 `mysql_engine`，已一并移除）。
+# 恢复要改代码 + 配置两处，请走票据。
 [development.redis]
 host="10.77.77.39"
 port=26379
@@ -114,12 +112,7 @@ host = "postgres_db"
 port = 5432
 database_name = "mushroom_algorithm"
 
-[production.mysql]
-database_type = "mysql"
-driver = "pymysql"
-host = "mysql_db"
-port = 3306
-database_name = "lenovo_algorithm_db"
+# 见上：[production.mysql] 已按 2026-10-14 裁定删除（算法侧禁用 tools_mysql）
 [production.redis]
 host="172.17.0.1"
 port = 26379

@@ -30,22 +30,10 @@ logger.info(
     f"[DB-CONFIG] connect_timeout={DB_CONNECT_TIMEOUT}s, pool_timeout={DB_POOL_TIMEOUT}s"
 )
 
-engine_url = (
-    f"{settings.mysql.database_type}+{settings.mysql.driver}://"
-    f"{settings.mysql.username}:{quote_plus(settings.mysql.password)}@"
-    f"{settings.mysql.host}:{settings.mysql.port}/{settings.mysql.database_name}"
-)
-
-mysql_engine = sqlalchemy.create_engine(
-    engine_url,
-    pool_pre_ping=True,
-    pool_recycle=1800,
-    pool_size=5,
-    max_overflow=10,
-    pool_timeout=DB_POOL_TIMEOUT,
-    connect_args={"connect_timeout": DB_CONNECT_TIMEOUT},
-    echo=False,
-)
+# 2026-10-14 用户裁定：`tools_mysql` 是业务数据库，**算法侧禁止使用**；取数一律走 pgsql。
+# `mysql_engine` 与它的 `engine_url` 已删除——全仓零调用者（只有 `global_const.py` 的
+# 导出与 `__all__`），`settings.mysql` 除本文件外也无人读。要恢复请走票据，别再从
+# `src/**` 里引 mysql。
 
 pg_engine_url = (
     f"{settings.pgsql.database_type}+{settings.pgsql.driver}://"
