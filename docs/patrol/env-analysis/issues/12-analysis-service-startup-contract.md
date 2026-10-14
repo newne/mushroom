@@ -57,14 +57,16 @@ API 的 db 路径缺省取 `ANALYSIS_DB`（容器里显式给，**不靠工作�
 ② 单个 asyncio 任务若死掉没有 supervisor 复活，靠"循环体永不退出"这条纪律兜。
 **不为此引入 supervisor**（最少新机制）。
 
-### 1.1 批次台账同步：过渡期暂停（Chief 2026-10-13 裁）
+### 1.1 批次台账同步：过渡期暂停（Chief 2026-10-13 裁；2026-10-14 改口径）
 
-`analysis.batch_ingest` 今天走 `docker exec tools_mysql mysql …` 读台账（`batches.py:56-59`），
-口令只在 `tools_mysql` 的 env 里。搬进容器要挂 `docker.sock` = 给**对外的 :8000 服务**
-配 root 等价权限 —— **Chief 不批，这条作废**。故：
+~~`analysis.batch_ingest` 今天走 `docker exec tools_mysql mysql …` 读台账~~ ——
+**旧通路已下线**：用户 2026-10-14 裁定 `tools_mysql` 是业务数据库、**禁止使用**，
+"给容器挂 `docker.sock`"那条方案一并作废（给对外的 :8000 服务配 root 等价权限）。故：
 
 - 迁移当天**不装配**这条作业：compose 不设 `BATCH_AT`，`default_jobs` 直接跳过它。
-- 目标形态 = **直连 MySQL 只读账号**（代码改动 + 凭据走挂载 env），见票 13。
+- 目标形态 = **pgsql 取数**（`postgres_db` / 库 `mushroom_algorithm`，DSN 走挂载 env，
+  `batches.py` 取 `mushroom_batch_yield ∪ image_text_quality`），见票 13
+  （文件名已改为 `13-batch-ledger-pgsql.md`）。
 - 落地后**补跑一次**把窗口补齐：全量覆盖 upsert（PK `(room_id, entry_date)`）⇒ 缺几天都能回补。
 - 过渡期台账停在迁移前那份快照：`window_of` 的"当前批次"会按过期台账算，
   所以界面与接口必须能显示"数据止于 X"（spec §6 的口径已经这么要求）。
