@@ -261,6 +261,53 @@ def _pgsql_runner(dsn: str | None):
     return run
 
 
+def dedupe_by_identity(
+    rows: list[dict], *, key: str = "room_id_canonical"
+) -> tuple[list[dict], dict]:
+    """同一 `(规范库房号, 入库日期)` 出现多行时**只留一行**，并把重复**计数可见**。
+
+    为什么读取侧也要挡（Chief 2026-10-14 选 B）：物化缓存换口径的那段时间里，
+    同一批次会同时挂着新旧两种编号（`7|…` 与 `607|…`），两条都归一到同一个身份 ——
+    `window_of` 会当成两个窗口，页面上就是**两张一模一样的批次卡**、环境汇总重复计入。
+    这是"同一身份出现两次"，读的人不该看到两张卡。
+
+    保留哪一条：优先**原始编号就是规范号**的那条（它不带历史编码），否则取第一条。
+    """
+    seen: dict[tuple, dict] = {}
+    dupes: list[str] = []
+    samples: list[dict] = []
+    for row in rows:
+        identity = (row.get(key), str(row.get("entry_date") or ""))
+        if identity not in seen:
+            seen[identity] = row
+            continue
+        keep = seen[identity]
+        # 规范化程度更高的那条胜出（原始编号 == 规范号 ⇒ 不是历史编码）
+        if row.get("room_id") == row.get(key) and keep.get("room_id") != keep.get(key):
+            seen[identity] = row
+        dupes.append(f"{identity[0]}|{identity[1]}")
+        if len(samples) < 5:
+            samples.append({
+                "identity": f"{identity[0]}|{identity[1]}",
+                "kept": seen[identity].get("room_id"),
+                "dropped": row.get("room_id"),
+            })
+    out = sorted(seen.values(), key=lambda r: (str(r.get(key) or ""), str(r.get("entry_date") or "")))
+    report = {
+        "n_total": len(rows),
+        "n_kept": len(out),
+        "n_dupes": len(dupes),
+        "dupe_keys": sorted(dupes),
+        "dupe_samples": samples,
+    }
+    if dupes:
+        print(
+            f"[batches] 同一批次身份出现 {len(dupes)} 次重复（已去重，保留规范编号那条）："
+            f"{', '.join(sorted(dupes))}"
+        )
+    return out, report
+
+
 def window_of(
     batches: list[dict], *, room: str, limit: int = 3, key: str = "room_id"
 ) -> list[dict]:

@@ -169,6 +169,48 @@ SELECT room_id, max(in_date) FROM mushroom_batch_yield GROUP BY room_id;
    （`mushroom_batch_yield` 就是这个物化产物：把刷新做成"入库即刷" + **新鲜度可见**），
    两侧读同一份物化结果 → ③ 才是新增只读端点。**选哪条由 Chief 定**；三条都不许自己写第二份 SQL。
 
+## 3.5 物化缓存：整体替换 + 新鲜度 + 只读端点（2026-10-14 落地）
+
+**为什么 upsert 不够**：`batches` 是 pgsql 并集的**物化缓存**，而 `run_once` 原先只 upsert、
+**永不 prune** ⇒ 源侧编码或我们的归一方式变一次，陈旧行永久留下。实测形状：换口径后
+同一批次同时挂 `7|2026-10-10` 与 `607|2026-10-10`，`window_of` 当成两个窗口 ⇒
+页面上**两张一样的批次卡**、环境汇总重复计入。Chief 2026-10-14 裁定：**不做手删，
+改由整体替换自然 prune**。
+
+1. **`db.replace_batches`**：一个事务里 `DELETE` + 插入全部 + 写状态；被删掉的键**逐条打印 + 计数**；
+   取数失败在写之前就抛错（`fetch_batches_with_report` 先跑），所以不会把表清空成"没有批次"。
+2. **新表 `batches_state`**（单行，与 `ranges_state` 同款）：`refreshed_at` / `n_rows` / `n_pruned` /
+   `pruned`(JSON) / `detail`(JSON)。**不给 `batches` 加列**：刷新是"一次作业事件"的属性，
+   加到每行等于把同一事实重复 N 遍，且老行 NULL 表达不了"从没刷过"。
+3. **`GET /batches?room_id=<库房>`**（只读、复用同一进程/端口，无写副作用）：
+   ```json
+   {"ok": true, "room_id": "611", "room_id_requested": "611", "room_label": "611",
+    "batches": [{"room_id":"611","room_id_raw":"611","room_label":"611",
+                 "entry_date":"2026-09-30","batch_id":"611|2026-09-30",
+                 "batch_no":"611_20260930","display_name":"mogu-107","until":null}],
+    "n_batches": 1, "ledger_refreshed_at":"2026-10-14T13:59:55",
+    "ledger_n_rows":2,"ledger_n_pruned":0,
+    "stale": false, "stale_after_h": 26.0,
+    "room_alias": {...}, "duplicates": {...}}
+   ```
+   - `batch_no` = **派生显示名** `<规范库房号>_<YYYYMMDD>`（与 `batch_yield_service` 同式，
+     与 `fetch_room.BatchRow.batch_no` 同式）；业务名 `mogu-*` 单独一列 `display_name`，
+     **缺映射 ⇒ NULL（不编）**。**两个名字不混用**：一个是派生身份、一个是业务显示名。
+   - `batch_id` = `<规范库房号>|<入库日期>`（ADR-0020，与 `fetch_room.BatchRow.batch_id` 同式）。
+   - `ledger_refreshed_at` = `batches_state.refreshed_at`；`stale` = 超过 `stale_after_h`
+     （默认 26h，`BATCH_STALE_AFTER_H` 可调）；**从没刷过 ⇒ `stale=true`**（不假装新鲜）。
+   - 别名归一沿用 `analysis.rooms`；解不出的编号**点名 + 计数**（`room_alias`），不猜。
+4. **读取侧去重**（`batches.dedupe_by_identity`）：同一 `(规范库房号, 入库日期)` 只留一条
+   （优先原始编号==规范号那条），`/batches` 与 `/environment/batches` 都带上 `duplicates` 计数。
+
+**⚠️ 缺口：现在没人按时刷**（这一条必须在端点被当准入依据之前定下来）
+
+- 宿主 `mushroom-batch-ingest.timer` **已停**（2026-10-14 10:28:35，见 §3.6）；
+- 容器里 `default_jobs` 只在设了 `BATCH_AT` 时才装配批次作业，而 **compose 现在没设** ⇒ 不跑；
+- ⇒ 物化表最后刷新 = **2026-10-14 05:20:06**（宿主旧通路那次，22 行）。**26h 后 `stale` 即为真**，
+  这正是端点要表达的事实。**先定"谁刷"再让它当准入依据**：建议容器设 `BATCH_AT=05:20`
+  （票 12 设计的形态，与 `RANGES_AT` 同一步加进 compose；`docker/` 归发版官）。
+
 ## 4. 验收
 
 - [x] 代码不再出现 `docker exec` / `tools_mysql` / mysql 口令（有用例钉住）
@@ -179,6 +221,9 @@ SELECT room_id, max(in_date) FROM mushroom_batch_yield GROUP BY room_id;
 - [x] 停掉宿主那份每天 05:20 跑旧 `docker exec` 通路的 timer（2026-10-14 10:28:35，见 §3.6）
 - [ ] 过渡期结束后补跑一次 `python -m analysis.batch_ingest --db <db> --once`：`batches` 行数与盘点一致（四库房最近入库日 607=10-10 / 608=09-27 / 611=09-30 / 612=09-30）
 - [ ] `GET /environment/batches` 的"当前批次"与盘点结论一致（611 = `mogu-107` / 2026-09-30）
+- [x] 物化缓存改**整体替换**（自然 prune + 逐条打印）+ `batches_state` 新鲜度（§3.5）
+- [x] 只读端点 `GET /batches`（§3.5，供巡检 `fetch_room` 走 A′ 失败后的替代路）
+- [ ] **定"谁按时刷"**（§3.5 缺口）：容器 `BATCH_AT=05:20`（compose，归发版官）——在此之前 `stale` 会为真
 
 ## Comments
 

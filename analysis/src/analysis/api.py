@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from analysis.audit import summarize_operations
-from analysis.batches import window_of
+from analysis.batches import dedupe_by_identity, window_of
 from analysis.jobs import default_jobs, run_job
 from analysis.db import (
     IMAGE_FIELDS,
@@ -25,6 +25,7 @@ from analysis.db import (
     ROUND_FIELDS,
     connect,
     fetch_batches as db_fetch_batches,
+    fetch_batches_state as db_fetch_batches_state,
     fetch_environment,
     fetch_operations,
     fetch_images,
@@ -44,6 +45,32 @@ from analysis.environment import (
 from analysis.growth import latest_delta, room_summary, series
 from analysis.rooms import canonical_room, canonical_rooms, display_room, resolve_rooms
 from analysis.setpoints import SetpointError, daily_states_from_db
+
+#: 台账物化缓存的陈旧阈值（小时）。刷一次是每天 05:20（票 12 的 `BATCH_AT`）⇒ 26h 留 2h 余量。
+DEFAULT_LEDGER_STALE_AFTER_H = 26.0
+
+
+def _stale_after_h() -> float:
+    raw = (os.environ.get("BATCH_STALE_AFTER_H") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_LEDGER_STALE_AFTER_H
+    return value if value > 0 else DEFAULT_LEDGER_STALE_AFTER_H
+
+
+def _ledger_is_stale(refreshed_at, *, now: datetime | None = None) -> bool:
+    """**从没刷过 ⇒ 陈旧**；时间戳读不出来 ⇒ 也陈旧（fail-closed）。
+
+    "没人刷"必须长得跟"刷过"不一样 —— 否则准入会拿一份永远陈旧的表当真值。
+    """
+    if not refreshed_at:
+        return True
+    try:
+        stamp = datetime.fromisoformat(str(refreshed_at))
+    except ValueError:
+        return True
+    return ((now or datetime.now()) - stamp).total_seconds() > _stale_after_h() * 3600
 
 
 class IngestBody(BaseModel):
@@ -335,6 +362,8 @@ def create_app(
                 "error": "还没有批次台账：先跑一次 analysis.batch_ingest",
                 "batches": [],
             }
+        # 同一 (规范库房号, 入库日期) 出现两次时只留一行（换口径过渡期的重复卡）
+        ledger, dupe_report = dedupe_by_identity(ledger)
         windows = window_of(
             ledger, room=want, limit=max(1, min(limit, 12)), key="room_id_canonical"
         )
@@ -366,9 +395,85 @@ def create_app(
                 for b in env_batches(rows, windows, zone=want)
             ],
             "room_alias": alias_report,
+            "duplicates": dupe_report,
             # 数据实际覆盖到哪天：更早的批次只有窗口没有数据，对比时要看"覆盖天数"
             "data_from": min((r["ts"] for r in kept), default=None),
             "data_to": max((r["ts"] for r in kept), default=None),
+        }
+
+    @app.get("/batches")
+    def batches(room_id: str = "", limit: int = 24) -> dict:
+        """**只读物化批次台账**（Chief 2026-10-14）：给巡检 `fetch_room` 的准入依据。
+
+        为什么单开这个端点：`/environment/batches` 是"按批次窗口汇总环境"，要 `zone`、
+        返回的是环境统计，**没有台账新鲜度**；准入要的是"这个库房有哪些批次 + 这份台账
+        是不是新鲜的"。不新增 service/端口，复用同一个 API 进程。
+
+        字段约定（**别自己拼**）：
+
+        - `batches[]`：`entry_date`、`batch_id`（`<规范库房号>|<入库日期>`，ADR-0020）、
+          `batch_no`（**派生显示名** `<规范库房号>_<YYYYMMDD>`，与 `batch_yield_service`
+          的写法一致）、`display_name`（映射来的业务名 `mogu-*`，**缺映射 ⇒ NULL，不编**）、
+          `until`（下一批入库日，开区间右端；末批 NULL）；
+        - `ledger_refreshed_at`：物化缓存最近一次**成功替换**的时间（`batches_state`）；
+        - `stale`：`now - refreshed_at > stale_after_h`（默认 26h，`BATCH_STALE_AFTER_H` 可调）
+          —— **从没刷过 ⇒ `stale=true`**（不假装新鲜）；
+        - `room_alias` / `duplicates`：解不出的编号点名 + 计数、重复身份去重计数。
+
+        **消费方注意**：`stale=true` 时这份台账**不该拿来判准入**（要判也得显式记下来）。
+        """
+        if not (room_id or "").strip():
+            raise HTTPException(status_code=400, detail="要指定 room_id（台账按库房给）")
+        want = canonical_room(room_id)
+        if want is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{room_id!r} 不是规范库房号（{'/'.join(canonical_rooms())}），"
+                    "也不是别名表里登记过的旧编号"
+                ),
+            )
+        ledger, alias_report = resolve_rooms(db_fetch_batches(conn), label="/batches")
+        ledger, dupe_report = dedupe_by_identity(ledger)
+        mine = sorted(
+            (b for b in ledger if b.get("room_id_canonical") == want),
+            key=lambda b: str(b.get("entry_date") or ""),
+        )
+        out: list[dict] = []
+        for i, batch in enumerate(mine):
+            nxt = mine[i + 1].get("entry_date") if i + 1 < len(mine) else None
+            out.append({
+                "room_id": want,
+                "room_id_raw": batch.get("room_id"),
+                "room_label": display_room(batch.get("room_id")),
+                "entry_date": batch.get("entry_date"),
+                "batch_id": batch.get("batch_id"),
+                "batch_no": f"{want}_{str(batch.get('entry_date') or '').replace('-', '')}",
+                "display_name": batch.get("batch_no"),
+                "until": nxt,
+            })
+        out.reverse()                                  # 最新在前
+        state = db_fetch_batches_state(conn)
+        stale = _ledger_is_stale(state.get("refreshed_at"))
+        if stale:
+            print(
+                f"[batches] 台账不新鲜：最后刷新 {state.get('refreshed_at') or '从未'}，"
+                f"阈值 {_stale_after_h()}h —— 消费方不要拿它判准入"
+            )
+        return {
+            "ok": True,
+            "room_id": want,
+            "room_id_requested": room_id,
+            "room_label": display_room(room_id),
+            "batches": out[: max(1, min(limit, 200))],
+            "n_batches": len(out),
+            "ledger_refreshed_at": state.get("refreshed_at"),
+            "ledger_n_rows": state.get("n_rows"),
+            "ledger_n_pruned": state.get("n_pruned"),
+            "stale": stale,
+            "stale_after_h": _stale_after_h(),
+            "room_alias": alias_report,
+            "duplicates": dupe_report,
         }
 
     @app.get("/environment/summary")

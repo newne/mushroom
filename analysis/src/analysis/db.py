@@ -152,14 +152,28 @@ CREATE TABLE IF NOT EXISTS operations (
   PRIMARY KEY (ts, device_code, point_code)
 );
 
--- 批次台账（来自生产库 `mogu.mo_gu_batch`）。批次边界只能来自这里：
+-- 批次台账：**pgsql 并集的物化缓存**（2026-10-14 起走 `postgres_db`/`mushroom_algorithm`；
+-- 旧文案写的 `mogu.mo_gu_batch` 是业务库，用户已裁定禁用）。批次边界只能来自台账：
 -- 环境数据是连续采集的，换批不会让传感器停，"按断档切段"在真机上被证否（2026-10-12）。
 CREATE TABLE IF NOT EXISTS batches (
-  room_id    TEXT NOT NULL,
+  room_id    TEXT NOT NULL,        -- **原始**库房号（可能是旧编号 7/8）；join 前用 analysis.rooms 归一
   entry_date TEXT NOT NULL,        -- 入库日期 YYYY-MM-DD
-  batch_no   TEXT,                 -- mogu-<id>
-  batch_id   TEXT,
+  batch_no   TEXT,                 -- 业务显示名 mogu-<id>；**缺映射就 NULL**（不编值）
+  batch_id   TEXT,                 -- 身份 `<规范库房号>|<入库日期>`（ADR-0020）
   PRIMARY KEY (room_id, entry_date)
+);
+
+-- 台账**物化缓存的重算状态**（单行表，与 `ranges_state` 同款）。为什么不是给 batches 加列：
+-- "最后刷新时间"是**一次作业事件**的属性，加到每行就是把同一事实重复 N 遍，而且老行是 NULL
+-- 表达不了"从没刷过"。`GET /batches` 用它给 `ledger_refreshed_at` 与 `stale`。
+CREATE TABLE IF NOT EXISTS batches_state (
+  id           INTEGER PRIMARY KEY CHECK (id = 1),
+  refreshed_at TEXT NOT NULL,       -- 最近一次成功替换的时间（本地 ISO8601）
+  n_rows       INTEGER NOT NULL DEFAULT 0,
+  n_pruned     INTEGER NOT NULL DEFAULT 0,  -- 本次替换**删掉**的行数（陈旧行自然 prune）
+  pruned       TEXT,                -- JSON：被删掉的 `库房号|入库日期` 清单
+  detail       TEXT,                -- JSON：来源差异 / 缺映射计数等
+  updated_at   TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS ranges (
@@ -486,6 +500,78 @@ def upsert_batches(conn: sqlite3.Connection, rows: list[dict]) -> None:
         [{f: row.get(f) for f in BATCH_FIELDS} for row in rows],
     )
     conn.commit()
+
+
+def replace_batches(
+    conn: sqlite3.Connection,
+    rows: list[dict],
+    *,
+    refreshed_at: str | None = None,
+    detail: dict | None = None,
+) -> dict:
+    """**整体替换**台账物化缓存（票 13，Chief 2026-10-14 裁定）。
+
+    为什么必须是替换而不是 upsert：`batches` 是 pgsql 并集的**缓存**，upsert 永不 prune ⇒
+    源侧编码或我们的归一方式变一次，陈旧行就永久留下，还得靠人肉发现 + 手删
+    （2026-10-14 实测：11 行旧编号 `7|`/`8|` 与新行 `607|` 同时存在，同一批次在页面上出两次）。
+
+    三条纪律：
+    1. **一个事务**里删+插：读的人只会看到旧集合或新集合，不会看到"空台账"
+       （空台账会让上游把"缓存正在刷"读成"没有批次"）；
+    2. 被删掉的键**逐条打印 + 计数**（收缩必须可见，不静默）；
+    3. 同时写 `batches_state`，让 `GET /batches` 能给出 `ledger_refreshed_at` 与 `stale`。
+    """
+    import json
+    from datetime import datetime
+
+    stamp = refreshed_at or datetime.now().isoformat(timespec="seconds")
+    old = {f"{r['room_id']}|{r['entry_date']}" for r in fetch_batches(conn)}
+    new = {f"{row.get('room_id')}|{row.get('entry_date')}" for row in rows}
+    pruned = sorted(old - new)
+
+    cols = ", ".join(BATCH_FIELDS)
+    marks = ", ".join(f":{f}" for f in BATCH_FIELDS)
+    with conn:                      # 一个事务：删+插+状态一起提交
+        conn.execute("DELETE FROM batches")
+        conn.executemany(
+            f"INSERT OR REPLACE INTO batches ({cols}) VALUES ({marks})",
+            [{f: row.get(f) for f in BATCH_FIELDS} for row in rows],
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO batches_state "
+            "(id, refreshed_at, n_rows, n_pruned, pruned, detail, updated_at) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?)",
+            (stamp, len(rows), len(pruned), json.dumps(pruned, ensure_ascii=False),
+             json.dumps(detail or {}, ensure_ascii=False),
+             datetime.now().isoformat(timespec="seconds")),
+        )
+    if pruned:
+        print(f"[batch_ingest] 替换掉 {len(pruned)} 行陈旧台账（逐条）：{', '.join(pruned)}")
+    return {"n_rows": len(rows), "n_pruned": len(pruned), "pruned": pruned, "refreshed_at": stamp}
+
+
+def fetch_batches_state(conn: sqlite3.Connection) -> dict:
+    """台账物化缓存的刷新状态；**从没刷过也返回一条**（`refreshed_at = None`），形状恒定。"""
+    import json
+
+    cur = conn.execute(
+        "SELECT refreshed_at, n_rows, n_pruned, pruned, detail, updated_at "
+        "FROM batches_state WHERE id = 1"
+    )
+    row = cur.fetchone()
+    if row is None:
+        return {
+            "refreshed_at": None, "n_rows": 0, "n_pruned": 0,
+            "pruned": [], "detail": {}, "updated_at": None,
+        }
+    keys = ("refreshed_at", "n_rows", "n_pruned", "pruned", "detail", "updated_at")
+    out = dict(zip(keys, row))
+    for field in ("pruned", "detail"):
+        try:
+            out[field] = json.loads(out[field]) if out[field] else ([] if field == "pruned" else {})
+        except (TypeError, ValueError):
+            out[field] = {"raw": out[field], "parse_error": True} if field == "detail" else []
+    return out
 
 
 def fetch_batches(conn: sqlite3.Connection, *, room_id: str | None = None) -> list[dict]:

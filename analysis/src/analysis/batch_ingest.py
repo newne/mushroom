@@ -25,7 +25,7 @@ import time
 from datetime import datetime, timedelta
 
 from analysis.batches import fetch_batches_with_report
-from analysis.db import connect, upsert_batches
+from analysis.db import connect, replace_batches
 
 DEFAULT_DB = "mushrooms.db"
 
@@ -35,9 +35,13 @@ def run_once(conn, *, runner=None, map_path: str | None = None) -> int:
 
     用带报告的那条路径：会打印**来源差异**（只出现在一张表里的批次）与
     **缺 `batch_no` 映射**的计数 —— 差异与缺口都要看得见，不静默。
+
+    **整体替换**（Chief 2026-10-14）：`batches` 是物化缓存，upsert 永不 prune ⇒
+    陈旧行会永久留下（同一批次两种编号在页面上出两次）。替换在**一个事务**里做，
+    被删的键逐条打印，并写 `batches_state` 供 `GET /batches` 给 `ledger_refreshed_at`/`stale`。
     """
-    rows, _report = fetch_batches_with_report(runner=runner, map_path=map_path)
-    upsert_batches(conn, rows)
+    rows, report = fetch_batches_with_report(runner=runner, map_path=map_path)
+    replace_batches(conn, rows, detail=report)
     return len(rows)
 
 
