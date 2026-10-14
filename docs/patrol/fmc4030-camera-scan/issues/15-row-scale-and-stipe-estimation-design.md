@@ -448,7 +448,6 @@ $py = 'D:\code\mushroom\patrol-workspace\.venv\Scripts\python.exe'
    "**完全没有标尺**"；`no_theta` **不进 `NON_USABLE_FLAGS`**，行照旧可用。
 
 ### 13.3 本表**不能**证明什么
-
 - 不能证明精度：precision/recall 要 20 帧人工标注（未做）；
 - 不能证明"远排不可用"以外的边界：L1 袋数 p10 = 7（有些帧只认出 7 袋）、min = 3，
   究竟是"帧里本来袋少"还是"漏检"，要人工数帧才知道；
@@ -461,6 +460,31 @@ $py = 'D:\code\mushroom\patrol-workspace\.venv\Scripts\python.exe'
 按**同排**归属（禁止跨排）、`base_y ≤ 袋顶线 + margin` 保留、**找不到同排袋的直接丢弃（fail-closed）**。
 测试 3 条（`test_segmentation_estimate.py`）：保留/丢弃边界、fail-closed 不猜、空输入。
 注：该门**尚未接进生产**（同上，等证据列与接线），目前只在离线评估里量化。
+
+### 13.5 精度评估：**判据预登记**（数据未到，先定指标）
+
+> **为什么先写这一节**：等 20 帧复核结果出来再挑指标，等于**看着数据挑判据**。
+> 下面是 2026-10-14 复核开始前就定下的口径与公式；数据到了只填数，不换尺子。
+
+**数据源**：票 21 的复核导出（`instances.csv` 带 `review_status`/`source`/`height_valid`；
+`frames.csv` 带 `reviewer`/`review_date`）。
+
+| 指标 | 公式（先在票面定好，再填数） |
+| --- | --- |
+| **L1 菌包 precision** | `(confirmed+edited) / (confirmed+edited+rejected)`，`category=bag`、`ignore≠1` |
+| **L1 菌包 recall** | `(confirmed+edited) / (confirmed+edited+human_added)`，同上 |
+| **L1 袋宽一致性** | 逐帧 `\|ref_px_人工 − ref_px_预标注\| / ref_px_人工` 的中位与 P90（px；**不是 mm**，避免混入尺度误差） |
+| **L3 菇体 precision** | 同式，`category=fruitbody` |
+| **L3 菇体 recall** | 同式；`human_added` 里标 `gate_false_negative` 的**单独计数**（= 袋肩门漏检） |
+| **袋肩门假阳** | `rejected` 中"被门保留但人判为袋面纹理"的比例；与"被门丢掉且确实是菇"（`gate_false_negative`）成对报告 |
+| **杆高一致性** | 只在 `height_valid=1` 的子集：`\|h_人工 − h_预标注\| / h_人工`，px；再乘局部 mm/px 报 mm 中位与 P90 |
+| **尺寸分位** | 门后实例的竖直跨度与横向范围：**P10 / P50 / P90**（px 与 mm 各一份），**写"P10–P90"，不写 `±`** |
+
+**纪律（写死）**：
+- 指标**只算 `ignore≠1` 的行**；`rejected`/`human_added` 行**必须存在**（删行=洗白假阳）；
+- **`n` 必须随指标一起报**（`n<5` 只写"样本不足"，不给结论）；
+- 只报**这 20 帧**的结论，**不外推**全池；任何"精度达标"的说法必须附这 20 帧的帧清单与复核人；
+- 结论写进 **§2 与本节**；**复核前一律"未知"**（当前状态）。
 
 ## 14. 接线与失效码裁定（Chief 2026-10-14）
 
