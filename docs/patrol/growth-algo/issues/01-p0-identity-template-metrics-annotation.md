@@ -5,6 +5,8 @@
 - **主交付变更（Plan 开篇）**：**48 个固定锚点的簇级生长趋势**为主交付；**菌帽投影直径**为独立增强项；
   **单杆分割退出本期主链路**；真实现场图离线标注 + 专用模型训练
 - **本票只做定义**：把 Plan §4/§5/§8/§11/§12/§15 里"需要落成契约"的四件写死到可开发、可验收的程度
+- **标注环境（用户 2026-10-14 15:19/15:45 裁定）**：**X-AnyLabeling 桌面客户端**装在 prod 服务器、标注员走 **RDP**；
+  `:9213` 服务端保留给 P2 预标注。客户端部署归运维（票 02），**标签配置见 §4.5 与 `annotation-config/`**
 
 ---
 
@@ -177,6 +179,7 @@ H_profile = (1/|V|) · Σ_{x∈V} [ b(x) − t(x) ]        # 单位：原图像�
 `review_status` 同名同义；`occluded/truncated` ↔ 票 21 的 `occluded_frac`/`truncated`；
 `measurement_valid` ↔ 票 21 的 `height_valid`（重新命名以对齐 Plan）；`bag_group_id` ↔ `cluster_id`。
 ⇒ **票 21 的 CSV/复核页可作为 `ObjectAnnotation` 的一种载体**，字段需按本节改名对齐（**待批后再动**）。
+**客户端落点（类别/属性/帧级 flags/分组怎么在 X-AnyLabeling 里表达）见 §4.5**——本节只定义字段语义。
 
 ### 4.2 标注四条硬规则（Plan §5.2/§5.3 的"不许"）
 
@@ -202,6 +205,116 @@ H_profile = (1/|V|) · Σ_{x∈V} [ b(x) − t(x) ]        # 单位：原图像�
   （近重复判据 = **图像哈希 + 采集元数据**，不凭相似度拒绝短间隔真实图像，Plan §6.1）；
 - **两类测试**：已知锚点不同时段 / 未见锚点或独立批次；**锁定测试集不用于调参**；
 - 标注主档案保留**无损掩码 + 元数据**，转格式后**必须回读校验**。
+
+---
+
+## 4.5 X-AnyLabeling 标签配置（Chief 2026-10-14 15:45 追加；**只出定义，不写码**）
+
+- **环境裁定（用户）**：桌面客户端装在 **prod 服务器**、标注员走 **RDP**；`:9213` 那套保留给 P2 预标注。
+  ⇒ 客户端部署/推送/目录/备份归**运维（票 02）**；我出标签配置与标注规范，**不接生产、不点客户端**。
+- **配置已落盘**（**数据文件，不是代码**）：`docs/patrol/growth-algo/annotation-config/`
+  = `labels.txt` + `attributes.json` + `image_flags.txt` + `example-frame.xlabel.json` + `README.md`（含逐条硬规则与出处）。
+
+### 4.5.1 类别清单与 ID（`labels.txt`，**行序 = 类别 ID，只追加不改序**）
+
+| 类别 | ID | 形态（X-AnyLabeling） | 与 Plan §5.2 的对应 | 画法要点 |
+| --- | --- | --- | --- | --- |
+| `bag` | 0 | `polygon`（`P`／Brush `Ctrl+N`） | 菌包：可见框 + 掩码 | **只画 polygon**；可见框由脚本外接得到（不并标两套） |
+| `cluster` | 1 | `polygon` | 菌簇：**一袋一实例**可见掩码 | 不填内部背景、不分单杆 |
+| `cap` | 2 | `polygon` | 菌帽：单帽可见掩码 | 只在 Cap 可辨认时画；不补全遮挡 |
+| `bag_top` | 3 | **`linestrip`（`Shift+S`）** | 袋顶基线：折线 + 有效性 | 贴袋口，不贴菌簇；不可见 ⇒ `baseline_valid=false` |
+| `void` | 4 | `polygon` | 不可判定区域：区域 + 原因 | 严重遮挡/粘连/归属歧义/亮斑误判区 |
+
+**形态核实（上游 main，抓取 commit `a7d2765`，`docs/en/user_guide.md` §2.1）**：支持 `rectangle(R)`、`rotation(O)`、
+`polygon(P)`、`quadrilateral(T)`、`point(Shift+P)`、`line(Shift+L)`、`linestrip(Shift+S)`、`circle(Shift+C)`、`cuboid(Ctrl+R)`，
+外加 **Brush Polygon(`Ctrl+N`)**、**Magic Wand(`Shift+W`)**、**Edit Brush(`Shift+B`)**——后三者产出的**仍是 polygon**。
+⇒ **掩码 = polygon**（画笔/Magic Wand 不是独立形态）；**折线 = `linestrip`**（`line` 只有两点，只能表达直线段，**不采用**）；
+`rotation / quadrilateral / circle / point / cuboid` 本期**不用**。
+`bag_top` **做成独立类别而不是属性**：导出与筛选都按 `label + shape_type` 走，做成属性无法表达"折线挂在哪个袋上"。
+
+### 4.5.2 属性字段在客户端里的表达（Plan §5.3 逐条落点）
+
+| Plan §5.3 字段 | 客户端落点 | 词表 / 控件 | 备注 |
+| --- | --- | --- | --- |
+| `bag_group_id` | **原生 `shapes[].group_id`**（选中同袋对象按 `G`） | 整数 | **不设同名属性**；同袋的 `bag+cluster+bag_top+cap` 同组 |
+| `occluded` | `attributes` | `no/partial/heavy`（radio） | 与票 21 `occluded_frac` 的 1/2/3 档对齐 |
+| `truncated` | `attributes` | `no/yes`（radio） | `yes ⇒ measurement_valid=false` |
+| `association_valid` | `attributes` | `true/false`（radio） | `false` ⇒ **不分组**（`group_id=null`） |
+| `measurement_valid` | `attributes` | `true/false`（radio） | 归属不清/顶端不可见/截断 ⇒ false |
+| `rejection_reason` | `attributes` | 枚举（combobox，见配置） | `none` + 8 类原因 + `other` |
+| `review_status` | `attributes` | `confirmed/edited/rejected/human_added`（radio） | **拒掉的行必须留**（删行=洗白假阳） |
+| `baseline_valid` | `bag_top` 的 `attributes` | `true/false`（radio） | 只在 `bag_top` 上 |
+| `cap_state` | **image-level flags** | `cap_clear / cap_not_clearly_formed / cap_indeterminate` | **三选一**（恰好一个为真） |
+| `quality_tags` | **image-level flags** | `q_low_contrast / q_bright_spot / q_blur / q_camera_moving / q_front_truncated / q_static_occlusion / q_empty_bag_present` | 可多选、可全假 |
+| 帧级复核完成 | **原生 `checked`**（`Ctrl+Alt+K`） | 布尔 | 与对象级 `review_status` 是两件事 |
+| （检索代理） | **`difficult`** | 布尔 | `difficult=1 ⇔ rejected 或 association_valid=false 或 measurement_valid=false` |
+
+- **为什么用 `difficult`**：客户端搜索框只认 `difficult/gid/shape/label/type/score/description/checked`（`user_guide.md` §2.5），
+  **自定义属性与帧级 flags 都搜不到**；`difficult::1` 是客户端里**唯一**能捞"问题行"的入口。属性仍是权威，`difficult` 只求可搜。
+- **属性值形态**：`"true"/"false"` 是**字符串**（属性面板只吃词表值），布尔映射由转换脚本做。
+
+**"导出 COCO 后还能回读"的正面回答**：
+
+1. COCO 标准**没有属性位**；上游只承诺**原生 XLABEL JSON** 保属性（FAQ Q1 原文含 `attributes` 与 metadata）。
+   ⇒ **主档案 = XLABEL JSON**（无损：`attributes` + `group_id` + 顶层 `flags/checked/description` 都在），COCO 是**派生物**。
+2. **禁止把语义塞进文件名或类别名拼串**（不可回读、污染类别名，且改文件名=改图身份）。
+3. 回读判据按票 02 §6.2 四条执行：对象数与类别逐条一致；几何在容差内；**属性键值逐条一致或显式产出丢失清单（不许静默丢）**；坐标恒 `2880×1616`。
+4. 若实测 COCO 确实丢属性：训练导出只用 COCO 支持的位（类别 + 掩码），**属性由转换脚本按 `(filename, shape_index)` join 主档案补回**，
+   并要求 `join` **1:1 可断言**（对不上就报错，不许静默配错）——该转换器列 P1 待建。
+5. **未实测项（P1 第一件）**：客户端实际版本与文档是否一致；**帧级 flags 的手工设置路径**（文档只写模型预测后到 `Ctrl+3` 改，
+   纯人工怎么设要实测；不行就退到 `View -> Image Tags`（`Ctrl+Shift+T`）写 `cap_state:clear` 这类固定串）；
+   COCO 导出是否带属性/`group_id`。
+
+### 4.6 标注操作规范一页（给标注人，工具步骤 + 六条判据）
+
+**开工五步**：① `Open Dir`(`Ctrl+U`) 选帧目录 → ② `Upload -> Upload Label Classes File` 载 `labels.txt`
+→ ③ `Upload -> Upload Attributes File` 载 `attributes.json` → ④ `Upload -> Upload Image Flags File` 载 `image_flags.txt`
+→ ⑤ `Ctrl+Shift+L` 打开属性显示、`Ctrl+Shift+T` 打开 Image Tags/属性面板。
+
+**六条判据（每条都能被复核）**：
+
+1. **什么算一袋一簇**：一个菌包上可判为同一簇的可见菌体 = **1 个 `cluster`**；同袋对象用 `G` 分组。
+   相邻两袋分不开 ⇒ 画成 1 个袋 + `rejection_reason=merged_multiple_bags`（**不要按想象拆袋**）。
+2. **菌簇掩码不许填内部背景**：用 Brush(`Ctrl+N`)/Edit Brush(`Shift+B`)/Magic Wand(`Shift+W`) 贴轮廓；
+   内部空隙留空；**禁止**沿框画个矩形当掩码。
+3. **顶部轮廓怎么画**：只画**能看见的**顶部边界；顶端出画/被遮 ⇒ 仍画可见部分 + `truncated/occluded` 属性 + `measurement_valid=false`；**不补全**。
+4. **袋顶折线何时 `baseline_valid=false`**：袋口被菌簇/水汽/QP 遮挡、或袋口出画 ⇒ 折线**不猜**（可只画可见段并标 `false`）；
+   折线**贴袋口**，不许贴到菌簇顶部（否则整条高度基线失真）。
+5. **帽在什么状态下不画**：`cap_state=not_clearly_formed` 或 `indeterminate` ⇒ **一个 `cap` 都不画**（只标帧级 flag）；
+   只有 `clear` 才画可见单帽掩码，且**不补全遮挡轮廓**。
+6. **`association_valid=false` 的典型场景**：跨袋（一簇压在两袋之间）、多袋粘连分不开、簇与袋顶归属不明、被遮挡到看不出附着位置。
+   ⇒ 不分组 + `false` + `rejection_reason`；**行必须留**。
+
+**范围与前后排**：画面内所有可见菌包/菌簇/帽**都要标**（Plan §7.2：**不得把未标注对象无意当背景**）；
+**前/后排不靠标注属性区分**——由模板 `front_roi` + 掩码几何在转换时计算（避免人为不一致）；
+**属性齐备只要求 `front_roi` 内对象**，后排对象画掩码即可。
+
+**禁止**：把亮面/管线/水印/顶棚当对象；把单杆分开标；补全遮挡；改文件名表达属性；用 `0` 冒充缺测。
+
+### 4.7 验收样本（2–3 张真机帧，含一张困难负样本）
+
+| # | 帧（**干净原图**） | 内容 | 教学目的 |
+| --- | --- | --- | --- |
+| S1 | `.scratch/frame-quality-samples/samples/ok/20261013_S406_level0_092634.jpg`（工单 F06 / S406 / 10-13 09:26 白天） | 前排密集、袋口较清 | 一袋一簇 + 袋顶折线 + `cap_state=not_clearly_formed` |
+| S2 | `.../samples/ok/20261013_S209_level0_152232.jpg`（F18 / S209 / 10-13 15:22 夜间） | 密集、交叉遮挡多 | 粘连仍按一袋一簇；跨袋不清 ⇒ `association_valid=false` + 行保留 |
+| S3（**困难负样本**） | `.../samples/ok/20261013_S108_level0_145300.jpg`（F13 / S108 / 10-13 14:53，**相机未稳定：大面积亮面/空区**） | 旧 L1 把亮面误检成大菌包 | **亮面不是菌包**；不编造对象；标 `q_camera_moving`/`q_bright_spot` |
+| 备选负样本 | `.../samples/ok/20261013_S206_level0_145442.jpg`（F14 / S206，低对比/朦胧） | 旧 L1 把顶棚误检成袋 | 低对比帧只标真实可见对象 |
+
+- **只给干净原图**：`.scratch/annotation-20/overlays/*`（旧检测框 overlay）**只用来挑帧**，不许发给标注人（会锚定、且含旧模型错误）。
+- 参考量级（**只用于教学，不是标准答案**，别当验收线）：S1 ≈25 袋/231 菇候选；S2 ≈23 袋/217；S3 ≈5 袋（绝大部分是误检）。
+- **诚实边界**：上面是"**已选定 + 已写好逐对象画法**"的样例，**不是"已试画"**——试画必须在客户端里由人做（我不接生产、点不到客户端）。
+  ⇒ 列为 **P1 第一件**：人在客户端按 §4.6 画这 3 张，回 3 个 XLABEL JSON；测量师按票 02 §6.2 四条回读校验。
+  试画若与本节配置对不上 ⇒ **改配置**，不改规范；对得上 ⇒ 这份配置才算"可加载、可回读"（P0 门的一部分）。
+
+### 4.8 交给运维（票 02）的落地项（**跨域，我不做**）
+
+| # | 项 | 验收证据 |
+| --- | --- | --- |
+| X1 | 三个配置文件推到客户端所在服务器并在客户端加载成功 | 客户端截图（类别列表 + 属性面板可见） |
+| X2 | 帧目录：从生产**只读搬运**干净原图到 `images/<date>/`（不进仓库、不进镜像） | `dir` 清单 + 尺寸 2880×1616 |
+| X3 | 标注人账号、工作目录、**备份点**（人工标注是唯一不可再生资产） | 备份路径 + 一次恢复演练 |
+| X4 | 离线口径：`--no-auto-update-check`；不装内置模型（人工标注零联网） | 启动命令 + 断网一次能开能存 |
+| X5 | 试画 3 张（S1–S3）并把 JSON 回给测量师校验 | 3 个 `.json` + §4.5.2 回读四条 |
 
 ---
 
@@ -241,7 +354,7 @@ H_profile = (1/|V|) · Σ_{x∈V} [ b(x) − t(x) ]        # 单位：原图像�
 | B6 | **固定集合聚合 + 四层汇总**（`panel_coverage`、分段、原始点保留） | §11 | 曲线可比性 |
 | B7 | **三层证据表 + `ResultKey` 版本维度** | §12.1/§12.2 | **需 DDL 评审（环境官）** |
 | B8 | **菌帽实例模型与帽径**（增强项，P5） | §9 | 与主交付解耦，互不阻塞 |
-| B9 | **离线标注环境**（CVAT 自部署）+ 导出/回读校验 | §5.1/§5.5 | 内部数据不出境 |
+| B9 | **离线标注环境 = X-AnyLabeling 桌面客户端**（用户 2026-10-14 15:19 改裁，取代 CVAT；客户端装在 prod 服务器、标注员走 RDP）+ 标签配置见 §4.5 / `annotation-config/` | §5.1/§5.5 | 内部数据不出境；导出/回读校验归票 02 |
 | B10 | **模型运行时**（YOLO26s-seg / SAM 2.1） | §3 | **GPU/torch**；现场机仅 numpy+Pillow ⇒ 离线跑 |
 
 ### 5.4 阶段门与停止规则（Plan §15，原样引用，作为准入）
@@ -263,12 +376,14 @@ H_profile = (1/|V|) · Σ_{x∈V} [ b(x) − t(x) ]        # 单位：原图像�
 | Q3 | `time_block` 的定义（用于数据划分的分组键） | 同日 + 同采集轮次窗口（±1 小时） |
 | Q4 | §3.2 的初值（`min_valid_column_ratio=0.3`、`top_quantile=0.9`、`panel_coverage_min=0.8`、`bag_shift_max_px=40`） | 先按初值，**开发集后冻结** |
 | Q5 | 三层证据表的 DDL 谁批、何时批？ | 环境官；**P0 不建表** |
-| Q6 | CVAT 部署与 GPU 运行时归属（谁维护、在哪跑） | 发版官/环境官；离线批处理 |
+| Q6 | 标注客户端与 GPU 运行时归属（谁维护、在哪跑） | 客户端=**运维**（装 prod 服务器 + RDP，票 02）；GPU/训练运行时仍待定 ⇒ 离线批处理 |
 | Q7 | 是否允许新增依赖 **OpenCV**（ECC 对齐必需） | 需要；否则 §6.2 无法实现 |
 | Q8 | 票 22（量测链路方案）是否**整体转为本票的"作废/保留"依据**，不再作为独立路线？ | 是；票 22 标注被本 Plan 取代 |
 
 ## 7. 本票的完成判据（P0 门）
 
 - 四条定义**无歧义**：任一字段有人能照着实现而不需要再问（Q1–Q8 有答复即可）；
+- **标注配置可用**：§4.5 三件配置文件通过结构校验（JSON 可解析、类别与属性引用一致、类别 ID 只追加），
+  且**客户端实际版本与帧级 flags 手工设置路径、COCO 回读**已有实测结论（P1 第一件，见 §4.5.2 第 5 条 / §4.8 X5）；
 - 作废/保留/待建三张表**与现有代码路径一一对应**（本票 §5 已给落点，需 Chief 确认）；
 - **P0 结束前不写新代码、不改 DDL、不动生产**（红线）。

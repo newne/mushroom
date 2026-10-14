@@ -1,0 +1,122 @@
+{
+  "version": "4.0.0",
+  "flags": {
+    "cap_not_clearly_formed": true,
+    "q_bright_spot": true
+  },
+  "tags": [],
+  "shapes": [
+    {
+      "label": "bag",
+      "score": null,
+      "points": [[812, 1176], [1184, 1170], [1216, 1478], [786, 1486]],
+      "group_id": 1,
+      "description": "前排袋：只画可见袋体，不含上方菌簇",
+      "difficult": false,
+      "shape_type": "polygon",
+      "flags": null,
+      "attributes": {
+        "occluded": "partial",
+        "truncated": "no",
+        "association_valid": "true",
+        "measurement_valid": "true",
+        "rejection_reason": "none",
+        "rejection_note": "",
+        "review_status": "confirmed"
+      }
+    },
+    {
+      "label": "cluster",
+      "score": null,
+      "points": [[824, 1042], [902, 1016], [1002, 1030], [1096, 1058], [1128, 1170], [908, 1180], [836, 1152]],
+      "group_id": 1,
+      "description": "一袋一簇：只画可见轮廓，不填内部背景，不分单杆",
+      "difficult": false,
+      "shape_type": "polygon",
+      "flags": null,
+      "attributes": {
+        "occluded": "no",
+        "truncated": "no",
+        "association_valid": "true",
+        "measurement_valid": "true",
+        "rejection_reason": "none",
+        "rejection_note": "",
+        "review_status": "confirmed"
+      }
+    },
+    {
+      "label": "bag_top",
+      "score": null,
+      "points": [[812, 1176], [1000, 1168], [1184, 1170]],
+      "group_id": 1,
+      "description": "袋顶折线：贴袋口，不贴菌簇；不可见就不画 baseline_valid=false",
+      "difficult": false,
+      "shape_type": "linestrip",
+      "flags": null,
+      "attributes": {
+        "baseline_valid": "true",
+        "rejection_note": "",
+        "review_status": "confirmed"
+      }
+    },
+    {
+      "label": "cap",
+      "score": null,
+      "points": [[958, 1024], [1006, 1016], [1028, 1046], [986, 1060]],
+      "group_id": 1,
+      "description": "帽：只画可辨认的单帽可见轮廓，不补全遮挡",
+      "difficult": false,
+      "shape_type": "polygon",
+      "flags": null,
+      "attributes": {
+        "occluded": "no",
+        "truncated": "no",
+        "association_valid": "true",
+        "measurement_valid": "true",
+        "rejection_reason": "none",
+        "rejection_note": "",
+        "review_status": "confirmed"
+      }
+    },
+    {
+      "label": "cluster",
+      "score": null,
+      "points": [[1450, 1102], [1560, 1090], [1632, 1136], [1520, 1160], [1458, 1150]],
+      "group_id": null,
+      "description": "跨袋归属不清：不分组、association_valid=false（示例）",
+      "difficult": true,
+      "shape_type": "polygon",
+      "flags": null,
+      "attributes": {
+        "occluded": "heavy",
+        "truncated": "no",
+        "association_valid": "false",
+        "measurement_valid": "false",
+        "rejection_reason": "cross_bag_ambiguity",
+        "rejection_note": "两袋之间，无法判定属于哪一袋",
+        "review_status": "confirmed"
+      }
+    },
+    {
+      "label": "void",
+      "score": null,
+      "points": [[1960, 1240], [2130, 1232], [2160, 1310], [1986, 1320]],
+      "group_id": null,
+      "description": "不可判定区域：包装亮斑，不是菌簇（示例）",
+      "difficult": true,
+      "shape_type": "polygon",
+      "flags": null,
+      "attributes": {
+        "void_reason": "bright_spot",
+        "rejection_note": "袋面反光，与菌体灰度接近",
+        "review_status": "confirmed"
+      }
+    }
+  ],
+  "description": "格式样例（手写，非真机帧标注）：用于核对字段落点，禁止当训练标签使用",
+  "checked": true,
+  "imagePath": "20261013_S406_level0_092634.jpg",
+  "imageData": null,
+  "imageHeight": 1616,
+  "imageWidth": 2880
+}

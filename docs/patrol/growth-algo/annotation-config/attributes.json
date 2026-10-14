@@ -1,0 +1,78 @@
+{
+  "bag": {
+    "occluded": ["no", "partial", "heavy"],
+    "truncated": ["no", "yes"],
+    "association_valid": ["true", "false"],
+    "measurement_valid": ["true", "false"],
+    "rejection_reason": ["none", "occluded_too_much", "indistinguishable_from_bag", "merged_multiple_bags", "cross_bag_ambiguity", "bright_spot_not_object", "camera_unstable", "truncated", "other"],
+    "rejection_note": "",
+    "review_status": ["confirmed", "edited", "rejected", "human_added"]
+  },
+  "cluster": {
+    "occluded": ["no", "partial", "heavy"],
+    "truncated": ["no", "yes"],
+    "association_valid": ["true", "false"],
+    "measurement_valid": ["true", "false"],
+    "rejection_reason": ["none", "occluded_too_much", "indistinguishable_from_bag", "merged_multiple_bags", "cross_bag_ambiguity", "bright_spot_not_object", "camera_unstable", "truncated", "other"],
+    "rejection_note": "",
+    "review_status": ["confirmed", "edited", "rejected", "human_added"]
+  },
+  "cap": {
+    "occluded": ["no", "partial", "heavy"],
+    "truncated": ["no", "yes"],
+    "association_valid": ["true", "false"],
+    "measurement_valid": ["true", "false"],
+    "rejection_reason": ["none", "occluded_too_much", "indistinguishable_from_bag", "merged_multiple_bags", "cross_bag_ambiguity", "bright_spot_not_object", "camera_unstable", "truncated", "other"],
+    "rejection_note": "",
+    "review_status": ["confirmed", "edited", "rejected", "human_added"]
+  },
+  "bag_top": {
+    "baseline_valid": ["true", "false"],
+    "rejection_note": "",
+    "review_status": ["confirmed", "edited", "rejected", "human_added"]
+  },
+  "void": {
+    "void_reason": ["ambiguous_association", "merged", "too_blurred", "bright_spot", "out_of_scope"],
+    "rejection_note": "",
+    "review_status": ["confirmed", "edited", "rejected", "human_added"]
+  },
+  "__widget_types__": {
+    "bag": {
+      "occluded": "radiobutton",
+      "truncated": "radiobutton",
+      "association_valid": "radiobutton",
+      "measurement_valid": "radiobutton",
+      "rejection_reason": "combobox",
+      "rejection_note": "lineedit",
+      "review_status": "radiobutton"
+    },
+    "cluster": {
+      "occluded": "radiobutton",
+      "truncated": "radiobutton",
+      "association_valid": "radiobutton",
+      "measurement_valid": "radiobutton",
+      "rejection_reason": "combobox",
+      "rejection_note": "lineedit",
+      "review_status": "radiobutton"
+    },
+    "cap": {
+      "occluded": "radiobutton",
+      "truncated": "radiobutton",
+      "association_valid": "radiobutton",
+      "measurement_valid": "radiobutton",
+      "rejection_reason": "combobox",
+      "rejection_note": "lineedit",
+      "review_status": "radiobutton"
+    },
+    "bag_top": {
+      "baseline_valid": "radiobutton",
+      "rejection_note": "lineedit",
+      "review_status": "radiobutton"
+    },
+    "void": {
+      "void_reason": "combobox",
+      "rejection_note": "lineedit",
+      "review_status": "radiobutton"
+    }
+  }
+}

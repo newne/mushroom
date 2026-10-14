@@ -1,0 +1,10 @@
+cap_clear
+cap_not_clearly_formed
+cap_indeterminate
+q_low_contrast
+q_bright_spot
+q_blur
+q_camera_moving
+q_front_truncated
+q_static_occlusion
+q_empty_bag_present
