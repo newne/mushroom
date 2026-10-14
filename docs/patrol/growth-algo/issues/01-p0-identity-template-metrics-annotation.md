@@ -10,6 +10,47 @@
 
 ---
 
+## 0. 最小形态（一页 · 效率模式 2026-10-14 16:1x）—— 本节是**权威摘要**，字段级细节查 §1–§4
+
+**0.1 身份（一表）**
+
+| 键 | 表达 | 结论 |
+| --- | --- | --- |
+| `AnchorKey` | `room_id`=`images.room_id`；`rack_id`=常量 `M1`；`layer_id`=`Station.layer`；`anchor_id`=**`images.station_id`（S101…S412，共 48）** | 现成，48 锚点 ↔ 48 站位一对一 |
+| `image_id` | `images` 主键 `(ts, station_id, angle_profile)` | 现成 |
+| `ObservationKey` | 追加 `observation_cycle_id` | **新表 `anchor_cycles`**（未批前用 `(room_id,station_id,entry_date,batch_no)` 临时键 + `cycle_id_tentative=true`） |
+| `ResultKey` | 版本四元组 `pipeline/model/roi/calibration_version` | `measurements` 表达不了 ⇒ **三层离线表** `frame_results/bag_results/cap_results`（DDL 交环境官） |
+
+**0.2 模板 `AnchorTemplate`（一表 ×48）**
+`room/rack/layer/anchor_id`｜`reference_image_id`（质量门过 + 对齐稳 + 无临时遮挡）｜`reference_image_size`=**2880×1616** 否则 `resolution_mismatch`｜
+`static_background_mask`（只含货架/管线，**不含生长对象**）｜`front_roi_polygon`（不跨后排，逐帧不变）｜`excluded_regions`（亮斑/管线+原因）｜
+`bag_slots[]`（固定观察袋位=分母来源）｜`reference_bag_top_lines`（每槽折线，不可见不猜）｜`registration_config`（**平移优先** + 残差门 + 变换上限）｜
+`quality_config`（`lapvar/dark/over/truncation`，**ROI 内算**）｜`roi_version`（任何几何/配置变更递增，进 `ResultKey`）｜`template_sha256`｜`reviewed_by/at`。
+生成 = **人工一次 + 另一人按清单复核**；存**离线文件**；天生不可用 ⇒ 显式 `anchor_unusable`，不硬凑。
+
+**0.3 指标取值规则（一表；初值待开发集冻结，**冻结后不回改，选错另开一节**）**
+
+| 规则 | 取值 |
+| --- | --- |
+| 主指标 | `mean_profile_height_px = (1/\|V\|)Σ[b(x)−t(x)]`，**px**；文案叫「菌簇平均顶部轮廓高度」，**不叫杆长** |
+| `supported_columns` | 掩码列连续宽 ≥ `min_col_run_px=3`（先 3×3 开运算） |
+| `reliable_top` | 该列前景最高连续段上边界；段间隙 > `max_gap_px=5` ⇒ 该列不可靠 |
+| `valid_column_ratio` | 门槛 `min_valid_column_ratio=0.3`，不足 ⇒ `insufficient_contour` |
+| 稳健/原始顶高 | `robust=quantile(h, top_quantile=0.9)`；`raw=max(h)`，先按 `outlier_quantile=0.995` 截尾 |
+| 横向跨度 | `cluster_width_px` = 有效列跨度（与高度同一套列有效性） |
+| 覆盖率 | `visible_coverage_ratio` = 簇掩码面积 / `front_roi` 面积（**仅辅助**） |
+| `baseline_valid` | 五条全满足：对齐接受 / 槽位匹配 / 袋口偏移 ≤ `bag_shift_max_px=40` / 基线未遮 / 同一物理位置；任一不满足 ⇒ **高度缺测**（簇跨度另存） |
+| `panel_coverage` | `matched_slots / expected_slots`，门槛 `0.8`，不足 ⇒ `panel_coverage_low` + 曲线标不可比 |
+| 缺测 vs 0 | **检测失败/不可测 ⇒ NULL**；只有「确认无袋/无菌帽」才写 0 |
+
+**0.4 样本池抽样（一列五条）**
+① 先覆盖 **48 锚点**（每锚 ≥1 帧）→ ② 再按**困难类型**扩充（密/疏/粘连/低对比/反光/模糊/截断/空袋/帽三态）→
+③ **不承诺固定帧数**（Plan 原话：不承诺多少帧即够训练）→ ④ 划分**按组** `(observation_cycle_id, anchor_id, time_block)`，
+断言 `no_source_image_overlap()` / `no_near_duplicate_leakage()`，锁定测试集不调参 → ⑤ 双人独立标注四项：
+一袋一簇归属 / 菌簇顶部轮廓 / 袋顶基线 / 菌帽身份与测量资格。
+
+---
+
 ## 1. 身份定义与现有表的映射
 
 ### 1.1 Plan 给的逻辑身份
