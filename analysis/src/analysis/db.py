@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS measurements (
   p10_len       REAL,
   p90_len       REAL,
   quality       TEXT,                -- `+` 分隔的 flag 串；区间表与决策层只吃含 verified 的行
+  -- 估算证据（票 20，2026-10-14）：平视单档下"估算"是常态，所以"哪些列是估的、
+  -- 这个 mm 用的是哪把标尺"必须落进行里 —— 埋在离线 notes 里等于下游看不见。
+  -- 枚举与形状见 `analysis/evidence.py`；过滤规则的唯一实现仍在测量侧。
+  estimated_fields TEXT,             -- `+` 分隔的**列名清单**，读回是 list（无估算 ⇒ NULL）
+  scale_source     TEXT,             -- bag_standard / calibration_target / bag_detected / none
+  mm_per_px        REAL,             -- 本行用的 mm/px；可交叉复算 ≈ scale_ref_mm / scale_ref_px
+  scale_ref_mm     REAL,             -- 标尺参考物的实物尺寸（mm）
+  scale_ref_px     REAL,             -- 同一参考物在帧里的像素尺寸
   PRIMARY KEY (ts, room_id, box_id)
 );
 
@@ -251,6 +259,13 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "mean_cluster_h_mm": "REAL",
         "mean_area_mm2": "REAL",
         "mean_projected_d_mm": "REAL",
+        # 估算证据（票 20，2026-10-14）。老行留 NULL = "那一行没有证据"，
+        # **不是"没有估算"** —— 所以下游判"这行能不能用"永远看 quality，不看这些列是否为空。
+        "estimated_fields": "TEXT",
+        "scale_source": "TEXT",
+        "mm_per_px": "REAL",
+        "scale_ref_mm": "REAL",
+        "scale_ref_px": "REAL",
     },
     # 区间表加量纲三列（票 05；Chief 2026-10-13 硬要求）。老行 NULL = "那时还没标量纲"。
     "ranges": {
@@ -485,13 +500,17 @@ def fetch_batches(conn: sqlite3.Connection, *, room_id: str | None = None) -> li
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-#: 测量线的字段清单（票 11）。与 measure 侧 `RECORD_FIELDS` **一字不差**，
+#: 测量线的字段清单（票 11）。与 measure 侧 `RECORD_FIELDS` **一字不差（含顺序）**，
 #: 禁第四套命名；`room_id` 在上游是必填，存储层用 NOT NULL 兜底（缺了就插不进去，
 #: 而不是静默丢字段——"写入方多给、存储方少要"这个坑踩过一次）。
+#: 票 20（2026-10-14）追加五个估算证据列。**顺序照测量侧的线格式**（2026-10-14 对齐）：
+#: 以前这边把菌簇四列排在 `quality` 之后，两侧顺序其实一直不同 —— 只有集合相同，
+#: "一字不差"名不副实。现在按生产者的顺序排，测试用严格相等钉住。
 MEASUREMENT_FIELDS = (
     "ts", "room_id", "box_id", "station_id", "angle_profile",
-    "n", "mean_len_mm", "mean_cap_mm", "p10_len", "p90_len", "quality",
-    "mean_cluster_w_mm", "mean_cluster_h_mm", "mean_area_mm2", "mean_projected_d_mm",
+    "n", "mean_len_mm", "mean_cap_mm", "mean_cluster_w_mm", "mean_cluster_h_mm",
+    "mean_area_mm2", "mean_projected_d_mm", "p10_len", "p90_len", "quality",
+    "estimated_fields", "scale_source", "mm_per_px", "scale_ref_mm", "scale_ref_px",
 )
 
 
@@ -500,12 +519,23 @@ def insert_measurements(conn: sqlite3.Connection, rows: list[dict]) -> None:
 
     用**命名**占位符：`MEASUREMENT_FIELDS` 是唯一字段清单，加列时不会出现
     "SQL 少写一个 ?、值整体错位"这种最难查的错。
+
+    两个证据列在入库前**归一**（`analysis/evidence.py`）：`estimated_fields` 收 list 或
+    `+` 串都行、统一存 `+` 串（读回来是 list）；`scale_source` 走枚举归一
+    （旧值 `bag_diameter` 归一 + 报警，未知值保留原文 + 报警）。
     """
+    from analysis.evidence import format_estimated_fields, normalize_scale_source
+
+    payload: list[dict] = []
+    for row in rows:
+        item = {f: row.get(f) for f in MEASUREMENT_FIELDS}
+        item["estimated_fields"] = format_estimated_fields(row.get("estimated_fields"))
+        item["scale_source"] = normalize_scale_source(row.get("scale_source"))
+        payload.append(item)
     cols = ", ".join(MEASUREMENT_FIELDS)
     marks = ", ".join(f":{f}" for f in MEASUREMENT_FIELDS)
     conn.executemany(
-        f"INSERT OR REPLACE INTO measurements ({cols}) VALUES ({marks})",
-        [{f: row.get(f) for f in MEASUREMENT_FIELDS} for row in rows],
+        f"INSERT OR REPLACE INTO measurements ({cols}) VALUES ({marks})", payload,
     )
     conn.commit()
 
@@ -516,7 +546,13 @@ def fetch_measurements(
     room_id: str | None = None,
     box_id: str | None = None,
 ) -> list[dict]:
-    """取测量行（升序）。可按库房/框号过滤 —— 区间表要按库房分组，不该在内存里筛。"""
+    """取测量行（升序）。可按库房/框号过滤 —— 区间表要按库房分组，不该在内存里筛。
+
+    `estimated_fields` **读回来是 list**（票 20 的形状要求）：列名清单让每处消费者
+    自己 split 字符串，迟早有一处用逗号、一处用加号 —— 那就是静默错过滤。
+    """
+    from analysis.evidence import parse_estimated_fields
+
     sql = f"SELECT {', '.join(MEASUREMENT_FIELDS)} FROM measurements"
     where: list[str] = []
     params: list = []
@@ -531,7 +567,10 @@ def fetch_measurements(
     sql += " ORDER BY ts"
     cur = conn.execute(sql, params)
     cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    out = [dict(zip(cols, row)) for row in cur.fetchall()]
+    for row in out:
+        row["estimated_fields"] = parse_estimated_fields(row.get("estimated_fields"))
+    return out
 
 
 ROUND_FIELDS = (

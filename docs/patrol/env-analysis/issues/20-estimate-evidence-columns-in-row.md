@@ -113,3 +113,55 @@ contract.field_is_usable(quality, estimated_fields, field) -> bool
 
 **测量侧下一步（不需要你再动）**：等 Chief 定的接线时机，L1–L3 接线层会把
 `estimated_fields`/`scale_source`/`mm_per_px`/`scale_ref_*` 真正填上；在那之前这些列会是 NULL。
+
+## 8. 环境官落地回执（列 + 名称 + 形状，2026-10-14）
+
+**Status: 已落地**（列 / 形状 / 枚举 / 测试；提交见仓库）。裁定取你的**方案 A**（独立列）：
+`estimated_fields` 必须能直接 `.split("+")`（塞 JSON 反而更绕），`scale_source`/`mm_per_px`/
+`scale_ref_*` 是行级单值列，页面与报表直接读、不必解 JSON。
+
+### 列名 → 类型 → 语义（转界面师进契约表）
+
+| 列 | 类型 | 语义 | NULL 的含义 |
+| --- | --- | --- | --- |
+| `estimated_fields` | TEXT | `+` 分隔的**估算列名清单**；**API 读回来是 list**（无估算 ⇒ `[]`） | 老行 = "那时没有证据"，**不是"没有估算"** |
+| `scale_source` | TEXT | 标尺来源枚举（见下） | 没记来源 |
+| `mm_per_px` | REAL | 本行用的 mm/px；可交叉复算 `≈ scale_ref_mm / scale_ref_px` | 没有可用标尺 |
+| `scale_ref_mm` | REAL | 标尺参考物的实物尺寸（mm） | 同上 |
+| `scale_ref_px` | REAL | 同一参考物在帧里的像素尺寸 | 同上 |
+
+**`scale_source` 枚举（定稿，与你 §7 一致）**：`bag_standard`（菌包标准尺寸常数 240/140 —— 当前口径）/
+`calibration_target`（每站位现场标定值，ADR-0024 另一路）/ `bag_detected`（只有自动检出可用，
+仍是估算，绝不进 `verified`）/ `none`（没有标尺 ⇒ mm NULL + `no_scale`）。
+过渡别名 `bag_diameter → bag_standard` **保留**（你 §7 说可留）：它是"还有人发旧值"的探针，
+命中就打一行警告；未知值**保留原文 + 报警**（丢掉来源标记等于"这个 mm 从哪来的"永久不可查）。
+票 18 的第四态**标尺冲突**（`scale_conflict`）是**质量 flag**、不在本枚举里，等你落 flag 时一起登记。
+
+### 两个新 flag 的落点（已登记，各有用例）
+
+- **`no_theta`**：**不进 `NON_USABLE_FLAGS`** ⇒ 行仍可用（`is_usable("estimate+no_theta")` 为 True），
+  竖直列 NULL、水平列照出。用例 `test_no_theta_does_not_make_the_row_unusable`。
+- **`height_uncorrected`**：**不是长度**、与 `estimate` 并存、**不进 `verified`/区间表/建议层**，
+  只作相对比较（同站位/同档/同 `imaging_profile`）。用例
+  `test_height_uncorrected_row_keeps_its_values_and_stays_out_of_verified_stats`
+  （值留得住，但 `compute_ranges` 一行都不出）。开关仍是默认关，**开启时机由 Chief 定**。
+
+### 两侧契约
+
+- **过滤规则的实现只有一处**：你的 `measure.contract.field_is_usable`；
+  `analysis/evidence.py` 只是适配器（list/`+` 串统一后转调它），**不写第二份** ——
+  用例 `test_filter_rule_is_the_measure_side_implementation` 钉住。
+- 顺带把**顺序**也对齐了：`analysis.db.MEASUREMENT_FIELDS` 原先把菌簇四列排在 `quality` 之后，
+  你那边排在 `p10_len/p90_len` 之前 —— 集合相同、顺序不同，"一字不差"名不副实。
+  现在两侧都是**生产者的线格式顺序**，`analysis` 侧的契约用例改成**严格相等**（集合相同也拦不住顺序漂移）。
+  你那边钉集合的用例不受影响（顺序现在也一致）。
+
+### 过渡口径（回答 §5）
+
+你请求的"证据列落地前把含 `estimate` 的行整行排除" —— **同意，而且现在已经是事实**：
+区间表那条链只吃 `verified`，而估算行按契约不含 `verified`，本来就不进统计。
+证据列落地后**字段级过滤**才成为可能；下游从"整行排除"换到"字段级取舍"要**单独一步、单独评审**，
+不在本票里顺手打开（Chief 2026-10-14：先落列 → 你发字段 → 下游才启用过滤）。
+
+**证据**：`pytest analysis/tests` **211 passed**（新增 `test_evidence_columns.py` 12 条）；
+`pytest measure/tests analysis/tests` **345 passed**。

@@ -102,11 +102,19 @@ def test_station_and_angle_are_kept_for_future_joins(tmp_path):
 
 
 def test_field_list_matches_the_wire_contract():
-    """`MEASUREMENT_FIELDS` 与 measure 侧 `RECORD_FIELDS` 一字不差（票 11 §1）。"""
-    assert MEASUREMENT_FIELDS == (
-        "ts", "room_id", "box_id", "station_id", "angle_profile",
-        "n", "mean_len_mm", "mean_cap_mm", "p10_len", "p90_len", "quality",
-        "mean_cluster_w_mm", "mean_cluster_h_mm", "mean_area_mm2", "mean_projected_d_mm",
+    """`MEASUREMENT_FIELDS` 与 measure 侧 `RECORD_FIELDS` **一字不差（含顺序）**。
+
+    票 20 追加五个估算证据列；测量侧已同步（`measure/record.py`）。顺带把**顺序**也对齐了：
+    以前这边把菌簇四列排在 `quality` 之后，两侧顺序其实一直不同 —— 只有集合相同，
+    `写入方多给、存储方少要` 那类错就会藏在"集合一样"背后。现在严格相等。
+    """
+    from measure.record import RECORD_FIELDS
+
+    assert MEASUREMENT_FIELDS == RECORD_FIELDS, (
+        "两侧字段清单必须一字不差（含顺序）：加/删/改名/改顺序都要先改票，两侧同时改"
+    )
+    assert MEASUREMENT_FIELDS[-5:] == (
+        "estimated_fields", "scale_source", "mm_per_px", "scale_ref_mm", "scale_ref_px"
     )
 
 
