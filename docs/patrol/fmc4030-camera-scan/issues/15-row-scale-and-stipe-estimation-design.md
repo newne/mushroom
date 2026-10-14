@@ -585,9 +585,21 @@ mm_per_px=1.0924   scale_ref_mm=240.0   scale_ref_px=220.0
    **⚠️ 那一次发布必须同时重建 `patrol` 镜像**——`measure/**` 是**打进 patrol 镜像**的
    （见 `docs/patrol/prod-deploy/` 的装配与「生效判据=镜像内字节」那条铁律），
    **只重建 analysis 不够**；发布后按"镜像内 sha256 自查 + prod 库逐列实测"验收。
-2. **`baseline` 标记的疑问（要 Chief/环境官一句话）**：`CONST_FLAGS=("baseline","level_view")` 是
-   "缺测基线帧"时代留下的，现在产的是**估算行**，`baseline` 字面像"定标帧、不是生长测量"——
-   它不在 `NON_USABLE_FLAGS`（不挡路），但容易误读。**我没擅自摘**（改它会动所有行的 quality）。
+2. **`baseline` 标记：2026-10-14 起停发**（Chief 四条裁定的执行结果，不再是疑问）：
+   - **停发原因**：现在产的是**估算行**，而 `baseline` 的语义是"基线/定标帧，不是生长测量"
+     ⇒ 这三个字会被读成"定标帧"——**误导性命名比没有标记更糟**（与"把没查成说成查了干净"同类）；
+   - **停发日期**：2026-10-14；实现 = `production.CONST_FLAGS = ("level_view",)`；
+   - **枚举保留**：`contract.QUALITY_FLAGS` 里 `baseline` 标注"**历史值，2026-10-14 起停发**"
+     ——**历史行仍可能带它，读兼容必须留**；它不在 `NON_USABLE_FLAGS`，历史行照旧可用；
+   - **只读排查结论（消费方清单）**：全仓搜 `baseline` —— `measure/` 侧只有枚举定义、
+     `CONST_FLAGS` 本身、`BaselineDetector` 模块名与文档；**`analysis/**`、`deploy/**`、
+     `web/console/**` 没有任何地方读这个质量标记**（`analysis/setpoints.py` 的 `baseline`
+     是操作台账变量、`deploy/preview.py` 的是帧计数、`measure/baseline.py` 是模块名，同名不同物）；
+     唯一的"读者"是 `test_production.py` 里那条断言，已改成"**新行不许再带 baseline**"。
+     ⇒ **无消费方需先改**，直接停发；
+   - **测试**：`test_production.py` 钉"新行不含 `baseline`"；
+     `test_contract.py::test_contract_new_rows_do_not_emit_baseline_but_history_still_reads`
+     钉"**历史行仍能 parse/format、不被当成不可用**"。
 3. **精度仍未知**：20 帧标注（票 21）复核前，L1/L3 的 P/R 一律"未知"。
 
 ## 15. 答复巡检手（票 16 三点，2026-10-14，附 218 帧证据）

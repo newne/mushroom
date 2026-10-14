@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from dataclasses import dataclass, field
 
@@ -141,6 +142,25 @@ def filter_above_bag_top(instances: list[FruitInstance], bags: list[BagRegion], 
             "inside_bag_body": inside, "unassigned": unassigned,
             "kept_frac": (len(kept) / len(instances)) if instances else 0.0}
     return kept, diag
+
+
+def scale_dispersion_rel_err(scales: list[float]) -> float | None:
+    """**标尺自身的相对误差**：一帧里逐实例局部 mm/px 的相对散布（1σ/均值）。
+
+    为什么这是主导项（2026-10-14 实测，票 15 §3.2/§13.1）：排内袋宽 CV **中位 0.249**
+    （p10 0.148 / p90 0.362）⇒ 袋宽分割（粘连/边缘）比"±3px 实例跨度"大一个量级。
+    旧的 `propagate_uncertainty(..., ref_px=None)` **把这一项整个漏掉了**（Δw/w 根本没进公式），
+    所以这里从数据里**实测**它，而不是拍一个常数。
+
+    ``len < 2``（只有一个尺度可测）⇒ 返回 None（报"standalone 不可估"，不假装知道）。
+    """
+    vals = [float(s) for s in scales if s and s > 0]
+    if len(vals) < 2:
+        return None
+    mean = float(np.mean(vals))
+    if mean <= 0:
+        return None
+    return float(np.std(vals, ddof=1) / mean)
 
 
 def propagate_uncertainty(*, mean_len_px: float | None, ref_px: float | None,
@@ -362,13 +382,23 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
     mpp_x = float(np.median(sx))
     mpp_y = float(np.median(sy))
     disagree = abs(mpp_x - mpp_y) / max(mpp_x, mpp_y)
+
+    # **标尺自身相对误差（Δw/w）**：优先用调用方注入的现场值，否则用本帧逐实例局部尺度的散布
+    # （2026-10-14 实测：这是主导项 20–30%，旧的 ref_px=None 写法把它整个漏掉了）
+    ref_rel = (float(cfg.bag_diameter_rel_err) if cfg.bag_diameter_rel_err is not None
+               else scale_dispersion_rel_err(sx))
+    eff_cfg = cfg if ref_rel is None or ref_rel == cfg.bag_diameter_rel_err else dataclasses.replace(
+        cfg, bag_diameter_rel_err=ref_rel)
     scale_note = (f"袋长240mm→{mpp_x:.4f} mm/px（水平）；袋径140mm→{mpp_y:.4f} mm/px（竖直，"
                   f"交叉校验，差 {disagree*100:.0f}%）")
+    if ref_rel is not None:
+        src = "现场注入" if cfg.bag_diameter_rel_err is not None else "本帧逐实例局部尺度散布"
+        scale_note += f"；标尺相对误差 Δw/w={ref_rel*100:.0f}%（{src}，n={len(sx)}）"
 
     w_mm = w_px * mpp_x
     unc_w, unc_w_note = propagate_uncertainty(mean_len_px=w_px, ref_px=None,
                                               mm_per_px=mpp_x,
-                                              depression_deg=None, cfg=cfg)
+                                              depression_deg=None, cfg=eff_cfg)
     flags.add("estimate")
     h_mm = unc_h = None
     unc_h_note = ""
@@ -381,7 +411,7 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
             flags.add("height_uncorrected")
             unc_h, unc_h_note = propagate_uncertainty(mean_len_px=h_px, ref_px=None,
                                                       mm_per_px=mpp_y,
-                                                      depression_deg=None, cfg=cfg)
+                                                      depression_deg=None, cfg=eff_cfg)
             note = ("竖直为**未做 cosθ 补偿的投影跨度（mm）**，不是长度；"
                     "仅可作相对比较（同站位/同档/同 imaging_profile）")
         else:
@@ -391,7 +421,7 @@ def estimate_cluster(instances: list[FruitInstance], bags: list[BagRegion], *,
         h_mm = h_px * mpp_y / max(cos_t, 1e-6)
         unc_h, unc_h_note = propagate_uncertainty(mean_len_px=h_px, ref_px=None,
                                                   mm_per_px=mpp_y,
-                                                  depression_deg=depression_deg, cfg=cfg)
+                                                  depression_deg=depression_deg, cfg=eff_cfg)
         note = f"竖直 ÷cosθ（θ={float(depression_deg):.1f}°）"
     fields = tuple(f for f, v in (("mean_cluster_h_mm", h_mm),
                                   ("mean_cluster_w_mm", w_mm)) if v is not None)

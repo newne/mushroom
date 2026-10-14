@@ -84,7 +84,9 @@ def test_row_has_contract_fields_and_null_unmeasurable():
     assert row["mean_area_mm2"] == pytest.approx(9473 * MM_PER_PX ** 2, rel=0.05)
     assert row["mean_projected_d_mm"] == pytest.approx(109.8 * MM_PER_PX, rel=0.05)
     assert row["n"] == 1
-    assert "baseline" in row["quality"] and "no_angle_profile" in row["quality"]
+    assert "no_angle_profile" in row["quality"]
+    # `baseline` 2026-10-14 起**停发**（Chief 四条裁定）：新行不许再带它
+    assert "baseline" not in row["quality"], "新行仍在发历史标记 baseline"
     # 平视口径必须标清（Chief 2026-10-13 裁定）
     assert "level_view" in row["quality"]
     assert "no_detection" not in row["quality"]

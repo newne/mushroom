@@ -108,7 +108,15 @@ python measure/tools/make_annotation_sheet.py --out .scratch/annotation-20 --n 2
 
 ## 4.5 离线复核页（把"923 行手改"变成"点选"）
 
+> **用法一句话**：**双击打开 → 选 `.scratch/annotation-20/` 目录 → 逐帧「确认/改框/删/加」→ 点导出**；
+> 导出文件**另存**（别覆盖工单原件）。
+
 **文件**：`measure/tools/review_annotation.html`（**单个 HTML**，无服务、无依赖、**双击即开**，离线可用）。
+
+**⚠️ 验证状态（如实写）**：**视觉渲染未经真人/浏览器验证**——本机没有可驱动浏览器的工具，
+只做了**无头证据**（`node --check` 语法；纯函数往返：923→924 行、表头逐字相同、CRLF 保留、
+`gate_false_negative` 自动填；Python 侧读回 19 列一致并算出 P/R 骨架）。
+⇒ **"视觉渲染"这一条待用户打开（或在我的浏览器面板里打开、我用 `read_browser` 读那一页）后补成 PASS。**
 
 **怎么用（三步）**：
 

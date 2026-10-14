@@ -173,6 +173,36 @@ def _fruit(base_y, *, cx=900.0, cy=None, h=30, w=20):
                          base_y=base_y, tip_y=base_y - h, on_bag=True)
 
 
+def test_scale_dispersion_is_measured_not_assumed():
+    """**主导项要实测**：标尺相对误差 = 一帧里逐实例局部 mm/px 的相对散布。
+
+    2026-10-14 实测：排内袋宽 CV 中位 0.249（p10 0.148 / p90 0.362），比"±3px 实例跨度"
+    大一个量级；旧的 `propagate_uncertainty(..., ref_px=None)` 把这一项整个漏掉了。
+    """
+    from measure.estimate import scale_dispersion_rel_err
+
+    assert scale_dispersion_rel_err([]) is None
+    assert scale_dispersion_rel_err([0.9]) is None       # 只有一个尺度 ⇒ 不可估，不假装知道
+    assert scale_dispersion_rel_err([0.8, 1.0, 1.2]) == pytest.approx(0.2, rel=0.05)
+    assert scale_dispersion_rel_err([1.0, 1.0, 1.0]) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_uncertainty_includes_the_scale_dispersion_term():
+    """两袋宽度不同 ⇒ `scale_note` 报出 Δw/w，且不确定度把它算进去（不是零）。"""
+    bags = [_bag(cy=1000.0, height=200, x0=100, x1=300),      # 宽 200
+            _bag(cy=1000.0, height=200, x0=800, x1=1100)]     # 宽 300
+    fruits = [_fruit(base_y=895, cx=200), _fruit(base_y=895, cx=950)]
+    e = estimate_cluster(fruits, bags, depression_deg=None)
+    assert "标尺相对误差" in e.scale_note and "散布" in e.scale_note
+    assert e.uncertainty_w_mm is not None and e.uncertainty_w_mm > 0
+    # 注入现场值时优先用它、不覆盖
+    from measure.estimate import EstimateConfig, estimate_cluster as ec
+
+    e2 = ec(fruits, bags, depression_deg=None,
+            cfg=EstimateConfig(bag_diameter_rel_err=0.05))
+    assert "现场注入" in e2.scale_note
+
+
 def test_above_bag_top_keeps_shoulder_drops_surface_texture():
     """袋顶线 = 1000−200/2 = 900。base_y ≤ 910 留；扎在袋体内部的丢。"""
     from measure.estimate import filter_above_bag_top

@@ -29,7 +29,26 @@ def test_is_usable_gates_on_no_detection():
     assert contract.is_usable("verified")
 
 
-def test_verified_and_level_view_are_registered():
+def test_contract_new_rows_do_not_emit_baseline_but_history_still_reads():
+    """`baseline` 2026-10-14 起停发，但**历史行必须仍能被读、不被当成不可用**（Chief 四条）。
+
+    停发的理由：现在产的是**估算行**，`baseline`＝"基线/定标帧，不是生长测量"
+    会被读成"定标帧"——误导性命名比没有标记更糟。枚举值**保留**（历史行还在库里）。
+    """
+    from measure.production import CONST_FLAGS
+
+    assert "baseline" not in CONST_FLAGS, "CONST_FLAGS 还在发 baseline"
+    # 历史行：能 parse、能 format、**不在不可用集**
+    assert "baseline" in contract.parse_flags("baseline+level_view+no_angle_profile")
+    assert contract.format_flags({"baseline", "level_view"}) == "baseline+level_view"
+    assert contract.is_usable("baseline+level_view+no_angle_profile") is True
+    assert "baseline" not in contract.NON_USABLE_FLAGS
+    # 但"只有 estimate 没有 verified"的历史行仍不得进统计（两层判断各司其职）
+    assert not contract.field_is_usable("baseline+estimate", "mean_cluster_w_mm",
+                                        "mean_cluster_w_mm")
+
+
+
     assert "verified" in contract.QUALITY_FLAGS
     # 平视口径是一个**描述性**标记（Chief：平视能算的量要标清口径）
     assert "level_view" in contract.QUALITY_FLAGS

@@ -40,8 +40,11 @@ from measure.pipeline import BoxStats, Detector, Detection, aggregate_box
 from measure.quality import frame_quality
 from measure.record import MeasurementRecord
 
-#: 每一行都带的标记：当前全部产出都是未标定的基线值，且都是平视口径
-CONST_FLAGS = ("baseline", "level_view")
+#: 每一行都带的标记：角度档是平视（**描述性旁白**，`angle_profile` 才是权威）。
+#: `baseline` 已于 2026-10-14 **停发**（Chief 四条裁定）：现在产的是**估算行**，
+#: "基线/定标帧，不是生长测量"这个字面会把人带偏——**一个会把人带偏的标记比没有标记更糟**。
+#: 枚举值保留（历史行仍可能带它），见 `contract.QUALITY_FLAGS`。
+CONST_FLAGS = ("level_view",)
 
 #: 缺测原因（票 11 §9：`mean_cap_mm`/`mean_len_mm` 单档平视下明确缺测）
 UNMEASURABLE_FLAGS = ("no_angle_profile",)
