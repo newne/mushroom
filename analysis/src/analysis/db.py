@@ -795,6 +795,21 @@ def fetch_images(
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
+def fetch_room_box_ids(conn: sqlite3.Connection, *, room_id: str) -> list[str]:
+    """某库房在**图像索引**里出现过的框号（去重、升序）。
+
+    `/growth/room` 用它铺"拍了但还没测量"的框清单（票 11：框不能在列表里悄悄消失），
+    所以只能从 `images` 来、不能从 `measurements` 来。去重与排序**在库里做**：
+    读全表再在 Python 里 distinct 会在图片多的库房里白读一整表。
+    """
+    cur = conn.execute(
+        "SELECT DISTINCT box_id FROM images WHERE room_id = ? AND box_id IS NOT NULL "
+        "ORDER BY box_id",
+        (room_id,),
+    )
+    return [r[0] for r in cur.fetchall()]
+
+
 def _as_text(value):
     """列表/字典 → JSON 文本，其余原样。
 

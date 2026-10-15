@@ -153,6 +153,75 @@ def test_ingest_and_measurement_reads_agree_on_both_backends(
                     f"{url}?{params} 两个后端的响应不一致"
 
 
+#: 一轮 + 两帧（B101 / B102 同库房）：/growth/room 的框清单只能从图像索引来。
+ROUND_ROWS = [
+    {"ts": "2026-08-16T10:00:20", "round_id": "r-1", "ok": True, "n_results": 48,
+     "n_failures": 0, "aborted": False, "room_id": "611", "entry_date": "2026-08-16",
+     "batch_no": "mogu-1", "suspect_duplicate": False,
+     "dup_groups": [{"sha256_12": "abc123def456", "n": 4, "stations": ["S211", "S212"]}],
+     "content_check_error": None, "n_duplicate": 4, "n_frames_recorded": 48},
+]
+
+IMAGE_ROWS = [
+    {"ts": "2026-08-16T10:00:20", "round_id": "r-1", "station_id": "S101", "box_id": "B101",
+     "angle_profile": "level0", "imaging_profile": "snap-3", "frame_dup": False,
+     "dup_group": None, "content_sha256": "d" * 64, "same_as_previous": False,
+     "duplicate_streak": 0, "camera_ip": "10.0.0.9", "yz": [-40, -90],
+     "object_name": "2026/08/16/a.jpg", "object_name_source": "service", "cloud_url": None,
+     "ok": True, "error": None, "elapsed_s": 1.25, "room_id": "611",
+     "entry_date": "2026-08-16", "batch_no": "mogu-1"},
+    {"ts": "2026-08-16T10:01:20", "round_id": "r-1", "station_id": "S102", "box_id": "B102",
+     "angle_profile": "level0", "yz": [-40, -145], "object_name": None,
+     "object_name_source": "request", "ok": False, "error": "timeout", "elapsed_s": 8.0,
+     "room_id": "611", "entry_date": "2026-08-16", "batch_no": "mogu-1"},
+]
+
+#: B101 两个整点且值相等 —— /growth/room 里应当是 stalled（配 no_prev 的 B102）。
+ROOM_MEASUREMENT_ROWS = [
+    {"ts": "2026-08-16T08:00:00", "room_id": "611", "box_id": "B101", "station_id": "S101",
+     "angle_profile": "level0", "n": 6, "mean_len_mm": 40.0, "mean_cap_mm": None,
+     "p10_len": None, "p90_len": None, "quality": "verified"},
+    {"ts": "2026-08-16T20:00:00", "room_id": "611", "box_id": "B101", "station_id": "S101",
+     "angle_profile": "level0", "n": 6, "mean_len_mm": 40.2, "mean_cap_mm": None,
+     "p10_len": None, "p90_len": None, "quality": "verified"},
+]
+
+
+def test_ingest_and_rounds_images_reads_agree_on_both_backends(
+    tmp_path, monkeypatch, pg_dsn, pg_schema
+):
+    """/rounds、/images 与 /growth/room 的框清单（原来那条裸 SQL）在两个后端上逐字段相同。
+
+    `/growth/room` 的框清单必须来自**图像索引**（拍了没测量的框不许消失），所以这一条同时
+    钉住 `fetch_room_box_ids` 的门面落点：SQLite 的 `?` 占位与直写表名不能再出现在 api.py。
+    """
+    with two_stores(tmp_path, monkeypatch, pg_dsn, pg_schema) as (sq, sq_app, pg_conn, pg_app):
+        rows = (
+            [{"kind": "round", **row} for row in ROUND_ROWS]
+            + [{"kind": "image_index", **row} for row in IMAGE_ROWS]
+            + [{"kind": "measurement", **row} for row in ROOM_MEASUREMENT_ROWS]
+        )
+        with TestClient(sq_app) as a, TestClient(pg_app) as b:
+            posted_a = a.post("/ingest", json={"rows": rows}).json()
+            posted_b = b.post("/ingest", json={"rows": rows}).json()
+            assert posted_b == posted_a, "两边入库计数与告警要一致"
+            assert len(store.fetch_images(pg_conn)) == len(IMAGE_ROWS), "PG 侧真有行"
+            for url, params in [
+                ("/rounds", {}),
+                ("/rounds", {"room_id": "611"}),
+                ("/rounds", {"entry_date": "2026-08-16", "batch_no": "mogu-1"}),
+                ("/images", {}),
+                ("/images", {"room_id": "611"}),
+                ("/images", {"box_id": "B101", "limit": 1}),
+                ("/growth/room", {"room_id": "611"}),
+                ("/growth/room", {"boxes": "B101,B102"}),
+            ]:
+                assert b.get(url, params=params).json() == a.get(url, params=params).json(), \
+                    f"{url}?{params} 两个后端的响应不一致"
+        boxes = store.fetch_room_box_ids(pg_conn, room_id="611")
+        assert boxes == ["B101", "B102"], "PG 侧框清单去重升序（换成 %s 占位后行为不变）"
+
+
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
 def test_env_ingest_cli_writes_through_the_facade(backend, tmp_path, monkeypatch):
     """`python -m analysis.env.ingest --once` 在两种后端上都能把小时聚合写进去。

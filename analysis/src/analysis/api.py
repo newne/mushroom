@@ -27,12 +27,8 @@ from analysis.db import (
     fetch_batches as db_fetch_batches,
     fetch_batches_state as db_fetch_batches_state,
     fetch_operations,
-    fetch_images,
     fetch_ranges,
     fetch_ranges_state,
-    fetch_rounds,
-    insert_images,
-    insert_rounds,
 )
 from analysis.environment import (
     batches as env_batches,
@@ -194,9 +190,9 @@ def create_app(
         if measurements:
             store.insert_measurements(conn, measurements)
         if images:
-            insert_images(conn, images)
+            store.insert_images(conn, images)
         if rounds:
-            insert_rounds(conn, rounds)
+            store.insert_rounds(conn, rounds)
         return {
             "inserted_measurements": len(measurements),
             "skipped_measurements": skipped_measurements,
@@ -216,7 +212,7 @@ def create_app(
     def rounds(
         limit: int = 0, room_id: str = "", entry_date: str = "", batch_no: str = ""
     ) -> list[dict]:
-        return fetch_rounds(
+        return store.fetch_rounds(
             conn,
             room_id=room_id or None,
             entry_date=entry_date or None,
@@ -237,7 +233,7 @@ def create_app(
         每行带 `room_id`/`entry_date`/`batch_no`——回溯照片时"这属于哪间库房、
         哪批蘑菇"必须能从索引本身读出来（见 db.SCHEMA 里 images 的注释）。
         """
-        return fetch_images(
+        return store.fetch_images(
             conn,
             station_id=station_id or None,
             box_id=box_id or None,
@@ -270,10 +266,9 @@ def create_app(
         if boxes:
             wanted = [b.strip() for b in boxes.split(",") if b.strip()]
         elif room_id:
-            cur = conn.execute(
-                "SELECT DISTINCT box_id FROM images WHERE room_id = ? AND box_id IS NOT NULL "
-                "ORDER BY box_id", (room_id,))
-            wanted = [r[0] for r in cur.fetchall()]
+            # 框清单从图像索引来（「拍了但没测量」的框也要出现）：走门面，不写裸 SQL ——
+            # `?` 占位符与直写表名都是 SQLite 专有（票 28 第 2 步的挡路点 2）。
+            wanted = store.fetch_room_box_ids(conn, room_id=room_id)
         else:
             wanted = []
         summary = room_summary(rows, boxes=wanted or None)

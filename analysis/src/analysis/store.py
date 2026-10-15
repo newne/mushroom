@@ -58,7 +58,7 @@ __all__ = [
     "upsert_operations", "fetch_operations", "fetch_latest_operations_before",
     "upsert_batches", "replace_batches", "fetch_batches", "fetch_batches_state",
     "insert_measurements", "fetch_measurements",
-    "insert_images", "fetch_images",
+    "insert_images", "fetch_images", "fetch_room_box_ids",
     "insert_rounds", "fetch_rounds",
     "replace_ranges", "fetch_ranges", "fetch_advice_ranges",
     "write_ranges_state", "fetch_ranges_state",
@@ -208,6 +208,10 @@ def fetch_images(
         conn, station_id=station_id, box_id=box_id, room_id=room_id, round_id=round_id,
         limit=limit,
     )
+
+
+def fetch_room_box_ids(conn, *, room_id: str) -> list[str]:
+    return _impl(conn).fetch_room_box_ids(conn, room_id=room_id)
 
 
 def insert_rounds(conn, rows: list[dict]) -> None:

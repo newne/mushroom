@@ -620,6 +620,19 @@ def fetch_images(
     return _fetch_dicts(conn, sql, params)
 
 
+def fetch_room_box_ids(conn: PgConnection, *, room_id: str) -> list[str]:
+    """见 `db.fetch_room_box_ids`；这是 API 里那条 SQLite 裸 SQL（`?` 占位 + 表名直写）的
+    门面落点（票 28 第 2 步的挡路点 2）。
+    """
+    rows = _fetch_dicts(
+        conn,
+        f"SELECT DISTINCT box_id FROM {_table(conn, 'images')} "
+        "WHERE room_id = %s AND box_id IS NOT NULL ORDER BY box_id",
+        (room_id,),
+    )
+    return [row["box_id"] for row in rows]
+
+
 def insert_rounds(conn: PgConnection, rows: list[dict]) -> None:
     """按 `ts` 覆盖写轮次行；列表型字段（`dup_groups`）序列化成 JSON 文本（与读侧成对）。"""
     payload = [
