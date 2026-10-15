@@ -147,3 +147,31 @@ def is_usable(quality: str | None) -> bool:
     from measure.contract import is_usable as impl
 
     return impl(quality)
+
+
+# ---------- 档（tier）：区间表接纳估算档的分界（票 26 / ADR-0025） ----------
+
+#: 行的**档**。`verified` 是**唯一能进建议层**的档（ADR-0025 §4：`verified` 的技术含义不变）；
+#: `estimate` 只放宽给**区间表**这一个消费者，且必须**整维标注「未验证」**。
+TIER_VERIFIED = "verified"
+TIER_ESTIMATE = "estimate"
+
+#: `quality` 里与本档对应的标记（票 20 的行级标记串，`+` 分隔）。
+TIER_FLAGS: dict[str, str] = {TIER_VERIFIED: "verified", TIER_ESTIMATE: "estimate"}
+
+
+def tier_of(quality: str | None) -> str | None:
+    """这一测量行属于哪一档：`verified` **优先**，其次 `estimate`，其余 ⇒ `None`（两档都不收）。
+
+    - **`verified` 优先**：两个标记正交（票 20 自述），`verified+estimate` 是合法组合；
+      把它按估算处理就等于从已验证统计里删数据 —— 那不是保守，是错。
+    - 其余标记（`no_detection` / `low_confidence` / `no_light` / 空串）**两档都不收**：
+      区间表放宽的只有"估算"，不是"什么都能进"。
+    - 用**子串**判断，与旧的 `str.contains("verified")` 同口径：历史上 quality 用过逗号分隔，
+      改成按 `+` 切词会把老行判成"两档都不收"，那是静默删数据。
+    """
+    text = "" if quality is None else str(quality)
+    for tier in (TIER_VERIFIED, TIER_ESTIMATE):
+        if TIER_FLAGS[tier] in text:
+            return tier
+    return None
