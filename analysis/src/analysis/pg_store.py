@@ -300,9 +300,11 @@ def connect(
     dsn: str | None = None, *, schema: str | None = None, connect_timeout: int = 10
 ) -> PgConnection:
     """建连接并保证 schema/表就位。连接串见 `analysis.store_config.load_dsn`。"""
-    psycopg = _driver()
+    # 先查配置再要驱动：配错了（缺 DSN / schema 名不合法）就该报配置的错，
+    # 报成"没装 psycopg"会把人往装包的方向带，而真正的毛病在配置那边。
     target = schema_name(schema)
     resolved = load_dsn(dsn, what="analysis 存储（票 28）")
+    psycopg = _driver()
     try:
         raw = psycopg.connect(resolved, connect_timeout=connect_timeout, autocommit=True)
     except Exception as exc:  # noqa: BLE001 - 连不上就报错，绝不静默换后端
