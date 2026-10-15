@@ -217,13 +217,12 @@ def best_ranges(merged: pd.DataFrame, *, n_bins: int = 4,
     return out
 
 
-def run_from_db(db_path: str | None = None, *, conn=None) -> list[dict]:
+def run_from_db(conn) -> list[dict]:
     """从库里读两表跑全流程（只读式计算，不落表）。返回区间行，**不返回为什么空**。
 
     要"为什么空"请用 `compute_ranges`（票 05 的空态标注）——它给同一批行 + 状态。
-    连接来源同 `compute_ranges`（票 28 第 2 步）：有 `conn` 就用，没有才按路径建。
     """
-    return compute_ranges(db_path, conn=conn).rows
+    return compute_ranges(conn).rows
 
 
 #: 区间表重算的状态机（票 05）。**空表必须说得出为什么空**：
@@ -289,22 +288,14 @@ class RangesRun:
     flags: list[str] = field(default_factory=list)
 
 
-def compute_ranges(
-    db_path: str | None = None, *, conn=None, metric: str | None = None
-) -> RangesRun:
+def compute_ranges(conn, *, metric: str | None = None) -> RangesRun:
     """从库里读两表跑全流程，返回 **区间行 + 为什么空**（票 05）。
 
-    **连接从哪来**（票 28 第 2 步）：给了 `conn` 就用它 —— API / jobs / 批处理手里本来就有
-    一份连接，**不许再按路径重连**（PG 下没有"路径"这个概念）；没给就经门面按 `db_path`
-    建一条，用完在本函数里关掉（CLI 与老测试还按老形状传路径）。
+    **只吃连接**（票 28 contract）：连接由调用方给（API / jobs / 测试手里本来就有），
+    本函数不自己建、也不关。SQLite 时代那条"没给连接就按 `db_path` 重连"的老形状已删 ——
+    PG 下重连会另开一个会话、还会丢掉 schema，那种连接是错的库。
     """
-    if conn is not None:
-        return _compute_ranges(conn, metric=metric)
-    own = store.connect(db_path)
-    try:
-        return _compute_ranges(own, metric=metric)
-    finally:
-        own.close()
+    return _compute_ranges(conn, metric=metric)
 
 
 def _compute_ranges(conn, *, metric: str | None = None) -> RangesRun:
@@ -459,23 +450,16 @@ def _compute_ranges(conn, *, metric: str | None = None) -> RangesRun:
 
 
 def refresh_ranges(
-    db_path: str | None = None, *, conn=None,
-    computed_at: str | None = None, metric: str | None = None,
+    conn, *, computed_at: str | None = None, metric: str | None = None
 ) -> int:
     """每日批处理入口（票 05）：计算最佳参数区间并整体替换 ranges 表（评审 #6）。
 
     API 的 GET /ranges 只读本表——重算与读取分离，请求代价为 O(表大小)。
 
-    **连接来源同 `compute_ranges`**（票 28 第 2 步）：jobs 与 API 手里有连接就直接传进来，
-    不再按路径重连（PG 下没有"路径"）；没给就经门面按 `db_path` 建一条、用完关掉。
+    **连接口径同 `compute_ranges`**：只吃连接，不自己建也不关（jobs 与 API 手里那份
+    连接就是它要用的库）。
     """
-    if conn is not None:
-        return _refresh_ranges(conn, computed_at=computed_at, metric=metric)
-    own = store.connect(db_path)
-    try:
-        return _refresh_ranges(own, computed_at=computed_at, metric=metric)
-    finally:
-        own.close()
+    return _refresh_ranges(conn, computed_at=computed_at, metric=metric)
 
 
 def _refresh_ranges(conn, *, computed_at: str | None, metric: str | None) -> int:

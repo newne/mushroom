@@ -6,8 +6,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from analysis.api import create_app
-from analysis.db import connect, upsert_batches, upsert_environment
 from analysis.env.adapters import EnvRow
+from analysis.store import upsert_batches, upsert_environment
 from analysis.environment import aggregate_hourly, batches, series, summary
 
 
@@ -33,13 +33,16 @@ def _hours(count=4, zone="611", lamp=2.0, n=60):
     ]
 
 
+def _client(pg_dsn, pg_schema, **kwargs) -> TestClient:
+    """本用例 schema 上的 API 客户端（**不预置数据**，给"空库"用例用）。"""
+    return TestClient(create_app(store_dsn=pg_dsn, store_schema=pg_schema, **kwargs))
+
+
 @pytest.fixture
-def client(tmp_path):
-    db = str(tmp_path / "t.db")
-    conn = connect(db)
-    upsert_environment(conn, _hours())
-    conn.close()
-    return TestClient(create_app(db))
+def client(pg, pg_dsn, pg_schema) -> TestClient:
+    """带 4 小时环境数据的 API 客户端（本文件多数用例的底料）。"""
+    upsert_environment(pg, _hours())
+    return _client(pg_dsn, pg_schema)
 
 
 # ---------- 入库前的聚合 ----------
@@ -159,45 +162,33 @@ def test_batches_skips_windows_without_data():
     assert got == []
 
 
-def test_api_batches_needs_ledger(tmp_path):
-    db = str(tmp_path / "t.db")
-    conn = connect(db)
-    upsert_environment(conn, _hours(count=4))
-    conn.close()
-    got = TestClient(create_app(db)).get("/environment/batches", params={"zone": "611"}).json()
+def test_api_batches_needs_ledger(client):
+    got = client.get("/environment/batches", params={"zone": "611"}).json()
     # 没同步过台账就直说，不退回"按断档切段"编一个批次出来
     assert got["ok"] is False and "batch_ingest" in got["error"] and got["batches"] == []
 
 
-def test_api_batches_with_ledger(tmp_path):
-    db = str(tmp_path / "t.db")
-    conn = connect(db)
-    upsert_environment(conn, _hours(count=4))          # 2026-10-12 的 4 个小时
-    upsert_batches(conn, [{"room_id": "611", "entry_date": "2026-09-30",
-                           "batch_no": "mogu-107", "batch_id": "107"}])
-    conn.close()
-    got = TestClient(create_app(db)).get("/environment/batches", params={"zone": "611"}).json()
+def test_api_batches_with_ledger(client, pg):
+    upsert_batches(pg, [{"room_id": "611", "entry_date": "2026-09-30",
+                         "batch_no": "mogu-107", "batch_id": "107"}])
+    got = client.get("/environment/batches", params={"zone": "611"}).json()
     assert got["ok"] is True and len(got["batches"]) == 1
     assert got["batches"][0]["batch_no"] == "mogu-107" and got["batches"][0]["hours"] == 4
     assert got["batches"][0]["room_label"] == "611", "规范号不洗白成别的写法"
     assert got["room_alias"]["n_unresolved"] == 0
 
 
-def _legacy_room_fixture(tmp_path):
+def _seed_legacy_room(pg) -> None:
     """台账里 607 那间挂着旧编号 `7`，环境侧用 `607` —— 跨域 join 的真实形状。"""
-    db = str(tmp_path / "legacy.db")
-    conn = connect(db)
-    upsert_environment(conn, _hours(count=4, zone="607"))
-    upsert_batches(conn, [{"room_id": "7", "entry_date": "2026-09-30",
-                           "batch_no": None, "batch_id": "7|2026-09-30"}])
-    conn.close()
-    return db
+    upsert_environment(pg, _hours(count=4, zone="607"))
+    upsert_batches(pg, [{"room_id": "7", "entry_date": "2026-09-30",
+                         "batch_no": None, "batch_id": "7|2026-09-30"}])
 
 
-def test_api_batches_resolves_the_legacy_room_code(tmp_path):
+def test_api_batches_resolves_the_legacy_room_code(client, pg):
     """默认别名表已确证 `7→607`（发版官 2026-10-14）⇒ join 直接成立，标签明写"原始 7"。"""
-    db = _legacy_room_fixture(tmp_path)
-    got = TestClient(create_app(db)).get("/environment/batches", params={"zone": "607"}).json()
+    _seed_legacy_room(pg)
+    got = client.get("/environment/batches", params={"zone": "607"}).json()
     assert got["ok"] is True and len(got["batches"]) == 1
     assert got["batches"][0]["hours"] == 4
     assert got["batches"][0]["room_label"] == "607（原始 7）", "显示了规范号就必须说明原始是 7"
@@ -205,17 +196,17 @@ def test_api_batches_resolves_the_legacy_room_code(tmp_path):
     assert got["room_alias"]["n_resolved"] == 1 and got["room_alias"]["n_unresolved"] == 0
 
 
-def test_api_batches_reports_unresolved_room_code_instead_of_saying_no_ledger(tmp_path, monkeypatch, capsys):
+def test_api_batches_reports_unresolved_room_code_instead_of_saying_no_ledger(client, pg, monkeypatch, capsys, tmp_path):
     """别名表里没有的编号 ⇒ 报"解不出"，**不许**说成"还没有批次台账"。
 
     用一份空 map 的表来模拟"还没确证"的状态（默认表已确证，不能拿它测这条路径）。
     """
-    db = _legacy_room_fixture(tmp_path)
+    _seed_legacy_room(pg)
     alias = tmp_path / "empty_alias.json"
     alias.write_text(json.dumps({"map": {}}), encoding="utf-8")
     monkeypatch.setenv("ROOM_ALIAS_FILE", str(alias))
 
-    got = TestClient(create_app(db)).get("/environment/batches", params={"zone": "607"}).json()
+    got = client.get("/environment/batches", params={"zone": "607"}).json()
     assert got["ok"] is False
     assert "batch_ingest" not in got["error"], "台账明明在，只是挂着旧编号"
     assert "'7'" in got["error"] and "不猜" in got["error"]
@@ -225,23 +216,23 @@ def test_api_batches_reports_unresolved_room_code_instead_of_saying_no_ledger(tm
     assert "库房号解不出" in printed, "解不出要打样例，不许静默 NULL"
 
 
-def test_api_batches_uses_an_explicit_alias_file(tmp_path, monkeypatch):
+def test_api_batches_uses_an_explicit_alias_file(client, pg, monkeypatch, tmp_path):
     """换一份别名表也能生效（口径只从文件读，不写死在代码里）。"""
-    db = _legacy_room_fixture(tmp_path)
+    _seed_legacy_room(pg)
     alias = tmp_path / "room_alias.json"
     alias.write_text(json.dumps({"map": {
         "7": {"to": "607", "evidence": "现场库房对照表 2026-10-15", "confirmed_by": "现场"}
     }}), encoding="utf-8")
     monkeypatch.setenv("ROOM_ALIAS_FILE", str(alias))
 
-    got = TestClient(create_app(db)).get("/environment/batches", params={"zone": "607"}).json()
+    got = client.get("/environment/batches", params={"zone": "607"}).json()
     assert got["ok"] is True and got["batches"][0]["room_label"] == "607（原始 7）"
     assert got["room_alias"]["n_resolved"] == 1
 
 
-def test_api_batches_rejects_a_non_room_zone(tmp_path):
-    db = _legacy_room_fixture(tmp_path)
-    got = TestClient(create_app(db)).get("/environment/batches", params={"zone": "999"})
+def test_api_batches_rejects_a_non_room_zone(client, pg):
+    _seed_legacy_room(pg)
+    got = client.get("/environment/batches", params={"zone": "999"})
     assert got.status_code == 400 and "不是规范库房号" in got.json()["detail"]
 
 
@@ -352,10 +343,8 @@ def test_api_environment_window_filter(client):
     assert [r["ts"] for r in got["rows"]] == ["2026-10-12T02:00:00", "2026-10-12T03:00:00"]
 
 
-def test_api_environment_empty_is_empty_list(tmp_path):
-    db = str(tmp_path / "empty.db")
-    connect(db).close()
-    got = TestClient(create_app(db)).get("/environment", params={"zone": "611"}).json()
+def test_api_environment_empty_is_empty_list(pg_dsn, pg_schema):
+    got = _client(pg_dsn, pg_schema).get("/environment", params={"zone": "611"}).json()
     assert got["rows"] == []
 
 
@@ -374,17 +363,14 @@ class _FakeRawSource:
                        rh_pct=92.4, co2_ppm=1639.0, lamp_state=2.0)]
 
 
-def _raw_client(tmp_path, seen):
-    db = str(tmp_path / "raw.db")
-    connect(db).close()
-    return TestClient(
-        create_app(db, raw_source_factory=lambda zone: _FakeRawSource(zone, seen))
-    )
+def _raw_client(pg_dsn, pg_schema, seen) -> TestClient:
+    return _client(pg_dsn, pg_schema,
+                   raw_source_factory=lambda zone: _FakeRawSource(zone, seen))
 
 
-def test_raw_is_fetched_live_not_from_store(tmp_path):
+def test_raw_is_fetched_live_not_from_store(pg_dsn, pg_schema):
     seen = {}
-    client = _raw_client(tmp_path, seen)
+    client = _raw_client(pg_dsn, pg_schema, seen)
     got = client.get(
         "/environment",
         params={"zone": "611", "granularity": "raw", "start": "2026-10-12T14:00:00",
@@ -395,13 +381,13 @@ def test_raw_is_fetched_live_not_from_store(tmp_path):
     assert seen["zone"] == "611" and seen["since"] == "2026-10-12T14:00:00"
 
 
-def test_raw_needs_a_window(tmp_path):
-    client = _raw_client(tmp_path, {})
+def test_raw_needs_a_window(pg_dsn, pg_schema):
+    client = _raw_client(pg_dsn, pg_schema, {})
     assert client.get("/environment", params={"granularity": "raw"}).status_code == 400
 
 
-def test_raw_window_is_capped(tmp_path):
-    client = _raw_client(tmp_path, {})
+def test_raw_window_is_capped(pg_dsn, pg_schema):
+    client = _raw_client(pg_dsn, pg_schema, {})
     got = client.get("/environment", params={
         "zone": "611", "granularity": "raw",
         "start": "2026-10-01T00:00:00", "end": "2026-10-12T00:00:00",

@@ -1,4 +1,4 @@
-"""PG 实现（票 28 第 1 步 expand）：在与生产同一个实例上，用**独立 schema** 建表、跑完删掉。
+"""存储层（票 28 contract 后唯一的实现）：在与生产同一个实例上，用**独立 schema** 建表、跑完删掉。
 
 **为什么必须独立 schema**：目标库 `mushroom_algorithm` 的 public 里是遗留业务表
 （`device_setpoint_changes` / `mushroom_batch_yield` / `decision_analysis_*` …），
@@ -7,24 +7,32 @@
 
 **连接串从 `ANALYSIS_TEST_DSN` / `ANALYSIS_TEST_DSN_FILE` 读**，**故意不复用
 `PGSQL_DSN*`**：那两个是应用跑生产用的，本机 shell 里挂着生产 DSN 时，跑一次测试不该
-往生产库里建 schema。两个都没设 ⇒ 整组 skip（默认的 SQLite 套件照旧全绿）。
+往生产库里建 schema。两个都没设 ⇒ 整套件 skip（`tests/conftest.py`）。
 
 DSN 解析与 schema 建删只有一处实现（`tests/pg_harness.py`），夹具（`pg_dsn` / `pg_schema` /
-`pg` / `catalog`）在 `tests/conftest.py` —— 第 2 步（migrate）起多个测试文件共用它们。
+`pg` / `catalog`）在 `tests/conftest.py`，多个测试文件共用它们。
 
-本文件钉住的核心是**两套实现的等价**：同一个场景在 SQLite 与 PG 上各跑一遍，读回来的行
-要逐字段相等；此外单独钉住 PG 特有的那几处（schema 隔离、列与 SQLite 逐列一致、
-布尔/整数按 SQLite 亲和性的结果落库）。
+本文件钉住：schema 隔离、**列与 `analysis.schema` 的字段清单一一对应**、索引真的建出来、
+以及各表的读写形状（布尔/整数按声明类型落库、列表型字段读回来还是列表）。
 """
 
 from __future__ import annotations
 
 import pytest
-from analysis import db, store
+
+from analysis import store
+from analysis.schema import (
+    BATCH_FIELDS,
+    ENVIRONMENT_FIELDS,
+    IMAGE_FIELDS,
+    MEASUREMENT_FIELDS,
+    OPERATION_FIELDS,
+    ROUND_FIELDS,
+)
 
 import pg_harness
 
-#: 目标表的清单（与 `db.SCHEMA` 一一对应）。
+#: 目标表的清单（与 `analysis.schema` 的字段清单一对应）。
 TABLES = (
     "batches", "batches_state", "environment", "images", "measurements", "operations",
     "ranges", "ranges_state", "rounds",
@@ -110,15 +118,6 @@ RANGE_ROWS = [
 ]
 
 
-#: 整组 skip 的判据（连接串与 schema 的其余装置见 `pg_harness` / `conftest`）。
-PG_DSN = pg_harness.test_dsn()
-
-pytestmark = pytest.mark.skipif(
-    PG_DSN is None,
-    reason="没有 ANALYSIS_TEST_DSN / ANALYSIS_TEST_DSN_FILE：PG 用例整组跳过",
-)
-
-
 def _tables(cur, schema: str) -> list[str]:
     cur.execute(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = %s "
@@ -136,12 +135,16 @@ def _columns(cur, schema: str, table: str) -> list[tuple[str, str]]:
     return list(cur.fetchall())
 
 
-#: SQLite 的声明类型 → PG 的 data_type（`db.SCHEMA` 用的就这三种）。
-_SQLITE_KIND = {"TEXT": "text", "REAL": "double precision", "INTEGER": "integer"}
-
-
-def _sqlite_columns(conn, table: str) -> list[tuple[str, str]]:
-    return [(row[1], _SQLITE_KIND[row[2]]) for row in conn.execute(f"PRAGMA table_info({table})")]
+#: 表 → 该表的字段清单（唯一实现处是 `analysis.schema`）。这张对应表钉的是"哪张表归哪份清单"：
+#: 建表 DDL 少一列 → 写入报错；字段清单多一列 → 同样报错。两边都不许漂。
+_CONTRACT = {
+    "environment": ENVIRONMENT_FIELDS,
+    "measurements": MEASUREMENT_FIELDS,
+    "rounds": ROUND_FIELDS,
+    "images": IMAGE_FIELDS,
+    "operations": OPERATION_FIELDS,
+    "batches": BATCH_FIELDS,
+}
 
 
 # ---------- schema 与列 ----------
@@ -151,27 +154,51 @@ def test_tables_are_created_in_the_given_schema(pg, catalog, pg_schema):
     assert _tables(catalog, pg_schema) == list(TABLES)
 
 
-def test_columns_match_the_sqlite_schema_one_for_one(tmp_path, pg, catalog, pg_schema):
-    """两边逐列一致（名字、顺序、类型族）——改一边忘另一边会被这条抓住。"""
-    sqlite_conn = db.connect(str(tmp_path / "t.db"))
-    try:
-        for table in TABLES:
-            assert _columns(catalog, pg_schema, table) == _sqlite_columns(sqlite_conn, table), table
-    finally:
-        sqlite_conn.close()
+def test_columns_match_the_field_contract(pg, catalog, pg_schema):
+    """每张表**实际建出来的列** == `analysis.schema` 的字段清单（比对集合，不比顺序：
+    写入 SQL 是具名列的，顺序不参与行为；顺序另有 `MEASUREMENT_FIELDS` 的用例钉住）。"""
+    for table, fields in _CONTRACT.items():
+        actual = {name for name, _ in _columns(catalog, pg_schema, table)}
+        assert actual == set(fields), f"{table}: 建表 DDL 与字段清单不一致"
 
 
-def test_writes_stay_inside_the_given_schema(pg, pg_schema, catalog, monkeypatch):
+def test_the_query_indexes_are_created(pg, catalog, pg_schema):
+    """票 28 §4.4：现场 0 个索引 ⇒ 按真实读法补上；少一条就是每次全表扫。"""
+    catalog.execute(
+        "SELECT indexname, indexdef FROM pg_indexes WHERE schemaname = %s", (pg_schema,)
+    )
+    indexes = {name: ddl for name, ddl in catalog.fetchall()}
+    for name in ("environment_zone_ts", "environment_ts", "images_ts", "images_room_ts",
+                 "images_box_ts", "measurements_room_ts", "measurements_box_ts",
+                 "operations_zone_ts"):
+        assert name in indexes, f"{name} 没建出来"
+    assert "(zone, ts)" in indexes["environment_zone_ts"], "库房 + 时间窗"
+    assert "(ts)" in indexes["images_ts"], "历史列表按 ts 倒序取最近 N 条"
+    assert "(room_id, ts)" in indexes["images_room_ts"]
+
+
+def test_schema_name_must_be_a_plain_identifier(monkeypatch):
+    """schema 名要拼进 DDL，所以只收"朴素标识符"；别的形态一律报错（不做转义）。"""
+    monkeypatch.setenv("ANALYSIS_PG_SCHEMA", "public; drop table environment")
+    with pytest.raises(store.StoreConfigError):
+        store.schema_name()
+    monkeypatch.setenv("ANALYSIS_PG_SCHEMA", "analysis")
+    assert store.schema_name() == "analysis"
+    monkeypatch.delenv("ANALYSIS_PG_SCHEMA", raising=False)
+    assert store.schema_name() == store.DEFAULT_SCHEMA
+
+
+def test_writes_stay_inside_the_given_schema(pg, pg_dsn, pg_schema, catalog):
     """另一个 schema 里同样的表必须是空的：schema 名真的在给写入路由。"""
     store.upsert_environment(pg, ENV_ROWS)
     other_schema = pg_schema + "_other"
-    other = store.connect(dsn=PG_DSN, schema=other_schema)
+    other = store.connect(dsn=pg_dsn, schema=other_schema)
     try:
         assert _tables(catalog, other_schema) == list(TABLES), "第二套表建在另一个 schema"
         assert store.fetch_environment(other) == [], "第一套 schema 里的行不该串过来"
     finally:
         other.close()
-        pg_harness.drop_schema(PG_DSN, other_schema)
+        pg_harness.drop_schema(pg_dsn, other_schema)
 
 
 # ---------- environment ----------
@@ -323,65 +350,3 @@ def test_ranges_state_defaults_to_never_computed_and_round_trips(pg):
         "n_rows": 2, "metric": "mean_projected_d_mm", "unit": "mm/h",
         "updated_at": "2026-08-16T02:00:01",
     }
-
-
-# ---------- 两套实现的等价 ----------
-
-
-def _seed(conn) -> None:
-    """同一个场景在任一后端上跑一遍（PG 与 SQLite 逐字段比）。"""
-    store.upsert_environment(conn, ENV_ROWS)
-    store.insert_measurements(conn, MEASUREMENT_ROWS)
-    store.insert_rounds(conn, ROUND_ROWS)
-    store.insert_images(conn, IMAGE_ROWS)
-    store.upsert_operations(conn, OPERATION_ROWS)
-    store.upsert_batches(conn, BATCH_ROWS)
-    store.replace_ranges(conn, RANGE_ROWS, computed_at="2026-08-16T02:00:00")
-    store.write_ranges_state(
-        conn, state="ok", state_text="6 箱，样本充足", computed_at="2026-08-16T02:00:00",
-        detail={"n_rows": 2}, flags=[], n_rows=2, metric="mean_area_mm2", unit="mm2/h",
-        updated_at="2026-08-16T02:00:01",
-    )
-    store.replace_batches(
-        conn, BATCH_ROWS, refreshed_at="2026-08-16T05:20:00", detail={"source": "pgsql"},
-    )
-
-
-def test_the_two_backends_return_the_same_rows(tmp_path, pg):
-    """同一个场景两边各跑一遍，读回来的行必须逐字段相等（expand 的全部意义所在）。"""
-    sqlite_conn = db.connect(str(tmp_path / "t.db"))
-    try:
-        _seed(sqlite_conn)
-        _seed(pg)
-        calls = [
-            ("fetch_environment", {}),
-            ("fetch_environment", {"zone": "611"}),
-            ("fetch_measurements", {}),
-            ("fetch_measurements", {"room_id": "611", "box_id": "B105"}),
-            ("fetch_rounds", {}),
-            ("fetch_rounds", {"room_id": "611", "limit": 1}),
-            ("fetch_images", {}),
-            ("fetch_images", {"room_id": "611", "limit": 2}),
-            ("fetch_operations", {}),
-            ("fetch_operations", {"zone": "611", "limit": 2}),
-            ("fetch_batches", {}),
-            ("fetch_ranges", {}),
-            ("fetch_advice_ranges", {}),
-            ("fetch_ranges_state", {}),
-        ]
-        for name, kwargs in calls:
-            assert getattr(store, name)(pg, **kwargs) == getattr(store, name)(sqlite_conn, **kwargs), \
-                f"{name}({kwargs}) 两套实现不一致"
-        assert store.fetch_latest_operations_before(
-            pg, zone="611", before="2026-08-17T00:00:00"
-        ) == store.fetch_latest_operations_before(
-            sqlite_conn, zone="611", before="2026-08-17T00:00:00"
-        )
-        pg_state = store.fetch_batches_state(pg)
-        sqlite_state = store.fetch_batches_state(sqlite_conn)
-        # `updated_at` 是各自写库那一刻的墙钟（两边不可能同秒），其余字段必须一致。
-        assert {k: v for k, v in pg_state.items() if k != "updated_at"} == {
-            k: v for k, v in sqlite_state.items() if k != "updated_at"
-        }
-    finally:
-        sqlite_conn.close()

@@ -178,7 +178,7 @@ def daily_states_from_db(
 ) -> dict:
     """从库里读事件 + 基线，跑 `daily_states`（API 与批处理共用这一条路）。
 
-    读经**存储门面**（票 28 第 2 步）：后端由 `ANALYSIS_STORE` 选，这里只认连接。
+    读经存储层 `analysis.store`（票 28）：这里只认连接，不关心连接是怎么建的。
     """
     from analysis.store import fetch_latest_operations_before, fetch_operations
 

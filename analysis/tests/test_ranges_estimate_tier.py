@@ -25,8 +25,7 @@ from analysis.align import (
     compute_ranges,
     refresh_ranges,
 )
-from analysis.db import (
-    connect,
+from analysis.store import (
     fetch_advice_ranges,
     fetch_ranges,
     fetch_ranges_state,
@@ -57,18 +56,17 @@ def _estimate_rows(hours: int, *, quality: str = "estimate", room: str = "611",
 # ---------- 验收 ①：只有估算行时状态是独立的「仅估算」 ----------
 
 
-def test_a_single_seed_estimate_row_is_already_its_own_state(tmp_path):
+def test_a_single_seed_estimate_row_is_already_its_own_state(pg):
     """**一条种子估算行**就够：状态 = 仅估算，既不是 ok 也不是"没数据"。
 
     一条行算不出速率（速率的**两侧都必须存在**），所以这里同时钉住：
     状态说"这是估算档"，detail 说"为什么一行区间都没出"——两者不许互相盖掉。
     """
-    path = str(tmp_path / "one.db")
-    conn = connect(path)
+    conn = pg
     _env(conn, 24)
     insert_measurements(conn, _estimate_rows(1))
 
-    run = compute_ranges(path)
+    run = compute_ranges(pg)
 
     assert run.state == STATE_ESTIMATE_ONLY
     assert run.state != STATE_OK
@@ -93,7 +91,7 @@ def _verified_rows(hours: int, *, room: str = "611", box: str = "B01",
             for i in range(hours)]
 
 
-def test_two_tiers_in_the_same_bin_are_counted_separately(tmp_path):
+def test_two_tiers_in_the_same_bin_are_counted_separately(pg):
     """同一分箱里两类计数分别可见，且**统计只来自本档**（ADR-0025 §2）。
 
     造法：两档用**不同的框**（同库房、同时刻、同环境），落进同一个分箱 ——
@@ -104,8 +102,7 @@ def test_two_tiers_in_the_same_bin_are_counted_separately(tmp_path):
     「混算了没有」有**独立算得出来的判据**：主箱里 7 条已验证 + 1 条估算，
     合并后均值会从 1.0 变成 (7×1.0 + 1×11.0)/8 = 2.25、计数会从 7 变成 8。
     """
-    path = str(tmp_path / "mix.db")
-    conn = connect(path)
+    conn = pg
     _env(conn, 24)
     insert_measurements(conn, _verified_rows(24))
     insert_measurements(conn, [
@@ -114,7 +111,7 @@ def test_two_tiers_in_the_same_bin_are_counted_separately(tmp_path):
         for i, level in ((0, 10.0), (1, 21.0), (2, 32.0))
     ])
 
-    run = compute_ranges(path)
+    run = compute_ranges(pg)
 
     assert run.state == STATE_OK, "有已验证行 ⇒ 正常态（估算行只作计数）"
     assert run.flags == [], "这份表的主体是已验证档，不该整维标未验证"
@@ -138,7 +135,7 @@ def test_two_tiers_in_the_same_bin_are_counted_separately(tmp_path):
 # ---------- 验收 ④：建议层永不消费估算行（有断言） ----------
 
 
-def test_advice_input_never_carries_estimate_rows(tmp_path):
+def test_advice_input_never_carries_estimate_rows(pg):
     """估算行**永不进建议层**（ADR-0025 §3），而且这条要能"改坏就红"。
 
     三层分别钉住：
@@ -148,12 +145,11 @@ def test_advice_input_never_carries_estimate_rows(tmp_path):
     3. 保险丝：真把一行估算行递到建议层入口（`assert_verified_only`），**直接抛**，
        不是静默丢掉 —— 静默丢掉的下一步就是有人"顺手"放宽筛选。
     """
-    path = str(tmp_path / "advice.db")
-    conn = connect(path)
+    conn = pg
     _env(conn, 24)
     insert_measurements(conn, _estimate_rows(24))
 
-    refresh_ranges(path, computed_at="2026-08-02T00:00:00")
+    refresh_ranges(pg, computed_at="2026-08-02T00:00:00")
     assert fetch_ranges(conn), "估算档该出区间行（整张表就是它）"
 
     # ① 表里有行，建议层输入仍然是空 —— "有数"不等于"能用"
@@ -177,34 +173,20 @@ def test_advice_input_never_carries_estimate_rows(tmp_path):
 # ---------- 验收 ①（端到端，主 seam）：/ranges 信封把「估算（未验证）」给到页面 ----------
 
 
-@pytest.fixture
-def db_path(tmp_path):
-    return str(tmp_path / "api.db")
-
-
-@pytest.fixture
-def client(db_path):
-    from analysis.api import create_app
-    from fastapi.testclient import TestClient
-
-    return TestClient(create_app(db_path))
-
-
-def _seed(path: str, rows: list[dict], *, hours: int = 24) -> None:
-    conn = connect(path)
+def _seed(conn, rows: list[dict], *, hours: int = 24) -> None:
     _env(conn, hours)
     insert_measurements(conn, rows)
 
 
-def test_ranges_envelope_from_a_single_seed_estimate_row(db_path, client):
+def test_ranges_envelope_from_a_single_seed_estimate_row(client, pg):
     """验收原话：**一条种子估算行**就能端到端验（不依赖真实数据到位）。
 
     一条行算不出区间（速率的**两侧**都要在），所以这条同时钉住"没行也不能丢掉档"：
     状态仍是 `estimate_only`、`flags` 仍有 `unverified`、`state_text` 里"为什么没行"
     照样说得出口 —— 独立态与空态**两条信息都不许被对方盖掉**。
     """
-    _seed(db_path, _estimate_rows(1))
-    refresh_ranges(db_path, computed_at="2026-08-02T00:00:00")
+    _seed(pg, _estimate_rows(1))
+    refresh_ranges(pg, computed_at="2026-08-02T00:00:00")
 
     body = client.get("/ranges").json()
 
@@ -217,15 +199,15 @@ def test_ranges_envelope_from_a_single_seed_estimate_row(db_path, client):
     assert "样本不足" in body["state_text"]
 
 
-def test_ranges_envelope_labels_the_estimate_tier(db_path, client):
-    """同一套 seam（临时库 + 测试客户端）验端到端：估算档在信封里**一眼可辨**。
+def test_ranges_envelope_labels_the_estimate_tier(client, pg):
+    """同一套 seam（PG 测试 schema + 测试客户端）验端到端：估算档在信封里**一眼可辨**。
 
     页面上的「估算（未验证）」标注是**前端票**的事，但后端要把三样东西都给到：
     `state`（独立态）/ `flags`（整维标注）/ 行上的 `tier`+`unverified`（逐行兜底）。
     少任何一样，前端都只能靠猜 —— 那正是 ADR-0025 要避免的"看着像真的假数"。
     """
-    _seed(db_path, _estimate_rows(24))
-    refresh_ranges(db_path, computed_at="2026-08-02T00:00:00")
+    _seed(pg, _estimate_rows(24))
+    refresh_ranges(pg, computed_at="2026-08-02T00:00:00")
 
     body = client.get("/ranges").json()
 
@@ -241,10 +223,10 @@ def test_ranges_envelope_labels_the_estimate_tier(db_path, client):
     assert body["detail"]["n_estimate_measurements"] == 24
 
 
-def test_ranges_envelope_keeps_verified_tables_unlabeled(db_path, client):
+def test_ranges_envelope_keeps_verified_tables_unlabeled(client, pg):
     """反向钉子：验证档的表**不许**被顺手标成未验证（标注不能到处撒）。"""
-    _seed(db_path, _verified_rows(24))
-    refresh_ranges(db_path, computed_at="2026-08-02T00:00:00")
+    _seed(pg, _verified_rows(24))
+    refresh_ranges(pg, computed_at="2026-08-02T00:00:00")
 
     body = client.get("/ranges").json()
 
@@ -253,59 +235,3 @@ def test_ranges_envelope_keeps_verified_tables_unlabeled(db_path, client):
     assert body["rows"] and all(
         r["tier"] == "verified" and r["unverified"] is False for r in body["rows"]
     )
-
-
-# ---------- 老库迁移：新列必须能**就地**补上 ----------
-
-
-def test_old_ranges_tables_get_the_tier_columns_in_place(tmp_path):
-    """现场库是长期存在的：老 `ranges` / `ranges_state` 要能就地补列。
-
-    `CREATE TABLE IF NOT EXISTS` **不补列** —— 漏一个就是每日重算抛
-    `no such column: tier`、页面收到一个 500，比空表更坏（空表至少说得出口）。
-    """
-    import sqlite3
-
-    from analysis.db import (
-        migrate,
-        replace_ranges,
-        write_ranges_state,
-    )
-
-    raw = sqlite3.connect(str(tmp_path / "old.db"))
-    raw.executescript("""
-        CREATE TABLE ranges (
-            stage TEXT NOT NULL, param TEXT NOT NULL, lo REAL, hi REAL, metric TEXT,
-            unit TEXT, rate_per_h REAL, rate_mm_per_h REAL, n INTEGER,
-            computed_at TEXT NOT NULL, PRIMARY KEY (stage, param));
-        CREATE TABLE ranges_state (
-            id INTEGER PRIMARY KEY CHECK (id = 1), computed_at TEXT, state TEXT NOT NULL,
-            state_text TEXT NOT NULL, detail TEXT, n_rows INTEGER NOT NULL DEFAULT 0,
-            metric TEXT, unit TEXT, updated_at TEXT NOT NULL);
-        INSERT INTO ranges VALUES ('0-20mm', 'temp_c', 21.0, 22.0, 'mean_len_mm', 'mm',
-                                   1.0, 1.0, 7, '2026-10-14T00:00:00');
-    """)
-    raw.commit()
-
-    added = migrate(raw)
-    assert {"ranges.tier", "ranges.n_verified", "ranges.n_estimate",
-            "ranges_state.flags"} <= set(added), f"补列清单少了：{added}"
-    assert migrate(raw) == [], "迁移幂等"
-
-    # 老行没标过档 ⇒ 读侧算**未验证**（fail-closed），不许当验证值
-    old = fetch_ranges(raw)[0]
-    assert old["tier"] is None and old["unverified"] is True
-    assert fetch_ranges_state(raw)["flags"] == []
-
-    # 新列能写能读
-    replace_ranges(raw, [{"stage": "0-20mm", "param": "temp_c", "lo": 21.0, "hi": 22.0,
-                          "metric": "mean_len_mm", "unit": "mm", "rate_per_h": 1.0, "n": 7,
-                          "tier": "estimate", "n_verified": 0, "n_estimate": 7}],
-                   computed_at="2026-10-15T00:00:00")
-    write_ranges_state(raw, state=STATE_ESTIMATE_ONLY, state_text="仅估算",
-                       flags=["unverified"], n_rows=1)
-    stored = fetch_ranges(raw)[0]
-    assert (stored["tier"], stored["n_verified"], stored["n_estimate"],
-            stored["unverified"]) == ("estimate", 0, 7, True)
-    assert fetch_ranges_state(raw)["flags"] == ["unverified"]
-

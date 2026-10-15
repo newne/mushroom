@@ -2,14 +2,13 @@
 
 用法::
 
-    python -m analysis.batch_ingest --db mushrooms.db --once
-    python -m analysis.batch_ingest --db mushrooms.db --interval 86400
-    python -m analysis.batch_ingest --db mushrooms.db --daily-at 05:20
-    ANALYSIS_STORE=postgres python -m analysis.batch_ingest --dsn <conninfo> --once
+    python -m analysis.batch_ingest --once
+    python -m analysis.batch_ingest --interval 86400
+    python -m analysis.batch_ingest --daily-at 05:20
 
-**落库走门面**（票 28 第 2 步）：SQLite 认 `--db`，PG 认 `--dsn`/`--schema`，后端由
-`ANALYSIS_STORE` 选（缺省 sqlite）。**取数那条**（pgsql 台账）与落库是两件事，各管各的
-连接串来源。
+**落库只有 PG**（票 28 contract）：`--dsn`/`--schema` 缺省走
+`PGSQL_DSN_FILE`（文件优先）/`PGSQL_DSN` 与 `ANALYSIS_PG_SCHEMA`；没有本地文件库这个选项。
+**取数那条**（pgsql 台账）与落库是两件事，各管各的连接串来源。
 
 **取数已改走 pgsql**（用户 2026-10-14 裁定）：`tools_mysql` 是业务数据库、**禁止使用**；
 旧的 `docker exec tools_mysql` 通路已下线。连接串走 `PGSQL_DSN_FILE`（文件优先）或 `PGSQL_DSN`，
@@ -31,9 +30,6 @@ from datetime import datetime, timedelta
 
 from analysis import store
 from analysis.batches import fetch_batches_with_report
-
-DEFAULT_DB = "mushrooms.db"
-
 
 def run_once(conn, *, runner=None, map_path: str | None = None) -> int:
     """同步一次台账，返回条数。取不到就抛错——**不退回"按断档切段"**。
@@ -101,7 +97,6 @@ def _daily_at(value: str) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="批次台账同步")
-    p.add_argument("--db", default=DEFAULT_DB, help=store.CLI_DB_HELP)
     p.add_argument("--dsn", help=store.CLI_DSN_HELP)
     p.add_argument("--schema", help=store.CLI_SCHEMA_HELP)
     p.add_argument("--once", action="store_true", help="同步一次后退出（与其它 ingest 同名参数）")
@@ -109,7 +104,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--daily-at", type=_daily_at, help="常驻：每天 HH:MM 同步一次")
     args = p.parse_args(argv)
 
-    conn = store.connect(args.db, dsn=args.dsn, schema=args.schema)
+    conn = store.connect(dsn=args.dsn, schema=args.schema)
     if args.interval or args.daily_at:
         loop(conn, interval_s=args.interval, daily_at=args.daily_at)
         return

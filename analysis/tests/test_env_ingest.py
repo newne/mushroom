@@ -1,5 +1,6 @@
 import pytest
-from analysis.db import connect, upsert_environment
+
+from analysis import store
 from analysis.env.adapters import CsvEnvSource, HttpEnvSource
 from analysis.env.ingest import run_once
 
@@ -21,12 +22,12 @@ def csv_dir(tmp_path):
 
 
 def read_env(conn):
-    return conn.execute("SELECT ts, zone, temp_c FROM environment ORDER BY ts, zone").fetchall()
+    """读回 `(ts, zone, temp_c)` 三元组（经存储层，不写裸 SQL）。"""
+    return [(r["ts"], r["zone"], r["temp_c"]) for r in store.fetch_environment(conn)]
 
 
-def test_csv_ingest_and_dedupe(csv_dir, tmp_path):
-    db = tmp_path / "t.db"
-    conn = connect(str(db))
+def test_csv_ingest_and_dedupe(csv_dir, pg):
+    conn = pg
     source = CsvEnvSource(str(csv_dir))
 
     cursor = run_once(conn, source)
@@ -87,13 +88,13 @@ def test_http_source_with_injected_transport():
     assert captured["url"] == "http://env.example.com/api?since=2026-08-30T00:00:00"
 
 
-def test_upsert_environment_overwrites(tmp_path):
-    conn = connect(str(tmp_path / "t.db"))
-    upsert_environment(conn, [
+def test_upsert_environment_overwrites(pg):
+    conn = pg
+    store.upsert_environment(conn, [
         {"ts": "t1", "zone": "z", "temp_c": 20.0, "rh_pct": None,
          "co2_ppm": None, "lamp_state": None},
     ])
-    upsert_environment(conn, [
+    store.upsert_environment(conn, [
         {"ts": "t1", "zone": "z", "temp_c": 21.0, "rh_pct": None,
          "co2_ppm": None, "lamp_state": None},
     ])

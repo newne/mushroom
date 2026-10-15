@@ -3,7 +3,7 @@
 这一票存在的理由是**字段级**取舍：只用行级 `estimate`，下游只能整行丢或整行收，
 两种都错（票 20 §2）。所以这里钉三件事：
 
-1. 五个列真的落进去了（新库建表 + 老库 `ALTER TABLE` 都能补），且 `/measurements` 读得出来；
+1. 五个列真的落进去了（PG 建表即当前形状），且 `/measurements` 读得出来；
 2. `estimated_fields` **读回来是 list**（写进去给 list 或 `+` 串都行）；
 3. `no_theta` / `height_uncorrected` **不让行变不可用**，但也**不进 `verified` 统计** ——
    两层判断各司其职；`height_uncorrected` 的竖直量**不是长度**，不许被当长度用。
@@ -11,11 +11,8 @@
 
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
-from analysis.api import create_app
-from analysis.db import ADDED_COLUMNS, MEASUREMENT_FIELDS, connect, migrate
+
 from analysis.evidence import (
     SCALE_SOURCES,
     field_is_usable,
@@ -25,7 +22,7 @@ from analysis.evidence import (
     normalize_scale_source,
     parse_estimated_fields,
 )
-from fastapi.testclient import TestClient
+from analysis.schema import MEASUREMENT_FIELDS
 
 #: 票 20 新增的列（追加在 `quality` 之后；测量侧同步时顺序也要照这个来）。
 NEW_FIELDS = ("estimated_fields", "scale_source", "mm_per_px", "scale_ref_mm", "scale_ref_px")
@@ -46,57 +43,27 @@ def measurement(**kw) -> dict:
     return row
 
 
-def client(tmp_path) -> TestClient:
-    return TestClient(create_app(str(tmp_path / "e.db")))
-
-
-def app_and_db(tmp_path, name="e.db"):
-    """返回 `(app, db_path)`：有些断言要直接跑库层（如 `compute_ranges`）。"""
-    db = str(tmp_path / name)
-    return create_app(db), db
-
-
 # ---------- 列真的落了 ----------
 
 
-def test_new_columns_are_in_the_schema_and_in_added_columns(tmp_path):
-    add = ADDED_COLUMNS["measurements"]
-    assert set(NEW_FIELDS) <= set(add), "老库靠 ADDED_COLUMNS 就地补列，漏一个就是静默丢字段"
+def test_the_evidence_columns_are_in_the_contract_and_in_the_table(pg, pg_schema, catalog):
+    """字段清单的末五行就是证据列，且 PG 表里真的有这五列（顺序由 `MEASUREMENT_FIELDS` 定义）。"""
     assert MEASUREMENT_FIELDS[-len(NEW_FIELDS):] == NEW_FIELDS, "新列追加在末尾，顺序两侧一致"
 
-    conn = connect(str(tmp_path / "new.db"))
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(measurements)")}
-    assert set(NEW_FIELDS) <= cols
-
-
-def test_migration_adds_the_evidence_columns_to_an_old_table(tmp_path):
-    """老库（没有这五列）走 `ALTER TABLE ADD COLUMN`，老行留 NULL —— 不编证据。"""
-    path = str(tmp_path / "old.db")
-    raw = sqlite3.connect(path)
-    raw.executescript("""
-        CREATE TABLE measurements (
-          ts TEXT NOT NULL, room_id TEXT NOT NULL, box_id TEXT NOT NULL,
-          quality TEXT, PRIMARY KEY (ts, room_id, box_id)
-        );
-        INSERT INTO measurements (ts, room_id, box_id, quality)
-        VALUES ('2026-10-01T10:00:00', '611', 'B105', 'verified');
-    """)
-    raw.commit()
-
-    added = migrate(raw)
-    assert set(added) >= {f"measurements.{f}" for f in NEW_FIELDS}
-    row = raw.execute(
-        "SELECT estimated_fields, scale_source, mm_per_px FROM measurements"
-    ).fetchone()
-    assert row == (None, None, None), "老行是 NULL（那时没有证据），不是 0、不是空串"
-    assert migrate(raw) == [], "迁移幂等"
+    catalog.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = %s AND table_name = 'measurements'",
+        (pg_schema,),
+    )
+    cols = {row[0] for row in catalog.fetchall()}
+    assert set(NEW_FIELDS) <= cols, "列真的落在表里，漏一个就是静默丢字段"
 
 
 # ---------- 形状：estimated_fields 读回来是 list ----------
 
 
-def test_estimated_fields_round_trips_as_a_list(tmp_path):
-    with client(tmp_path) as c:
+def test_estimated_fields_round_trips_as_a_list(client):
+    with client as c:
         c.post("/ingest", json={"rows": [measurement(
             estimated_fields=["mean_cluster_w_mm", "mean_cluster_h_mm"],
             scale_source="bag_standard", mm_per_px=0.6012,
@@ -110,18 +77,18 @@ def test_estimated_fields_round_trips_as_a_list(tmp_path):
     assert got["mm_per_px"] == pytest.approx(0.6012)
 
 
-def test_estimated_fields_accepts_the_plus_joined_wire_form(tmp_path):
+def test_estimated_fields_accepts_the_plus_joined_wire_form(client):
     """测量侧线上发的是 `+` 串（`field_is_usable` 就那么 split）—— 两种形状都收。"""
-    with client(tmp_path) as c:
+    with client as c:
         c.post("/ingest", json={"rows": [measurement(
             estimated_fields="mean_cluster_w_mm+mean_len_mm")]})
         got = c.get("/measurements").json()[0]
     assert got["estimated_fields"] == ["mean_cluster_w_mm", "mean_len_mm"]
 
 
-def test_no_estimation_means_null_not_empty_string(tmp_path):
+def test_no_estimation_means_null_not_empty_string(client):
     """没有估算 ⇒ NULL（不是 `""`、不是 `[]`）：空串会让"没有估算"和"估算清单是空的"分不清。"""
-    with client(tmp_path) as c:
+    with client as c:
         c.post("/ingest", json={"rows": [measurement(quality="verified")]})
         got = c.get("/measurements").json()[0]
     assert got["estimated_fields"] == []
@@ -169,18 +136,16 @@ def test_no_theta_does_not_make_the_row_unusable():
     assert is_usable("estimate+height_uncorrected+no_theta") is True
 
 
-def test_height_uncorrected_row_keeps_its_values_and_stays_out_of_verified_stats(tmp_path):
+def test_height_uncorrected_row_keeps_its_values_and_stays_out_of_verified_stats(client, pg):
     """`height_uncorrected` 的竖直量是**投影跨度不是长度**：留得住（展示/相对比较），
     但绝不进 `verified` 统计（区间表/建议层只吃 verified）。"""
-    app, db = app_and_db(tmp_path)
-    with TestClient(app) as c:
-        c.post("/ingest", json={"rows": [measurement(
-            quality="estimate+no_theta+height_uncorrected+no_angle_profile",
-            estimated_fields=["mean_cluster_w_mm", "mean_cluster_h_mm"],
-            scale_source="bag_standard",
-            mean_cluster_w_mm=61.5, mean_cluster_h_mm=44.0,
-        )]})
-        row = c.get("/measurements").json()[0]
+    client.post("/ingest", json={"rows": [measurement(
+        quality="estimate+no_theta+height_uncorrected+no_angle_profile",
+        estimated_fields=["mean_cluster_w_mm", "mean_cluster_h_mm"],
+        scale_source="bag_standard",
+        mean_cluster_w_mm=61.5, mean_cluster_h_mm=44.0,
+    )]})
+    row = client.get("/measurements").json()[0]
     assert row["mean_cluster_h_mm"] == 44.0, "值不许被行级 flag 抹掉"
     assert row["estimated_fields"] == ["mean_cluster_w_mm", "mean_cluster_h_mm"]
     assert field_is_usable(row["quality"], row["estimated_fields"], "mean_cluster_w_mm") is False
@@ -188,7 +153,7 @@ def test_height_uncorrected_row_keeps_its_values_and_stays_out_of_verified_stats
 
     from analysis.align import compute_ranges
 
-    run = compute_ranges(db)
+    run = compute_ranges(pg)
     assert run.rows == [], "估算行不许进区间表（这行既没 verified，竖直量也不是长度）"
 
 

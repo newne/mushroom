@@ -20,9 +20,9 @@ from analysis import store
 from analysis.audit import summarize_operations
 from analysis.batches import dedupe_by_identity, window_of
 from analysis.jobs import default_jobs, run_job
-# 字段清单是**契约常量**（单一实现处是 db.py，pg_store 也从那里取），不是数据访问：
-# 数据访问一律经门面 `analysis.store`。
-from analysis.db import IMAGE_FIELDS, MEASUREMENT_FIELDS, ROUND_FIELDS
+# 字段清单是**契约常量**（单一实现处是 `analysis.schema`），不是数据访问：
+# 数据访问一律经 `analysis.store`。
+from analysis.schema import IMAGE_FIELDS, MEASUREMENT_FIELDS, ROUND_FIELDS
 from analysis.environment import (
     batches as env_batches,
     series as env_series,
@@ -77,19 +77,19 @@ def _span_hours(start: str, end: str | None) -> float:
 
 
 def create_app(
-    db_path: str | None = None,
     *,
     store_dsn: str | None = None,
     store_schema: str | None = None,
     raw_source_factory=None,
     jobs_factory=default_jobs,
 ) -> FastAPI:
-    """建应用。`db_path` 缺省取环境变量 `ANALYSIS_DB`（容器里显式给路径，不靠工作目录）。
+    """建应用。
 
-    **存储后端由 `ANALYSIS_STORE` 选**（票 28：缺省 `sqlite`，`postgres` 走 PG），
-    这里只把连接参数交给门面：`store_dsn` / `store_schema` **只在 PG 后端参与**，
-    缺省分别走 `PGSQL_DSN_FILE`（文件优先）/`PGSQL_DSN` 与 `ANALYSIS_PG_SCHEMA`；
-    SQLite 后端只认 `db_path`。两个参数都不传就是现状（容器里由 compose 给 `ANALYSIS_DB`）。
+    **存储只有一条路**（票 28 contract）：经 `analysis.store` 连 PG。连接串按
+    `store_dsn` → `PGSQL_DSN_FILE`（文件优先）→ `PGSQL_DSN` 解析，schema 按
+    `store_schema` → `ANALYSIS_PG_SCHEMA` → `analysis`；缺了连接串就报
+    `StoreConfigError`。**没有"退回本地文件库"的分支**（用户 2026-10-15 裁定：
+    严禁本地文件数据库），也没有可关闭的后端开关。
 
     **常驻作业在 lifespan 里跑**（票 12）：API 与 env/audit/batch 三个 ingest
     同一个容器、同一个进程，定时是进程内 asyncio 任务 —— 不靠容器重启，
@@ -97,14 +97,9 @@ def create_app(
     `analysis.jobs.default_jobs`，而不设周期环境变量时它返回空表 ⇒
     开发与测试里不会有后台网络请求。
     """
-    resolved_db = db_path or os.environ.get("ANALYSIS_DB", "mushrooms.db")
-    # 单 worker 部署，允许跨线程复用连接（FastAPI 线程池执行 sync 端点）。
-    # 后端由门面选；PG 下 `resolved_db` 不参与（连接串见 create_app 文档）。
-    conn = store.connect(
-        resolved_db, check_same_thread=False, dsn=store_dsn, schema=store_schema
-    )
-    # 共享形态由后端决定（SQLite 开 WAL；PG 无事可做）—— 这里不写后端专有语句。
-    store.prepare_connection(conn)
+    # 单 worker 部署，一份连接同时给请求线程与 lifespan 里的作业线程用：
+    # psycopg 连接本身线程安全（同一连接上的操作会串行化）。
+    conn = store.connect(dsn=store_dsn, schema=store_schema)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):

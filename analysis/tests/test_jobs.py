@@ -14,26 +14,23 @@ import time
 
 import pytest
 from analysis.api import create_app
-from analysis.db import connect
 from analysis.jobs import IngestJob, default_jobs
 from fastapi.testclient import TestClient
 
 
-def test_without_interval_env_no_job_runs(tmp_path):
-    path = str(tmp_path / "quiet.db")
-    assert default_jobs(connect(path)) == []
+def test_without_interval_env_no_job_runs(pg):
+    assert default_jobs(pg) == []
 
 
-def test_jobs_are_assembled_from_env(monkeypatch, tmp_path):
+def test_jobs_are_assembled_from_env(monkeypatch, pg):
     monkeypatch.setenv("ENV_INGEST_INTERVAL", "300")
     monkeypatch.setenv("AUDIT_INTERVAL", "600")
     monkeypatch.setenv("EMS_ACCOUNT", "acct")
     monkeypatch.setenv("EMS_PASSWORD_MD5", "md5")
     monkeypatch.setenv("BATCH_AT", "05:20")
     monkeypatch.setenv("RANGES_AT", "05:40")
-    path = str(tmp_path / "jobs.db")
 
-    jobs = {job.name: job for job in default_jobs(connect(path))}
+    jobs = {job.name: job for job in default_jobs(pg)}
     assert set(jobs) == {"env", "audit", "batch", "ranges"}
     assert jobs["env"].interval_s == 300
     assert jobs["audit"].interval_s == 600
@@ -55,11 +52,10 @@ def test_failures_back_off_with_a_cap():
     assert daily.next_delay_s(1) <= daily.backoff_cap_s, "每天一次的作业失败后要更快重试（不是等明天）"
 
 
-def test_audit_job_is_skipped_without_credentials(monkeypatch, tmp_path):
+def test_audit_job_is_skipped_without_credentials(monkeypatch, pg):
     """没凭据就别启动：拿空口令去打环控平台只是白挨一次 401。"""
     monkeypatch.setenv("AUDIT_INTERVAL", "600")
-    path = str(tmp_path / "nocreds.db")
-    assert default_jobs(connect(path)) == []
+    assert default_jobs(pg) == []
 
 
 def test_job_needs_exactly_one_period():
@@ -69,7 +65,7 @@ def test_job_needs_exactly_one_period():
         IngestJob("x", lambda: None, interval_s=1, daily_at="05:20")
 
 
-def test_lifespan_runs_the_job_once_then_stops(tmp_path):
+def test_lifespan_runs_the_job_once_then_stops(pg_dsn, pg_schema):
     first_run = threading.Event()
     calls: list[int] = []
 
@@ -80,7 +76,7 @@ def test_lifespan_runs_the_job_once_then_stops(tmp_path):
     def factory(conn):
         return [IngestJob("stub", run, interval_s=3600)]
 
-    app = create_app(str(tmp_path / "life.db"), jobs_factory=factory)
+    app = create_app(store_dsn=pg_dsn, store_schema=pg_schema, jobs_factory=factory)
     with TestClient(app) as c:
         assert c.get("/healthz").json() == {"ok": True}
         assert first_run.wait(5.0), "lifespan 启动后应当先跑一轮（不是等一个周期）"
@@ -90,19 +86,21 @@ def test_lifespan_runs_the_job_once_then_stops(tmp_path):
     assert len(calls) == after_shutdown, "退出后不该还有作业在跑"
 
 
-def test_db_path_defaults_to_analysis_db_env(monkeypatch, tmp_path):
-    """容器里靠 `ANALYSIS_DB` 给路径，不靠工作目录（票 12 §2）。"""
-    target = tmp_path / "from-env.db"
-    monkeypatch.setenv("ANALYSIS_DB", str(target))
+def test_dsn_and_schema_come_from_the_environment(monkeypatch, tmp_path, pg_dsn, pg_schema):
+    """容器里靠 `PGSQL_DSN_FILE`（连接串）与 `ANALYSIS_PG_SCHEMA`（schema）给配置（票 12 §2 / 票 28）：
+    `create_app()` 一个参数都不传也要连得上，而不是去找工作目录下的某个文件。"""
+    dsn_file = tmp_path / "pgsql.dsn"
+    dsn_file.write_text(pg_dsn, encoding="utf-8")
+    monkeypatch.setenv("PGSQL_DSN_FILE", str(dsn_file))
+    monkeypatch.setenv("ANALYSIS_PG_SCHEMA", pg_schema)
     with TestClient(create_app()) as c:
         assert c.get("/healthz").json() == {"ok": True}
-    assert target.exists()
 
 
 # ---------- 异常隔离：作业炸了不许把 API 拖崩（Chief 2026-10-13 硬要求） ----------
 
 
-def test_a_failing_job_never_takes_the_api_down(tmp_path):
+def test_a_failing_job_never_takes_the_api_down(pg_dsn, pg_schema):
     runs: list[int] = []
 
     def run() -> None:
@@ -112,7 +110,7 @@ def test_a_failing_job_never_takes_the_api_down(tmp_path):
     def factory(conn):
         return [IngestJob("bad", run, interval_s=0.01, backoff_cap_s=0.02)]
 
-    app = create_app(str(tmp_path / "bad.db"), jobs_factory=factory)
+    app = create_app(store_dsn=pg_dsn, store_schema=pg_schema, jobs_factory=factory)
     with TestClient(app) as c:
         assert c.get("/healthz").json() == {"ok": True}
         time.sleep(0.3)
@@ -120,9 +118,10 @@ def test_a_failing_job_never_takes_the_api_down(tmp_path):
     assert len(runs) >= 2, "失败后要重试，不是就此停掉"
 
 
-def test_broken_jobs_factory_still_serves_the_api(tmp_path):
+def test_broken_jobs_factory_still_serves_the_api(pg_dsn, pg_schema):
     def factory(conn):
         raise RuntimeError("装配就炸了")
 
-    with TestClient(create_app(str(tmp_path / "f.db"), jobs_factory=factory)) as c:
+    app = create_app(store_dsn=pg_dsn, store_schema=pg_schema, jobs_factory=factory)
+    with TestClient(app) as c:
         assert c.get("/healthz").json() == {"ok": True}

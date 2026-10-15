@@ -35,14 +35,13 @@ def test_record_fields_match_ticket_11():
 
 
 def test_record_fields_are_the_analysis_contract():
-    """与 analysis 侧清单**名字集合一字不差**；顺序以 analysis 建表 DDL 为准。
+    """与 analysis 侧清单**名字集合一字不差**（票 28 contract 后常量在 `analysis.schema`）。
 
     为什么不是"元组逐位相等"：analysis 侧 `MEASUREMENT_FIELDS` 是 `INSERT` 的列清单
-    （用命名占位符，顺序无所谓），而线上格式的权威顺序是 `db.py` 的 `CREATE TABLE`
-    （菌簇四列在 `p10_len`/`p90_len` 之前）。比较集合才是这两份清单真正的契约；
+    （用命名占位符，顺序无所谓），按集合比才是这两份清单真正的契约；
     比较顺序会在任一侧无害重排时误报。
     """
-    from analysis.db import MEASUREMENT_FIELDS
+    from analysis.schema import MEASUREMENT_FIELDS
 
     assert set(RECORD_FIELDS) == set(MEASUREMENT_FIELDS)
     assert len(RECORD_FIELDS) == len(MEASUREMENT_FIELDS)

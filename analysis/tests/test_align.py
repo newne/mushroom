@@ -56,16 +56,13 @@ def test_best_ranges_finds_hot_bin():
     assert (best["metric"], best["unit"]) == ("mean_len_mm", "mm")
 
 
-def test_best_ranges_carries_area_dimension_without_mm_rate():
+def test_best_ranges_carries_area_dimension_without_mm_rate(pg):
     """面积口径下 `rate_mm_per_h` 不许有值（旧字段只在 unit='mm/h' 时有效）。
 
     这里直接构造 align 之后的形状（固定一个 stage）——本用例钉的是**量纲怎么跟着走**，
     不是分箱本身（分箱由 make_data 那组用例覆盖）。
     """
-    import os
-    import tempfile
-
-    from analysis.db import connect, fetch_ranges, replace_ranges
+    from analysis import store
 
     merged = pd.DataFrame({
         "room_id": ["611"] * 12,
@@ -83,9 +80,8 @@ def test_best_ranges_carries_area_dimension_without_mm_rate():
     assert {r["unit"] for r in ranges} == {"mm2"}
     assert all(r["metric"] == "mean_area_mm2" for r in ranges)
 
-    conn = connect(os.path.join(tempfile.mkdtemp(), "r.db"))
-    replace_ranges(conn, ranges, computed_at="2026-10-14T00:00:00")
-    stored = fetch_ranges(conn)
+    store.replace_ranges(pg, ranges, computed_at="2026-10-14T00:00:00")
+    stored = store.fetch_ranges(pg)
     assert stored[0]["unit"] == "mm2"
     assert stored[0]["rate_per_h"] is not None
     assert stored[0]["rate_mm_per_h"] is None, "mm²/h 不许塞进一个叫 _mm_ 的字段"
@@ -136,7 +132,7 @@ def test_unverified_rows_do_not_enter_the_curve():
     assert len(kept) < len(all_rows)
 
 
-def test_rate_needs_two_verified_neighbours(tmp_path):
+def test_rate_needs_two_verified_neighbours():
     """速率的两侧都必须是相邻整点的可用值；任一侧缺测 ⇒ 留空，不许凑数。
 
     旧实现用 `groupby.diff()`：缺一小时会把「2 小时的增长」算成「每小时的增长」，

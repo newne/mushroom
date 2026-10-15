@@ -8,11 +8,9 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
-from analysis.api import create_app
-from analysis.db import connect, upsert_operations
 from analysis.setpoints import SetpointError, daily_states, day_range
+from analysis.store import upsert_operations
 
 
 def op(ts: str, *, device="TD1_Q3MDHUM02", point="1", value="5", **extra) -> dict:
@@ -116,21 +114,13 @@ def test_multiple_points_are_kept_separate():
 # ---------- 接口层（含窗口起点之前的基线，走真库） ----------
 
 
-def _api_db(tmp_path, rows):
-    db = str(tmp_path / "sp.db")
-    conn = connect(db)
-    upsert_operations(conn, rows)
-    conn.close()
-    return db
-
-
-def test_api_daily_endpoint_reads_operations_only(tmp_path):
-    db = _api_db(tmp_path, [
+def test_api_daily_endpoint_reads_operations_only(client, pg):
+    upsert_operations(pg, [
         op("2026-09-20T09:00:00", value="4"),      # 窗口外：作基线
         op("2026-10-01T08:10:00", value="3"),
         op("2026-10-01T20:40:00", value="7"),
     ])
-    got = TestClient(create_app(db)).get(
+    got = client.get(
         "/setpoints/daily", params={"zone": "607", "start": "2026-10-01", "end": "2026-10-02"}
     ).json()
     assert got["ok"] is True and got["days"] == ["2026-10-01", "2026-10-02"]
@@ -140,9 +130,7 @@ def test_api_daily_endpoint_reads_operations_only(tmp_path):
     assert got["summary"]["n_baseline"] == 1, "基线取到了，所以第一天不是未知"
 
 
-def test_api_daily_endpoint_validates_inputs(tmp_path):
-    db = _api_db(tmp_path, [])
-    client = TestClient(create_app(db))
+def test_api_daily_endpoint_validates_inputs(client):
     assert client.get("/setpoints/daily", params={"start": "2026-10-01", "end": "2026-10-02"}).status_code == 400
     assert client.get("/setpoints/daily", params={"zone": "607"}).status_code == 400
     bad = client.get("/setpoints/daily",
@@ -150,10 +138,9 @@ def test_api_daily_endpoint_validates_inputs(tmp_path):
     assert bad.status_code == 400 and "早于" in bad.json()["detail"]
 
 
-def test_api_daily_endpoint_does_not_touch_device_setpoint_changes(tmp_path):
+def test_api_daily_endpoint_does_not_touch_device_setpoint_changes(client):
     """ADR-0022：事件源只有 `operations`。产物里不许出现另一套来源的字段。"""
-    db = _api_db(tmp_path, [])
-    body = TestClient(create_app(db)).get(
+    body = client.get(
         "/setpoints/daily", params={"zone": "607", "start": "2026-10-01", "end": "2026-10-01"}
     ).json()
     text = str(body)

@@ -164,20 +164,18 @@ def test_corrupt_map_file_warns_and_returns_empty(tmp_path, capsys):
     assert "读不了" in capsys.readouterr().out
 
 
-def test_batch_map_is_built_from_our_own_db(tmp_path):
+def test_batch_map_is_built_from_our_own_db(pg, pg_dsn, pg_schema):
     """映射来源是**我们自己的库**里既有行，不碰业务库。"""
     from analysis.batch_map import build_map
     from analysis.batches import fetch_batches as _unused  # noqa: F401  (名字不同的两条路径)
-    from analysis.db import connect, upsert_batches
+    from analysis.store import upsert_batches
 
-    path = str(tmp_path / "ours.db")
-    conn = connect(path)
-    upsert_batches(conn, [
+    upsert_batches(pg, [
         {"room_id": "611", "entry_date": "2026-09-30", "batch_no": "mogu-107",
          "batch_id": "107"},
         {"room_id": "612", "entry_date": "2026-09-30", "batch_no": None, "batch_id": None},
     ])
-    assert build_map(path) == {"611|2026-09-30": "mogu-107"}
+    assert build_map(dsn=pg_dsn, schema=pg_schema) == {"611|2026-09-30": "mogu-107"}
 
 
 # ---------- 来源差异可观测（并集口径 + 差异看得见） ----------

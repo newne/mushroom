@@ -154,8 +154,8 @@ def default_jobs(conn) -> list[IngestJob]:
         from analysis.align import refresh_ranges
 
         def run_ranges() -> None:
-            # 传连接而不是路径（票 28 第 2 步）：PG 下没有"路径"这回事，重连会丢 schema。
-            n = refresh_ranges(conn=conn)
+            # 用 API 那一份连接（票 28 contract：refresh_ranges 只吃连接，不按路径重连）。
+            n = refresh_ranges(conn)
             print(f"[ranges] 重算完成，{n} 行区间")
 
         jobs.append(IngestJob("ranges", run_ranges, daily_at=ranges_at))

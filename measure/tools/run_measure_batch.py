@@ -4,14 +4,15 @@
 而不是评估脚本里另拼一套。用途：
 
 1. 证明"接了线"在**整批**帧上成立（20 列、证据列、`height_uncorrected`、NULL 语义）；
-2. 给出可入库的行文件（`rows.jsonl`），供本地 sqlite 入库验证 `/measurements` 非零行；
+2. 给出可入库的行文件（`rows.jsonl`），`--ingest` 时经 analysis 存储层灌进 PG
+   验证 `/measurements` 非零行；
 3. 记整批耗时与轮增量（性能口径）。
 
 用法（仓库根）：
 
     python measure/tools/run_measure_batch.py --out .scratch/measure-batch
     python measure/tools/run_measure_batch.py --out .scratch/measure-batch \
-        --ingest-sqlite .scratch/measure-batch/measurements.sqlite
+        --ingest --ingest-schema analysis_test_local
 
 `--mm-per-px` **默认不传**：一期口径是**菌包标准尺寸**当帧内标尺（`scale_source=bag_standard`）；
 给了就是站位标定优先（ADR-0024，`calibration_target`）。
@@ -59,8 +60,12 @@ def main() -> int:
     ap.add_argument("--room", default="611")
     ap.add_argument("--mm-per-px", type=float, default=None)
     ap.add_argument("--emit-empty", action="store_true", default=True)
-    ap.add_argument("--ingest-sqlite", default=None,
-                    help="给了就把行灌进这个 sqlite（用 analysis.db 的建表与 upsert）")
+    ap.add_argument("--ingest", action="store_true",
+                    help="把行经 analysis 存储层灌进 PG（用户 2026-10-15 裁定：严禁本地文件库）")
+    ap.add_argument("--ingest-dsn", default=None,
+                    help="（配 --ingest）显式连接串；缺省走 PGSQL_DSN_FILE / PGSQL_DSN")
+    ap.add_argument("--ingest-schema", default=None,
+                    help="（配 --ingest）PG schema；缺省 ANALYSIS_PG_SCHEMA，再缺省 analysis")
     args = ap.parse_args()
 
     samples, out = Path(args.samples), Path(args.out)
@@ -103,29 +108,33 @@ def main() -> int:
         if "标尺散布" in line or "height_uncorrected" in line or "测量：" in line:
             print("LOG:", line)
 
-    if args.ingest_sqlite:
-        _ingest(Path(args.ingest_sqlite), rows)
+    if args.ingest:
+        _ingest(args.ingest_dsn, args.ingest_schema, rows)
     return 0
 
 
-def _ingest(db_path: Path, rows: list[dict]) -> None:
-    """用 analysis 侧的建表 + upsert 灌进本地 sqlite：证明 `/measurements` 非零行。"""
-    sys.path.insert(0, str(_HERE.parents[2] / "analysis" / "src"))
-    from analysis.db import connect, insert_measurements
+def _ingest(dsn: str | None, schema: str | None, rows: list[dict]) -> None:
+    """经 analysis 存储层灌进 PG（票 28 contract 后**只有**这条路）：证明 `/measurements` 非零行。
 
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = connect(str(db_path))
-    insert_measurements(conn, rows)
-    conn.commit()
-    n = conn.execute("SELECT COUNT(*) FROM measurements").fetchone()[0]
-    cols = [c[1] for c in conn.execute("PRAGMA table_info(measurements)")]
-    print(f"\n本地入库：{db_path} ⇒ measurements **{n} 行**（列 {len(cols)}：{', '.join(cols)}）")
-    sample = conn.execute(
-        "SELECT ts, room_id, box_id, n, mean_cluster_w_mm, mean_cluster_h_mm, quality,"
-        " estimated_fields, scale_source, mm_per_px FROM measurements LIMIT 2").fetchall()
-    for s in sample:
-        print("  样例行:", s)
-    conn.close()
+    连接口径与生产一致：`--ingest-dsn` → `PGSQL_DSN_FILE`（文件优先）→ `PGSQL_DSN`；
+    schema 走 `--ingest-schema` → `ANALYSIS_PG_SCHEMA` → `analysis`。
+    """
+    sys.path.insert(0, str(_HERE.parents[2] / "analysis" / "src"))
+    from analysis import store
+    from analysis.schema import MEASUREMENT_FIELDS
+
+    conn = store.connect(dsn=dsn, schema=schema)
+    try:
+        store.insert_measurements(conn, rows)
+        got = store.fetch_measurements(conn)
+        print(f"\n入库：schema `{conn.schema}` ⇒ measurements **{len(got)} 行**"
+              f"（列 {len(MEASUREMENT_FIELDS)}：{', '.join(MEASUREMENT_FIELDS)}）")
+        for row in got[:2]:
+            print("  样例行:", tuple(row.get(f) for f in (
+                "ts", "room_id", "box_id", "n", "mean_cluster_w_mm", "mean_cluster_h_mm",
+                "quality", "estimated_fields", "scale_source", "mm_per_px")))
+    finally:
+        conn.close()
 
 
 def _quant(vals: list[float], q: float) -> float | None:

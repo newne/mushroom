@@ -1,19 +1,3 @@
-import pytest
-from analysis.api import create_app
-from fastapi.testclient import TestClient
-
-
-@pytest.fixture
-def db_path(tmp_path):
-    return str(tmp_path / "api.db")
-
-
-@pytest.fixture
-def client(db_path):
-    app = create_app(db_path)
-    return TestClient(app)
-
-
 def test_healthz(client):
     assert client.get("/healthz").json() == {"ok": True}
 
@@ -175,11 +159,11 @@ def test_ranges_empty_db(client):
     assert body["computed_at"] is None
 
 
-def test_ranges_empty_state_says_why(client, db_path):
+def test_ranges_empty_state_says_why(client, pg):
     """重算过但要空（没有测量行）⇒ 状态要能说出是**哪一步**空的。"""
     from analysis.align import refresh_ranges
 
-    refresh_ranges(db_path, computed_at="2026-08-02T00:00:00")
+    refresh_ranges(pg, computed_at="2026-08-02T00:00:00")
 
     body = client.get("/ranges").json()
     assert body["rows"] == []
@@ -189,13 +173,13 @@ def test_ranges_empty_state_says_why(client, db_path):
     assert body["computed_at"] == "2026-08-02T00:00:00"
 
 
-def test_ranges_state_survives_a_metric_filter_removal(client, db_path):
+def test_ranges_state_survives_a_metric_filter_removal(client, pg):
     """（票 05 收口）`/ranges` 不提供 `metric` 过滤参数 —— 行上带 `metric`/`unit` 就够，
     多的查询参数是没人要的契约面。这条测试钉住"别再加回去"。"""
     from analysis.align import refresh_ranges
 
-    _seed_24h_growth(db_path)
-    refresh_ranges(db_path, computed_at="2026-08-02T00:00:00")
+    _seed_24h_growth(pg)
+    refresh_ranges(pg, computed_at="2026-08-02T00:00:00")
 
     body = client.get("/ranges").json()
     assert body["state"] == "ok"
@@ -203,34 +187,33 @@ def test_ranges_state_survives_a_metric_filter_removal(client, db_path):
     assert all(r["metric"] == "mean_len_mm" and r["unit"] == "mm" for r in body["rows"])
 
 
-def _seed_24h_growth(db_path):
+def _seed_24h_growth(conn):
     """24h 合成数据：温度 22/26 交替、杆长逐小时 +1mm。"""
-    from analysis.db import connect, insert_measurements, upsert_environment
+    from analysis import store
 
-    conn = connect(db_path)
     rows = []
     for i in range(24):
         ts = f"2026-08-01T{i:02d}:00:00"
         rows.append({"ts": ts, "room_id": "room1", "box_id": "B01", "mean_len_mm": 10.0 + i,
                      "quality": "verified"})
-        upsert_environment(conn, [{"ts": ts, "zone": "room1",
-                                   "temp_c": 22.0 + (i % 2) * 4.0,
-                                   "rh_pct": 85.0, "co2_ppm": 800.0, "lamp_state": 2.0}])
-    insert_measurements(conn, rows)
+        store.upsert_environment(conn, [{"ts": ts, "zone": "room1",
+                                         "temp_c": 22.0 + (i % 2) * 4.0,
+                                         "rh_pct": 85.0, "co2_ppm": 800.0, "lamp_state": 2.0}])
+    store.insert_measurements(conn, rows)
 
 
-def test_ranges_reads_materialized_table(client, db_path):
+def test_ranges_reads_materialized_table(client, pg):
     """评审 #6：批处理写入 ranges 表，API 只读该表（不再每请求重算）。"""
+    from analysis import store
     from analysis.align import refresh_ranges
-    from analysis.db import connect, fetch_ranges
 
-    _seed_24h_growth(db_path)
+    _seed_24h_growth(pg)
 
-    n = refresh_ranges(db_path, computed_at="2026-08-02T00:00:00")
+    n = refresh_ranges(pg, computed_at="2026-08-02T00:00:00")
     assert n >= 1
 
     body = client.get("/ranges").json()
-    assert body["rows"] == fetch_ranges(connect(db_path))
+    assert body["rows"] == store.fetch_ranges(pg)
     assert body["rows"][0]["computed_at"] == "2026-08-02T00:00:00"
     assert body["state"] == "ok"
     assert body["count"] == n

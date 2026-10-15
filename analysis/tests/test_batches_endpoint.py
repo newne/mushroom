@@ -12,23 +12,19 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
-from analysis.api import create_app
-from analysis.db import (
-    connect,
+from analysis.store import (
     fetch_batches,
     fetch_batches_state,
     replace_batches,
     upsert_batches,
+    upsert_environment,
 )
-from fastapi.testclient import TestClient
 
 
-def _db(tmp_path, rows=None, *, name="b.db"):
-    path = str(tmp_path / name)
-    conn = connect(path)
+def _seed(conn, rows=None) -> None:
+    """把台账行写进本用例的库（每个用例一个独立 schema）。"""
     if rows:
         upsert_batches(conn, rows)
-    return path
 
 
 def batch(room, entry, *, batch_no=None, batch_id=None):
@@ -39,12 +35,12 @@ def batch(room, entry, *, batch_no=None, batch_id=None):
 # ---------- 端点形状 ----------
 
 
-def test_batches_endpoint_shape_for_a_canonical_room(tmp_path):
-    path = _db(tmp_path, [
+def test_batches_endpoint_shape_for_a_canonical_room(client, pg):
+    path = _seed(pg, [
         batch("611", "2026-08-01", batch_no="mogu-103"),
         batch("611", "2026-09-30", batch_no="mogu-107"),
     ])
-    got = TestClient(create_app(path)).get("/batches", params={"room_id": "611"}).json()
+    got = client.get("/batches", params={"room_id": "611"}).json()
     assert got["ok"] is True and got["room_id"] == "611"
     assert got["n_batches"] == 2
     assert [b["entry_date"] for b in got["batches"]] == ["2026-09-30", "2026-08-01"], "最新在前"
@@ -56,9 +52,9 @@ def test_batches_endpoint_shape_for_a_canonical_room(tmp_path):
     assert got["batches"][1]["until"] == "2026-09-30", "窗口右端=下一批入库日"
 
 
-def test_batches_endpoint_resolves_legacy_room_code(tmp_path):
-    path = _db(tmp_path, [batch("7", "2026-10-10", batch_no="mogu-110")])
-    got = TestClient(create_app(path)).get("/batches", params={"room_id": "607"}).json()
+def test_batches_endpoint_resolves_legacy_room_code(client, pg):
+    path = _seed(pg, [batch("7", "2026-10-10", batch_no="mogu-110")])
+    got = client.get("/batches", params={"room_id": "607"}).json()
     assert got["ok"] is True and got["n_batches"] == 1
     one = got["batches"][0]
     assert one["room_id"] == "607" and one["room_id_raw"] == "7"
@@ -67,55 +63,54 @@ def test_batches_endpoint_resolves_legacy_room_code(tmp_path):
     assert got["room_alias"]["n_resolved"] == 1
 
 
-def test_batches_endpoint_validates_input(tmp_path):
-    path = _db(tmp_path, [batch("611", "2026-09-30")])
-    client = TestClient(create_app(path))
+def test_batches_endpoint_validates_input(client, pg):
+    path = _seed(pg, [batch("611", "2026-09-30")])
     assert client.get("/batches").status_code == 400
     bad = client.get("/batches", params={"room_id": "999"})
     assert bad.status_code == 400 and "不是规范库房号" in bad.json()["detail"]
 
 
-def test_batches_endpoint_says_never_refreshed_is_stale(tmp_path):
+def test_batches_endpoint_says_never_refreshed_is_stale(client, pg):
     """**没人刷过必须长得跟刷过不一样**：`refreshed_at=None` ⇒ `stale=true`。"""
-    path = _db(tmp_path, [batch("611", "2026-09-30")])
-    got = TestClient(create_app(path)).get("/batches", params={"room_id": "611"}).json()
+    path = _seed(pg, [batch("611", "2026-09-30")])
+    got = client.get("/batches", params={"room_id": "611"}).json()
     assert got["ledger_refreshed_at"] is None
     assert got["stale"] is True, "从没刷过不许假装新鲜"
     assert got["stale_after_h"] == 26.0
 
 
-def test_batches_endpoint_is_fresh_right_after_a_replace(tmp_path):
-    path = _db(tmp_path, [batch("611", "2026-08-01")])
-    conn = connect(path)
+def test_batches_endpoint_is_fresh_right_after_a_replace(client, pg):
+    path = _seed(pg, [batch("611", "2026-08-01")])
+    conn = pg
     replace_batches(conn, [batch("611", "2026-09-30", batch_no="mogu-107")])
 
-    got = TestClient(create_app(path)).get("/batches", params={"room_id": "611"}).json()
+    got = client.get("/batches", params={"room_id": "611"}).json()
     assert got["stale"] is False
     assert got["ledger_refreshed_at"] == fetch_batches_state(conn)["refreshed_at"]
     assert got["ledger_n_rows"] == 1
 
 
-def test_stale_threshold_is_configurable_and_old_stamps_go_stale(tmp_path, monkeypatch):
-    path = _db(tmp_path, [batch("611", "2026-09-30")])
-    conn = connect(path)
+def test_stale_threshold_is_configurable_and_old_stamps_go_stale(client, pg, monkeypatch):
+    path = _seed(pg, [batch("611", "2026-09-30")])
+    conn = pg
     old = (datetime.now() - timedelta(hours=30)).isoformat(timespec="seconds")
     replace_batches(conn, [batch("611", "2026-09-30")], refreshed_at=old)
 
-    got = TestClient(create_app(path)).get("/batches", params={"room_id": "611"}).json()
+    got = client.get("/batches", params={"room_id": "611"}).json()
     assert got["stale"] is True, "30h > 26h ⇒ 陈旧"
 
     monkeypatch.setenv("BATCH_STALE_AFTER_H", "48")
-    got = TestClient(create_app(path)).get("/batches", params={"room_id": "611"}).json()
+    got = client.get("/batches", params={"room_id": "611"}).json()
     assert got["stale"] is False and got["stale_after_h"] == 48.0
 
 
-def test_unresolved_room_code_is_named_not_guessed(tmp_path, monkeypatch):
-    path = _db(tmp_path, [batch("9", "2026-09-30")])
+def test_unresolved_room_code_is_named_not_guessed(client, pg, monkeypatch, tmp_path):
+    path = _seed(pg, [batch("9", "2026-09-30")])
     alias = tmp_path / "empty.json"
     alias.write_text(json.dumps({"map": {}}), encoding="utf-8")
     monkeypatch.setenv("ROOM_ALIAS_FILE", str(alias))
 
-    got = TestClient(create_app(path)).get("/batches", params={"room_id": "611"}).json()
+    got = client.get("/batches", params={"room_id": "611"}).json()
     assert got["ok"] is True and got["batches"] == [], "没这个库房的批次是合法结果"
     assert got["room_alias"]["unresolved_values"] == {"9": 1}, "但解不出的编号要点名+计数"
 
@@ -123,11 +118,11 @@ def test_unresolved_room_code_is_named_not_guessed(tmp_path, monkeypatch):
 # ---------- 整体替换（prune）+ 身份去重 ----------
 
 
-def test_replace_batches_prunes_stale_rows_and_records_state(tmp_path):
+def test_replace_batches_prunes_stale_rows_and_records_state(pg):
     """换口径后旧编号行要被**替换掉**（不是永远留着），且删了什么看得见。"""
-    path = _db(tmp_path, [batch("7", "2026-10-10", batch_no="mogu-110"),
+    path = _seed(pg, [batch("7", "2026-10-10", batch_no="mogu-110"),
                           batch("611", "2026-09-30", batch_no="mogu-107")])
-    conn = connect(path)
+    conn = pg
     result = replace_batches(conn, [
         batch("607", "2026-10-10", batch_no="mogu-110"),
         batch("611", "2026-09-30", batch_no="mogu-107"),
@@ -145,9 +140,9 @@ def test_replace_batches_prunes_stale_rows_and_records_state(tmp_path):
     assert state["refreshed_at"]
 
 
-def test_replace_batches_is_atomic_and_idempotent(tmp_path):
-    path = _db(tmp_path)
-    conn = connect(path)
+def test_replace_batches_is_atomic_and_idempotent(pg):
+    path = _seed(pg)
+    conn = pg
     rows = [batch("611", "2026-09-30")]
     first = replace_batches(conn, rows)
     second = replace_batches(conn, rows)
@@ -155,28 +150,25 @@ def test_replace_batches_is_atomic_and_idempotent(tmp_path):
     assert second["n_pruned"] == 0 and len(fetch_batches(conn)) == 1
 
 
-def test_duplicate_identity_is_deduped_with_a_visible_count(tmp_path):
+def test_duplicate_identity_is_deduped_with_a_visible_count(client, pg):
     """同一 (规范库房号, 入库日期) 两条 ⇒ 只留一条，且**计数可见**（换口径过渡期）。"""
-    path = _db(tmp_path, [batch("7", "2026-10-10", batch_no="mogu-110"),
+    path = _seed(pg, [batch("7", "2026-10-10", batch_no="mogu-110"),
                           batch("607", "2026-10-10", batch_no="mogu-110")])
-    got = TestClient(create_app(path)).get("/batches", params={"room_id": "607"}).json()
+    got = client.get("/batches", params={"room_id": "607"}).json()
     assert got["n_batches"] == 1, "同一身份不该出两张卡"
     assert got["duplicates"]["n_dupes"] == 1
     assert got["duplicates"]["dupe_keys"] == ["607|2026-10-10"]
     assert got["batches"][0]["room_id_raw"] == "607", "保留规范编号那条"
 
 
-def test_environment_batches_also_dedupes(tmp_path):
-    from analysis.db import upsert_environment
-
-    path = str(tmp_path / "env.db")
-    conn = connect(path)
+def test_environment_batches_also_dedupes(client, pg):
+    conn = pg
     upsert_environment(conn, [{"ts": f"2026-10-12T{h:02d}:00:00", "zone": "607",
                                "temp_c": 20.0, "rh_pct": 85.0, "co2_ppm": 800.0, "n": 60}
                               for h in range(4)])
     upsert_batches(conn, [batch("7", "2026-09-30"), batch("607", "2026-09-30")])
 
-    got = TestClient(create_app(path)).get(
+    got = client.get(
         "/environment/batches", params={"zone": "607"}
     ).json()
     assert got["ok"] is True

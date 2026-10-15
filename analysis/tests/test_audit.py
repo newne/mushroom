@@ -1,9 +1,7 @@
 """操作日志：采集、解析、汇总与接口（2026-10-12 用户要求"体现操作员的实际操作"）。"""
 
 import pytest
-from fastapi.testclient import TestClient
 
-from analysis.api import create_app
 from analysis.audit import (
     AuthError,
     fetch_operations,
@@ -14,7 +12,7 @@ from analysis.audit import (
     room_of,
     summarize_operations,
 )
-from analysis.db import connect, fetch_operations as db_fetch, upsert_operations
+from analysis.store import fetch_operations as db_fetch, upsert_operations
 
 RAW = {
     "total": 1,
@@ -101,20 +99,17 @@ def test_summarize_operations_counts_by_day_device_and_operator():
     assert got["by_operator"] == {"现场操作员": 2}
 
 
-def test_operations_upsert_is_idempotent(tmp_path):
-    conn = connect(str(tmp_path / "t.db"))
+def test_operations_upsert_is_idempotent(pg):
+    conn = pg
     rows = parse_operations(RAW)
     upsert_operations(conn, rows)
     upsert_operations(conn, rows)
     assert len(db_fetch(conn, zone="607")) == 1
 
 
-def test_api_operations_returns_rows_and_summary(tmp_path):
-    db = str(tmp_path / "t.db")
-    conn = connect(db)
-    upsert_operations(conn, parse_operations(RAW))
-    conn.close()
-    got = TestClient(create_app(db)).get("/operations", params={"zone": "607"}).json()
+def test_api_operations_returns_rows_and_summary(client, pg):
+    upsert_operations(pg, parse_operations(RAW))
+    got = client.get("/operations", params={"zone": "607"}).json()
     assert got["ok"] is True and len(got["rows"]) == 1
     assert got["rows"][0]["content"] == "加湿开启设定[5]"
     assert got["summary"]["by_day"] == {"2026-10-12": 1}

@@ -7,13 +7,6 @@
 
 from __future__ import annotations
 
-from analysis.api import create_app
-from fastapi.testclient import TestClient
-
-
-def client(tmp_path) -> TestClient:
-    return TestClient(create_app(str(tmp_path / "api.db")))
-
 
 def measurement(ts, box_id, mean_len, *, n=6, cap=None, room_id="611", quality="verified") -> dict:
     """票 11：测量行必须带 `room_id`；`growth` 只吃含 `verified` 的质量标记。"""
@@ -22,27 +15,25 @@ def measurement(ts, box_id, mean_len, *, n=6, cap=None, room_id="611", quality="
             "p90_len": None, "quality": quality}
 
 
-def test_growth_series_returns_per_point_verdicts(tmp_path):
+def test_growth_series_returns_per_point_verdicts(client):
     rows = [measurement("2026-09-13T08:00:00", "B101", 40.0),
             measurement("2026-09-13T14:00:00", "B101", 43.0),
             measurement("2026-09-13T20:00:00", "B101", 46.0)]
-    with client(tmp_path) as c:
-        c.post("/ingest", json={"rows": rows})
-        got = c.get("/growth?box_id=B101").json()
+    client.post("/ingest", json={"rows": rows})
+    got = client.get("/growth?box_id=B101").json()
     assert got["box_id"] == "B101"
     assert [p["verdict"] for p in got["points"]] == ["no_prev", "growing", "growing"]
     assert got["latest"]["verdict_text"] == "在长"
     assert got["latest"]["rate_len_mm_per_h"] == 0.5
 
 
-def test_growth_unknown_box_returns_empty_not_500(tmp_path):
-    with client(tmp_path) as c:
-        got = c.get("/growth?box_id=B999")
+def test_growth_unknown_box_returns_empty_not_500(client):
+    got = client.get("/growth?box_id=B999")
     assert got.status_code == 200
     assert got.json() == {"box_id": "B999", "points": [], "latest": None}
 
 
-def test_growth_room_covers_every_box_seen_in_the_image_index(tmp_path):
+def test_growth_room_covers_every_box_seen_in_the_image_index(client):
     """图像索引里出现过、但还没测量值的框，要以 `no_prev` 出现在列表里。"""
     images = [{"kind": "image_index", "ts": "2026-09-13T20:25:42", "ok": True,
                "box_id": box, "station_id": f"S10{i}", "angle_profile": "top45",
@@ -50,9 +41,8 @@ def test_growth_room_covers_every_box_seen_in_the_image_index(tmp_path):
               for i, box in enumerate(("B101", "B102"), start=1)]
     measures = [measurement("2026-09-13T08:00:00", "B101", 40.0),
                 measurement("2026-09-13T20:00:00", "B101", 40.2)]
-    with client(tmp_path) as c:
-        c.post("/ingest", json={"rows": images + measures})
-        got = c.get("/growth/room?room_id=611").json()
+    client.post("/ingest", json={"rows": images + measures})
+    got = client.get("/growth/room?room_id=611").json()
     assert got["room_id"] == "611"
     assert set(got["boxes"]) == {"B101", "B102"}
     assert got["boxes"]["B101"]["verdict"] == "stalled"
@@ -60,8 +50,7 @@ def test_growth_room_covers_every_box_seen_in_the_image_index(tmp_path):
     assert got["counts"] == {"stalled": 1, "no_prev": 1}
 
 
-def test_growth_room_accepts_an_explicit_box_list(tmp_path):
-    with client(tmp_path) as c:
-        got = c.get("/growth/room?boxes=B101,B102,B103").json()
+def test_growth_room_accepts_an_explicit_box_list(client):
+    got = client.get("/growth/room?boxes=B101,B102,B103").json()
     assert got["n_boxes"] == 3
     assert all(v["verdict"] == "no_prev" for v in got["boxes"].values())

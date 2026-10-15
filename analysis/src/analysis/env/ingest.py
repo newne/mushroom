@@ -2,12 +2,13 @@
 
 用法::
 
-    python -m analysis.env.ingest --db data.db --source csv --path ./env_csv --interval 300
-    python -m analysis.env.ingest --db data.db --source csv --path ./env_csv --once
-    ANALYSIS_STORE=postgres python -m analysis.env.ingest --dsn <conninfo> --source tdengine --url ...
+    python -m analysis.env.ingest --source csv --path ./env_csv --interval 300
+    python -m analysis.env.ingest --source csv --path ./env_csv --once
+    python -m analysis.env.ingest --dsn <conninfo> --source tdengine --url ...
 
-**存储走门面**（票 28 第 2 步）：连接参数按后端分——SQLite 认 `--db`，PG 认 `--dsn`/`--schema`，
-后端由 `ANALYSIS_STORE` 选（缺省 sqlite）。所以 `--db` 不再必填：PG 下它不参与。
+**存储只有 PG**（票 28 contract）：`--dsn`/`--schema` 缺省走
+`PGSQL_DSN_FILE`（文件优先）/`PGSQL_DSN` 与 `ANALYSIS_PG_SCHEMA`；
+**没有本地文件库这个选项**（用户 2026-10-15 裁定）。
 """
 
 from __future__ import annotations
@@ -53,7 +54,6 @@ def loop(conn, source: EnvSource, *, interval_s: float = 300.0, max_cycles: int 
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="环境数据定时入库（票 03）")
-    p.add_argument("--db", help=store.CLI_DB_HELP)
     p.add_argument("--dsn", help=store.CLI_DSN_HELP)
     p.add_argument("--schema", help=store.CLI_SCHEMA_HELP)
     p.add_argument("--source", choices=["csv", "http", "tdengine"], default="csv")
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> None:
             lookback_minutes=int(args.lookback),
         )
 
-    conn = store.connect(args.db, dsn=args.dsn, schema=args.schema)
+    conn = store.connect(dsn=args.dsn, schema=args.schema)
     if args.once:
         cursor = run_once(conn, source)
         print(f"[env_ingest] 完成，游标: {cursor}")
