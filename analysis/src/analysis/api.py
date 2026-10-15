@@ -26,7 +26,6 @@ from analysis.db import (
     ROUND_FIELDS,
     fetch_batches as db_fetch_batches,
     fetch_batches_state as db_fetch_batches_state,
-    fetch_operations,
     fetch_ranges,
     fetch_ranges_state,
 )
@@ -498,7 +497,7 @@ def create_app(
         **逐条返回，不聚合**——"那天 10:10 谁把右加湿器的开启设定改成 5"
         是运行经验的最小单位，聚合掉就答不出来了。同时给一份按天/设备/点位的计数。
         """
-        rows = fetch_operations(
+        rows = store.fetch_operations(
             conn,
             zone=zone or None,
             start=start or None,

@@ -176,8 +176,11 @@ def daily_states(
 def daily_states_from_db(
     conn, *, zone: str, start: str, end: str, entry_date: str | None = None
 ) -> dict:
-    """从 SQLite 读事件 + 基线，跑 `daily_states`（API 与批处理共用这一条路）。"""
-    from analysis.db import fetch_latest_operations_before, fetch_operations
+    """从库里读事件 + 基线，跑 `daily_states`（API 与批处理共用这一条路）。
+
+    读经**存储门面**（票 28 第 2 步）：后端由 `ANALYSIS_STORE` 选，这里只认连接。
+    """
+    from analysis.store import fetch_latest_operations_before, fetch_operations
 
     events = fetch_operations(conn, zone=zone, start=f"{start}T00:00:00", end=f"{end}T23:59:59")
     baseline = fetch_latest_operations_before(conn, zone=zone, before=f"{start}T00:00:00")

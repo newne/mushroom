@@ -18,6 +18,7 @@ batches_state），这里就补上对应的一批用例，钉住的是**链路**
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 import pytest
 from analysis import store
@@ -222,12 +223,85 @@ def test_ingest_and_rounds_images_reads_agree_on_both_backends(
         assert boxes == ["B101", "B102"], "PG 侧框清单去重升序（换成 %s 占位后行为不变）"
 
 
+#: 操作日志：同一设备点位跨日的变更（/setpoints/daily 的 changed/carried 都要跑到）。
+OPERATION_ROWS = [
+    {"ts": "2026-08-16T08:00:00", "device_code": "D1", "point_code": "P1", "zone": "611",
+     "device_name": "加湿", "point_name": "设定", "value": "5", "operator": "现场",
+     "source": "local", "content": "加湿开启设定[5]"},
+    {"ts": "2026-08-16T09:00:00", "device_code": "D1", "point_code": "P1", "zone": "611",
+     "device_name": "加湿", "point_name": "设定", "value": "6", "operator": "远程",
+     "source": "remote", "content": "加湿开启设定[6]"},
+    {"ts": "2026-08-16T09:00:00", "device_code": "D2", "point_code": "P2", "zone": "611",
+     "device_name": "风机", "point_name": "开关", "value": "1", "operator": "现场",
+     "source": "local", "content": "风机开启[1]"},
+    {"ts": "2026-08-17T08:00:00", "device_code": "D1", "point_code": "P1", "zone": "611",
+     "device_name": "加湿", "point_name": "设定", "value": "7", "operator": "现场",
+     "source": "local", "content": "加湿开启设定[7]"},
+]
+
+
+def test_operations_and_daily_setpoints_agree_on_both_backends(
+    tmp_path, monkeypatch, pg_dsn, pg_schema
+):
+    """/operations 与 /setpoints/daily：逐条不聚合的一侧与"当天末态"的一侧，两边逐字段相同。
+
+    `/setpoints/daily` 走 `setpoints.daily_states_from_db`（事件 + 窗口前基线两条查询），
+    所以这一条同时钉住 api 与 setpoints 两处调用点。
+    """
+    with two_stores(tmp_path, monkeypatch, pg_dsn, pg_schema) as (sq, sq_app, pg_conn, pg_app):
+        store.upsert_operations(sq, OPERATION_ROWS)
+        store.upsert_operations(pg_conn, OPERATION_ROWS)
+        assert len(store.fetch_operations(pg_conn, zone="611")) == len(OPERATION_ROWS)
+        assert_same_answers(sq_app, pg_app, [
+            ("/operations", {"zone": "611"}),
+            ("/operations", {"zone": "611", "limit": 2}),
+            ("/operations", {"zone": "612"}),
+            ("/setpoints/daily", {"zone": "611", "start": "2026-08-16", "end": "2026-08-17"}),
+            ("/setpoints/daily", {"zone": "611", "start": "2026-08-17", "end": "2026-08-17",
+                                  "entry_date": "2026-08-16"}),
+        ])
+
+
+@contextmanager
+def one_store(backend, tmp_path, monkeypatch):
+    """**单后端**的一个临时库：SQLite 用临时文件，PG 用临时 schema（跑完删）。
+
+    给"不进 HTTP"的用例（CLI、批处理入口）用：`connect_kwargs` 与 `cli_args` 按后端给，
+    用例只换后端名 —— 这就是"原来只走 SQLite 的场景补上 PG 参数化"的落点。
+    """
+    if backend == "postgres":
+        dsn = pg_harness.test_dsn()
+        if dsn is None:
+            pytest.skip("没有测试 DSN：PG 侧这一半跳过")
+        schema = pg_harness.new_schema_name()
+        monkeypatch.setenv("ANALYSIS_STORE", "postgres")
+        try:
+            yield _Target({"dsn": dsn, "schema": schema}, ["--dsn", dsn, "--schema", schema])
+        finally:
+            pg_harness.drop_schema(dsn, schema)
+    else:
+        monkeypatch.delenv("ANALYSIS_STORE", raising=False)
+        path = str(tmp_path / "store.db")
+        yield _Target({"db_path": path}, ["--db", path])
+
+
+@dataclass(frozen=True)
+class _Target:
+    """一次用例要打的那个库：门面连接参数 + CLI 的同义参数。"""
+
+    connect_kwargs: dict
+    cli_args: list[str]
+
+    def connect(self):
+        return store.connect(**self.connect_kwargs)
+
+
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
 def test_env_ingest_cli_writes_through_the_facade(backend, tmp_path, monkeypatch):
     """`python -m analysis.env.ingest --once` 在两种后端上都能把小时聚合写进去。
 
-    PG 侧没有 DSN 就 skip 这一半（SQLite 那一半照旧跑）—— 这就是"原来只走 SQLite 的场景
-    补上 PG 参数化"：同一个 CLI、同一份 CSV，只换连接参数。
+    PG 侧没有 DSN 就 skip 这一半（SQLite 那一半照旧跑）—— 同一个 CLI、同一份 CSV，
+    只换连接参数。
     """
     from analysis.env.ingest import main
 
@@ -240,25 +314,9 @@ def test_env_ingest_cli_writes_through_the_facade(backend, tmp_path, monkeypatch
         encoding="utf-8",
     )
 
-    if backend == "postgres":
-        dsn = pg_harness.test_dsn()
-        if dsn is None:
-            pytest.skip("没有测试 DSN：PG 侧的 CLI 用例跳过")
-        schema = pg_harness.new_schema_name()
-        monkeypatch.setenv("ANALYSIS_STORE", "postgres")
-        conn_kwargs = {"dsn": dsn, "schema": schema}
-        backend_args = ["--dsn", dsn, "--schema", schema]
-    else:
-        monkeypatch.delenv("ANALYSIS_STORE", raising=False)
-        schema = None
-        conn_kwargs = {"db_path": str(tmp_path / "cli.db")}
-        backend_args = ["--db", str(tmp_path / "cli.db")]
-
-    try:
-        main([
-            *backend_args, "--source", "csv", "--path", str(csv_dir), "--once",
-        ])
-        conn = store.connect(**conn_kwargs)
+    with one_store(backend, tmp_path, monkeypatch) as target:
+        main([*target.cli_args, "--source", "csv", "--path", str(csv_dir), "--once"])
+        conn = target.connect()
         try:
             rows = store.fetch_environment(conn, zone="611")
         finally:
@@ -266,6 +324,46 @@ def test_env_ingest_cli_writes_through_the_facade(backend, tmp_path, monkeypatch
         assert [(r["ts"], r["temp_c"]) for r in rows] == [
             ("2026-08-30T08:00:00", 23.5), ("2026-08-30T09:00:00", 24.0),
         ], "CLI 写进去的小时聚合要能被门面读回来"
-    finally:
-        if schema is not None:
-            pg_harness.drop_schema(dsn, schema)
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_audit_ingest_run_once_writes_operations_on_both_backends(
+    backend, tmp_path, monkeypatch
+):
+    """`analysis.audit_ingest.run_once`（操作日志入库）在两种后端上写入同样多的行。
+
+    环控平台的调用用假 transport 顶掉：这里要证的是"写侧换成门面后 PG 也写得进去"，
+    不是再测一次接口解析（那在 `test_audit.py`）。
+    """
+    from analysis.audit import md5_hex
+    from analysis.audit_ingest import run_once
+
+    raw = {
+        "total": 1,
+        "list": [{
+            "deviceCode": "TD1_Q3MDHUM02", "pointCode": "On", "pointValue": "5",
+            "actionSource": "现场", "actionState": True, "actionModel": "现场操作员",
+            "operator": "现场操作员", "remark": None, "operateTime": "2026-10-12 10:10:00",
+            "deviceName": "607库-右加湿器", "pointName": "加湿开启设定",
+            "actionType": None, "actionContent": "加湿开启设定[5]",
+        }],
+    }
+
+    def transport(url, body, headers=None):
+        if url.endswith("/service/security/auth/login"):
+            return {"code": 200, "data": {"accessToken": "tok"}}
+        assert headers and headers["X-AUTH-TOKEN"] == "tok"
+        return {"code": 200, "data": raw}
+
+    with one_store(backend, tmp_path, monkeypatch) as target:
+        conn = target.connect()
+        try:
+            n = run_once(
+                conn, base_url="http://ems", account="u", password_md5=md5_hex("p"),
+                transport=transport,
+            )
+            rows = store.fetch_operations(conn, zone="607")
+        finally:
+            conn.close()
+        assert n == 1
+        assert [(r["ts"], r["value"]) for r in rows] == [("2026-10-12T10:10:00", "5")]
