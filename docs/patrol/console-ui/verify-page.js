@@ -868,6 +868,37 @@ check('环境模式：曲线高度收窄（车道 76 → 54，三个量仍各占
                return !!svg && svg.getAttribute('viewBox') === '0 0 920 204'; })(),
       (document.querySelector('#envchart svg') || {}).getAttribute
         ? document.querySelector('#envchart svg').getAttribute('viewBox') : '(无)');
+// 票 18（2026-10-15）：车道 76 → 54 之后，"上限值 / 下限值"两个标签的纵向偏移还是写死的，
+// 基线只差 4px ⇒ 必叠字。断言两条：**真渲染出来的相邻两行** ≥14px；偏移**从车道高度派生**，
+// 换个车道高度也不复发。字号是 CSS 里的 10.5px、间距也在同一套用户单位里 ⇒ 与实际缩放无关。
+// 左列（x=6）每根车道三行：车道名、上限值、下限值——渲染顺序就是车道顺序。
+const laneRows = (() => {
+  const svg = document.querySelector('#envchart svg');
+  if (!svg) return [];
+  const ys = Array.from(svg.querySelectorAll('text.lanelbl'))
+    .filter(t => t.getAttribute('x') === '6')
+    .map(t => Number(t.getAttribute('y')));
+  const rows = [];
+  for (let i = 0; i + 2 < ys.length; i += 3) rows.push([ys[i], ys[i + 1], ys[i + 2]]);
+  return rows;
+})();
+check('环境模式：车道内相邻两行标签的基线间距 ≥14px（每根车道三行，共三根）',
+  laneRows.length === 3 && laneRows.every(r => r[1] - r[0] >= 14 && r[2] - r[1] >= 14),
+  JSON.stringify(laneRows));
+check('环境模式：上限值在上、下限值在下（车道 54 时曾反过来、只差 4px）',
+  laneRows.length === 3 && laneRows.every(r => r[1] < r[2]), JSON.stringify(laneRows));
+// 派生性：换车道高度（44/54/64/76/96）都不复发，且不是又一组写死的像素——偏移随高度走。
+const laneHeights = [44, 54, 64, 76, 96];
+const laneOf = h => (typeof window.envLaneRows === 'function' ? window.envLaneRows(h) : null);
+check('环境模式：车道内纵向偏移从车道高度派生（44/54/64/76/96 都 ≥14px 且不越出车道）',
+  laneHeights.every(h => {
+    const L = laneOf(h);
+    return !!L && L.hiY - L.nameY >= 14 && L.baseY - L.hiY >= 14 && L.baseY < h;
+  }), JSON.stringify(laneHeights.map(h => laneOf(h))));
+check('环境模式：偏移随车道高度走（车道再变时不会复现"两个标签压在一起"）',
+  (() => { const a = laneOf(54), b = laneOf(76);
+           return !!a && !!b && b.hiY > a.hiY && b.baseY > a.baseY; })(),
+  JSON.stringify([laneOf(54), laneOf(76)]));
 check('环境模式：统计面板一行一个参数（中位放大 + 区间 + IQR 条），不再是一张 6 列表',
       T('#envsummary').includes('19.8') && T('#envsummary').includes('120')
       && document.querySelectorAll('#envsummary .qrow').length === 3

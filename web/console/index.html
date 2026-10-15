@@ -3559,6 +3559,20 @@ const ENV_PARAMS = [
   { key: 'rh_pct',  label: '湿度', unit: '%',   color: '#18794e' },
   { key: 'co2_ppm', label: 'CO₂',  unit: 'ppm', color: '#9a6700' }
 ];
+/* 车道内的纵向落点**全部从 laneH 派生**（票 18，2026-10-15）：车道 76 → 54 之后，
+   写死的偏移让"上限值 / 下限值"两个标签的基线只差 4px ⇒ 必叠字。这里把车道名、绘图区顶、
+   上下限标签的位置都算成车道高度的函数 —— 车道高度再变，间距跟着变，不复发。
+   行距有下限 14px：10.5px 字号的两行文字，基线差小于它就会碰上（与 #envchart .lanelbl 同源）。 */
+const ENV_LANE_MIN_ROW = 14;
+function envLaneRows(laneH){
+  const row = Math.max(ENV_LANE_MIN_ROW, laneH * 0.26);   // 相邻文本行的基线间距
+  const nameY = laneH * 0.18;                             // 车道名基线
+  return { row: row, nameY: nameY,
+           plotY: nameY + row * 0.5,                      // 绘图区顶（曲线/色带的上沿）
+           hiY:   nameY + row,                            // 上限值（右侧最近值同一行）
+           baseY: nameY + row * 2 };                      // 基线（横轴 + 下限值）
+}
+
 const ENV_LABEL = { temp_c: '温度', rh_pct: '湿度', co2_ppm: 'CO₂' };
 const LAMP_TEXT = { 0: '自动', 1: '手动', 2: '停止', 3: '关闭' };
 const LAMP_COLOR = { 0: '#18794e', 1: '#1f6feb', 2: '#9a6700', 3: '#8c959f' };
@@ -3689,6 +3703,7 @@ function drawEnvChart(){
   // 2026-10-13 用户："图太大"。车道 76 → 54、上下留白收紧，同样的信息少占约 1/4 高度；
   // 三个量的量级仍各占一根轴（不共用纵轴），所以缩的是高度不是信息。
   const W = 920, laneH = 54, padT = 20, padB = 22, padL = 46, padR = 104;
+  // 车道内的纵向位置走 envLaneRows(laneH)：以后只改 laneH 这一个数，标签间距自动跟（票 18）。
   // 补光的**设备状态色带**已去掉（2026-10-12 用户：开几秒、停约两小时，色带基本看不出东西）。
   // 补光的四个实际参数放在「补光」卡里按原值显示。band 分支保留给将来真需要色带的量。
   const lanes = ENV_PARAMS;
@@ -3700,31 +3715,32 @@ function drawEnvChart(){
 
   let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="环境参数小时曲线：温度、湿度、CO₂ 各占一根轴">';
   lanes.forEach((lane, i) => {
-    const yTop = padT + i * laneH, yBase = yTop + laneH - 26;
+    const yTop = padT + i * laneH, L = envLaneRows(laneH);
+    const yBase = yTop + L.baseY, yPlot = yTop + L.plotY;
     svg += '<line x1="' + padL + '" y1="' + yBase + '" x2="' + (W-padR) + '" y2="' + yBase + '" stroke="#d8e0e8"/>';
-    svg += '<text class="lanelbl" x="6" y="' + (yTop+14) + '">' + esc(lane.label) + (lane.unit ? ' ' + lane.unit : '') + '</text>';
+    svg += '<text class="lanelbl" x="6" y="' + (yTop + L.nameY) + '">' + esc(lane.label) + (lane.unit ? ' ' + lane.unit : '') + '</text>';
     if(lane.band){
       for(const r of rows){
         const st = r.lamp_state;
         if(st === null || st === undefined) continue;   // 缺数据的小时不画，不拿"停止"去填
         const x = X(envTime(r.ts));
-        svg += '<rect x="' + x.toFixed(1) + '" y="' + (yTop+20) + '" width="' + barW.toFixed(1)
-             + '" height="' + (yBase - yTop - 20).toFixed(1) + '" fill="' + (LAMP_COLOR[st] || '#8c959f')
+        svg += '<rect x="' + x.toFixed(1) + '" y="' + yPlot + '" width="' + barW.toFixed(1)
+             + '" height="' + (yBase - yPlot).toFixed(1) + '" fill="' + (LAMP_COLOR[st] || '#8c959f')
              + '"><title>' + esc(r.ts) + ' · ' + esc(LAMP_TEXT[st] || ('状态 ' + st)) + '</title></rect>';
       }
       // 最近一小时的**折算**点亮分钟：色带说的是"灯处于什么状态"，这个数字说的是
       // "按循环参数（OnSSet/OffSSet）它这一小时该亮多久"——两者不是一回事。
       const lastLamp = rows.slice().reverse().find(r => typeof r.lamp_on_min === 'number');
       if(lastLamp){
-        svg += '<text class="laneval" x="' + (W-padR+8) + '" y="' + (yTop+34) + '">'
+        svg += '<text class="laneval" x="' + (W-padR+8) + '" y="' + (yTop + L.hiY) + '">'
              + lastLamp.lamp_on_min + ' 分/时</text>';
       }
     }else{
       const nums = rows.map(r => (typeof r[lane.key] === 'number' ? r[lane.key] : null)).filter(v => v !== null);
       const lo = Math.min.apply(null, nums), hi = Math.max.apply(null, nums);
       const padv = ((hi - lo) * 0.12) || 1;
-      const Y = v => yBase - ((v - (lo - padv)) / ((hi + padv) - (lo - padv))) * (yBase - (yTop + 20));
-      svg += '<text class="lanelbl" x="6" y="' + (yTop+32) + '">' + hi.toFixed(1) + '</text>';
+      const Y = v => yBase - ((v - (lo - padv)) / ((hi + padv) - (lo - padv))) * (yBase - yPlot);
+      svg += '<text class="lanelbl" x="6" y="' + (yTop + L.hiY) + '">' + hi.toFixed(1) + '</text>';
       svg += '<text class="lanelbl" x="6" y="' + yBase + '">' + lo.toFixed(1) + '</text>';
       let d = '', pen = false;
       for(const r of rows){
@@ -3735,7 +3751,7 @@ function drawEnvChart(){
       }
       svg += '<path d="' + d + '" fill="none" stroke="' + lane.color + '" stroke-width="1.8"/>';
       const last = rows.slice().reverse().find(r => typeof r[lane.key] === 'number');
-      if(last) svg += '<text class="laneval" x="' + (W-padR+8) + '" y="' + (yTop+32) + '">' + last[lane.key] + '</text>';
+      if(last) svg += '<text class="laneval" x="' + (W-padR+8) + '" y="' + (yTop + L.hiY) + '">' + last[lane.key] + '</text>';
     }
   });
   svg += '<text class="lanelbl" x="' + padL + '" y="' + (H-8) + '">' + esc(String(rows[0].ts).replace('T',' ').slice(5,16)) + '</text>';
