@@ -79,3 +79,64 @@ Status: ready-for-agent
 5. `analysis/env/ingest.py:86`、`audit_ingest.py:57`、`batch_ingest.py:105`、`batch_map.py:32` 都是 `connect(args.db)`（CLI `--db` 路径）——PG 下这些 CLI 参数要换成 `--dsn`。
 6. 票 27（回填）写的就是这份存储：先等第 2/3 步定下"写哪个 schema、哪张表"，再回填，否则要搬两次。
 
+### 2026-10-15 第 2 步（migrate）落地：调用点全切到门面，PG 上整条链路跑通（6 个提交）
+
+实现者 worktree `store-pg2`（分支 `feat/store-pg2`，基线 `37316d7`；报告时已 `git merge feat/env-baseline`，
+merge 提交 `325935c`）。**仍然没做 contract**：`sqlite3` 与 `ANALYSIS_DB` 都还在，缺省仍 `sqlite` ——
+不设 `ANALYSIS_STORE` 时行为与迁移前一致（回归红线：两套件逐条绿）。
+
+六个提交，每批一个、每批跑完两套件保持全绿：
+
+| 提交 | 批次 | 切了哪些调用点 |
+| --- | --- | --- |
+| `52312cf` | 环境 | `api.create_app` 的连接与共享形态（新增 `store.prepare_connection`）、`/environment`、`/environment/summary` 的环境读、`analysis.env.ingest`（CLI 加 `--dsn/--schema`） |
+| `2339da2` | measurements | `POST /ingest` 的 `insert_measurements`、`/measurements`、`/growth`、`/growth/room` 的测量读 |
+| `ad7cf54` | rounds / images | `insert_rounds`/`insert_images`、`/rounds`、`/images`；**裸 SQL 收进门面**（新增 `fetch_room_box_ids`） |
+| `a7884c5` | operations | `/operations`、`setpoints.daily_states_from_db` 的事件与基线两条查询、`analysis.audit_ingest`（`--dsn`） |
+| `caf2f47` | ranges | `pd.read_sql` → 经门面取行再拼 DataFrame；`compute_ranges`/`refresh_ranges` 改吃连接；`/ranges`；`jobs.default_jobs(conn)`（不再收 `db_path`，ranges 作业用 API 那份连接） |
+| `36ecb8b` | batches_state | `/batches`、`/environment/batches` 的台账读、`analysis.batch_ingest`、`analysis.batch_map`（都加 `--dsn/--schema`） |
+
+§「给第 2 步的现场勘测」六条逐条：
+
+1. **WAL（SQLite 专有）** —— 收进 `store.prepare_connection`：SQLite 开 WAL、PG 空实现；
+   `api.py` 里不再有 `PRAGMA`。
+2. **api 裸 SQL 问号占位** —— 新增门面函数 `fetch_room_box_ids`（去重与排序在库里做），
+   SQLite/PG 各一份实现；`api.py` 里不再有 `conn.execute`。
+3. **`pd.read_sql`** —— 改成 `pd.DataFrame(store.fetch_environment(conn))`（pandas 不吃 psycopg，
+   也不为此引入 SQLAlchemy：读侧本来就有门面函数）。
+4. **按路径重连** —— `compute_ranges`/`refresh_ranges` 加 `conn=`，jobs 与 API 传连接；
+   **路径形状保留**（CLI 与老测试还在用，第 4 步 contract 再删）。
+5. **四个 CLI** —— `env/ingest`、`audit_ingest`、`batch_ingest`、`batch_map` 都加 `--dsn/--schema`，
+   措辞单源在 `store.CLI_*_HELP`；后端仍只由 `ANALYSIS_STORE` 一个开关选（不新增第二套开关语义）。
+6. **票 27（回填）的落点** —— 写哪已经定了：`ANALYSIS_PG_SCHEMA`（缺省 `analysis`，**不是 public**），
+   9 张表与 `db.SCHEMA` 逐列一致（`pg_store._TABLE_DDL`，有测试逐列比对）。回填按这个口径写即可。
+
+实测（2026-10-15，本机）：
+
+- 不带测试 DSN：`250 passed, 24 skipped`（基线 `245 passed, 13 skipped`；+5 是两后端都跑的新场景，
+  +11 是 PG 条件用例缺 DSN 时跳过）；
+- 带测试 DSN（`ANALYSIS_TEST_DSN_FILE` 指向 dev DSN 文件）：`274 passed`（基线 `258 passed`，+16）；
+- 新增 `analysis/tests/test_store_migrate_postgres.py` 钉的是**链路**：同一份种子数据在 SQLite 与 PG
+  各起一个 API 实例，`/environment`、`/measurements`、`/growth`、`/growth/room`、`/rounds`、`/images`、
+  `/operations`、`/setpoints/daily`、`/ranges`、`/batches`、`/environment/batches` 的响应**逐字段相同**；
+  `refresh_ranges(conn=)` 与 `default_jobs(conn)` 在 PG 上真跑一轮；四个 CLI 在 PG 上真写一次。
+  PG 夹具（`pg_dsn`/`pg_schema`/`pg`/`catalog`）与 DSN 解析、schema 建删都只有一处实现
+  （`analysis/tests/pg_harness.py` + `conftest.py`），原来写在 `test_store_postgres.py` 里的那份已合并过去。
+- PG 卫生复查（跑完全部用例，目标库 `mushroom_algorithm`）：`analysis_test_*` schema **0 个**、
+  `analysis` schema 不存在、测试 schema 下 **0 张表**、public 未动；连接串只从环境变量给的 DSN 文件读，
+  值不打印、不进仓库；**不写 TDengine**（ADR-0026）。
+
+§2 验收逐条（第 2 步能推进的）：
+
+- [ ] 迁移后 `analysis/tests` 全绿（**对着 PG 跑**）—— **部分**：套件缺省仍对着 SQLite；PG 条件用例从 13 涨到 24，
+  另有 5 条两后端都跑，但"整组怼着 PG 跑"属于第 4 步。
+- [ ] `/environment`/`/ranges`/`/batches`/`/setpoints/daily` 响应逐字段一致 —— **部分**：同一份数据在两个
+  后端上逐字段相同已经钉住；"迁移前后对同一份生产数据存样本对比"要等第 3 步搬完才有意义。
+- [ ] `mushrooms.db` 不再被写入 —— 未做（缺省仍 SQLite，生产还在写它）。
+- [x] DSN 走文件、[x] 有回滚路径（切回 `ANALYSIS_STORE=sqlite` 配旧镜像）、[x] 不写 TDengine —— 照旧成立。
+
+未切（**写域外**，留给后续票 / 第 4 步）：`measure/tools/run_measure_batch.py` 与
+`patrol/tests/test_round_integrity_e2e.py` 仍直接 `from analysis.db import …`（本步写域只到 `analysis/**`）。
+后果要记住：`ANALYSIS_STORE=postgres` 时那两处**不会**跟着切，仍然只写 SQLite 文件 ——
+第 4 步删 `db.py` 之前必须先处理这两处。
+
