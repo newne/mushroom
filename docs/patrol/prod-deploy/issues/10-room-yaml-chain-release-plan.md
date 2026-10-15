@@ -71,3 +71,12 @@
 
 - 2026-10-14 15:4x 发版官写票。依据 Chief 当日裁定（归属：调用者=测试、部署=发版官；排期=解除冻结后第一批且早于 10-20）。
 - 修正 Chief 步骤②：`data/room.yaml` **已存在且与 `configs/room.yaml` 逐字节相同**，故 **`cp` 一步省掉**。
+
+- **2026-10-15 13:01 执行（本票的 analysis 侧，第一批）**：镜像 `registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261015125805-b61d970`（digest `sha256:7957ce30…`，**从 `main`@`b61d970` 构建**、`-f docker/Dockerfile.patrol`、未走混淆——ADR-0012 明确混淆构建不覆盖 patrol）。prod `.env` 的 `PATROL_IMAGE` 改到该 tag；`mushroom_analysis.environment` 增 `BATCH_AT=05:20`；`docker compose up -d --force-recreate --no-deps mushroom_analysis`。
+  - **为什么必须重新构建**：线上原有镜像最新只到 `c3dcbc5`（10-14 13:07），而 `/batches` 是提交 `3c30feb` 引入的（**在 `c3dcbc5` 之后**）⇒ 只改 env 再 recreate 修不了 404。
+  - **判据实测（全过）**：`/batches?room_id=611` **200**；`stale=false`、`ledger_refreshed_at=2026-10-15T13:01:14`、`ledger_n_rows=27`、`ledger_n_pruned=11`、`room_alias` 27/27 resolved、`duplicates` 27 kept / 0 dupe；`/ranges` 200；`rounds`/`images` 响应长度与前置快照**逐字节相同**（23718 / 2246947）；七容器 healthy，**patrol 未被触碰**（Up 40h）。
+  - **备份与回滚**：`.env.bak-20261015-130020`、`mushroom_solution.yml.bak-20261015-130020`；回滚 = 还原这两个文件后同一条 `up -d --force-recreate --no-deps mushroom_analysis`。
+  - **第 0 步仍未做**：调用者代码（票 18 的 `fetch_room`）是**纯文档零代码** ⇒ `room.yaml` **不会被刷新**。本批只交付"**端点可用 + 台账新鲜**"。
+  - **一处更正**：`PATROL_ANALYSIS` **不是** analysis 容器读的变量（`analysis/jobs.py` 只认 `BATCH_AT`/`RANGES_AT`/`ENV_INGEST_INTERVAL`/`AUDIT_INTERVAL`），所以只加了 `BATCH_AT`。
+  - **顺带确证**：`/batches` 给出的 611 批次链是 **5 条**，含此前只有旧文档提过、当时"**不采信**"的 `2025-11-27`（→ until 2025-12-24）⇒ 票 13 的台账判据与 A3「批次清单对齐」由此闭环。
+
