@@ -24,11 +24,11 @@ Status: ready-for-agent
 
 ## 2. 验收（缺一条不算过）
 
-- [ ] 迁移后 `analysis/tests` 全绿（**对着 PG 跑**，不再对着临时 SQLite）
+- [x] 迁移后 `analysis/tests` 全绿（**对着 PG 跑**，不再对着临时 SQLite）（第 3 步 contract 做到：带 DSN 247 passed）
 - [ ] `/environment`、`/ranges`、`/batches`、`/setpoints/daily` 的**响应形状与状态词逐字段一致**（迁移前后各存一份样本对比）
 - [ ] `mushrooms.db` **不再被写入**（可断言文件 mtime 不变）
 - [ ] DSN 走**文件**，不进 compose 明文、不进 `docker inspect`
-- [ ] 有**回滚路径**（切回 SQLite 开关 + 旧镜像）
+- [ ] 有**回滚路径**（切回 SQLite 开关 + 旧镜像）—— 开关已按 §4 删除；回滚 = 旧镜像 + 旧库备份
 - [ ] **不写 TDengine**（ADR-0026 硬门）
 
 ## 3. 不做什么 / 待定
@@ -140,3 +140,126 @@ merge 提交 `325935c`）。**仍然没做 contract**：`sqlite3` 与 `ANALYSIS_
 后果要记住：`ANALYSIS_STORE=postgres` 时那两处**不会**跟着切，仍然只写 SQLite 文件 ——
 第 4 步删 `db.py` 之前必须先处理这两处。
 
+### 2026-10-15 第 3 步（contract）落地：SQLite 依赖删除，缺省即 PostgreSQL
+
+实现者 worktree `store-pg3`（分支 `feat/store-pg3`，基线 `eacc409`；报告时已 `git merge feat/env-baseline`，
+当时它仍在 `eacc409` ⇒ no-op）。代码提交 `a79d9e9`（37 个文件，+1935 / −3392）。
+> 注：本分支的票面还没有 §4「用户追加裁定」与 §5「生产遗留清理清单」两节（它们在 `main 480c6b6`）；
+> 本节按裁定口径写：「**迁移并删除 sqlite 依赖，后续严禁使用本地文件数据库**」。
+
+**删了什么**
+
+| 删掉的 | 说明 |
+| --- | --- |
+| `analysis/src/analysis/db.py` | SQLite 实现（1,037 行）整文件删除 |
+| `analysis/src/analysis/pg_store.py` | PG 实现整文件删除 —— 与门面**合并**进 `analysis/store.py`：只剩一个后端时，22 个同名转发函数没有存在理由 |
+| `ANALYSIS_DB` / `ANALYSIS_STORE` | 库路径与后端开关全删（`store.backend()`、`BACKENDS`、`DEFAULT_DB_PATH*`） |
+| `store.prepare_connection()` | SQLite 专有的 `PRAGMA journal_mode=WAL` 落点，没有了 |
+| 四个 CLI 的 `--db` | `env.ingest` / `audit_ingest` / `batch_ingest` / `batch_map` 只认 `--dsn`/`--schema` |
+| `ADDED_COLUMNS` / `RENAMED_COLUMNS` / `migrate` / 三处重建函数 | SQLite 老库的补列与重建历史；PG 的表由 `store.ensure_schema` 按当前形状建 |
+| `compute_ranges` / `refresh_ranges` / `run_from_db` 的**传路径**老形状 | 只吃连接（`compute_ranges(conn, …)`），不为老测试留旧签名 |
+| `analysis/tests/test_store_switch.py` | 主体就是那个开关；schema 名合法性那条搬到 `test_store_postgres.py` |
+
+`analysis/src/analysis/**` 与 `analysis/tests/**` 里现在 **0 处 `import sqlite3`**（全仓只剩一次性搬迁工具那一处，见下）。
+缺连接串 ⇒ `StoreConfigError` 直接报错，**没有"退回本地文件库"的分支**。
+
+**常量搬到哪**
+
+`analysis/src/analysis/schema.py`（新，名实相符）：`ENVIRONMENT_FIELDS` / `OPERATION_FIELDS` / `BATCH_FIELDS` /
+`MEASUREMENT_FIELDS` / `ROUND_FIELDS` / `IMAGE_FIELDS`、`flatten_image`、`as_text` / `as_list`（JSON 编解码）、
+`RANGES_STATE_NEVER_COMPUTED`。字段清单与建表 DDL 的一致性现在由 `test_store_postgres.py` 的
+`test_columns_match_the_field_contract` 逐表比对（对着 `information_schema`），不再靠 `db.SCHEMA`。
+
+**索引（§4.4：现状 0 个）** —— 写进 `store._INDEX_DDL`，建 schema 时一起建，有一条用例钉住它们真的建出来了：
+
+| 索引 | 对应读法 |
+| --- | --- |
+| `environment (zone, ts)` | `/environment`、`/environment/summary` 的"库房 + 时间窗" |
+| `environment (ts)` | 区间表按整点对齐时读全量 |
+| `images (ts)` | 历史列表 `ORDER BY ts DESC LIMIT`（PG 可反向扫） |
+| `images (room_id, ts)` | `/growth/room` 枚举框号、按库房取图 |
+| `images (box_id, ts)` | `/images?box_id=`、`/growth?box_id=` |
+| `measurements (room_id, ts)` / `(box_id, ts)` | 区间表按库房分组、按框取点（主键 `(ts, room_id, box_id)` 管不了这两个前缀） |
+| `operations (zone, ts)` | `/operations` 与 setpoints 基线的"库房 + 时间窗" |
+
+`rounds` / `batches` / `ranges` 的读法都落在主键上，不重复建。
+
+**一处必须改的行为差异（PG 比 SQLite 严）**
+
+`images` 的唯一键从 `PRIMARY KEY (ts, station_id, angle_profile)` 改成 **`UNIQUE` 约束**：
+SQLite 的复合主键**允许 NULL**（历史怪癖），现场确实有 `angle_profile` 缺测的"采图失败"行
+（`test_ingest_failed_station_index_keeps_null_object_name` 钉的就是它）；PG 的 `PRIMARY KEY` 会强制 NOT NULL，
+把那些行挡在门外 —— 那是**行为回归**，不是收紧。`UNIQUE` 的 NULL 语义与老库一致（NULL 互不相等，重复投递会多出一行，
+老库也这么长）。这条是 contract 里唯一一处"迁移会把现场数据挡在门外"的坑，已修并有用例覆盖。
+
+**一次性搬迁工具**（§4.3）：`analysis/src/analysis/tools/oneoff_sqlite_to_pg.py`，`python -m` 可跑，
+只读打开旧库（`mode=ro`）、幂等可重跑、逐表行数与时间跨度对账，退出码 0/1 表示对账通过与否：
+
+    python -m analysis.tools.oneoff_sqlite_to_pg --source /opt/mushroom-analysis/mushrooms.db --dry-run
+    python -m analysis.tools.oneoff_sqlite_to_pg --source /opt/mushroom-analysis/mushrooms.db
+
+本机用合成旧库（**照 §4 基线的行数**：images 3,925 / environment 2,712 / rounds 82 / operations 62 / batches 27 /
+batches_state 1 / ranges_state 1 = 6,810 行）跑了两遍，输出：
+
+```text
+表                    旧库开始     旧库结束     实时增量    PG 之前    PG 之后     本次写入  时间跨度（旧库）
+----------------------------------------------------------------------------------------------------
+batches                27       27        0        0       27       27
+batches_state           1        1        0        0        1        1
+environment          2712     2712        0        0     2712     2712  2026-09-17T10:00:00 → 2027-01-08T09:00:00
+images               3925     3925        0        0     3925     3925  2026-09-13T10:00:20 → 2026-09-17T12:06:20
+measurements            0        0        0        0        0        0
+operations             62       62        0        0       62       62  2026-10-12T10:00:00 → 2026-10-12T15:05:00
+ranges                  0        0        0        0        0        0
+ranges_state            1        1        0        0        1        1
+rounds                 82       82        0        0       82       82  2026-09-13T09:05:03 → 2026-10-23T21:05:03
+----------------------------------------------------------------------------------------------------
+合计：旧库 6810 行；本次写入 6810 行；PG 侧 6810 行 schema analysis_test_oneoff_b0185302
+对账通过。旧库若仍在被写：把增量再搬一次（本工具幂等），然后归档旧库。
+```
+
+第二遍（同一 schema）`PG 之前 = PG 之后 = 6810`、`本次写入 6810` ⇒ 幂等成立；
+`images` 的 `y`/`z` 两列在搬迁后**全部非空**（工具先把它们拼回线格式的 `yz`，否则会被 `flatten_image` 摊平成 NULL）。
+**生产搬迁由用户执行**，本步只交付脚本与用法。
+
+**测试**（`uv run --no-project --with pytest --with httpx --with pandas --with fastapi --with 'psycopg[binary]' pytest analysis/tests -q`）
+
+- 带测试 DSN（`ANALYSIS_TEST_DSN_FILE` 指向 dev DSN 文件）：**247 passed**；
+- 不带：**247 skipped**（整组 skip，理由：没有 `ANALYSIS_TEST_DSN` / `ANALYSIS_TEST_DSN_FILE`，本套件只在 PG 上跑）。
+  这正是 §4.2 要的形状 —— 不再是"一半照跑"，也**不回退临时文件库**。
+- 条数从第 2 步的 274 降到 247：删掉的是**主体已经不存在**的用例 —— 开关/双后端分派 12 条、
+  老 SQLite 库的补列与重建 11 条、双后端等价 2 条、传路径老形状 1 条；同时新增了列契约、索引、
+  schema 名合法性等用例。端点覆盖由各端点文件（全部改跑 PG）承担。
+- `measure/tests/test_record.py` 与 `patrol/tests/test_round_integrity_e2e.py`（跨域写域外，见下）分别在 PG 上通过。
+
+**PG 卫生（硬门）**：全部用例 + 两次搬迁演练用的都是 `analysis_test_<随机>` schema，跑完 `DROP SCHEMA … CASCADE`
+并断言不存在；复查目标库只剩 `information_schema` / `pg_catalog` / `pg_toast` / `public`，
+`analysis_test_%` 残留 **0 个**、`analysis` schema **不存在**、public 未动、**没碰 TDengine**（ADR-0026）。
+连接串只从环境变量给的 DSN 文件读，不打印、不进仓库。
+
+**写域外的三处**
+
+1. `measure/tools/run_measure_batch.py`（授权）：`from analysis.db import …` → `analysis.store`；
+   `--ingest-sqlite` 换成 `--ingest` + `--ingest-dsn/--ingest-schema`（本地文件库已禁）。
+2. `patrol/tests/test_round_integrity_e2e.py`（授权）：改成经 `analysis.store` 落 PG 的独立测试 schema，
+   没有测试 DSN 就 skip（**不回退临时文件库**）。
+3. `measure/tests/test_record.py`（**未授权、但不得不改**）：第 45 行 `from analysis.db import MEASUREMENT_FIELDS`
+   在删掉 `db.py` 后直接 ImportError。只改了这一行 import（→ `analysis.schema`）与对应注释，**没有别的改动**；
+   如果要严格守写域，把这一行还原成 `analysis.db` 即可（那条用例会红）。
+
+**留给发版官（本步不碰）**
+
+- `docker/mushroom_solution.yml:357` 仍有 `ANALYSIS_DB=/opt/mushroom-analysis/mushrooms.db`：新代码不再读它，
+  但**必须给容器 `PGSQL_DSN_FILE`**（缺了 API 直接 `StoreConfigError` 起不来）—— 这是切流量的前置条件。
+- 生产搬迁 + 旧库归档 + §5 的遗留清理（`src/` 影子副本、`.venv/`、compose 里的 `ANALYSIS_DB`）由用户/运维执行。
+
+§2 验收逐条（本步的落点）：
+
+- [x] 迁移后 `analysis/tests` 全绿（**对着 PG 跑**，不再对着临时 SQLite）—— 247 passed（带 DSN）；
+- [ ] `/environment`、`/ranges`、`/batches`、`/setpoints/daily` 响应逐字段一致 —— 第 2 步已钉"同一份种子数据两后端逐字段相同"，
+  contract 删掉 SQLite 后对比装置没有了；"迁移前后对同一份**生产**数据存样本对比"要等生产搬迁（用户执行）才做得了；
+- [ ] `mushrooms.db` 不再被写入 —— 生产还在写，切流量后成立（本步只保证代码不会再碰它）；
+- [x] DSN 走**文件**，不进 compose 明文、不进 `docker inspect` —— 照旧；
+- [ ] 有回滚路径（切回 SQLite 开关 + 旧镜像）—— **被 §4 的用户裁定取代**：开关已删，回滚只剩
+  "旧镜像 + `/opt/mushroom-analysis/backups/` 里的旧库"这一条；
+- [x] **不写 TDengine**（ADR-0026）—— 本步不 import 任何 TDengine 通路。
