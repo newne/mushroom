@@ -249,7 +249,9 @@ const state = {
   env_error: false,                           // 让 /api/environment 回"prod 查不到"
   env_empty: false,                           // 让 /api/environment 回"窗口内没有数据"
   ops_error: false,                           // 让 /api/operations 回"prod 查不到"
-  ranges_state: null,                         // 区间表六态；null ⇒ 假后端默认 all_excluded
+  ranges_state: null,                         // 区间表七态；null ⇒ 假后端默认 all_excluded
+  ranges_flags: null,                         // 票 26 的**整维标注**（['unverified'] …）；null ⇒ []
+  ranges_rows: null,                          // 区间行；票 26 起行上带 tier/unverified/n_verified/n_estimate
   ranges_error: false,                        // 让 /api/ranges 回 ok:false
   ranges_legacy: false,                       // 让 /api/ranges 回**旧版裸列表**（线上现役形状）
   preview_down: false,                        // 让 /api/preview/status 回"预览服务连不上"
@@ -422,20 +424,27 @@ function route(method, url, body) {
   }
   if (path === '/api/ranges') {
     // 票 05 §5 的信封：{ok, rows, count, state, state_text, detail, computed_at, metric, unit}
+    // 票 26/19 另给 `flags`（整维标注）与行上的 tier/unverified/n_verified/n_estimate。
     if (state.ranges_legacy) {                      // 旧版线上形状：**裸列表**（没有 state）
       return json(200, state.ranges_legacy_rows || []);
     }
     if (state.ranges_error) return json(200, { ok: false, error: '区间表查询失败：不通', rows: [] });
     const st = state.ranges_state || 'all_excluded';
+    const rows = state.ranges_rows || [];
     const TEXT = {
-      ok: '区间表已算好（0 行）',
+      ok: '区间表已算好（' + rows.length + ' 行）',
       no_measurements: '样本不足：库房里还没有任何测量行（测量管线未接上）',
       all_excluded: '样本不足：测量行全部落在被排除的可疑轮/复制帧窗口内（见 detail.excluded_by_reason）',
       no_environment: '样本不足：还没有环境小时聚合，长势速率无法与环境对齐',
       no_growth_metric: '样本不足：没有可用的长势量（平视单档下杆长恒缺测，需要菌簇量）',
       insufficient_samples: '样本不足：每个参数分箱的有效样本 < 5（相邻整点的速率段不够），暂不输出区间',
       never_computed: '还没重算过：区间表从未生成（RANGES_AT 还没生效）',
+      // 票 26 的第七个状态词（**仅估算**：不是 ok、也不是空态），原文取自
+      // `analysis/align.py` 的 STATE_TEXT；一行都没出时再拼 STATE_TEXT_ESTIMATE_EMPTY。
+      estimate_only: '区间表只有估算档（' + rows.length
+        + ' 行，**未验证**）：估算值不能当验证值用，也永不进建议层',
     };
+    const estimateEmpty = '；样本不足：每个参数分箱的有效样本 < 5（相邻整点的速率段不够），暂不输出区间';
     const detail = (st === 'all_excluded')
       ? { n_kept: 0, n_excluded: 3, excluded_by_reason: { legacy_excluded: 1, suspect_round: 2 },
           excluded_samples: [
@@ -445,8 +454,12 @@ function route(method, url, body) {
               window: '2026-10-09T18:20:05~18:27:34', detail: '重复帧窗口' }],
           excluded_samples_truncated: false }
       : {};
-    return json(200, { ok: true, rows: state.ranges_rows || [], count: (state.ranges_rows || []).length,
-                       state: st, state_text: TEXT[st] || '', detail,
+    return json(200, { ok: true, rows, count: rows.length,
+                       state: st, state_text: (TEXT[st] || '')
+                         + ((st === 'estimate_only' && !rows.length) ? estimateEmpty : ''),
+                       // 整维标注（票 26）：只有估算档 ⇒ ['unverified']；一行都出不了再补
+                       // 'insufficient_samples'。fixture **显式给**，不由状态推（否则是自证）。
+                       flags: state.ranges_flags || [], detail,
                        computed_at: '2026-10-14T03:00:00', metric: 'mean_cluster_h_mm', unit: 'mm' });
   }
   if (path === '/api/operations') {
@@ -1585,6 +1598,106 @@ await sleep(150);
     check('排除可见：前 20 条**原文**带窗口与依据（可回答"排掉了哪一段、凭什么"）',
       noteOf().includes('2026-10-09T18:20:05') && noteOf().includes('18:27:34')
       && noteOf().includes('批准：Chief 2026-10-14'), noteOf().slice(0, 220));
+
+    // ---- 票 19：**仅估算态**（`estimate_only`）与「估算（未验证）」徽标 ----
+    // 真形状（票 26 / ADR-0025）：只有估算档 ⇒ `state="estimate_only"`（独立状态：不是 ok、
+    // 也不是任何空态）、`flags=["unverified"]`、行带 `tier="estimate"`/`unverified=true` 与
+    // **同箱两类计数**（后端用例：7 条已验证 + 1 条估算同箱）。契约里**明明有行** ⇒ 页面必须
+    // 照常画行表 —— 旧页面只在 `state==='ok'` 时画行，estimate_only 时用户看到的是一张空表。
+    // 表头名 → 单元格文本（列序变了也不影响断言）。
+    const rangeTable = () => {
+      const t = document.querySelector('#batchnote table.meas');
+      if(!t) return null;
+      const heads = Array.from(t.querySelectorAll('tr th')).map(th => th.textContent.trim());
+      const rows = Array.from(t.querySelectorAll('tr')).filter(tr => tr.querySelector('td'))
+        .map(tr => {
+          const cells = Array.from(tr.querySelectorAll('td')).map(td => td.textContent.trim());
+          const o = {};
+          heads.forEach((h, i) => { o[h] = cells[i]; });
+          return o;
+        });
+      return { heads, rows };
+    };
+    // 行表**之外**的整维徽标（`#batchnote` 里、不在表内的 `.tag`）
+    const wholeBadges = () => Array.from(document.querySelectorAll('#batchnote .tag'))
+      .filter(el => !el.closest('table.meas')).map(el => el.textContent.trim());
+    // 区间表那一段**之外**的页面文字：剪掉 `#batchnote` 与 script/style
+    // （不然会读到我自己的源码——那也能"匹配"上就白测了）
+    const outsideRangesText = () => {
+      const probe = document.body.cloneNode(true);
+      const note = probe.querySelector('#batchnote');
+      if(note) note.remove();
+      probe.querySelectorAll('script,style').forEach(n => n.remove());
+      return probe.textContent || '';
+    };
+    state.ranges_state = 'estimate_only';
+    state.ranges_flags = ['unverified'];
+    state.ranges_rows = [
+      { stage: 'stage2', param: 'temp_c', lo: 20.1, hi: 22.3, metric: 'mean_cluster_h_mm',
+        unit: 'mm', rate_per_h: 9.87, n: 1, tier: 'estimate', unverified: true,
+        n_verified: 7, n_estimate: 1 },
+      { stage: 'stage3', param: 'rh_pct', lo: 88.0, hi: 92.5, metric: 'mean_cluster_w_mm',
+        unit: 'mm', rate_per_h: 0.42, n: 2, tier: 'estimate', unverified: true,
+        n_verified: 3, n_estimate: 2 },
+    ];
+    await click('#reloadbtn'); await sleep(400); await toEnv();
+    check('票 19：`estimate_only` **照常画行表**（契约里有行就不许显示成空表）——2 行都在',
+      !!rangeTable() && rangeTable().rows.length === 2,
+      rangeTable() ? rangeTable().rows.length + ' 行' : '没有行表');
+    check('票 19：估算行**每一行**都带「估算（未验证）」标记（估算值绝不显示成验证值）',
+      !!rangeTable() && rangeTable().rows.every(r => String(r['档'] || '').includes('估算（未验证）')),
+      JSON.stringify(rangeTable() ? rangeTable().rows.map(r => r['档']) : null));
+    check('票 19：整维徽标按 `flags` 里的 `unverified` 挂在行表之外（一处，原文「估算（未验证）」）',
+      wholeBadges().length === 1 && wholeBadges()[0] === '估算（未验证）',
+      wholeBadges().join(' | ') || '(无)');
+    check('票 19：同一分箱里**两类计数分开可见**（7 条已验证 / 1 条估算，不合并成一个数）',
+      !!rangeTable() && rangeTable().rows[0]['同箱已验证'] === '7'
+      && rangeTable().rows[0]['同箱估算'] === '1',
+      rangeTable() ? JSON.stringify(rangeTable().rows[0]) : '(无行表)');
+    check('票 19：估算行**只出现在区间表那一段**（数值与标记在别处一个字都没有：不进建议层相关区域）',
+      outsideRangesText().indexOf('9.87') < 0
+      && outsideRangesText().indexOf('估算（未验证）') < 0,
+      outsideRangesText().slice(0, 120));
+    // `ok`（已验证档）且 flags 空 ⇒ 同样的行表照画，但**不挂**未验证徽标：
+    // 徽标只按 flags 挂，不是"有行就标"（整表无差别标成未验证，等于没标）。
+    state.ranges_state = 'ok';
+    state.ranges_flags = [];
+    state.ranges_rows = [
+      { stage: 'stage2', param: 'temp_c', lo: 20.1, hi: 22.3, metric: 'mean_cluster_h_mm',
+        unit: 'mm', rate_per_h: 1.05, n: 7, tier: 'verified', unverified: false,
+        n_verified: 7, n_estimate: 1 },
+    ];
+    await click('#reloadbtn'); await sleep(400); await toEnv();
+    check('票 19：`ok` + `flags` 无 `unverified` ⇒ 行画「已验证」且**不挂**未验证徽标（徽标只按 flags 挂）',
+      !!rangeTable() && rangeTable().rows.length === 1
+      && rangeTable().rows[0]['档'] === '已验证' && wholeBadges().length === 0,
+      (rangeTable() ? JSON.stringify(rangeTable().rows[0]) : '(无行表)')
+      + ' / 徽标=' + JSON.stringify(wholeBadges()));
+    // 仅估算但**一行都没出**（`flags=["unverified","insufficient_samples"]`）：状态与标注照旧成立，
+    // "为什么没有行"照样要说（票 05 的空态语言不因为换了个状态词就失效）。
+    state.ranges_state = 'estimate_only';
+    state.ranges_flags = ['unverified', 'insufficient_samples'];
+    state.ranges_rows = [];
+    await click('#reloadbtn'); await sleep(400); await toEnv();
+    check('票 19：`estimate_only` 一行都没有时**原样说清"为什么没有行"**（不画空表头、空态不退化）',
+      !document.querySelector('#batchnote table.meas') && noteOf().includes('estimate_only')
+      && noteOf().includes('暂不输出区间'), noteOf().slice(0, 200));
+    check('票 19：一行都没有时整维标注**照样**挂（`unverified` 说的是这份表的档次，不是"有没有行"）',
+      wholeBadges().length === 1 && wholeBadges()[0] === '估算（未验证）',
+      wholeBadges().join(' | ') || '(无)');
+    // 整维标注**跟 flags 走，不跟状态词走**：估算档也会卡在别的空态上（`analysis/align.py:410-411`：
+    // 估算档 + 没有可用长势量 ⇒ `no_growth_metric` + `["unverified"]`）。那种响应同样要挂
+    // 「估算（未验证）」—— 否则"未验证"一换状态词就消失，正好是 ADR-0025 要防的。
+    state.ranges_state = 'no_growth_metric';
+    state.ranges_flags = ['unverified'];
+    state.ranges_rows = [];
+    await click('#reloadbtn'); await sleep(400); await toEnv();
+    check('票 19：空态带 `flags=["unverified"]` 时**照样**挂徽标（徽标跟 flags 走，不跟状态词走）',
+      noteOf().includes('no_growth_metric') && noteOf().includes('没有可用的长势量')
+      && wholeBadges().length === 1 && wholeBadges()[0] === '估算（未验证）',
+      noteOf().slice(0, 120) + ' / 徽标=' + JSON.stringify(wholeBadges()));
+    state.ranges_state = null; state.ranges_flags = null; state.ranges_rows = null;
+
     // "没重算过"与"样本不足"必须是两句不同的话
     state.ranges_state = 'never_computed';
     await click('#reloadbtn'); await sleep(400); await toEnv();
@@ -2565,10 +2678,13 @@ await sleep(150);
                  'batch_no'] },
     // analysis 票 05 §5（2026-10-14 **破坏性变更**：裸列表 → 信封）
     // 行形状不变（仍带 metric/unit/rate_per_h）；六态具名，空态用 state_text 原文。
+    // 票 26 另给信封 `flags`（整维标注）与行上的 tier/unverified/n_verified/n_estimate
+    // （票 19 页面按它们显示「估算（未验证）」与"同箱两类计数分别可见"）。
     '/api/ranges': { q: '', pick: 'top',
       fields: ['ok', 'rows', 'count', 'state', 'state_text', 'detail', 'computed_at',
-               'metric', 'unit'],
-      required: ['ok', 'rows', 'count', 'state', 'state_text', 'detail'] },
+               'metric', 'unit', 'flags',
+               'tier', 'unverified', 'n_verified', 'n_estimate'],
+      required: ['ok', 'rows', 'count', 'state', 'state_text', 'detail', 'flags'] },
     // deploy/console.py api_environment → analysis/environment.py:28-32 FIELDS（小时聚合）
     '/api/environment': { q: '?zone=611&granularity=hour', pick: 'rows',
       fields: ['ts', 'zone', 'temp_c', 'temp_min', 'temp_max', 'rh_pct', 'rh_min', 'rh_max',
@@ -2614,7 +2730,8 @@ await sleep(150);
   const PAGE_CONSUMES = {
     '/api/growth': ['ts', 'metric', 'unit', 'd_value', 'rate_per_h', 'band_source',
                     'verdict', 'verdict_text'],
-    '/api/ranges': ['ok', 'rows', 'count', 'state', 'state_text', 'detail'],
+    '/api/ranges': ['ok', 'rows', 'count', 'state', 'state_text', 'detail', 'flags',
+                    'tier', 'unverified', 'n_verified', 'n_estimate'],
     '/api/measurements': ['ts', 'quality', 'mean_len_mm', 'mean_cap_mm', 'mean_projected_d_mm',
                           'mean_area_mm2', 'n', 'mean_cluster_w_mm', 'mean_cluster_h_mm',
                           'p10_len', 'p90_len', 'estimated_fields', 'scale_source',

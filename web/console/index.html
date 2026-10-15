@@ -68,6 +68,8 @@
        border:1px solid var(--line);color:var(--dim)}
   .tag.on{color:var(--ok);border-color:var(--ok);background:var(--ok-soft)}
   .tag.bad{color:var(--bad);border-color:var(--bad);background:var(--bad-soft)}
+  /* 「未验证」是**警示**不是错误：红是"出事"，估算只是"没验证过"（票 19） */
+  .tag.warn{color:var(--warn);border-color:var(--warn);background:#fdf3e3}
   .seg{display:inline-flex;border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden;background:var(--soft);padding:2px;gap:2px}
   .tlhead{padding:var(--sp-2) 0 2px;color:var(--dim);font-size:12px;border-bottom:1px solid var(--line)}
   .tl .im{cursor:pointer}
@@ -932,24 +934,47 @@ function requestErrorText(error){
   return error && error.code === 'TIMEOUT' ? '请求超时，请检查 console 服务' : '接口不可达：' + error.message;
 }
 
-/* ---- 区间表 `/api/ranges`（票 05 §5，2026-10-14 **破坏性形状变更**：裸列表 → 信封）----
+/* ---- 区间表 `/api/ranges`（票 05 §5，2026-10-14 **破坏性形状变更**：裸列表 → 信封；
+   票 19 接「仅估算」态与未验证徽标）----
    新形状：`{ok, rows, count, state, state_text, detail, computed_at, metric, unit}`（行形状不变，
-   仍带 `metric`/`unit`/`rate_per_h`）。**旧版线上还是裸列表**，所以两种都要能读、**信封优先**：
+   仍带 `metric`/`unit`/`rate_per_h`；票 26 另给信封 `flags` 与行上的 `tier`/`unverified`/
+   `n_verified`/`n_estimate`）。**旧版线上还是裸列表**，所以两种都要能读、**信封优先**：
    - 裸列表 ⇒ 只当"拿到了 N 行"，**没有状态字段** ⇒ 如实说"不知道算没算过"，**不许**说成"样本不足"；
-   - 信封 ⇒ 空态**原样显示后端给的 `state_text`**（六态各自具名：`no_measurements` /
-     `all_excluded` / `no_environment` / `no_growth_metric` / `insufficient_samples` / `never_computed`）
+   - 信封 ⇒ 空态**原样显示后端给的 `state_text`**（七态各自具名：`no_measurements` /
+     `all_excluded` / `no_environment` / `no_growth_metric` / `insufficient_samples` /
+     `never_computed` / **`estimate_only`**）
      —— **绝不把"样本不足"和"没重算过"合并成"暂无数据"**（"未知要说未知"）；
    - **排除要可见**：`detail.excluded_by_reason` 是计数、`detail.excluded_samples` 是前 20 条原文
-     （含 `window` 与 `detail`）——"排除了多少"和"排掉了哪一段、凭什么"都要能答。 */
+     （含 `window` 与 `detail`）——"排除了多少"和"排掉了哪一段、凭什么"都要能答；
+   - **`estimate_only`（仅估算，票 26/ADR-0025）不是空态**：契约里**有行**就照常画行表
+     （旧实现只在 `state==='ok'` 时画行 ⇒ 只有估算行时用户看到的是一张**空表**，
+     那正是票 19 要修的）；整维按 `flags` 里的 `unverified` 挂「估算（未验证）」，
+     行上把**档**与**同箱两类计数**分开显示；一行都没有时照样说清"为什么没有行"。 */
 function rangesEnvelope(payload){
   if(Array.isArray(payload)) return { ok: true, rows: payload, count: payload.length,
-                                      state: null, state_text: '', detail: {}, legacy: true };
+                                      state: null, state_text: '', detail: {}, flags: [],
+                                      legacy: true };
   const e = (payload && typeof payload === 'object') ? payload : {};
   return { ok: e.ok !== false, rows: e.rows || [],
            count: (typeof e.count === 'number') ? e.count : (e.rows || []).length,
            state: e.state || null, state_text: e.state_text || '', detail: e.detail || {},
+           // 票 26 的**整维标注**落点（`unverified` 走这里）；旧信封没有这个键 ⇒ 空表，不猜
+           flags: Array.isArray(e.flags) ? e.flags.map(String) : [],
            computed_at: e.computed_at || null, metric: e.metric || null, unit: e.unit || null,
            legacy: false };
+}
+
+/** 区间行的**档**标签（票 19 / ADR-0025）：判据是行上的 `tier`（`verified`/`estimate` 两档）
+ *  与读侧派生的 `unverified` —— **没标过档的行后端按未验证算**（fail-closed），页面不许替它
+ *  猜成"已验证"。未知档值**原样显示**，不翻译、不归类（把没见过的档说成已知的两档就是猜）。 */
+function rangeTierLabel(row){
+  const tier = (row && row.tier !== undefined && row.tier !== null) ? String(row.tier) : '';
+  const unverified = (row && row.unverified !== undefined && row.unverified !== null)
+    ? !!row.unverified : (tier !== 'verified');
+  if(tier === 'verified' && !unverified) return '已验证';
+  if(tier === 'estimate') return '估算（未验证）';
+  if(tier) return tier + '（未验证）';
+  return unverified ? '未标档（按未验证算）' : '已验证';
 }
 
 function rangesHtml(payload){
@@ -964,12 +989,27 @@ function rangesHtml(payload){
   // 措辞刻意**不含**"样本不足"四个字：断言据此判"有没有把'不知道'冒充成'样本不足'"
   else if(e.legacy) bits.push('旧版接口（裸列表、没有状态字段）：返回 ' + e.count
     + ' 行 —— **不知道**算没算过（旧形状没有状态字段，无从判断），不许当成"样本不够"');
-  if(e.ok && e.state === 'ok' && e.rows.length){
+  // 整维标注（票 19）：`unverified` 由后端放在 `flags` 里 ⇒ 徽标**照 flags 挂**，页面不替它猜档。
+  // 一行都没有时**也照挂**：它说的是"这份表是什么档次"，不是"有没有行"。
+  if(e.flags.includes('unverified'))
+    bits.push('<span class="tag warn">估算（未验证）</span>');
+  // **有行就画行表**：`ok`（已验证档）与 **`estimate_only`（仅估算档，票 19）** 都"有行"。
+  // 契约里带行的状态只有这两个（`analysis/align.py` 的状态机）；将来多一个带行的状态，
+  // 要在**这里显式**加名 —— 别让它又静默退化成一张空表。裸列表没有档信息，照旧只报行数。
+  if(e.ok && e.rows.length && (e.state === 'ok' || e.state === 'estimate_only')){
+    // 列：量 / 单位 / 速率（原有）＋ **档** ＋ **同箱两类计数各占一列**（票 19：不许加成一个数）
     const cols = ['metric', 'unit', 'rate_per_h'];
-    bits.push('<table class="meas"><tr><th>量</th><th>单位</th><th>速率</th></tr>'
-      + e.rows.slice(0, 8).map(r => '<tr>' + cols.map(c => '<td>' + esc(
-          (r && r[c] !== undefined && r[c] !== null) ? String(r[c]) : '—') + '</td>').join('') + '</tr>')
-        .join('') + '</table>');
+    const cell = v => esc((v === undefined || v === null) ? '—' : String(v));
+    bits.push('<table class="meas"><tr><th>量</th><th>单位</th><th>速率</th><th>档</th>'
+      + '<th>同箱已验证</th><th>同箱估算</th></tr>'
+      + e.rows.slice(0, 8).map(r => {
+          const tier = rangeTierLabel(r);
+          return '<tr>' + cols.map(c => '<td>' + cell(r && r[c]) + '</td>').join('')
+            + '<td>' + (tier === '已验证' ? cell(tier)
+                : '<span class="tag warn">' + cell(tier) + '</span>') + '</td>'
+            + '<td>' + cell(r && r.n_verified) + '</td>'
+            + '<td>' + cell(r && r.n_estimate) + '</td></tr>';
+        }).join('') + '</table>');
   }
   const ex = e.detail.excluded_by_reason || {};
   const reasons = Object.keys(ex);
