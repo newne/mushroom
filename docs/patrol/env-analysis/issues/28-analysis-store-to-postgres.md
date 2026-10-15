@@ -392,3 +392,38 @@ PG 卫生：跑完 `analysis_test_*` 残留 **0 个**、`analysis` schema 不存
 `ALTER TABLE images DROP CONSTRAINT images_ts_station_id_angle_profile_key` +
 `ADD CONSTRAINT … UNIQUE NULLS NOT DISTINCT (…)`（注意：表里若已有重复 NULL 行，加约束会失败，得先清重）。
 生产 `analysis` schema 目前还没建过 ⇒ 实际搬迁不受影响。
+
+### 2026-10-15 19:2x 生产切换执行记录（已完成）
+
+**镜像**：`registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261015192510-0be3947`
+（digest `sha256:6a036c24202b65ffee60b82df25c44d2528f6bf6b7b111d33c27fcbc6c0c3b9a`，从 `main`@`0be3947` 构建、`Dockerfile.patrol`、未走混淆）
+
+**顺序：先迁移、后切容器**（切换瞬间 PG 已有数据，不经历"接口返回空"的窗口）
+
+1. 迁移前快照（现成的 `backup-db.py`）：`backups/pre-a-prime-20261015-185228/`，`wal_checkpoint(TRUNCATE) = (0,0,0)`
+2. 容器内 dry-run（不连 PG）⇒ 6,925 行
+3. **真搬两遍**：第一遍 6,925 行入 PG 的 `analysis` schema；**第二遍 PG 侧零增长** ⇒ 幂等在真数据上成立
+   - 踩坑：DSN 里的 `postgres_db` 是 **compose 网络服务名**，`docker run` 必须加 `--network mushroom_service_plant_backend`，否则 `Name or service not known`
+4. 改 compose：**删 `ANALYSIS_DB`**、加 `ANALYSIS_PG_SCHEMA=analysis`、`PATROL_IMAGE` 换新 tag；`compose config` 通过
+5. `up -d --force-recreate --no-deps mushroom_analysis` ⇒ **10 秒 healthy**
+6. **补搬增量 + 逐表最终对账**（把旧库复制进容器再读，**原库零改动**）
+7. 归档旧库、删 `src/` 与 `.venv/`、去掉 compose 里的 rw 挂载、再 recreate 验证
+
+**判据实测（全过）**
+
+| 判据 | 结果 |
+| --- | --- |
+| `/environment?zone=611` | 200，201,658 B |
+| `/ranges` | 200，`state=no_measurements`，`flags=[]` |
+| `/batches?room_id=611` | 200，**5 批次**，`stale=false`，台账 27/27 解析、0 重复 |
+| `/rounds` / `/images` | 200，24,312 B / 2,308,713 B |
+| **逐表最终对账** | 九表**全等**，不一致表数 **0** |
+| **`mushrooms.db`** | mtime **冻结在 19:27:47**，`-wal` **已消失** ⇒ 再无任何写入 |
+| 七容器 | 全 healthy；**patrol 未动**（Up 46h） |
+| 容器挂载 | **只剩 `/etc/mushroom/pgsql.dsn`（ro）** ⇒ 文件库挂载已摘除 |
+
+**清理**：旧库归档到 `backups/migrated-to-pg-20261015-193006/`（6.97 MB，**移动未删**）；`src/`（296 K 影子副本）与 `.venv/`（30 M）删除；目录从约 65 M 降到 **41 M**（只剩 `backups/` 与 `backup-db.py`）。
+
+**回滚面**：`.env.bak-20261015-19{2646,2746,3006}`、`mushroom_solution.yml.bak-*` 三组备份；旧镜像 `0.1.0-20261015125805-b61d970` 仍在本地；归档旧库仍在。
+
+⇒ 到此刻为止：**服务代码无 `sqlite3` 依赖、容器不再挂载文件库、"本地文件数据库"已从这个系统里消失**（ADR-0026 补充裁定的判据全部满足）。
