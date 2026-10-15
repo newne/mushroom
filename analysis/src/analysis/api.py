@@ -560,13 +560,21 @@ def create_app(
         `[]` 分不清"从没重算过"、"没有测量"、"平视下没有可用长势量"、"样本不足"，
         而这四件事页面要说给用户听、且处置完全不同。所以与 `/operations` 一致给信封：
 
-        - `rows`：区间行（每行带 `metric`/`unit`/`rate_per_h`，速率必须显示量纲）；
+        - `rows`：区间行（每行带 `metric`/`unit`/`rate_per_h`，速率必须显示量纲；
+          另带 `tier`（`verified`/`estimate`）、`unverified`、`n_verified`/`n_estimate`
+          —— 同一分箱里两类行**计数分别可见**，统计只来自 `tier` 那一档）；
         - `state`：`ok` / `never_computed` / `no_measurements` / `all_excluded` /
-          `no_environment` / `no_growth_metric` / `insufficient_samples`；
+          `no_environment` / `no_growth_metric` / `insufficient_samples` /
+          **`estimate_only`（仅估算，票 26）**；
         - `state_text`：人话，页面直接显示；
-        - `detail`：计数与排除明细（`n_excluded`、`excluded_by_reason`、前 20 条原文）
-          —— **排除必须可见，不静默消失**；
+        - `flags`：**整维标注**（票 26 / ADR-0025）。只有估算档时给 `["unverified"]`，
+          页面照它显示「**估算（未验证）**」—— 标注进 flags，不另开状态词；
+        - `detail`：计数与排除明细（`n_excluded`、`excluded_by_reason`、前 20 条原文、
+          两档的 `tiers` 明细）—— **排除必须可见，不静默消失**；
         - `computed_at` / `metric` / `unit`：最近一次重算的戳与量纲。
+
+        ⚠️ **建议层不许读这个响应**：它含估算行。建议层的入口是
+        `analysis.align.advice_input` / `db.fetch_advice_ranges`（只给已验证档，带断言）。
         """
         state = fetch_ranges_state(conn)
         rows = fetch_ranges(conn)
@@ -576,6 +584,7 @@ def create_app(
             "count": len(rows),
             "state": state["state"],
             "state_text": state["state_text"],
+            "flags": state.get("flags") or [],
             "detail": state["detail"],
             "computed_at": state["computed_at"],
             "metric": state["metric"],

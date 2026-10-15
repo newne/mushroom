@@ -187,7 +187,16 @@ CREATE TABLE IF NOT EXISTS ranges (
   unit         TEXT,               -- mm2/h 或 mm/h
   rate_per_h   REAL,               -- 速率数值（单位见 unit）
   rate_mm_per_h REAL,              -- **只在 unit='mm/h' 时有效**，否则必须 NULL（旧字段，兼容保留）
-  n            INTEGER,
+  n            INTEGER,            -- 本箱的样本数（**本档**的，估算行绝不并进来）
+  -- 同一个箱里**两类各几行**（票 26 的"计数分别可见"）：分箱与均值仍只来自本档的 n，
+  -- 这两列是**数**出来的。放在同一行上，页面不必去 join 第二次。
+  n_verified   INTEGER,
+  n_estimate   INTEGER,
+  -- 档（票 26 / ADR-0025）：'verified' / 'estimate'。估算档**整维标注「未验证」**，
+  -- 且永不与已验证行混算 —— 本表只放**主档**的行（有已验证行时主档就是它），
+  -- 估算行另以 n_estimate 计数出现在同一箱里（计数分开可见，统计不混合）。
+  -- 老行留 NULL = "那时还没分档"；读侧**一律按未验证算**（见 fetch_ranges）。
+  tier         TEXT,
   computed_at  TEXT NOT NULL,
   PRIMARY KEY (stage, param)
 );
@@ -200,8 +209,10 @@ CREATE TABLE IF NOT EXISTS ranges_state (
   id          INTEGER PRIMARY KEY CHECK (id = 1),  -- 单行表：只记最近一次重算
   computed_at TEXT,
   state       TEXT NOT NULL,     -- ok / no_measurements / all_excluded / no_environment
-                                 -- / no_growth_metric / insufficient_samples
+                                 -- / no_growth_metric / insufficient_samples / estimate_only
   state_text  TEXT NOT NULL,     -- 人话，页面直接显示，不用自己拼
+  flags       TEXT,              -- JSON 列表：**整维标注**（票 26 的 unverified 等标注）——
+                                 -- 标注进 flags 不进状态词（spec「状态与标注」）
   detail      TEXT,              -- JSON：计数 + 排除明细（**不许只有一句"样本不足"**）
   n_rows      INTEGER NOT NULL DEFAULT 0,
   metric      TEXT,              -- 本次用的长势量（决定量纲），没有则 NULL
@@ -286,6 +297,15 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "metric": "TEXT",
         "unit": "TEXT",
         "rate_per_h": "REAL",
+        # 档（票 26 / ADR-0025）：老行 NULL = "那时还没分档"，读侧按**未验证**算（fail-closed）。
+        "tier": "TEXT",
+        # 同一箱里两类行各几行（票 26）。老行 NULL = "那时还没分过档"，页面显示"未知"即可。
+        "n_verified": "INTEGER",
+        "n_estimate": "INTEGER",
+    },
+    # 状态表的整维标注列（票 26）：老库补列后是 NULL，读回来当空列表（= 没有标注）。
+    "ranges_state": {
+        "flags": "TEXT",
     },
 }
 
@@ -859,24 +879,53 @@ def replace_ranges(conn: sqlite3.Connection, rows: list[dict], computed_at: str)
         payload.append({
             **row,
             "computed_at": computed_at,
+            # **不编默认档**：行上没标档就写 NULL，读侧按未验证算（写侧替它猜一个 =
+            # 把"没人标过"洗成"已验证"）。本函数的调用方是 compute_ranges，那里档必有。
+            "tier": row.get("tier"),
             "rate_mm_per_h": rate if unit == "mm/h" else None,
         })
     conn.executemany(
         "INSERT INTO ranges (stage, param, lo, hi, metric, unit, rate_per_h, "
-        "rate_mm_per_h, n, computed_at) VALUES (:stage, :param, :lo, :hi, :metric, "
-        ":unit, :rate_per_h, :rate_mm_per_h, :n, :computed_at)",
+        "rate_mm_per_h, n, tier, n_verified, n_estimate, computed_at) "
+        "VALUES (:stage, :param, :lo, :hi, :metric, :unit, :rate_per_h, :rate_mm_per_h, "
+        ":n, :tier, :n_verified, :n_estimate, :computed_at)",
         payload,
     )
     conn.commit()
 
 
 def fetch_ranges(conn: sqlite3.Connection) -> list[dict]:
+    """读区间表（只读物化结果）。
+
+    **「未验证」是读侧派生的**（票 26 / ADR-0025）：判据只有 `tier`，且**没标过的行按
+    未验证算** —— 宁可把老行短暂标成"未验证"（下一次重算就写上新档），也不许把没标过档的行
+    当验证值显示。这一条是"看着像真的假数"最后一道闸。
+    """
+    from analysis.evidence import TIER_VERIFIED
+
     cur = conn.execute(
-        "SELECT stage, param, lo, hi, metric, unit, rate_per_h, rate_mm_per_h, n, "
-        "computed_at FROM ranges ORDER BY stage, param"
+        "SELECT stage, param, lo, hi, metric, unit, rate_per_h, rate_mm_per_h, n, tier, "
+        "n_verified, n_estimate, computed_at FROM ranges ORDER BY stage, param"
     )
     cols = [d[0] for d in cur.description]
-    return [dict(zip(cols, row)) for row in cur.fetchall()]
+    out = []
+    for row in cur.fetchall():
+        item = dict(zip(cols, row))
+        item["unverified"] = item.get("tier") != TIER_VERIFIED
+        out.append(item)
+    return out
+
+
+def fetch_advice_ranges(conn: sqlite3.Connection) -> list[dict]:
+    """**建议层读区间表只许走这里**：只返回已验证档的行（票 26 / ADR-0025 §3）。
+
+    "只有估算行"时返回 `[]` —— **有数不等于能用**：`GET /ranges` 照样把估算档给页面看，
+    但建议层不许拿它当输入（调控建议不能建立在未验证的输入上）。断言在 `advice_input` 里，
+    这里是数据库侧的入口。
+    """
+    from analysis.align import advice_input
+
+    return advice_input(fetch_ranges(conn))
 
 
 #: "区间表从来没人算过"—— **不要把"没算过"说成"样本不足"**：
@@ -884,7 +933,8 @@ def fetch_ranges(conn: sqlite3.Connection) -> list[dict]:
 RANGES_STATE_NEVER_COMPUTED = "never_computed"
 
 _RANGES_STATE_COLS = (
-    "computed_at", "state", "state_text", "detail", "n_rows", "metric", "unit", "updated_at",
+    "computed_at", "state", "state_text", "detail", "flags", "n_rows", "metric", "unit",
+    "updated_at",
 )
 
 
@@ -895,6 +945,7 @@ def write_ranges_state(
     state_text: str,
     computed_at: str | None = None,
     detail: dict | None = None,
+    flags: list[str] | None = None,
     n_rows: int = 0,
     metric: str | None = None,
     unit: str | None = None,
@@ -908,13 +959,15 @@ def write_ranges_state(
 
     conn.execute(
         "INSERT OR REPLACE INTO ranges_state "
-        "(id, computed_at, state, state_text, detail, n_rows, metric, unit, updated_at) "
-        "VALUES (1, :computed_at, :state, :state_text, :detail, :n_rows, :metric, :unit, :updated_at)",
+        "(id, computed_at, state, state_text, detail, flags, n_rows, metric, unit, updated_at) "
+        "VALUES (1, :computed_at, :state, :state_text, :detail, :flags, :n_rows, :metric, "
+        ":unit, :updated_at)",
         {
             "computed_at": computed_at,
             "state": state,
             "state_text": state_text,
             "detail": json.dumps(detail or {}, ensure_ascii=False),
+            "flags": json.dumps(list(flags or []), ensure_ascii=False),
             "n_rows": int(n_rows),
             "metric": metric,
             "unit": unit,
@@ -939,6 +992,7 @@ def fetch_ranges_state(conn: sqlite3.Connection) -> dict:
             "state": RANGES_STATE_NEVER_COMPUTED,
             "state_text": "区间表还没有重算过（每日任务未接线或从未成功跑过）",
             "detail": {},
+            "flags": [],
             "n_rows": 0,
             "metric": None,
             "unit": None,
@@ -950,4 +1004,9 @@ def fetch_ranges_state(conn: sqlite3.Connection) -> dict:
     except (TypeError, ValueError):
         # 存坏了也别把端点打崩：原文留着，让排查看得到
         out["detail"] = {"raw_detail": out["detail"], "detail_parse_error": True}
+    try:
+        out["flags"] = json.loads(out["flags"]) if out["flags"] else []
+    except (TypeError, ValueError):
+        # 存坏了也别把端点打崩：**当没有标注**（不是当"已验证"）—— 读侧永远是保守那一侧
+        out["flags"] = []
     return out

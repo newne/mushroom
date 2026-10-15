@@ -4,7 +4,8 @@ Status: ready-for-agent
 归属：后端（analysis）为主；前端（web/console）承载视图；算法侧只消费
 权威依据：本规格由 2026-10-15 grill-with-docs 会话产出，**20 个决定已由用户逐条裁定**（见 `docs/patrol/next-plan-2026-10-15.md §2）
 相关：ADR-0020（批次身份）、ADR-0021（参数权威）、ADR-0022（实际参数为主）、ADR-0023（小时聚合）、ADR-0024（标定与四量权威——**本规格对其"区间表只吃已验证"作出修正**）
-不做什么：本规格不产长势信号、不做产量归因、不接生产
+硬约束：**TDengine 是环境原始序列的权威且只读存储，严禁写入或 DDL**；业务数据落 PostgreSQL，热数据缓存用 Redis；方向永远只有 TDengine →（只读拉取 + 聚合）→ PostgreSQL（ADR-0026）
+不做什么：本规格不产长势信号、不做产量归因；不写 TDengine
 
 ## Problem Statement
 
