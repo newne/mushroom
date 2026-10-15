@@ -28,12 +28,10 @@ from analysis.db import (
     fetch_batches_state as db_fetch_batches_state,
     fetch_operations,
     fetch_images,
-    fetch_measurements,
     fetch_ranges,
     fetch_ranges_state,
     fetch_rounds,
     insert_images,
-    insert_measurements,
     insert_rounds,
 )
 from analysis.environment import (
@@ -194,7 +192,7 @@ def create_app(
         for text in warnings:
             print(f"[ingest] 未知字段：{text}")
         if measurements:
-            insert_measurements(conn, measurements)
+            store.insert_measurements(conn, measurements)
         if images:
             insert_images(conn, images)
         if rounds:
@@ -210,7 +208,7 @@ def create_app(
     @app.get("/measurements")
     def measurements(room_id: str = "", box_id: str = "") -> list[dict]:
         """测量行（票 11）。可按库房/框过滤 —— 区间表按库房分组，别在内存里筛。"""
-        return fetch_measurements(
+        return store.fetch_measurements(
             conn, room_id=room_id or None, box_id=box_id or None
         )
 
@@ -255,7 +253,7 @@ def create_app(
         判词与阈值口径见 `analysis.growth`：间隔太短/样本太少时**不给结论**，
         而不是硬算一个速率。
         """
-        rows = fetch_measurements(conn)
+        rows = store.fetch_measurements(conn)
         points = series(rows, box_id, limit=limit or None)
         return {"box_id": box_id, "points": [p.to_row() for p in points],
                 "latest": (points[-1].to_row() if points else None)}
@@ -268,7 +266,7 @@ def create_app(
         `distinct box_id` —— 这样"拍了但没测量"的框也能出现在列表里（判词为
         `no_prev`），而不是从页面上悄悄消失。
         """
-        rows = fetch_measurements(conn)
+        rows = store.fetch_measurements(conn)
         if boxes:
             wanted = [b.strip() for b in boxes.split(",") if b.strip()]
         elif room_id:

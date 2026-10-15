@@ -94,6 +94,7 @@ def test_environment_endpoints_agree_on_both_backends(
     with two_stores(tmp_path, monkeypatch, pg_dsn, pg_schema) as (sq, sq_app, pg_conn, pg_app):
         _seed_env(sq)
         _seed_env(pg_conn)
+        assert len(store.fetch_environment(pg_conn)) == len(ENV_ROWS), "先确认 PG 侧真有行"
         assert_same_answers(sq_app, pg_app, [
             ("/environment", {"zone": "611", "granularity": "hour"}),
             ("/environment", {"zone": "611", "granularity": "day"}),
@@ -102,6 +103,54 @@ def test_environment_endpoints_agree_on_both_backends(
             ("/environment/summary", {"zone": "611"}),
             ("/environment/summary", {"zone": "999"}),
         ])
+
+
+#: 测量行：B101 连续两个整点（跑 /growth 的速率），B201 只有一行（单点/空态路径）。
+MEASUREMENT_ROWS = [
+    {"ts": "2026-08-16T10:00:00", "room_id": "611", "box_id": "B101", "station_id": "S101",
+     "angle_profile": "level0", "n": 3, "mean_len_mm": 40.0, "mean_cap_mm": 12.0,
+     "mean_cluster_w_mm": 120.0, "mean_cluster_h_mm": 90.0, "mean_area_mm2": 8400.0,
+     "mean_projected_d_mm": 130.5, "p10_len": 38.0, "p90_len": 42.0, "quality": "verified",
+     "estimated_fields": ["mean_cluster_w_mm", "mean_area_mm2"], "scale_source": "bag_diameter",
+     "mm_per_px": 0.42, "scale_ref_mm": 240.0, "scale_ref_px": 571.4},
+    {"ts": "2026-08-16T11:00:00", "room_id": "611", "box_id": "B101", "station_id": "S101",
+     "angle_profile": "level0", "n": 3, "mean_len_mm": 44.0, "mean_cap_mm": 13.0,
+     "mean_cluster_w_mm": 124.0, "mean_cluster_h_mm": 93.0, "mean_area_mm2": 8600.0,
+     "mean_projected_d_mm": 134.5, "p10_len": 42.0, "p90_len": 46.0, "quality": "verified",
+     "estimated_fields": ["mean_cluster_w_mm", "mean_area_mm2"], "scale_source": "bag_standard",
+     "mm_per_px": 0.42, "scale_ref_mm": 240.0, "scale_ref_px": 571.4},
+    {"ts": "2026-08-16T10:00:00", "room_id": "612", "box_id": "B201", "station_id": "S201",
+     "angle_profile": "level0", "n": 1, "mean_cluster_w_mm": None, "mean_cluster_h_mm": None,
+     "mean_area_mm2": None, "mean_projected_d_mm": None, "quality": "low_confidence",
+     "estimated_fields": None, "scale_source": "none"},
+]
+
+
+def test_ingest_and_measurement_reads_agree_on_both_backends(
+    tmp_path, monkeypatch, pg_dsn, pg_schema
+):
+    """POST /ingest 写 measurements + /measurements、/growth、/growth/room 的读。
+
+    写侧与读侧走的是同一条链（api → 门面 → 后端），所以这一条同时钉住
+    `insert_measurements` 与 `fetch_measurements` 两处调用点切到门面后的行为。
+    """
+    with two_stores(tmp_path, monkeypatch, pg_dsn, pg_schema) as (sq, sq_app, pg_conn, pg_app):
+        body = {"rows": [{"kind": "measurement", **row} for row in MEASUREMENT_ROWS]}
+        with TestClient(sq_app) as a, TestClient(pg_app) as b:
+            posted_a = a.post("/ingest", json=body).json()
+            posted_b = b.post("/ingest", json=body).json()
+            assert posted_b == posted_a, "两边入库计数与告警要一致"
+            assert len(store.fetch_measurements(pg_conn)) == len(MEASUREMENT_ROWS), "PG 侧真有行"
+            for url, params in [
+                ("/measurements", {}),
+                ("/measurements", {"room_id": "611"}),
+                ("/measurements", {"box_id": "B101"}),
+                ("/growth", {"box_id": "B101"}),
+                ("/growth", {"box_id": "B999"}),
+                ("/growth/room", {"boxes": "B101,B201"}),
+            ]:
+                assert b.get(url, params=params).json() == a.get(url, params=params).json(), \
+                    f"{url}?{params} 两个后端的响应不一致"
 
 
 @pytest.mark.parametrize("backend", ["sqlite", "postgres"])
