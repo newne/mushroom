@@ -13,7 +13,8 @@ schema 是这里的唯一护栏。
 四条与 SQLite 时代不同、当初写在 `pg_store.py` 里的差异（搬进来免得后来人再猜）：
 
 1. `INSERT OR REPLACE` → `INSERT … ON CONFLICT (…) DO UPDATE`（幂等语义相同；
-   `images` 的唯一键是 UNIQUE 约束而不是 PRIMARY KEY —— 见那条 DDL 上的注释）；
+   `images` 的唯一键是 `UNIQUE NULLS NOT DISTINCT` 而不是 PRIMARY KEY —— 见那条 DDL 上的注释：
+   UNIQUE 保住"失败帧插得进去"，NULLS NOT DISTINCT 保住"重复投递不插重"，缺一不可）；
 2. **写入前按库里声明的列类型对齐值**（布尔 → 0/1、数字 → 文本）：SQLite 的列亲和性一直
    在替"写入方多给"擦屁股（`ok=True` 存成 1、`room_id=611` 存成 '611'），PG 会直接报错。
    类型表从 `information_schema` **现读**，不手抄一份（手抄的迟早与 DDL 漂移）；
@@ -165,9 +166,13 @@ _TABLE_DDL: tuple[str, ...] = (
       -- （历史怪癖），现场确实有 `angle_profile` 缺测的"采图失败"行（见
       -- `test_ingest_failed_station_index_keeps_null_object_name`）；PG 的 PRIMARY KEY
       -- 会强制 NOT NULL，把那些行挡在门外 —— 那是**行为回归**，不是收紧。
-      -- UNIQUE 里 NULL 互不相等，与 SQLite 一致：同一行 NULL 重复投递会多出一条
-      --（老库也是这么长的，先等价、再谈优化）。
-      UNIQUE (ts, station_id, angle_profile)
+      -- **而且必须 `NULLS NOT DISTINCT`（PG 15+；服务器 18.1）**：普通 UNIQUE 里
+      -- NULL **互不相等** ⇒ `ON CONFLICT (ts, station_id, angle_profile)` 对这些行
+      -- 永远匹配不上 ⇒ 同一失败帧每重投一次就多插一行（实时链路与一次性搬迁走的是
+      -- 同一套 upsert）。2026-10-15 真数据彩排：6,921 行的生产旧库搬第二遍，
+      -- PG 侧 6,921 → 6,931，多出来的 10 行全是 `angle_profile IS NULL`。
+      -- NULLS NOT DISTINCT 把 NULL 当相等：失败帧照样插得进去、重复投递仍是覆盖写。
+      UNIQUE NULLS NOT DISTINCT (ts, station_id, angle_profile)
     )
     """,
     """

@@ -86,6 +86,13 @@ IMAGE_ROWS = [
      "angle_profile": "level0", "yz": [-40, -145], "object_name": None,
      "object_name_source": "request", "ok": False, "error": "timeout", "elapsed_s": 8.0,
      "room_id": "611", "entry_date": "2026-08-16", "batch_no": "mogu-1"},
+    # **采图失败帧**（时间最早 ⇒ 倒序里排最后）：站位有、图没拍成，angle_profile 缺测 ⇒ NULL
+    # （现场确实有，见 test_ingest_failed_station_index_keeps_null_object_name）。
+    # 这份合成夹具原先一行 NULL 都没有，于是"NULL 行的 upsert 不幂等"一直没露头 ——
+    # 真数据彩排（2026-10-15，6,921 行的生产旧库）第二遍多出来的 10 行全是这种行。
+    {"ts": "2026-08-16T09:00:00", "round_id": "r-0", "station_id": "S107", "box_id": "B107",
+     "ok": False, "error": "采图链路失败: refused", "room_id": "611",
+     "entry_date": "2026-08-16", "batch_no": "mogu-1"},
 ]
 
 OPERATION_ROWS = [
@@ -256,7 +263,7 @@ def test_rounds_round_trip_keeps_dup_groups_as_a_list(pg):
 def test_images_flatten_yz_and_come_back_newest_first(pg):
     store.insert_images(pg, IMAGE_ROWS)
     rows = store.fetch_images(pg)
-    assert [r["station_id"] for r in rows] == ["S106", "S105"], "倒序"
+    assert [r["station_id"] for r in rows] == ["S106", "S105", "S107"], "倒序"
     latest = rows[0]
     assert latest["y"] == -40.0 and latest["z"] == -145.0, "yz 摊平成 y/z"
     assert latest["ok"] == 0 and latest["error"] == "timeout"
@@ -265,6 +272,119 @@ def test_images_flatten_yz_and_come_back_newest_first(pg):
     assert kept["ok"] == 1 and kept["frame_dup"] == 0 and kept["elapsed_s"] == 1.25
     assert store.fetch_images(pg, station_id="S105") == [kept]
     assert store.fetch_images(pg, room_id="611", limit=1) == [latest]
+
+    failed = rows[2]
+    assert failed["angle_profile"] is None, "采图失败的帧照样入库（angle_profile 缺测 ⇒ NULL）"
+    assert failed["object_name"] is None, "UNIQUE 不许把可空列变成 NOT NULL"
+
+
+# ---------- images 的唯一键：NULL 行的 upsert 必须幂等 ----------
+
+#: 唯一索引 / 主键的目录视图（读 `pg_index`，不猜 —— 服务器 PG 18.1，`NULLS NOT DISTINCT` 可用）：
+#:
+#: - `indnkeyatts` 是**键列**个数（不含 INCLUDE 列）；`indnullsnotdistinct` 是 PG 15+ 的列；
+#: - `indkey` 是 `int2vector`，**下标从 0 起**（不是数组的 1 起）—— 写成 1..n 会静默丢掉第一列，
+#:   这条 SQL 第一版就是这么错的（`batches` 主键只查出 `entry_date`），留一句免得后来人"修"回去。
+_UNIQUE_KEYS_SQL = """
+    WITH idx AS (
+      SELECT ix.indexrelid, ix.indrelid, ix.indisprimary, ix.indnullsnotdistinct,
+             ix.indnkeyatts, ix.indkey
+        FROM pg_index ix
+        JOIN pg_class i ON i.oid = ix.indexrelid
+        JOIN pg_namespace n ON n.oid = i.relnamespace
+       WHERE n.nspname = %s AND (ix.indisunique OR ix.indisprimary)
+    )
+    SELECT t.relname, i.relname, x.indisprimary, x.indnullsnotdistinct,
+           array_agg(a.attname ORDER BY k.ord) AS key_columns,
+           array_agg(a.attname ORDER BY k.ord)
+             FILTER (WHERE NOT a.attnotnull) AS nullable_key_columns
+      FROM idx x
+      JOIN pg_class i ON i.oid = x.indexrelid
+      JOIN pg_class t ON t.oid = x.indrelid
+      CROSS JOIN LATERAL generate_series(0, x.indnkeyatts - 1) AS k(ord)
+      JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = x.indkey[k.ord]
+     GROUP BY t.relname, i.relname, x.indisprimary, x.indnullsnotdistinct
+     ORDER BY t.relname, i.relname
+"""
+
+
+def _unique_keys(catalog, schema: str) -> list[tuple]:
+    catalog.execute(_UNIQUE_KEYS_SQL, (schema,))
+    return list(catalog.fetchall())
+
+
+def test_images_upsert_is_idempotent_for_null_angle_profile(pg):
+    """同一「采图失败」帧（`angle_profile IS NULL`）重投两次 ⇒ 表里只留一行。
+
+    根因：唯一键是普通 `UNIQUE (ts, station_id, angle_profile)`，而标准 SQL 里 **NULL 互不相等**
+    ⇒ `ON CONFLICT (ts, station_id, angle_profile)` 对含 NULL 的行**永远匹配不上冲突目标**，
+    每次重投都当新行插入。真数据彩排（2026-10-15，6,921 行的生产旧库）第二遍：PG 侧
+    6,921 → 6,931，多出来的 10 行全是 `angle_profile IS NULL`。
+
+    唯一键写成 `UNIQUE NULLS NOT DISTINCT (…)` 之后冲突检测才把 NULL 当相等。这条用例同时从
+    **行为上**钉住「`ON CONFLICT` 的推断仍绑在这个索引上」：绑不上时 PG 直接报
+    `no unique or exclusion constraint matching the ON CONFLICT specification`。
+    """
+    failed = next(r for r in IMAGE_ROWS if r.get("angle_profile") is None)
+    store.insert_images(pg, [failed])
+    store.insert_images(pg, [failed | {"error": "refused again"}])
+
+    rows = store.fetch_images(pg, station_id=failed["station_id"])
+    assert len(rows) == 1, "同一失败帧重投两次不许插重"
+    assert rows[0]["error"] == "refused again", "第二次是覆盖写（DO UPDATE）"
+    assert rows[0]["angle_profile"] is None, "NULL 行照样插得进去（不许退回 PRIMARY KEY）"
+
+
+def test_images_upsert_is_idempotent_for_a_non_null_angle_profile(pg):
+    """对照组：`angle_profile` 非 NULL 的行本来就幂等，修完不许变。"""
+    kept = next(r for r in IMAGE_ROWS if r["station_id"] == "S105")
+    store.insert_images(pg, [kept])
+    store.insert_images(pg, [kept | {"object_name": "2026/08/16/b.jpg"}])
+
+    rows = store.fetch_images(pg, station_id="S105")
+    assert len(rows) == 1
+    assert rows[0]["object_name"] == "2026/08/16/b.jpg", "覆盖写"
+
+
+def test_unique_index_keeps_nullable_key_columns_nulls_not_distinct(pg, catalog, pg_schema):
+    """**防复发断言**：键列里只要有一列可空，那个唯一索引 / 主键就必须是 `NULLS NOT DISTINCT`。
+
+    标准 SQL 里 NULL 互不相等 ⇒ 普通唯一键挡不住「同一行 NULL 的重复投递」（`ON CONFLICT`
+    匹配不上）；而键列可空说明写入方确实会写 NULL（采图失败帧的 `angle_profile` 就是）。
+    人工审计（2026-10-15）：九张表里只有 `images` 中招，其余主键列全是 NOT NULL ——
+    这条断言是给**以后加表**用的：新表的键列一旦可空又漏了 `NULLS NOT DISTINCT`，这里当场红。
+    """
+    assert pg.schema == pg_schema, "表由被测的存储层建出来（夹具 pg 的副作用），不是手搓的"
+    keys = _unique_keys(catalog, pg_schema)
+    assert {row[0] for row in keys} == set(TABLES), "九个表都要查到，别让这条断言空转"
+
+    offenders = [
+        (table, index, nullable)
+        for table, index, _primary, nulls_not_distinct, _key_columns, nullable in keys
+        if nullable and not nulls_not_distinct
+    ]
+    assert offenders == [], (
+        "这些唯一索引的键列里有可空列，却不是 NULLS NOT DISTINCT："
+        + repr(offenders)
+        + "；改成 UNIQUE NULLS NOT DISTINCT (…)（PG 15+），否则 ON CONFLICT 对含 NULL 的行"
+        "永远匹配不上，重复投递会插重"
+    )
+
+
+def test_images_unique_key_covers_the_conflict_target(pg, catalog, pg_schema):
+    """`insert_images` 的冲突目标 `(ts, station_id, angle_profile)` 与唯一索引列一一对应。
+
+    推断按**列清单**匹配、`NULLS NOT DISTINCT` 决定匹配上之后 NULL 算不算相等 —— 两件事都要成立。
+    绑定本身由上面两条 upsert 用例行为上钉住，这里钉的是索引的形状（列与顺序）。
+    """
+    assert pg.schema == pg_schema, "表由被测的存储层建出来（夹具 pg 的副作用）"
+    images = [row for row in _unique_keys(catalog, pg_schema) if row[0] == "images"]
+    assert len(images) == 1, f"images 只该有一个唯一键：{images}"
+    _table, _index, primary, nulls_not_distinct, key_columns, nullable = images[0]
+    assert not primary, "是 UNIQUE 约束（PRIMARY KEY 会强制 NOT NULL，失败帧插不进去）"
+    assert key_columns == ["ts", "station_id", "angle_profile"], "列清单 == ON CONFLICT 的目标"
+    assert "angle_profile" in nullable, "这列可空正是当初中招的原因，夹具别把它变成 NOT NULL"
+    assert nulls_not_distinct is True, "可空键列必须 NULLS NOT DISTINCT"
 
 
 # ---------- operations ----------

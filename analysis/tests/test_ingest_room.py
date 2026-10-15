@@ -198,3 +198,26 @@ def test_rounds_and_images_endpoints_expose_the_integrity_fields(client):
     assert image_out["duplicate_streak"] == 35
     assert image_out["dup_group"] == "a1b2c3d4e5f6"
     assert image_out["content_sha256"] == "b" * 64
+
+
+# ---------- 重复上报：唯一键挡插重（2026-10-15 真数据彩排抓到的那条） ----------
+
+
+def test_reposting_the_same_failed_frame_updates_instead_of_inserting(client):
+    """patrol 重投同一「采图失败」帧（`angle_profile` 缺测 ⇒ NULL）⇒ 覆盖写，不是插新行。
+
+    实时链路（`POST /ingest` → `store.insert_images`）与一次性搬迁走的是**同一套 upsert**。
+    唯一键若是普通 `UNIQUE`，NULL 互不相等 ⇒ `ON CONFLICT (ts, station_id, angle_profile)`
+    永远匹配不上 ⇒ 每重投一次多一行（真数据彩排第二遍多出来的 10 行就是这么来的）。
+    预期轴：重投 N 次，`/images` 里还是一行、内容是最新那次。
+    """
+    failed = image_row(angle_profile=None, object_name=None, ok=False,
+                       error="采图链路失败: refused")
+    with client as c:
+        assert c.post("/ingest", json={"rows": [failed]}).json()["inserted_images"] == 1
+        again = c.post("/ingest", json={"rows": [failed | {"error": "refused again"}]})
+        assert again.json()["inserted_images"] == 1
+        imgs = c.get("/images", params={"station_id": "S101"}).json()
+    assert len(imgs) == 1, "同一失败帧重投两次只许留一行"
+    assert imgs[0]["angle_profile"] is None, "失败帧照样入库（唯一键不许变成 NOT NULL）"
+    assert imgs[0]["error"] == "refused again", "第二次是覆盖写，不是插重"

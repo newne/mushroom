@@ -161,6 +161,9 @@ merge 提交 `325935c`）。**仍然没做 contract**：`sqlite3` 与 `ANALYSIS_
 | `analysis/tests/test_store_switch.py` | 主体就是那个开关；schema 名合法性那条搬到 `test_store_postgres.py` |
 
 `analysis/src/analysis/**` 与 `analysis/tests/**` 里现在 **0 处 `import sqlite3`**（全仓只剩一次性搬迁工具那一处，见下）。
+> 2026-10-15 追加：该工具的**自测** `analysis/tests/test_oneoff_migration.py` 也 `import sqlite3` ——
+> 只为**造一个旧库夹具**（工具要测的就是"旧库里有 NULL 行时搬迁幂等"），与工具**同生共死**：
+> `analysis/src/analysis/tools/` 删掉时它一起删。**服务代码里 0 处**这条不变，存储层只有一个后端这条也不变。
 缺连接串 ⇒ `StoreConfigError` 直接报错，**没有"退回本地文件库"的分支**。
 
 **常量搬到哪**
@@ -189,8 +192,10 @@ merge 提交 `325935c`）。**仍然没做 contract**：`sqlite3` 与 `ANALYSIS_
 `images` 的唯一键从 `PRIMARY KEY (ts, station_id, angle_profile)` 改成 **`UNIQUE` 约束**：
 SQLite 的复合主键**允许 NULL**（历史怪癖），现场确实有 `angle_profile` 缺测的"采图失败"行
 （`test_ingest_failed_station_index_keeps_null_object_name` 钉的就是它）；PG 的 `PRIMARY KEY` 会强制 NOT NULL，
-把那些行挡在门外 —— 那是**行为回归**，不是收紧。`UNIQUE` 的 NULL 语义与老库一致（NULL 互不相等，重复投递会多出一行，
-老库也这么长）。这条是 contract 里唯一一处"迁移会把现场数据挡在门外"的坑，已修并有用例覆盖。
+把那些行挡在门外 —— 那是**行为回归**，不是收紧。
+> **2026-10-15 更正**：这里当初写成"`UNIQUE` 的 NULL 语义与老库一致（NULL 互不相等，重复投递会多出一行）"，
+> 那是**只保住了"插得进去"、没保住"重复投递不插重"** —— 真数据彩排当场踩到（搬迁第二遍多出 10 行）。
+> 唯一键已改成 `UNIQUE NULLS NOT DISTINCT`，详见文末《2026-10-15 修复》一节。
 
 **一次性搬迁工具**（§4.3）：`analysis/src/analysis/tools/oneoff_sqlite_to_pg.py`，`python -m` 可跑，
 只读打开旧库（`mode=ro`）、幂等可重跑、逐表行数与时间跨度对账，退出码 0/1 表示对账通过与否：
@@ -263,3 +268,70 @@ rounds                 82       82        0        0       82       82  2026-09-
 - [ ] 有回滚路径（切回 SQLite 开关 + 旧镜像）—— **被 §4 的用户裁定取代**：开关已删，回滚只剩
   "旧镜像 + `/opt/mushroom-analysis/backups/` 里的旧库"这一条；
 - [x] **不写 TDengine**（ADR-0026）—— 本步不 import 任何 TDengine 通路。
+
+### 2026-10-15 修复：`images` 唯一键的 NULL 语义 —— 真数据彩排抓到搬迁不幂等
+
+实现者 worktree `store-pg4`（分支 `feat/store-pg4`，基线 `bc3c74e`）。
+**真数据彩排抓到的数据完整性问题**：拿生产旧库的真实快照（6,921 行）跑一次性搬迁，**不幂等** ——
+第一遍 6,921 行、对账通过；第二遍 PG 侧变成 **6,931**，差的 +10 只在 `images`（4,022 → 4,032），
+且 PG 里 `(ts, station_id, angle_profile)` 的重复组**全是 `angle_profile IS NULL`**。
+
+**根因**：唯一键是 `UNIQUE (ts, station_id, angle_profile)`，upsert 是
+`ON CONFLICT (ts, station_id, angle_profile) DO UPDATE` —— 标准 SQL 里 **NULL 互不相等**，
+`angle_profile IS NULL` 的行**永远匹配不上冲突目标** ⇒ 每次重跑都当新行插入。
+**这不只是搬迁工具的事**：实时链路 `insert_images`（`POST /ingest`）用的是同一套 upsert ⇒
+patrol 重复上报同一"采图失败"帧同样会插重。上一节"UNIQUE 的 NULL 语义与老库一致"的说法因此被推翻：
+那等于把老库的怪癖当成目标，换来"重复投递会插重"这个数据完整性问题。
+**两件事要一起成立**：`UNIQUE` 保住"失败帧插得进去"，`NULLS NOT DISTINCT` 保住"重复投递不插重"。
+
+**DDL 改了什么**（`analysis/src/analysis/store.py` 的建表 DDL，只有这一处）：
+
+| | `images` 的唯一键 |
+| --- | --- |
+| 前 | `UNIQUE (ts, station_id, angle_profile)` |
+| 后 | `UNIQUE NULLS NOT DISTINCT (ts, station_id, angle_profile)` |
+
+`NULLS NOT DISTINCT` 从 PG 15 起可用；服务器实测 `show server_version` =
+`18.1 (Debian 18.1-1.pgdg12+2)`。
+`ON CONFLICT (ts, station_id, angle_profile)` 的**推断仍绑在这个索引上**（推断按**列清单**匹配，
+`NULLS NOT DISTINCT` 只决定匹配上之后 NULL 算不算相等）—— 用行为用例钉住（绑不上时 PG 当场报
+`no unique or exclusion constraint matching the ON CONFLICT specification`），不靠猜。
+
+**新增用例**（每条都能单独变红）：
+
+| 用例 | 断言（红 → 绿） |
+| --- | --- |
+| `test_store_postgres.py::test_images_upsert_is_idempotent_for_null_angle_profile` | 同一 `angle_profile IS NULL` 行 upsert 两次 ⇒ 表里**1 行**且是覆盖写（红：2 行） |
+| `test_store_postgres.py::test_images_upsert_is_idempotent_for_a_non_null_angle_profile` | 对照组：非 NULL 行的幂等语义不许变 |
+| `test_store_postgres.py::test_unique_index_keeps_nullable_key_columns_nulls_not_distinct` | **防复发断言**：遍历该 schema 全部唯一索引 / 主键，**键列里有可空列的必须 `NULLS NOT DISTINCT`**；并断言九个表都查到（不让断言空转）。人工审计：只有 `images` 中招，其余八张表主键列 NOT NULL |
+| `test_store_postgres.py::test_images_unique_key_covers_the_conflict_target` | `images` 的唯一索引列 == 冲突目标 `(ts, station_id, angle_profile)`、可空键列、`NULLS NOT DISTINCT` |
+| `test_ingest_room.py::test_reposting_the_same_failed_frame_updates_instead_of_inserting` | 实时链路：`POST /ingest` 重投同一失败帧两次 ⇒ `/images` 只有 **1 行**（红：2 行） |
+| `test_oneoff_migration.py::test_migration_tool_writes_nothing_on_a_second_run_with_null_frames` | 带 NULL 行的旧库上，搬迁 CLI 连跑两遍 ⇒ 第二遍**逐表行数一个都不涨**（红：images 4 → 6） |
+
+**夹具补了什么**（原来的合成库没有 NULL 行，所以这个 bug 从没露头）：
+`test_store_postgres.py` 的 `IMAGE_ROWS` 补了一条"采图失败帧"（`angle_profile` 缺测 ⇒ NULL，
+进得去、也该被 upsert 覆盖）；`test_oneoff_migration.py` 的旧库夹具里有两行 NULL 帧，
+用例**断言这两行确实存在**（否则这条用例测不到东西）。
+
+**真库快照彩排**（`D:\code\mushroom\.scratch\prod-db\mushrooms.db`，
+`mode=ro` 只读打开、没改它；schema `analysis_test_rehearsal_pg4_9f3a1c`，跑完 DROP）：
+
+```text
+第一遍：合计：旧库 6921 行；本次写入 6921 行；PG 侧 6921 行   （images 4022，九表对账通过）
+第二遍：images   PG 之前 4022 → PG 之后 4022                  （九表逐表 PG 之前 == PG 之后，对账通过）
+```
+
+独立核对（不经工具）：`images` 4,022 行、其中 `angle_profile IS NULL` **10** 行、
+重复的 `(ts, station_id, angle_profile)` 组 **0**；唯一索引 =
+`btree (ts, station_id, angle_profile) NULLS NOT DISTINCT`。
+跑完 `DROP SCHEMA … CASCADE` 并复查不存在；整轮跑完目标库只剩 `information_schema / pg_catalog / pg_toast / public`。
+
+**测试**：带测试 DSN **253 passed**；不带 DSN **253 skipped**（都是 247 + 新增 6 条）；
+PG 卫生：跑完 `analysis_test_*` 残留 **0 个**、`analysis` schema 不存在、public 未动、没碰 TDengine。
+
+**给发版官的一条注意事项**：`ensure_schema` 用的是 `CREATE TABLE IF NOT EXISTS`，**不会改既有表**。
+本修复之前建过 `analysis` schema 的目标库（彩排用的临时 schema 都该已 DROP），既有 `images` 的唯一约束
+还是旧语义 —— 要么 `DROP SCHEMA` 重搬，要么手工
+`ALTER TABLE images DROP CONSTRAINT images_ts_station_id_angle_profile_key` +
+`ADD CONSTRAINT … UNIQUE NULLS NOT DISTINCT (…)`（注意：表里若已有重复 NULL 行，加约束会失败，得先清重）。
+生产 `analysis` schema 目前还没建过 ⇒ 实际搬迁不受影响。
