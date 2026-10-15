@@ -20,13 +20,9 @@ from analysis import store
 from analysis.audit import summarize_operations
 from analysis.batches import dedupe_by_identity, window_of
 from analysis.jobs import default_jobs, run_job
-from analysis.db import (
-    IMAGE_FIELDS,
-    MEASUREMENT_FIELDS,
-    ROUND_FIELDS,
-    fetch_batches as db_fetch_batches,
-    fetch_batches_state as db_fetch_batches_state,
-)
+# 字段清单是**契约常量**（单一实现处是 db.py，pg_store 也从那里取），不是数据访问：
+# 数据访问一律经门面 `analysis.store`。
+from analysis.db import IMAGE_FIELDS, MEASUREMENT_FIELDS, ROUND_FIELDS
 from analysis.environment import (
     batches as env_batches,
     series as env_series,
@@ -355,7 +351,7 @@ def create_app(
                 ),
             )
         # 整份台账都要看：只按 zone 过滤会把"旧编号挂着的那几批"当成"没有台账"
-        ledger, alias_report = resolve_rooms(db_fetch_batches(conn), label="/environment/batches")
+        ledger, alias_report = resolve_rooms(store.fetch_batches(conn), label="/environment/batches")
         if not ledger:
             return {
                 "ok": False,
@@ -433,7 +429,7 @@ def create_app(
                     "也不是别名表里登记过的旧编号"
                 ),
             )
-        ledger, alias_report = resolve_rooms(db_fetch_batches(conn), label="/batches")
+        ledger, alias_report = resolve_rooms(store.fetch_batches(conn), label="/batches")
         ledger, dupe_report = dedupe_by_identity(ledger)
         mine = sorted(
             (b for b in ledger if b.get("room_id_canonical") == want),
@@ -453,7 +449,7 @@ def create_app(
                 "until": nxt,
             })
         out.reverse()                                  # 最新在前
-        state = db_fetch_batches_state(conn)
+        state = store.fetch_batches_state(conn)
         stale = _ledger_is_stale(state.get("refreshed_at"))
         if stale:
             print(

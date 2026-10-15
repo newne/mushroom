@@ -9,6 +9,11 @@
 
     python -m analysis.batch_map --db /opt/mushroom-analysis/mushrooms.db \\
         --out analysis/data/batch_no_map.json
+    ANALYSIS_STORE=postgres python -m analysis.batch_map --dsn <conninfo> \
+        --out analysis/data/batch_no_map.json
+
+**读本库走门面**（票 28 第 2 步）：SQLite 认 `--db`，PG 认 `--dsn`/`--schema`，后端由
+`ANALYSIS_STORE` 选（缺省 sqlite）。
 
 **缺映射**时 `batches.batch_no` 写 NULL（不编值），页面显示派生 id `库房号|入库日期`；
 `fetch_batches_with_report()` 会给出"缺映射"的可见计数。长期解是让生产侧在 pgsql 补一列
@@ -22,22 +27,30 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from analysis import store
 from analysis.batches import DEFAULT_MAP_PATH
-from analysis.db import connect
-from analysis.db import fetch_batches as local_batches
 
 
-def build_map(db_path: str) -> dict[str, str]:
-    """从本库 `batches` 表里"有 batch_no 的行"反推映射。缺失的行不猜。"""
-    conn = connect(db_path)
-    mapping: dict[str, str] = {}
-    for row in local_batches(conn):
-        room = row.get("room_id")
-        date = row.get("entry_date")
-        batch_no = row.get("batch_no")
-        if room and date and batch_no:
-            mapping[f"{room}|{date}"] = str(batch_no)
-    return mapping
+def build_map(
+    db_path: str | None = None, *, dsn: str | None = None, schema: str | None = None
+) -> dict[str, str]:
+    """从本库 `batches` 表里「有 batch_no 的行」反推映射。缺失的行不猜。
+
+    连接参数按后端分（票 28 第 2 步）：SQLite 用 `db_path`，PG 用 `dsn`/`schema`；
+    经门面拿连接，用法由 `ANALYSIS_STORE` 选。
+    """
+    conn = store.connect(db_path, dsn=dsn, schema=schema)
+    try:
+        mapping: dict[str, str] = {}
+        for row in store.fetch_batches(conn):
+            room = row.get("room_id")
+            date = row.get("entry_date")
+            batch_no = row.get("batch_no")
+            if room and date and batch_no:
+                mapping[f"{room}|{date}"] = str(batch_no)
+        return mapping
+    finally:
+        conn.close()
 
 
 def write_map(mapping: dict[str, str], out_path: str) -> Path:
@@ -56,11 +69,13 @@ def write_map(mapping: dict[str, str], out_path: str) -> Path:
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="生成 batch_no 映射文件（从本库既有行反推）")
-    p.add_argument("--db", default="mushrooms.db", help="SQLite 路径（我们自己的库）")
+    p.add_argument("--db", default="mushrooms.db", help=store.CLI_DB_HELP)
+    p.add_argument("--dsn", help=store.CLI_DSN_HELP)
+    p.add_argument("--schema", help=store.CLI_SCHEMA_HELP)
     p.add_argument("--out", default=DEFAULT_MAP_PATH, help="映射文件落点")
     args = p.parse_args(argv)
 
-    mapping = build_map(args.db)
+    mapping = build_map(args.db, dsn=args.dsn, schema=args.schema)
     target = write_map(mapping, args.out)
     print(f"[batch_map] 从 {args.db} 反推 {len(mapping)} 条映射 → {target}")
     if not mapping:

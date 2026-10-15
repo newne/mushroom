@@ -227,6 +227,104 @@ def test_ingest_and_rounds_images_reads_agree_on_both_backends(
         assert boxes == ["B101", "B102"], "PG 侧框清单去重升序（换成 %s 占位后行为不变）"
 
 
+#: 台账物化缓存的两批（同一库房跨两个入库日）：/batches 的 until 与 /environment/batches 的窗口都要跑到。
+BATCH_ROWS = [
+    {"room_id": "611", "entry_date": "2026-08-16", "batch_no": "mogu-1", "batch_id": "611|2026-08-16"},
+    {"room_id": "611", "entry_date": "2026-09-30", "batch_no": "mogu-2", "batch_id": "611|2026-09-30"},
+    {"room_id": "612", "entry_date": "2026-08-16", "batch_no": None, "batch_id": "612|2026-08-16"},
+]
+
+
+def _seed_batches(conn) -> None:
+    """物化台账：整体替换一次（带 refreshed_at 与来源明细，/batches 的新鲜度判据靠它）。"""
+    store.replace_batches(
+        conn, BATCH_ROWS, refreshed_at="2026-08-16T05:20:00", detail={"source": "pgsql"},
+    )
+
+
+def test_batches_endpoints_agree_on_both_backends(tmp_path, monkeypatch, pg_dsn, pg_schema):
+    """/batches 与 /environment/batches：台账读 + 窗口切分在两个后端上逐字段相同。
+
+    `replace_batches` 是**写侧**（batch_ingest 用），`fetch_batches`/`fetch_batches_state`
+    是读侧（API 用）—— 两侧都在这一条里跑到。
+    """
+    with two_stores(tmp_path, monkeypatch, pg_dsn, pg_schema) as (sq, sq_app, pg_conn, pg_app):
+        _seed_env(sq)
+        _seed_env(pg_conn)
+        _seed_batches(sq)
+        _seed_batches(pg_conn)
+        assert len(store.fetch_batches(pg_conn)) == len(BATCH_ROWS)
+        assert store.fetch_batches_state(pg_conn)["refreshed_at"] == "2026-08-16T05:20:00"
+        assert_same_answers(sq_app, pg_app, [
+            ("/batches", {"room_id": "611"}),
+            ("/batches", {"room_id": "612"}),
+            ("/batches", {"room_id": "607"}),
+            ("/environment/batches", {"zone": "611"}),
+            ("/environment/batches", {"zone": "608"}),
+        ])
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_batch_map_cli_reverses_the_ledger_on_both_backends(backend, tmp_path, monkeypatch):
+    """`python -m analysis.batch_map` 从本库既有行反推映射：两种后端上结果一样。
+
+    映射文件是本地 JSON（不落库），这里只钉"读本库"那一半换了后端还通。
+    """
+    import json
+
+    from analysis.batch_map import main
+
+    out = tmp_path / "batch_no_map.json"
+    with one_store(backend, tmp_path, monkeypatch) as target:
+        conn = target.connect()
+        try:
+            _seed_batches(conn)
+        finally:
+            conn.close()
+
+        main([*target.cli_args, "--out", str(out)])
+
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["map"] == {
+        "611|2026-08-16": "mogu-1", "611|2026-09-30": "mogu-2",
+    }, "只有带 batch_no 的行进映射；缺的（612）不猜"
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgres"])
+def test_batch_ingest_run_once_materializes_the_ledger_on_both_backends(
+    backend, tmp_path, monkeypatch
+):
+    """`analysis.batch_ingest.run_once`（取数用假 runner 顶掉）在两后端上落同一份台账。"""
+    from datetime import date
+
+    from analysis.batch_ingest import run_once
+    from analysis.batches import SOURCES_SQL
+
+    rows = [(611, date(2026, 8, 16)), (611, date(2026, 9, 30)), (612, date(2026, 9, 30))]
+
+    def runner(sql):
+        if sql == SOURCES_SQL:
+            return [(611, date(2026, 8, 16), True, True),
+                    (611, date(2026, 9, 30), True, True),
+                    (612, date(2026, 9, 30), True, False)]
+        return rows
+
+    with one_store(backend, tmp_path, monkeypatch) as target:
+        conn = target.connect()
+        try:
+            n = run_once(conn, runner=runner, map_path=str(tmp_path / "nope.json"))
+            batches = store.fetch_batches(conn)
+            state = store.fetch_batches_state(conn)
+        finally:
+            conn.close()
+
+    assert n == 3
+    assert [b["batch_id"] for b in batches] == [
+        "611|2026-08-16", "611|2026-09-30", "612|2026-09-30"]
+    assert state["refreshed_at"], "整体替换要写 batches_state（/batches 的新鲜度靠它）"
+    assert state["n_rows"] == 3
+
+
 #: 24 小时环境（温度两档）+ 每小时 +1mm 的已验证测量：区间流水线能跑出 STATE_OK。
 def _seed_ranges(conn) -> None:
     store.upsert_environment(conn, [

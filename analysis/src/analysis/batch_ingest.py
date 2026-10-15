@@ -5,6 +5,11 @@
     python -m analysis.batch_ingest --db mushrooms.db --once
     python -m analysis.batch_ingest --db mushrooms.db --interval 86400
     python -m analysis.batch_ingest --db mushrooms.db --daily-at 05:20
+    ANALYSIS_STORE=postgres python -m analysis.batch_ingest --dsn <conninfo> --once
+
+**落库走门面**（票 28 第 2 步）：SQLite 认 `--db`，PG 认 `--dsn`/`--schema`，后端由
+`ANALYSIS_STORE` 选（缺省 sqlite）。**取数那条**（pgsql 台账）与落库是两件事，各管各的
+连接串来源。
 
 **取数已改走 pgsql**（用户 2026-10-14 裁定）：`tools_mysql` 是业务数据库、**禁止使用**；
 旧的 `docker exec tools_mysql` 通路已下线。连接串走 `PGSQL_DSN_FILE`（文件优先）或 `PGSQL_DSN`，
@@ -24,8 +29,8 @@ import argparse
 import time
 from datetime import datetime, timedelta
 
+from analysis import store
 from analysis.batches import fetch_batches_with_report
-from analysis.db import connect, replace_batches
 
 DEFAULT_DB = "mushrooms.db"
 
@@ -41,7 +46,7 @@ def run_once(conn, *, runner=None, map_path: str | None = None) -> int:
     被删的键逐条打印，并写 `batches_state` 供 `GET /batches` 给 `ledger_refreshed_at`/`stale`。
     """
     rows, report = fetch_batches_with_report(runner=runner, map_path=map_path)
-    replace_batches(conn, rows, detail=report)
+    store.replace_batches(conn, rows, detail=report)
     return len(rows)
 
 
@@ -96,13 +101,15 @@ def _daily_at(value: str) -> str:
 
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(description="批次台账同步")
-    p.add_argument("--db", default=DEFAULT_DB, help="SQLite 路径")
+    p.add_argument("--db", default=DEFAULT_DB, help=store.CLI_DB_HELP)
+    p.add_argument("--dsn", help=store.CLI_DSN_HELP)
+    p.add_argument("--schema", help=store.CLI_SCHEMA_HELP)
     p.add_argument("--once", action="store_true", help="同步一次后退出（与其它 ingest 同名参数）")
     p.add_argument("--interval", type=float, help="常驻：每 N 秒同步一次")
     p.add_argument("--daily-at", type=_daily_at, help="常驻：每天 HH:MM 同步一次")
     args = p.parse_args(argv)
 
-    conn = connect(args.db)
+    conn = store.connect(args.db, dsn=args.dsn, schema=args.schema)
     if args.interval or args.daily_at:
         loop(conn, interval_s=args.interval, daily_at=args.daily_at)
         return
