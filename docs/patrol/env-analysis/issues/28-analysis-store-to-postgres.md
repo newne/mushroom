@@ -66,3 +66,31 @@ Status: ready-for-agent
 
 > 注：`environment` 仍在增长（入库作业每 300s 一次）⇒ 搬迁时**以搬迁当刻实测为准**，上表是量级与形状的基线，
 > 不是"必须等于 2712"。搬迁脚本要能把"搬完之后的实时增量"与"搬迁开始前的快照"分开说清楚。
+
+## 5. 生产侧遗留清理清单（2026-10-15 盘点：服务已迁到 `/home/sysadmin/algorithm`）
+
+`/opt/mushroom-analysis/` 里除"活着的 SQLite"外还有一批遗留物，共约 65 MB：
+
+| 项 | 体积 | 日期 | 性质 | 处置 |
+| --- | ---: | --- | --- | --- |
+| `mushrooms.db`(+`-wal`/`-shm`) | 6.7 MB | **10-15 15:41 仍在写** | 活的业务库（容器 rw 挂载） | 搬迁并验证后归档删除 |
+| `backups/` | 28 MB | 10-09 ~ 10-14 | 8 个迁移前快照 + 单元文件备份 | **保留**（回滚底牌） |
+| `.venv/` | 30 MB | 9-13 | systemd 时代的 venv（py3.12 + fastapi 等） | 可删 |
+| `src/analysis/` | 296 KB | 10-12 | **遗留源码影子副本**（`db.py` 里仍有 **19 处 `sqlite3`**），**不是 git 检出** | 可删（见下"影子副本"） |
+| `backup-db.py` | 4 KB | 10-13 | WAL checkpoint + 连 `-wal`/`-shm` 备份 + 六表计数 | **迁移前继续用它** |
+
+### 两颗地雷（已拆一颗）
+
+1. **`mushroom-batch-ingest.service` + `.timer`（已拆除）**：服务 `static`、timer `disabled`、当前 inactive，**但文件仍装着**：
+   `ExecStart=/opt/mushroom-analysis/.venv/bin/python -m analysis.batch_ingest --db mushrooms.db --once`，
+   `PYTHONPATH=/opt/mushroom-analysis/src`，`OnCalendar=*-*-* 05:20:00`、`Persistent=true`。
+   ⇒ 一旦被 start/enable，就会**用遗留 src 的旧代码写即将废弃的 SQLite**；而且**与容器里的 `BATCH_AT=05:20` 重复**（两个写者同步同一份台账）。
+   **已于 2026-10-15 拆除**：单元文件备份到 `backups/unitfiles-batch-ingest-<时间戳>/`（沿用既有 `unitfiles-*` 先例）→ stop/disable → 删文件 → `daemon-reload` → 复查单元与文件均已消失。
+2. **`src/` 影子副本**：这是 compose 注释里"**不要把 PYTHONPATH 指到这里面的 src**"警告的对象。它含 `analysis` 包完整旧版
+   （api/db/align/growth/env/*/batch_ingest…），与镜像内代码不同步。搬迁后**必须删除**，否则它就是一个"跑旧代码、写废弃库"的持久诱因。
+
+### 已正确退休的（对照）
+
+`mushroom-analysis`/`-patrol`/`-console`/`-preview`/`-audit` 单元**已不存在**（`not-found`）；
+它们的单元文件在 `backups/unitfiles-20261014-102835/` 里（含 `mushroom-analysis.service`、`mushroom-env-ingest.service`、`mushroom-audit-ingest.*`）——
+**只有 batch-ingest 这一组漏了**，现已补齐。
