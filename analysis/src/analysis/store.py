@@ -37,9 +37,23 @@ BACKENDS = (BACKEND_SQLITE, BACKEND_POSTGRES)
 DEFAULT_DB_PATH_ENV = "ANALYSIS_DB"
 DEFAULT_DB_PATH = "mushrooms.db"
 
+#: 四个 ingest CLI（env / audit / batch / batch_map）共用的连接参数说明。
+#: 后端由 `ANALYSIS_STORE` 选，所以两个参数各管一个后端：SQLite 认 `--db`、PG 认 `--dsn`。
+CLI_DB_HELP = (
+    f"SQLite 库路径（缺省取 {DEFAULT_DB_PATH_ENV}，再缺省 {DEFAULT_DB_PATH}）；"
+    f"只在 {DEFAULT_BACKEND_ENV} 缺省/{BACKEND_SQLITE} 时参与"
+)
+CLI_DSN_HELP = (
+    f"PG 连接串；缺省走 PGSQL_DSN_FILE（文件优先）/ PGSQL_DSN。"
+    f"只在 {DEFAULT_BACKEND_ENV}={BACKEND_POSTGRES} 时参与。**别写进命令行历史/仓库**"
+)
+CLI_SCHEMA_HELP = (
+    f"PG schema（缺省取 {_pg.DEFAULT_SCHEMA_ENV}，再缺省 {_pg.DEFAULT_SCHEMA}）"
+)
+
 __all__ = [
     "BACKENDS", "BACKEND_POSTGRES", "BACKEND_SQLITE", "DEFAULT_BACKEND_ENV",
-    "StoreConfigError", "backend", "connect", "migrate",
+    "StoreConfigError", "backend", "connect", "migrate", "prepare_connection",
     "upsert_environment", "fetch_environment",
     "upsert_operations", "fetch_operations", "fetch_latest_operations_before",
     "upsert_batches", "replace_batches", "fetch_batches", "fetch_batches_state",
@@ -81,6 +95,16 @@ def connect(
         db_path or os.environ.get(DEFAULT_DB_PATH_ENV, DEFAULT_DB_PATH),
         check_same_thread=check_same_thread,
     )
+
+
+def prepare_connection(conn) -> None:
+    """把连接调成后端各自的「共享形态」（API 一份连接给请求线程与作业线程用）。
+
+    调用方说的是「我要共享它」，**怎么做由后端决定**：SQLite 开 WAL（多读一写），
+    PG 无事可做（MVCC）。这是 `api.create_app` 里那句 SQLite 专有
+    `PRAGMA journal_mode=WAL` 的落点（票 28 第 2 步的挡路点 1）。
+    """
+    _impl(conn).prepare_connection(conn)
 
 
 def _impl(conn):

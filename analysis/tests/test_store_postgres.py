@@ -9,6 +9,9 @@
 `PGSQL_DSN*`**：那两个是应用跑生产用的，本机 shell 里挂着生产 DSN 时，跑一次测试不该
 往生产库里建 schema。两个都没设 ⇒ 整组 skip（默认的 SQLite 套件照旧全绿）。
 
+DSN 解析与 schema 建删只有一处实现（`tests/pg_harness.py`），夹具（`pg_dsn` / `pg_schema` /
+`pg` / `catalog`）在 `tests/conftest.py` —— 第 2 步（migrate）起多个测试文件共用它们。
+
 本文件钉住的核心是**两套实现的等价**：同一个场景在 SQLite 与 PG 上各跑一遍，读回来的行
 要逐字段相等；此外单独钉住 PG 特有的那几处（schema 隔离、列与 SQLite 逐列一致、
 布尔/整数按 SQLite 亲和性的结果落库）。
@@ -16,12 +19,10 @@
 
 from __future__ import annotations
 
-import os
-import uuid
-from pathlib import Path
-
 import pytest
 from analysis import db, store
+
+import pg_harness
 
 #: 目标表的清单（与 `db.SCHEMA` 一一对应）。
 TABLES = (
@@ -109,61 +110,13 @@ RANGE_ROWS = [
 ]
 
 
-def _test_dsn() -> str | None:
-    """测试用的连接串：**只认测试专用的两个变量**（理由见模块头）。"""
-    dsn = (os.environ.get("ANALYSIS_TEST_DSN") or "").strip()
-    if dsn:
-        return dsn
-    path = (os.environ.get("ANALYSIS_TEST_DSN_FILE") or "").strip()
-    if not path:
-        return None
-    try:
-        text = Path(path).read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return text or None
-
-
-PG_DSN = _test_dsn()
+#: 整组 skip 的判据（连接串与 schema 的其余装置见 `pg_harness` / `conftest`）。
+PG_DSN = pg_harness.test_dsn()
 
 pytestmark = pytest.mark.skipif(
     PG_DSN is None,
     reason="没有 ANALYSIS_TEST_DSN / ANALYSIS_TEST_DSN_FILE：PG 用例整组跳过",
 )
-
-
-@pytest.fixture
-def pg_schema():
-    """每个用例一个独立 schema，跑完必删；删不掉就报错（不许留下垃圾 schema）。"""
-    name = f"analysis_test_{uuid.uuid4().hex[:12]}"
-    yield name
-    import psycopg
-
-    with psycopg.connect(PG_DSN, autocommit=True) as conn, conn.cursor() as cur:
-        cur.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')
-        cur.execute("SELECT 1 FROM information_schema.schemata WHERE schema_name = %s", (name,))
-        assert cur.fetchone() is None, f"测试 schema {name} 没删干净"
-
-
-@pytest.fixture
-def pg(pg_schema, monkeypatch):
-    """经**门面**拿 PG 连接（开关打开），与生产调用路径一致。"""
-    monkeypatch.setenv("ANALYSIS_STORE", "postgres")
-    assert store.backend() == "postgres"
-    conn = store.connect(dsn=PG_DSN, schema=pg_schema)
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-@pytest.fixture
-def catalog():
-    """**独立连接**（不经过被测对象）用来查目录/核对，避免"自己验自己"。"""
-    import psycopg
-
-    with psycopg.connect(PG_DSN, autocommit=True) as conn, conn.cursor() as cur:
-        yield cur
 
 
 def _tables(cur, schema: str) -> list[str]:
@@ -218,10 +171,7 @@ def test_writes_stay_inside_the_given_schema(pg, pg_schema, catalog, monkeypatch
         assert store.fetch_environment(other) == [], "第一套 schema 里的行不该串过来"
     finally:
         other.close()
-        import psycopg
-
-        with psycopg.connect(PG_DSN, autocommit=True) as conn, conn.cursor() as cur:
-            cur.execute(f'DROP SCHEMA IF EXISTS "{other_schema}" CASCADE')
+        pg_harness.drop_schema(PG_DSN, other_schema)
 
 
 # ---------- environment ----------

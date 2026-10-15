@@ -252,6 +252,14 @@ class PgConnection:
         return False
 
 
+def prepare_connection(conn: PgConnection) -> None:
+    """PG 侧**什么都不用做**：并发是 MVCC 的事，连接本身线程安全（psycopg3）。
+
+    存在的意义是让调用方（`api.create_app`）不必再写 SQLite 专有的
+    `PRAGMA journal_mode=WAL`（票 28 第 2 步的挡路点 1）。
+    """
+
+
 def _driver():
     """惰性 import `psycopg`：只用 SQLite 时，import 链不该依赖重驱动（票 12 §1.1）。"""
     try:

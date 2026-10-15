@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from analysis import store
 from analysis.audit import summarize_operations
 from analysis.batches import dedupe_by_identity, window_of
 from analysis.jobs import default_jobs, run_job
@@ -23,10 +24,8 @@ from analysis.db import (
     IMAGE_FIELDS,
     MEASUREMENT_FIELDS,
     ROUND_FIELDS,
-    connect,
     fetch_batches as db_fetch_batches,
     fetch_batches_state as db_fetch_batches_state,
-    fetch_environment,
     fetch_operations,
     fetch_images,
     fetch_measurements,
@@ -93,10 +92,17 @@ def _span_hours(start: str, end: str | None) -> float:
 def create_app(
     db_path: str | None = None,
     *,
+    store_dsn: str | None = None,
+    store_schema: str | None = None,
     raw_source_factory=None,
     jobs_factory=default_jobs,
 ) -> FastAPI:
     """建应用。`db_path` 缺省取环境变量 `ANALYSIS_DB`（容器里显式给路径，不靠工作目录）。
+
+    **存储后端由 `ANALYSIS_STORE` 选**（票 28：缺省 `sqlite`，`postgres` 走 PG），
+    这里只把连接参数交给门面：`store_dsn` / `store_schema` **只在 PG 后端参与**，
+    缺省分别走 `PGSQL_DSN_FILE`（文件优先）/`PGSQL_DSN` 与 `ANALYSIS_PG_SCHEMA`；
+    SQLite 后端只认 `db_path`。两个参数都不传就是现状（容器里由 compose 给 `ANALYSIS_DB`）。
 
     **常驻作业在 lifespan 里跑**（票 12）：API 与 env/audit/batch 三个 ingest
     同一个容器、同一个进程，定时是进程内 asyncio 任务 —— 不靠容器重启，
@@ -105,9 +111,13 @@ def create_app(
     开发与测试里不会有后台网络请求。
     """
     resolved_db = db_path or os.environ.get("ANALYSIS_DB", "mushrooms.db")
-    # 单 worker 部署，允许跨线程复用连接（FastAPI 线程池执行 sync 端点）
-    conn = connect(resolved_db, check_same_thread=False)
-    conn.execute("PRAGMA journal_mode=WAL")
+    # 单 worker 部署，允许跨线程复用连接（FastAPI 线程池执行 sync 端点）。
+    # 后端由门面选；PG 下 `resolved_db` 不参与（连接串见 create_app 文档）。
+    conn = store.connect(
+        resolved_db, check_same_thread=False, dsn=store_dsn, schema=store_schema
+    )
+    # 共享形态由后端决定（SQLite 开 WAL；PG 无事可做）—— 这里不写后端专有语句。
+    store.prepare_connection(conn)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -315,7 +325,7 @@ def create_app(
                 "source": "tdengine",
                 "rows": _raw_rows(zone, start, end),
             }
-        rows = fetch_environment(
+        rows = store.fetch_environment(
             conn, zone=zone or None, start=start or None, end=end or None
         )
         return {
@@ -384,7 +394,7 @@ def create_app(
                 "batches": [],
                 "room_alias": alias_report,
             }
-        rows = fetch_environment(conn, zone=want)
+        rows = store.fetch_environment(conn, zone=want)
         kept = [r for r in rows if r.get("ts")]
         return {
             "ok": True,
@@ -479,7 +489,7 @@ def create_app(
     @app.get("/environment/summary")
     def environment_summary(zone: str = "", start: str = "", end: str = "") -> dict:
         """窗口内的极值/分位数、缺口清单与"整列无源"标记（都基于小时聚合）。"""
-        rows = fetch_environment(
+        rows = store.fetch_environment(
             conn, zone=zone or None, start=start or None, end=end or None
         )
         return env_summary(

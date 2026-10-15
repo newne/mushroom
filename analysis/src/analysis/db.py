@@ -232,6 +232,16 @@ def connect(db_path: str, *, check_same_thread: bool = True) -> sqlite3.Connecti
     return conn
 
 
+def prepare_connection(conn: sqlite3.Connection) -> None:
+    """共享连接的形态：**开 WAL**（多读一写）。
+
+    API 拿一份连接给请求线程与 lifespan 里的作业线程用（票 12），所以这一步属于
+    「怎么共享」而不是「建连接」。经门面 `analysis.store.prepare_connection` 转发到这里；
+    PG 侧是空实现（MVCC 没有「日志模式」这回事）。
+    """
+    conn.execute("PRAGMA journal_mode=WAL")
+
+
 #: 建表语句之后**追加**过的列（表已存在时 `CREATE TABLE IF NOT EXISTS` 不会补列）。
 #: 现场库是长期存在的，所以这里必须能就地升级——否则老库会一直是"缺列"的样子，
 #: 而写入方（daemon）并不知道，只会静默丢字段。
