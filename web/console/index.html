@@ -3312,6 +3312,24 @@ function batchKey(row){
   return JSON.stringify([row.room_id || '', row.entry_date || '', row.batch_no || '']);
 }
 
+/** 批次的**主显示**与**附注**（票 17，ADR-0020）。
+ *
+ *  权威身份 = **（库房号, 入库日期）**：主显示永远走 `main`（"611 · 2026-09-30"）；
+ *  `mogu-*`（`batch_no`）只是**派生显示名**，只能作附注（`note`）——反过来的话，
+ *  人会拿派生名当身份用，而它换一次映射就变。
+ *
+ *  库房号优先用后端给的 `room_label`（旧编号会写成「607（原始 7）」；只给一个数字会让人
+ *  以为是同一套编码），后端没给（老 analysis 镜像）才退回调用方知道的 zone，仍没有就只给日期
+ *  ——**不猜**一个库房号出来。缺 `batch_no` ⇒ `note` 是空串（**不编**），由调用方决定空位写什么。
+ */
+function batchIdentity(row, fallbackRoom){
+  const r = row || {};
+  const room = r.room_label || r.room_id || fallbackRoom || '';
+  const date = String(r.entry_date || r.start || '').slice(0, 10);
+  return { main: [room, date].filter(Boolean).join(' · '),
+           note: r.batch_no ? String(r.batch_no) : '' };
+}
+
 function syncBatchOptions(){
   const batches = new Map();
   for(const round of hist.rounds){
@@ -3326,8 +3344,8 @@ function syncBatchOptions(){
   }
   $('#batchSel').innerHTML = options.length
     ? options.map(([key, row]) => {
-        const label = [row.room_id && `库房 ${row.room_id}`, row.entry_date && `入库 ${row.entry_date}`,
-                       row.batch_no || '批次未标记'].filter(Boolean).join(' · ');
+        const id = batchIdentity(row);
+        const label = id.main + '（' + (id.note || '业务名未标记') + '）';
         return `<option value="${esc(encodeURIComponent(key))}">${esc(label)}</option>`;
       }).join('')
     : '<option value="">暂无生产批次</option>';
@@ -3916,15 +3934,17 @@ function drawBatches(){
   box.className = '';
   box.innerHTML = '<table class="meas"><tr><th>批次</th><th>天数</th><th>温度均</th><th>湿度均</th>'
     + '<th>CO₂均</th><th>补光周期</th></tr>'
-    + list.map((b, i) =>
-        '<tr><td>' + esc(b.batch_no || String(b.entry_date || b.start).slice(5, 10))
-        + (i === 0 ? '（当前）' : '')
-        + '<div class="empty" style="padding:0">' + esc(String(b.entry_date || b.start).slice(0, 10))
-        + ' 起</div></td><td>' + b.days + '</td>'
+    + list.map((b, i) => {
+        // 主显示 = （库房, 入库日期）；业务名（mogu-*）降为附注（票 17 / ADR-0020）
+        const id = batchIdentity(b, envZone());
+        return '<tr><td>' + esc(id.main) + (i === 0 ? '（当前）' : '')
+        + '<div class="empty" style="padding:0">' + esc(id.note || '业务名未标记')
+        + '</div></td><td>' + b.days + '</td>'
         + '<td>' + cell(p(b, 'temp_c')) + '</td>'
         + '<td>' + cell(p(b, 'rh_pct')) + '</td>'
         + '<td>' + cell(p(b, 'co2_ppm')) + '</td>'
-        + '<td>' + esc(fmtLampCycle(b.lamp)) + '</td></tr>').join('')
+        + '<td>' + esc(fmtLampCycle(b.lamp)) + '</td></tr>';
+      }).join('')
     + '</table>';
   const cur = list[0];
   note.innerHTML = '<div class="empty" style="padding:4px 0 0">'
