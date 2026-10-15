@@ -22,10 +22,14 @@ from dataclasses import dataclass
 
 import pytest
 from analysis import store
+from analysis.align import refresh_ranges
 from analysis.api import create_app
 from fastapi.testclient import TestClient
 
 import pg_harness
+
+#: `two_stores` 建的 SQLite 临时库名（用例要按"老形状"传路径时用它）。
+SQLITE_NAME = "migrate.db"
 
 #: 环境小时聚合：两个库房 × 两个整点（够跑 hour/day 聚合与 summary）。
 ENV_ROWS = [
@@ -60,7 +64,7 @@ def two_stores(tmp_path, monkeypatch, pg_dsn, pg_schema):
     "同一个请求两边逐字段相同"，所以这里把两份并排摆好，用例只负责比。
     """
     monkeypatch.delenv("ANALYSIS_STORE", raising=False)
-    path = str(tmp_path / "migrate.db")
+    path = str(tmp_path / SQLITE_NAME)
     sqlite_conn = store.connect(path)
     sqlite_app = create_app(path)
     monkeypatch.setenv("ANALYSIS_STORE", "postgres")
@@ -221,6 +225,82 @@ def test_ingest_and_rounds_images_reads_agree_on_both_backends(
                     f"{url}?{params} 两个后端的响应不一致"
         boxes = store.fetch_room_box_ids(pg_conn, room_id="611")
         assert boxes == ["B101", "B102"], "PG 侧框清单去重升序（换成 %s 占位后行为不变）"
+
+
+#: 24 小时环境（温度两档）+ 每小时 +1mm 的已验证测量：区间流水线能跑出 STATE_OK。
+def _seed_ranges(conn) -> None:
+    store.upsert_environment(conn, [
+        {"ts": f"2026-08-01T{i:02d}:00:00", "zone": "611", "temp_c": 22.0 + (i % 2) * 4.0,
+         "rh_pct": 85.0, "co2_ppm": 800.0, "lamp_state": 2.0}
+        for i in range(24)
+    ])
+    store.insert_measurements(conn, [
+        {"ts": f"2026-08-01T{i:02d}:00:00", "room_id": "611", "box_id": "B01",
+         "mean_len_mm": 10.0 + i, "quality": "verified"}
+        for i in range(24)
+    ])
+
+
+def test_ranges_pipeline_agrees_on_both_backends(tmp_path, monkeypatch, pg_dsn, pg_schema):
+    """区间重算与 /ranges：PG 侧与 SQLite 侧产出**同一份区间行与状态**。
+
+    这一条钉住票 28 第 2 步的三个挡路点：`pd.read_sql` 换成"经门面取行再拼 DataFrame"、
+    `compute_ranges`/`refresh_ranges` 改成吃连接、`/ranges` 的读走门面。
+    """
+    with two_stores(tmp_path, monkeypatch, pg_dsn, pg_schema) as (sq, sq_app, pg_conn, pg_app):
+        _seed_ranges(sq)
+        _seed_ranges(pg_conn)
+        stamp = "2026-08-16T02:00:00"
+        n_pg = refresh_ranges(conn=pg_conn, computed_at=stamp)
+        n_sq = refresh_ranges(conn=sq, computed_at=stamp)
+        assert n_pg == n_sq > 0, "两边都算出区间行（不是「空表对空表」）"
+        assert store.fetch_ranges(pg_conn) == store.fetch_ranges(sq)
+        pg_state, sq_state = store.fetch_ranges_state(pg_conn), store.fetch_ranges_state(sq)
+        assert pg_state["state"] == sq_state["state"] == "ok"
+        # `updated_at` 是各自写库那一刻的墙钟（两边不可能同秒），其余字段必须一致。
+        assert {k: v for k, v in pg_state.items() if k != "updated_at"} == {
+            k: v for k, v in sq_state.items() if k != "updated_at"
+        }
+        assert_same_answers(sq_app, pg_app, [("/ranges", {})])
+
+
+def test_the_path_shaped_entry_points_still_work(tmp_path, monkeypatch):
+    """**老形状（按路径建连接）还在**：CLI 与老测试还这么传，第 4 步 contract 才删。
+
+    这一条故意只跑 SQLite（不需要 DSN）：PG 下的调用方必须传连接，路径在 PG 下没有意义。
+    """
+    from analysis.align import compute_ranges
+
+    monkeypatch.delenv("ANALYSIS_STORE", raising=False)
+    path = str(tmp_path / "path-shaped.db")
+    conn = store.connect(path)
+    _seed_ranges(conn)
+    conn.close()
+
+    run = compute_ranges(path)
+    assert run.state == "ok" and run.rows
+    assert refresh_ranges(path, computed_at="2026-08-16T02:00:00") == len(run.rows)
+    assert store.fetch_ranges_state(store.connect(path))["state"] == "ok"
+
+
+def test_ranges_job_recomputes_on_pg_through_the_shared_connection(pg, monkeypatch):
+    """`RANGES_AT` 装出来的 ranges 作业**拿 API 那一份连接**重算（PG 上不再按路径重连）。
+
+    作业原来调 `refresh_ranges(db_path)`：PG 下没有"路径"这回事，那种重连要么连错库、
+    要么丢掉 schema。这里跑一轮真实的重算，确认区间行与状态都落在同一个 schema 里。
+    """
+    from analysis.jobs import default_jobs
+
+    monkeypatch.setenv("RANGES_AT", "05:40")
+    _seed_ranges(pg)
+    jobs = {job.name: job for job in default_jobs(pg)}
+    assert set(jobs) == {"ranges"}
+
+    jobs["ranges"].run()
+
+    state = store.fetch_ranges_state(pg)
+    assert state["state"] == "ok" and state["n_rows"] > 0
+    assert len(store.fetch_ranges(pg)) == state["n_rows"]
 
 
 #: 操作日志：同一设备点位跨日的变更（/setpoints/daily 的 changed/carried 都要跑到）。

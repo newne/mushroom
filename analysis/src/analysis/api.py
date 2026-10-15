@@ -26,8 +26,6 @@ from analysis.db import (
     ROUND_FIELDS,
     fetch_batches as db_fetch_batches,
     fetch_batches_state as db_fetch_batches_state,
-    fetch_ranges,
-    fetch_ranges_state,
 )
 from analysis.environment import (
     batches as env_batches,
@@ -115,7 +113,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         try:
-            jobs = list(jobs_factory(conn, resolved_db))
+            jobs = list(jobs_factory(conn))
         except Exception as e:  # noqa: BLE001 - 装配失败不许把 API 拖下水
             print(f"[ingest] 作业装配失败，API 照常启动: {e}")
             jobs = []
@@ -578,8 +576,8 @@ def create_app(
         ⚠️ **建议层不许读这个响应**：它含估算行。建议层的入口是
         `analysis.align.advice_input` / `db.fetch_advice_ranges`（只给已验证档，带断言）。
         """
-        state = fetch_ranges_state(conn)
-        rows = fetch_ranges(conn)
+        state = store.fetch_ranges_state(conn)
+        rows = store.fetch_ranges(conn)
         return {
             "ok": True,
             "rows": rows,

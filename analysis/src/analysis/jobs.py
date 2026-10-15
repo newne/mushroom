@@ -82,8 +82,8 @@ async def run_job(job: IngestJob) -> None:
         await asyncio.sleep(job.next_delay_s(failures))
 
 
-def default_jobs(conn, db_path: str) -> list[IngestJob]:
-    """按环境变量装配作业。**没设周期变量的作业不会出现**（开发/测试默认安静）。
+def default_jobs(conn) -> list[IngestJob]:
+    """按环境变量装配作业，**共用 API 那一份连接**。没设周期变量的作业不会出现（开发/测试默认安静）。
 
     | 环境变量 | 作业 | 默认 |
     | --- | --- | --- |
@@ -154,7 +154,8 @@ def default_jobs(conn, db_path: str) -> list[IngestJob]:
         from analysis.align import refresh_ranges
 
         def run_ranges() -> None:
-            n = refresh_ranges(db_path)
+            # 传连接而不是路径（票 28 第 2 步）：PG 下没有"路径"这回事，重连会丢 schema。
+            n = refresh_ranges(conn=conn)
             print(f"[ranges] 重算完成，{n} 行区间")
 
         jobs.append(IngestJob("ranges", run_ranges, daily_at=ranges_at))

@@ -3,6 +3,7 @@
 要钉住的三件事：
 1. **不设周期环境变量就不跑**（开发/测试里不该有后台网络请求）；
 2. 作业由 `analysis.api` 的 lifespan 在**同一个进程**里起停 —— 不靠容器重启当调度；
+   作业与 API 共用**同一份连接**（票 28 第 2 步：不再按路径重连）；
 3. 退出时任务被取消，不会留下野循环。
 """
 
@@ -20,7 +21,7 @@ from fastapi.testclient import TestClient
 
 def test_without_interval_env_no_job_runs(tmp_path):
     path = str(tmp_path / "quiet.db")
-    assert default_jobs(connect(path), path) == []
+    assert default_jobs(connect(path)) == []
 
 
 def test_jobs_are_assembled_from_env(monkeypatch, tmp_path):
@@ -32,7 +33,7 @@ def test_jobs_are_assembled_from_env(monkeypatch, tmp_path):
     monkeypatch.setenv("RANGES_AT", "05:40")
     path = str(tmp_path / "jobs.db")
 
-    jobs = {job.name: job for job in default_jobs(connect(path), path)}
+    jobs = {job.name: job for job in default_jobs(connect(path))}
     assert set(jobs) == {"env", "audit", "batch", "ranges"}
     assert jobs["env"].interval_s == 300
     assert jobs["audit"].interval_s == 600
@@ -58,7 +59,7 @@ def test_audit_job_is_skipped_without_credentials(monkeypatch, tmp_path):
     """没凭据就别启动：拿空口令去打环控平台只是白挨一次 401。"""
     monkeypatch.setenv("AUDIT_INTERVAL", "600")
     path = str(tmp_path / "nocreds.db")
-    assert default_jobs(connect(path), path) == []
+    assert default_jobs(connect(path)) == []
 
 
 def test_job_needs_exactly_one_period():
@@ -76,7 +77,7 @@ def test_lifespan_runs_the_job_once_then_stops(tmp_path):
         calls.append(1)
         first_run.set()
 
-    def factory(conn, db_path):
+    def factory(conn):
         return [IngestJob("stub", run, interval_s=3600)]
 
     app = create_app(str(tmp_path / "life.db"), jobs_factory=factory)
@@ -108,7 +109,7 @@ def test_a_failing_job_never_takes_the_api_down(tmp_path):
         runs.append(1)
         raise RuntimeError("TDengine 抖了一下")
 
-    def factory(conn, db_path):
+    def factory(conn):
         return [IngestJob("bad", run, interval_s=0.01, backoff_cap_s=0.02)]
 
     app = create_app(str(tmp_path / "bad.db"), jobs_factory=factory)
@@ -120,7 +121,7 @@ def test_a_failing_job_never_takes_the_api_down(tmp_path):
 
 
 def test_broken_jobs_factory_still_serves_the_api(tmp_path):
-    def factory(conn, db_path):
+    def factory(conn):
         raise RuntimeError("装配就炸了")
 
     with TestClient(create_app(str(tmp_path / "f.db"), jobs_factory=factory)) as c:

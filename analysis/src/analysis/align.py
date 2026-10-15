@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from analysis import store
 from analysis.evidence import TIER_ESTIMATE, TIER_VERIFIED, tier_of
 from analysis.growth import GROWTH_METRICS
 
@@ -216,12 +217,13 @@ def best_ranges(merged: pd.DataFrame, *, n_bins: int = 4,
     return out
 
 
-def run_from_db(db_path: str) -> list[dict]:
-    """从 SQLite 读两表跑全流程（只读式计算，不落表）。返回区间行，**不返回为什么空**。
+def run_from_db(db_path: str | None = None, *, conn=None) -> list[dict]:
+    """从库里读两表跑全流程（只读式计算，不落表）。返回区间行，**不返回为什么空**。
 
     要"为什么空"请用 `compute_ranges`（票 05 的空态标注）——它给同一批行 + 状态。
+    连接来源同 `compute_ranges`（票 28 第 2 步）：有 `conn` 就用，没有才按路径建。
     """
-    return compute_ranges(db_path).rows
+    return compute_ranges(db_path, conn=conn).rows
 
 
 #: 区间表重算的状态机（票 05）。**空表必须说得出为什么空**：
@@ -287,21 +289,37 @@ class RangesRun:
     flags: list[str] = field(default_factory=list)
 
 
-def compute_ranges(db_path: str, *, metric: str | None = None) -> RangesRun:
-    """从 SQLite 读两表跑全流程，返回 **区间行 + 为什么空**（票 05）。
+def compute_ranges(
+    db_path: str | None = None, *, conn=None, metric: str | None = None
+) -> RangesRun:
+    """从库里读两表跑全流程，返回 **区间行 + 为什么空**（票 05）。
+
+    **连接从哪来**（票 28 第 2 步）：给了 `conn` 就用它 —— API / jobs / 批处理手里本来就有
+    一份连接，**不许再按路径重连**（PG 下没有"路径"这个概念）；没给就经门面按 `db_path`
+    建一条，用完在本函数里关掉（CLI 与老测试还按老形状传路径）。
+    """
+    if conn is not None:
+        return _compute_ranges(conn, metric=metric)
+    own = store.connect(db_path)
+    try:
+        return _compute_ranges(own, metric=metric)
+    finally:
+        own.close()
+
+
+def _compute_ranges(conn, *, metric: str | None = None) -> RangesRun:
+    """`compute_ranges` 的实体：只认连接，数据访问全走门面。
 
     - **先过滤**（票 13/17）：可疑轮、复制帧、以及显式排除清单命中的测量行不进统计 ——
       复制帧会让长势曲线看起来正常，那种错误比缺数据更难发现。
     - 每一步失败都映射成一个**具名状态**，绝不返回一个无解释的空列表。
     """
-    from analysis.db import connect, fetch_measurements, fetch_rounds
     from analysis.integrity import partition
 
-    conn = connect(db_path)
-    measurements = pd.DataFrame(fetch_measurements(conn))
-    environment = pd.read_sql(
-        "SELECT ts, zone, temp_c, rh_pct, co2_ppm, lamp_on_min FROM environment", conn
-    )
+    measurements = pd.DataFrame(store.fetch_measurements(conn))
+    # 环境读经门面再拼 DataFrame：`pd.read_sql` 只吃 DBAPI 连接（pandas 不认识 psycopg）
+    # —— 票 28 第 2 步的挡路点 3。列名与原来那条 SELECT 一致（多出来的列没人读）。
+    environment = pd.DataFrame(store.fetch_environment(conn))
     detail: dict = {
         "n_measurements": int(len(measurements)),
         "n_environment": int(len(environment)),
@@ -340,7 +358,7 @@ def compute_ranges(db_path: str, *, metric: str | None = None) -> RangesRun:
     if measurements.empty:
         return done(STATE_NO_MEASUREMENTS)
 
-    kept, dropped = partition(measurements.to_dict("records"), fetch_rounds(conn))
+    kept, dropped = partition(measurements.to_dict("records"), store.fetch_rounds(conn))
     detail["n_kept"] = len(kept)
     detail["n_excluded"] = len(dropped)
     by_reason: dict[str, int] = {}
@@ -441,23 +459,36 @@ def compute_ranges(db_path: str, *, metric: str | None = None) -> RangesRun:
 
 
 def refresh_ranges(
-    db_path: str, *, computed_at: str | None = None, metric: str | None = None
+    db_path: str | None = None, *, conn=None,
+    computed_at: str | None = None, metric: str | None = None,
 ) -> int:
     """每日批处理入口（票 05）：计算最佳参数区间并整体替换 ranges 表（评审 #6）。
 
     API 的 GET /ranges 只读本表——重算与读取分离，请求代价为 O(表大小)。
 
-    **同一事务里写区间行与状态**：行与状态不许对不上（"有 12 行"却写着 `样本不足`）。
+    **连接来源同 `compute_ranges`**（票 28 第 2 步）：jobs 与 API 手里有连接就直接传进来，
+    不再按路径重连（PG 下没有"路径"）；没给就经门面按 `db_path` 建一条、用完关掉。
+    """
+    if conn is not None:
+        return _refresh_ranges(conn, computed_at=computed_at, metric=metric)
+    own = store.connect(db_path)
+    try:
+        return _refresh_ranges(own, computed_at=computed_at, metric=metric)
+    finally:
+        own.close()
+
+
+def _refresh_ranges(conn, *, computed_at: str | None, metric: str | None) -> int:
+    """`refresh_ranges` 的实体：**同一个连接里读 + 写**（同一事务里写区间行与状态）：
+
+    行与状态不许对不上（"有 12 行"却写着 `样本不足`）。
     """
     from datetime import datetime
 
-    from analysis.db import connect, replace_ranges, write_ranges_state
-
     stamp = computed_at or datetime.now().isoformat(timespec="seconds")
-    run = compute_ranges(db_path, metric=metric)
-    conn = connect(db_path)
-    replace_ranges(conn, run.rows, stamp)
-    write_ranges_state(
+    run = _compute_ranges(conn, metric=metric)
+    store.replace_ranges(conn, run.rows, stamp)
+    store.write_ranges_state(
         conn,
         state=run.state,
         state_text=run.state_text,
