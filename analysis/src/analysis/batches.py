@@ -39,9 +39,13 @@ import os
 from datetime import date, datetime
 from pathlib import Path
 
-DEFAULT_DSN_ENV = "PGSQL_DSN"
+from analysis import store_config
+
+#: 连接串的两个环境变量名。**解析实现只有一处**（`analysis/store_config`）：
+#: 批次台账（票 13）与票 28 的 PG 存储读的是同一个 pgsql，优先级不能有两个版本。
+DEFAULT_DSN_ENV = store_config.DEFAULT_DSN_ENV
 #: 更推荐的一条：DSN 放文件、进程运行时读（`env_file` 会把值注入 `docker inspect` 可见的环境变量）
-DEFAULT_DSN_FILE_ENV = "PGSQL_DSN_FILE"
+DEFAULT_DSN_FILE_ENV = store_config.DEFAULT_DSN_FILE_ENV
 #: `batch_no` 映射文件（仓库里的数据文件；由 `python -m analysis.batch_map` 生成）。
 #: **按包位置解析，不按 cwd**：相对路径换个工作目录就"文件不存在 ⇒ batch_no 全 NULL"，
 #: 而那个失败长得跟"还没生成映射"一样（房间别名表那边实测踩过同一个坑）。
@@ -217,28 +221,19 @@ def fetch_batches_with_report(
 def _load_dsn(dsn: str | None = None) -> str:
     """连接串：显式参数 → 文件 → 环境变量。
 
+    **实现在 `analysis.store_config`，全仓只有一处**：批次台账（票 13）与票 28 的 PG 存储
+    读的是同一个 pgsql，优先级不能有两个版本。这里只是把错误类型换成本模块的
+    `BatchFetchError`（调用方按这个类型抓）。
+
     **为什么推荐文件**：`env_file` 是 compose 在创建容器时读文件并**注入成环境变量**的，
     值会出现在 `docker inspect` 的 `Config.Env`（发版官 2026-10-14 实测）。要满足
     "值不进 `docker inspect`"只有一条路：DSN 放文件、进程运行时自己读
     （宿主 0600 文件 bind 进容器 `:ro`；挂一个文件卷不算新增 service）。
     """
-    if dsn and dsn.strip():
-        return dsn.strip()
-    path = (os.environ.get(DEFAULT_DSN_FILE_ENV) or "").strip()
-    if path:
-        try:
-            text = Path(path).read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise BatchFetchError(f"读 {path} 失败（{DEFAULT_DSN_FILE_ENV}）：{exc}") from exc
-        if text:
-            return text
-    env = (os.environ.get(DEFAULT_DSN_ENV) or "").strip()
-    if env:
-        return env
-    raise BatchFetchError(
-        f"没有 pgsql 连接串：设 {DEFAULT_DSN_FILE_ENV}（文件，推荐）或 {DEFAULT_DSN_ENV}（环境变量）。"
-        "**不退回 docker exec / 不退回按断档切段**"
-    )
+    try:
+        return store_config.load_dsn(dsn)
+    except store_config.StoreConfigError as exc:
+        raise BatchFetchError(str(exc)) from exc
 
 
 def _pgsql_runner(dsn: str | None):

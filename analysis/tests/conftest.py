@@ -9,7 +9,13 @@ from __future__ import annotations
 
 import pytest
 
-INGEST_ENV = ("ENV_INGEST_INTERVAL", "AUDIT_INTERVAL", "BATCH_AT", "RANGES_AT", "ANALYSIS_DB")
+#: 存储后端开关也一并清掉（票 28）：缺省必须是 SQLite，测试不该被开发机上顺手设的
+#: `ANALYSIS_STORE=postgres` 带跑（那会去找 pgsql）。PG 用例**显式**传 DSN 与 schema，
+#: 不依赖这两个变量。
+INGEST_ENV = (
+    "ENV_INGEST_INTERVAL", "AUDIT_INTERVAL", "BATCH_AT", "RANGES_AT", "ANALYSIS_DB",
+    "ANALYSIS_STORE", "ANALYSIS_PG_SCHEMA",
+)
 
 
 @pytest.fixture(autouse=True)
