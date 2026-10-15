@@ -1,6 +1,6 @@
 # 11. L1 对齐：平移优先的 ECC 配准（变换上限 + 残差门）
 
-Status: ready-for-agent
+Status: implemented（2026-10-15，算法；10 条验收逐条核过；已合并 feat/env-baseline）
 归属：算法
 写域：`measure/**`（含 `measure/tests/**`、`measure/tools/**`）＋本票
 依据：`docs/patrol/growth-algo/spec.md` §6「链路分解与模块接口」L1 行
