@@ -570,7 +570,7 @@ def create_app(
         - `computed_at` / `metric` / `unit`：最近一次重算的戳与量纲。
 
         ⚠️ **建议层不许读这个响应**：它含估算行。建议层的入口是
-        `analysis.align.advice_input` / `db.fetch_advice_ranges`（只给已验证档，带断言）。
+        `analysis.align.advice_input` / `analysis.store.fetch_advice_ranges`（只给已验证档，带断言）。
         """
         state = store.fetch_ranges_state(conn)
         rows = store.fetch_ranges(conn)

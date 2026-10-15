@@ -164,7 +164,7 @@ def best_ranges(merged: pd.DataFrame, *, n_bins: int = 4,
 
     输出的每一行都带 **`metric` / `unit` / `rate_per_h`**（量纲随行走，票 05）与 **`tier`**
     （票 26：**档随行走** —— 下游靠它决定能不能进建议层、要不要标「未验证」，不许回头猜）；
-    `rate_mm_per_h` 不再由这里给 —— 由 `db.replace_ranges` 按 `unit=='mm/h'` 决定写不写。
+    `rate_mm_per_h` 不再由这里给 —— 由门面 `store.replace_ranges` 按 `unit=='mm/h'` 决定写不写。
 
     `merged` 必须**已经是单一档**的数据：这个函数不做任何档筛选（混算不在这里发生，
     也不会在这里被挡住），筛选与分档由 `compute_ranges` 负责。
