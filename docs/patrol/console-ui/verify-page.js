@@ -209,19 +209,30 @@ const OPS_SUMMARY = { n: 1, first_ts: '2026-10-12T10:10:00', last_ts: '2026-10-1
   by_point: { '加湿开启设定': 1 }, by_operator: { '现场操作员': 1 }, by_zone: { '607': 1 } };
 
 // 批次对比：按断档切段，最新在前
+// 字段形状照 `analysis/api.py:387-396`：行来自 env_batches()，**每行再挂 room_label**
+// （display_room 出来的规范号；台账挂旧编号时写成「607（原始 7）」）。`batch_no` 是派生显示名，
+// 缺映射就是 **NULL**——页面不许编一个出来（票 17；`analysis/tests/test_batches.py:114`）。
 const BATCHES = [
-  { batch_no: 'mogu-107', entry_date: '2026-09-30',
+  { room_id: '611', room_label: '611', batch_no: 'mogu-107', entry_date: '2026-09-30',
     start: '2026-09-30T00:00:00', end: '2026-10-12T17:00:00', hours: 290, samples: 17279, days: 12.1,
     params: { temp_c: { mean: 19.7, min: 18.0, median: 19.8, max: 21.0 },
               rh_pct: { mean: 92.3, min: 90.0, median: 92.3, max: 94.0 },
               co2_ppm: { mean: 1800.0, min: 1500.0, median: 1780.0, max: 2200.0 } },
     lamp: { lamp_on_s: 2.0, lamp_off_s: 0.0, lamp_on_m: 0.0, lamp_off_m: 120.0, on_min_total: 5.0 } },
-  { batch_no: 'mogu-103', entry_date: '2026-09-17',
+  { room_id: '611', room_label: '611', batch_no: 'mogu-103', entry_date: '2026-09-17',
     start: '2026-09-17T00:00:00', end: '2026-09-29T23:00:00', hours: 300, samples: 17800, days: 12.5,
     params: { temp_c: { mean: 20.4, min: 19.0, median: 20.4, max: 22.0 },
               rh_pct: { mean: 91.0, min: 89.0, median: 91.0, max: 93.0 },
               co2_ppm: { mean: 1650.0, min: 1400.0, median: 1640.0, max: 2000.0 } },
     lamp: { lamp_on_s: 0.0, lamp_off_s: 0.0, lamp_on_m: 5.0, lamp_off_m: 120.0, on_min_total: 700.0 } },
+  // 没生成映射的批次：batch_no 为 NULL（真形状）。主显示仍要给出（库房, 入库日期），
+  // 附注位如实写"业务名未标记"，**不许**拿日期或别的东西冒充业务名。
+  { room_id: '611', room_label: '611', batch_no: null, entry_date: '2026-08-16',
+    start: '2026-08-16T00:00:00', end: '2026-09-16T23:00:00', hours: 300, samples: 15000, days: 12.0,
+    params: { temp_c: { mean: 21.0, min: 20.0, median: 21.0, max: 22.0 },
+              rh_pct: { mean: 90.0, min: 88.0, median: 90.0, max: 92.0 },
+              co2_ppm: { mean: 1500.0, min: 1400.0, median: 1500.0, max: 1700.0 } },
+    lamp: { lamp_on_s: 0.0, lamp_off_s: 0.0, lamp_on_m: 0.0, lamp_off_m: 0.0, on_min_total: 0.0 } },
 ];
 
 const state = {
@@ -868,6 +879,37 @@ check('环境模式：曲线高度收窄（车道 76 → 54，三个量仍各占
                return !!svg && svg.getAttribute('viewBox') === '0 0 920 204'; })(),
       (document.querySelector('#envchart svg') || {}).getAttribute
         ? document.querySelector('#envchart svg').getAttribute('viewBox') : '(无)');
+// 票 18（2026-10-15）：车道 76 → 54 之后，"上限值 / 下限值"两个标签的纵向偏移还是写死的，
+// 基线只差 4px ⇒ 必叠字。断言两条：**真渲染出来的相邻两行** ≥14px；偏移**从车道高度派生**，
+// 换个车道高度也不复发。字号是 CSS 里的 10.5px、间距也在同一套用户单位里 ⇒ 与实际缩放无关。
+// 左列（x=6）每根车道三行：车道名、上限值、下限值——渲染顺序就是车道顺序。
+const laneRows = (() => {
+  const svg = document.querySelector('#envchart svg');
+  if (!svg) return [];
+  const ys = Array.from(svg.querySelectorAll('text.lanelbl'))
+    .filter(t => t.getAttribute('x') === '6')
+    .map(t => Number(t.getAttribute('y')));
+  const rows = [];
+  for (let i = 0; i + 2 < ys.length; i += 3) rows.push([ys[i], ys[i + 1], ys[i + 2]]);
+  return rows;
+})();
+check('环境模式：车道内相邻两行标签的基线间距 ≥14px（每根车道三行，共三根）',
+  laneRows.length === 3 && laneRows.every(r => r[1] - r[0] >= 14 && r[2] - r[1] >= 14),
+  JSON.stringify(laneRows));
+check('环境模式：上限值在上、下限值在下（车道 54 时曾反过来、只差 4px）',
+  laneRows.length === 3 && laneRows.every(r => r[1] < r[2]), JSON.stringify(laneRows));
+// 派生性：换车道高度（44/54/64/76/96）都不复发，且不是又一组写死的像素——偏移随高度走。
+const laneHeights = [44, 54, 64, 76, 96];
+const laneOf = h => (typeof window.envLaneRows === 'function' ? window.envLaneRows(h) : null);
+check('环境模式：车道内纵向偏移从车道高度派生（44/54/64/76/96 都 ≥14px 且不越出车道）',
+  laneHeights.every(h => {
+    const L = laneOf(h);
+    return !!L && L.hiY - L.nameY >= 14 && L.baseY - L.hiY >= 14 && L.baseY < h;
+  }), JSON.stringify(laneHeights.map(h => laneOf(h))));
+check('环境模式：偏移随车道高度走（车道再变时不会复现"两个标签压在一起"）',
+  (() => { const a = laneOf(54), b = laneOf(76);
+           return !!a && !!b && b.hiY > a.hiY && b.baseY > a.baseY; })(),
+  JSON.stringify([laneOf(54), laneOf(76)]));
 check('环境模式：统计面板一行一个参数（中位放大 + 区间 + IQR 条），不再是一张 6 列表',
       T('#envsummary').includes('19.8') && T('#envsummary').includes('120')
       && document.querySelectorAll('#envsummary .qrow').length === 3
@@ -897,6 +939,38 @@ check('环境模式：批次对比显示各批次的补光周期（秒档与分�
 check('环境模式：不编一个"最优"出来（区间表由 /api/ranges 真读，见下面那组断言）',
       T('#batchnote').includes('不编一个') && T('#batchnote').includes('区间表'),
       T('#batchnote').slice(0, 80));
+// 票 17（2026-10-15，ADR-0020）：批次的**权威身份是（库房号, 入库日期）**，`mogu-*` 是派生显示名。
+// 主显示位永远给那一对；业务名只作附注——反过来的话，人会拿派生名当身份用。
+const batchCells = Array.from(document.querySelectorAll('#envbatches tr')).slice(1).map(tr => {
+  const td = tr.children[0];
+  const first = td && td.childNodes[0] ? td.childNodes[0].textContent : '';
+  return { main: first.trim(), full: td ? td.textContent.replace(/\s+/g, ' ').trim() : '' };
+});
+check('环境模式：批次主显示是「库房 · 入库日期」（业务名不在主位）',
+  batchCells.length === 3 && /^611 · 2026-09-30/.test(batchCells[0].main)
+  && /^611 · 2026-09-17/.test(batchCells[1].main)
+  && /^611 · 2026-08-16/.test(batchCells[2].main)
+  && batchCells.every(c => !/^mogu-/.test(c.main)),
+  JSON.stringify(batchCells.map(c => c.main)));
+check('环境模式：业务名仍可见（附注行）；没映射时写"业务名未标记"、**不编**一个',
+  /mogu-107/.test(batchCells[0].full) && /mogu-103/.test(batchCells[1].full)
+  && batchCells[2].full.includes('业务名未标记') && !/mogu/.test(batchCells[2].full),
+  JSON.stringify(batchCells.map(c => c.full)));
+check('环境模式：库房号用后端给的规范标签（旧编号写成「607（原始 7）」），缺标签才退回本次查询的 zone',
+  (() => {
+    const f = window.batchIdentity;
+    if (typeof f !== 'function') return false;
+    const a = f({ room_label: '607（原始 7）', entry_date: '2026-09-30', batch_no: 'mogu-107' }, '607');
+    const b = f({ entry_date: '2026-09-30' }, '611');
+    return a.main === '607（原始 7） · 2026-09-30' && a.note === 'mogu-107'
+        && b.main === '611 · 2026-09-30' && b.note === '';
+  })(),
+  JSON.stringify(typeof window.batchIdentity === 'function'
+    ? [window.batchIdentity({ room_label: '607（原始 7）', entry_date: '2026-09-30',
+                              batch_no: 'mogu-107' }, '607'),
+       window.batchIdentity({ entry_date: '2026-09-30' }, '611')]
+    : '(页面里没有 batchIdentity)'));
+
 check('环境模式：左栏站位表让位（单列看数据）',
       document.querySelector('main').classList.contains('envmode')
       && window.getComputedStyle(document.querySelector('main>section:first-child')).display === 'none',
@@ -1602,6 +1676,25 @@ await sleep(150);
     T('#timeline .mosaic-cell[data-station-id="S412"]').includes('本轮无帧'));
   check('图片请求按 round_id 精确筛选',
     state.calls.some(call => call.url.includes('round_id=round-20260913')));
+  // 票 17：历史模式的批次选择器也以「库房 · 入库日期」为主（业务名是附注），
+  // 但**筛选键一个字节都不动**——option 的 value 还是 batchKey 的三元组，筛选与对账照旧。
+  const batchOpts = Array.from($('#batchSel').options)
+    .map(o => ({ text: o.textContent, value: o.value }));
+  const optText = batchOpts.map(o => o.text);
+  check('历史模式：批次主显示是「库房 · 入库日期」，业务名作附注',
+    optText.some(t => /^611 · 2026-09-04/.test(t) && /BATCH-10/.test(t))
+    && optText.some(t => /^611 · 2026-09-04/.test(t) && /BATCH-09/.test(t))
+    && optText.every(t => !/^库房 /.test(t)),
+    JSON.stringify(optText));
+  check('历史模式：批次筛选键仍是（库房, 入库日期, 业务名）三元组——筛选与对账不断',
+    batchOpts.length === 2 && batchOpts.every(o => {
+      try {
+        const k = JSON.parse(decodeURIComponent(o.value));
+        return Array.isArray(k) && k.length === 3 && k[0] === '611' && k[1] === '2026-09-04'
+            && /^BATCH-0[9]$|^BATCH-10$/.test(k[2]);
+      } catch (e) { return false; }
+    }),
+    JSON.stringify(batchOpts.map(o => o.value)));
 
   $('#batchSel').value = encodeURIComponent(JSON.stringify(['611', '2026-09-04', 'BATCH-09']));
   $('#batchSel').dispatchEvent(new window.Event('change'));
