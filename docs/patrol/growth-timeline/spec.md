@@ -62,7 +62,7 @@ GET /timeline?zone=611&batch_id=611|2026-09-30&metric=coverage
   - `axis`：`t0` / `t1` / 生长天数刻度点
   - `nodes[]`：`node_id`（站位）/ `layer` / `col` / `box_id` / `points[]`
   - `points[]`：`ts` / `day` / `round_id` / `has_frame` / `n_frames` / `ok_rate` / `dup` / `growth`（P1，缺即 `null`）
-  - `room_band[]`：`ts` / `day` / `p25` / `p50` / `p75` / `n`
+  - `room_band[]`：**端点里没有这个字段**（票 05 定）。库房分位由页面从**同一次拿回的矩阵**算出——放服务端会多出一份**可能与矩阵漂移的副本**，却换不来现场可见的东西。口径与阈值见票 05（样本不足不画、覆盖率 0 是真的 0 所以线不断开）。
   - `notes[]`：数据侧说明（沿用既有 `notes` 手法）
 - **节点主轴 = 站位**，`box_id` 只作聚合与既有「生长曲线」卡的对接键。
 
