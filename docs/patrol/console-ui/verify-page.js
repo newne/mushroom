@@ -2635,6 +2635,233 @@ await sleep(150);
       && document.querySelectorAll('#roomband circle.rb-covpt').length === 6,
       document.querySelectorAll('#roomband g.rb-round').length + ' 轮 / ' + segsOf().length + ' 段带');
   }
+
+  // ---- 票 06：时间刷选（**一份**共享窗口，三处视图同步聚焦）+ 筛选（层 / 列 / 有没有数据）----
+  // 三条护栏（逐条对应票面验收）：
+  //   · 同源：刷选后 总览 / 放大视图 / 分位数带 拿的是**同一份**窗口；几何上，窗口两端的轮次
+  //     必须落在三处**各自绘图区的左右边缘**上（谁自己另算一个窗口 ⇒ 边缘对不上 ⇒ 红）；
+  //   · 空区间：刷到没有轮次的一段 ⇒ 三处显示**同一句**空态，一个图元都不画，更没有 0；
+  //   · 不重取：刷选与筛选只是把**已经拿回的那份矩阵**换一种画法，/api/timeline 一次都不多。
+  // 数字都是**手算**的（fixture 六轮：S102 3/4/2_/5/1、S412 1/1/2/2/3/4、S101 一张没有）：
+  //   · 窗口 09-11 10:00 → 09-13 10:00 里有 3 轮（R2/R3/R4），两端这两站都有帧 ⇒ 三处都画得出；
+  //   · 窗口 09-11 11:00 → 09-12 09:00 里**一轮都没有** ⇒ 三处空态；
+  //   · 筛选：48 格 = 有数据 2（S102/S412） + 无数据 1（S101） + 空位 45。
+  {
+    const RTS = COV_ROUNDS.map(r => r.ts);
+    const T0 = RTS[0], T1 = RTS[RTS.length - 1];
+    const MS = t => Date.parse(String(t).replace(' ', 'T'));
+    const bsvg = () => document.querySelector('#brushwrap svg.brush-svg');
+    const bTicks = () => Array.from(document.querySelectorAll('#brushwrap line.brush-tick'));
+    const tickX = ts => {
+      const el = document.querySelector('#brushwrap line.brush-tick[data-ts=' + JSON.stringify(ts) + ']');
+      return el ? Number(el.getAttribute('x1')) : NaN;
+    };
+    // 时间戳 → clientX：**用刷选条自己画出来的两端刻度**做线性插值（不写死内边距；
+    // 页面真改成另一套比例，这条换算会跟着走，而不是把用例变成一个假的坑）。
+    const pxOf = ts => tickX(T0) + (MS(ts) - MS(T0)) / (MS(T1) - MS(T0)) * (tickX(T1) - tickX(T0));
+    // 拖拽：按下 → 移到 → 松开。jsdom 不做布局，照本文件 mapsvg 那条老惯例补一个框
+    // （宽度 = viewBox 宽 ⇒ clientX 与 svg 坐标 1:1）。
+    const drag = async (fromTs, toTs) => {
+      const svg = bsvg();
+      if(!svg) return;
+      const vb = String(svg.getAttribute('viewBox') || '0 0 920 46').split(' ');
+      svg.getBoundingClientRect = () => ({ left: 0, top: 0, width: Number(vb[2]), height: Number(vb[3]) });
+      const at = ts => ({ clientX: pxOf(ts), clientY: 12, bubbles: true });
+      svg.dispatchEvent(new window.MouseEvent('mousedown', at(fromTs)));
+      svg.dispatchEvent(new window.MouseEvent('mousemove', at(toTs)));
+      svg.dispatchEvent(new window.MouseEvent('mouseup', at(toTs)));
+      await sleep(220);
+    };
+    const clearBtn = () => $('#brushclear');
+    const winOf = sel => {
+      const el = $(sel);
+      return el ? String(el.getAttribute('data-t0')) + '→' + String(el.getAttribute('data-t1')) : '(没有 ' + sel + ')';
+    };
+    const ovCells = () => Array.from(document.querySelectorAll('#overview .ov-cell'));
+    const ovShown = () => ovCells().filter(el => !el.hasAttribute('hidden'));
+    const cellOf = id => document.querySelector('#overview .ov-cell[data-station-id="' + id + '"]');
+    const ptsOf = id => (cellOf(id) ? Array.from(cellOf(id).querySelectorAll('circle.ov-pt')) : []);
+    const gapsOf = id => (cellOf(id) ? Array.from(cellOf(id).querySelectorAll('rect.ov-gapmark')) : []);
+    const ptOf = (id, ts) => (cellOf(id)
+      ? cellOf(id).querySelector('circle.ov-pt[data-ts=' + JSON.stringify(ts) + ']') : null);
+    const mdPt = ts => document.querySelector('#nodedetail circle.md-covpt[data-ts=' + JSON.stringify(ts) + ']');
+    const rbPt = ts => document.querySelector('#roomband g.rb-round[data-ts=' + JSON.stringify(ts) + '] circle.rb-pt');
+    const rbN = ts => {
+      const g = document.querySelector('#roomband g.rb-round[data-ts=' + JSON.stringify(ts) + ']');
+      return g ? g.getAttribute('data-n') : '?';
+    };
+    const lineXs = sel => {
+      const l = document.querySelector(sel);
+      return l ? [Number(l.getAttribute('x1')), Number(l.getAttribute('x2'))] : [NaN, NaN];
+    };
+    const cxOf = el => Number(el && el.getAttribute('cx'));
+    const isMatrix = c => c.url.split('?')[0] === '/api/timeline' && !/[?&]station_id=/.test(c.url);
+    const isBatchEnv = c => c.url.split('?')[0] === '/api/environment' && /[?&]start=2026-09-10/.test(c.url);
+    const filterBtn = (kind, value) => document.querySelector('#ovfilters button[data-tl-filter="'
+      + kind + '"][data-tl-value="' + value + '"]');
+    const setFilter = async (kind, value) => {
+      const b = filterBtn(kind, value);
+      if(b) b.click();
+      await sleep(150);
+    };
+    const ovInfo = () => T('#ovfilterinfo');
+
+    // 先把放大视图开到 S412（这一站**六轮都有帧**）：窗口两端在三处都能看到同一个点。
+    if(cellOf('S412')) cellOf('S412').click();
+    await waitFor(() => {
+      const s = document.querySelector('#nodedetail svg.md-svg');
+      return !!s && s.getAttribute('data-station-id') === 'S412';
+    }, 6000);
+    await waitFor(() => !!bsvg(), 5000);
+    await waitFor(() => document.querySelectorAll('#nodedetail path.md-envline').length === 3, 6000);
+    const mark = state.calls.length;
+    const matrix0 = state.calls.filter(isMatrix).length, env0 = state.calls.filter(isBatchEnv).length;
+
+    check('时间刷选条画出来了：本批 6 轮各一条刻度（手写内联 SVG，零外部依赖）',
+      !!bsvg() && bTicks().length === RTS.length
+      && document.querySelectorAll('#brushwrap canvas, #brushwrap img, #brushwrap iframe').length === 0
+      && document.querySelectorAll('script[src], link[rel="stylesheet"]').length === 0,
+      (bsvg() ? '有 svg' : '没有 svg') + ' / ' + bTicks().length + ' 条刻度');
+
+    const tickXs = RTS.map(tickX);
+    const tickGaps = [];
+    for(let i = 1; i < tickXs.length; i++) tickGaps.push(tickXs[i] - tickXs[i - 1]);
+    check('刷选条的刻度也按**真实时间**排（相邻间距比 12:16:24:24:8，等距排 ⇒ 红）',
+      tickGaps.length === 5 && tickGaps.every(g => g > 0)
+      && Math.abs(tickGaps[1] / tickGaps[0] - 16 / 12) <= 0.02
+      && Math.abs(tickGaps[2] / tickGaps[3] - 1) <= 0.02
+      && Math.abs(tickGaps[0] / tickGaps[4] - 12 / 8) <= 0.02,
+      '刻度间距 ' + tickGaps.map(g => g.toFixed(1)).join(' / ') + '（真实 12h/16h/24h/24h/8h）');
+
+    const fullWin = T0 + '→' + T1;
+    check('没刷选时三处视图都用本批整段（首末轮），刷选条无选区、清除键置灰',
+      winOf('#overview') === fullWin && winOf('#nodedetail') === fullWin && winOf('#roomband') === fullWin
+      && !!bsvg() && String(bsvg().getAttribute('data-sel-t0')) === ''
+      && !!clearBtn() && clearBtn().disabled === true,
+      [winOf('#overview'), winOf('#nodedetail'), winOf('#roomband')].join(' | ') + ' / 清除键 '
+      + (clearBtn() ? clearBtn().disabled : '(没有)'));
+
+    // ① 拖一段：09-11 10:00 → 09-13 10:00（窗口里 3 轮：R2/R3/R4）
+    await drag(RTS[2], RTS[4]);
+    const win = RTS[2] + '→' + RTS[4];
+    check('拖拽刷选后，三处视图带的是**同一份**窗口（逐字相同；三处各算各的 ⇒ 红）',
+      winOf('#overview') === win && winOf('#nodedetail') === win && winOf('#roomband') === win
+      && !!clearBtn() && clearBtn().disabled === false,
+      '期望 ' + win + '，实得 ' + [winOf('#overview'), winOf('#nodedetail'), winOf('#roomband')].join(' | '));
+
+    // 三处**几何**同源：窗口两端的轮次落在各自绘图区的左右边缘（底轴/环绕线的端点就是边缘，
+    // 不写死内边距）。谁还用整段、或用另一段，这一点就缩在中间 ⇒ 红。
+    const ovEdge = lineXs('#overview .ov-cell[data-station-id="S412"] svg line');
+    const mdEdge = lineXs('#nodedetail line.md-axis');
+    const rbEdge = lineXs('#roomband line.rb-axis');
+    const atLeft = (x, e) => Number.isFinite(x) && Math.abs(x - e[0]) <= 1;
+    const atRight = (x, e) => Number.isFinite(x) && Math.abs(x - e[1]) <= 1;
+    check('三处同源（几何）：窗口**两端**的轮次在总览格 / 放大视图 / 分位数带里都落在绘图区左右边缘上',
+      atLeft(cxOf(ptOf('S412', RTS[2])), ovEdge) && atRight(cxOf(ptOf('S412', RTS[4])), ovEdge)
+      && atLeft(cxOf(mdPt(RTS[2])), mdEdge) && atRight(cxOf(mdPt(RTS[4])), mdEdge)
+      && atLeft(cxOf(rbPt(RTS[2])), rbEdge) && atRight(cxOf(rbPt(RTS[4])), rbEdge),
+      '总览 ' + cxOf(ptOf('S412', RTS[2])) + '/' + cxOf(ptOf('S412', RTS[4])) + ' 边缘 ' + ovEdge.join('/')
+      + '；放大 ' + cxOf(mdPt(RTS[2])) + '/' + cxOf(mdPt(RTS[4])) + ' 边缘 ' + mdEdge.join('/')
+      + '；带 ' + cxOf(rbPt(RTS[2])) + '/' + cxOf(rbPt(RTS[4])) + ' 边缘 ' + rbEdge.join('/'));
+
+    check('刷选后只画窗口内的轮次：放大视图 3 格覆盖条、总览 S102 是 2 点 + 1 灰块，窗口外的消失',
+      document.querySelectorAll('#nodedetail rect.md-covcell').length === 3
+      && !!document.querySelector('#nodedetail rect.md-covcell[data-ts=' + JSON.stringify(RTS[4]) + ']')
+      && !document.querySelector('#nodedetail rect.md-covcell[data-ts=' + JSON.stringify(RTS[5]) + ']')
+      && ptsOf('S102').length === 2 && gapsOf('S102').length === 1
+      && !ptOf('S102', RTS[0]) && !gapsOf('S102').some(g => g.getAttribute('data-ts') === RTS[1]),
+      document.querySelectorAll('#nodedetail rect.md-covcell').length + ' 格覆盖条 / S102 '
+      + ptsOf('S102').length + ' 点 + ' + gapsOf('S102').length + ' 灰块');
+
+    // ② 空区间：09-11 11:00 → 09-12 09:00（这一段**一个轮次都没有**）
+    const EF = '2026-09-11T11:00:00', ET = '2026-09-12T09:00:00';
+    await drag(EF, ET);
+    const emptyText = T('#overview');
+    check('刷到没有轮次的区间：三处视图显示**同一句**空态（三处各说各的 ⇒ 红）',
+      emptyText.indexOf('刷选窗口内没有巡检轮次') >= 0
+      && T('#nodedetail') === emptyText && T('#roomband') === emptyText,
+      '总览「' + emptyText.slice(0, 70) + '」/ 三处一致=' + (T('#nodedetail') === emptyText && T('#roomband') === emptyText));
+    check('空区间**不画成 0**：三处一个图元都没有，也没有 data-frames="0" 或 data-p*="0"',
+      !document.querySelector('#overview svg')
+      && !document.querySelector('#nodedetail svg.md-svg')
+      && document.querySelectorAll('#nodedetail circle.md-covpt, #nodedetail rect.md-covcell, '
+        + '#nodedetail rect.md-dayband').length === 0
+      && !document.querySelector('#roomband svg.rb-svg')
+      && document.querySelectorAll('#overview [data-frames="0"], #nodedetail [data-frames="0"], '
+        + '#roomband [data-frames="0"]').length === 0
+      && document.querySelectorAll('#roomband [data-p25="0"], #roomband [data-p50="0"], '
+        + '#roomband [data-p75="0"]').length === 0
+      && T('#roomband').indexOf('0 帧') < 0,
+      '总览 svg ' + document.querySelectorAll('#overview svg').length + ' 个 / 放大 svg '
+      + document.querySelectorAll('#nodedetail svg.md-svg').length + ' 个 / 带 svg '
+      + document.querySelectorAll('#roomband svg.rb-svg').length + ' 个');
+    check('空区间里三处仍带着**同一份**窗口（不是各自退回整段），刷选条如实标出这一段没轮次',
+      winOf('#overview') === EF + '→' + ET && winOf('#nodedetail') === EF + '→' + ET
+      && winOf('#roomband') === EF + '→' + ET
+      && !!bsvg() && String(bsvg().getAttribute('data-sel-t0')) === EF
+      && String(bsvg().getAttribute('data-sel-t1')) === ET
+      && T('#brushmeta').indexOf('没有巡检轮次') >= 0,
+      winOf('#overview') + ' / ' + T('#brushmeta'));
+
+    // ③ 清除刷选：三处回到整段
+    if(clearBtn()) clearBtn().click();
+    await sleep(220);
+    check('清除刷选后三处回到本批整段（图元也回来），清除键回到置灰',
+      winOf('#overview') === fullWin && winOf('#nodedetail') === fullWin && winOf('#roomband') === fullWin
+      && ptsOf('S102').length === 5 && document.querySelectorAll('#roomband g.rb-round').length === RTS.length
+      && !!clearBtn() && clearBtn().disabled === true,
+      winOf('#overview') + ' / S102 ' + ptsOf('S102').length + ' 点');
+
+    // ④ 筛选：层 / 列 / 有没有数据（只作用于这张矩阵，**计数必须看得见**）
+    await setFilter('layer', '1');
+    check('筛选（按层）：只剩第 1 层 12 格；被筛掉的 36 格**还在 DOM 里**（只是 hidden）',
+      ovShown().length === 12 && ovCells().length === 48
+      && ovCells().filter(el => el.getAttribute('data-kept') === '0').length === 36
+      && ovShown().every(el => el.dataset.layer === '1'),
+      ovShown().length + ' 格可见 / ' + ovCells().length + ' 格在 DOM');
+    check('被筛掉多少**看得见**（计数写在卡片上，不是把格子一删了之）',
+      ovInfo().indexOf('筛掉 36 格') >= 0 && ovInfo().indexOf('留下 12 格') >= 0
+      && ovInfo().indexOf('空位 35') >= 0,
+      ovInfo());
+    await setFilter('data', 'has');
+    check('筛选（有数据）+ 第 1 层：只剩 S102 一格，计数说清丢掉的是些什么',
+      ovShown().length === 1 && ovShown()[0].dataset.stationId === 'S102'
+      && ovInfo().indexOf('筛掉 47 格') >= 0 && ovInfo().indexOf('留下 1 格') >= 0,
+      ovShown().length + ' 格可见 / ' + ovInfo());
+    check('筛选只筛格子、不动数据：那一格里的 sparkline 还是本批 6 轮（5 点 + 1 灰块）',
+      ptsOf('S102').length === 5 && gapsOf('S102').length === 1,
+      ptsOf('S102').length + ' 点 + ' + gapsOf('S102').length + ' 灰块');
+    await setFilter('layer', 'all');
+    await setFilter('data', 'none');
+    check('筛选（无数据）：只剩「有站位、本批一张帧都没拍到」的 S101；45 个空位**不算**无数据',
+      ovShown().length === 1 && ovShown()[0].dataset.stationId === 'S101'
+      && ovInfo().indexOf('筛掉 47 格') >= 0 && ovInfo().indexOf('空位 45') >= 0,
+      ovShown().length + ' 格可见 / ' + ovInfo());
+    await setFilter('data', 'all');
+    await setFilter('col', '12');
+    check('筛选（按列）：只剩第 12 列的 4 格（S412 在里面），计数看得见',
+      ovShown().length === 4 && ovShown().every(el => el.dataset.col === '12')
+      && ovShown().some(el => el.dataset.stationId === 'S412')
+      && ovInfo().indexOf('筛掉 44 格') >= 0,
+      ovShown().length + ' 格可见 / ' + ovInfo());
+    check('筛选只作用于这张矩阵：库房分位数带仍按**全库房**算（6 轮、逐轮 n 不变）',
+      document.querySelectorAll('#roomband g.rb-round').length === RTS.length
+      && RTS.map(rbN).join(',') === '2,2,2,1,2,2',
+      RTS.map(rbN).join(','));
+    await setFilter('col', 'all');
+    check('清除筛选：48 格全回来，计数回到「筛掉 0 格」',
+      ovShown().length === 48 && ovInfo().indexOf('筛掉 0 格') >= 0 && ovInfo().indexOf('留下 48 格') >= 0,
+      ovShown().length + ' 格可见 / ' + ovInfo());
+
+    check('刷选 / 筛选全程**一个请求都没多发**（窗口化的是已经拿回的那份矩阵）',
+      state.calls.slice(mark).filter(isMatrix).length === 0
+      && state.calls.slice(mark).filter(isBatchEnv).length === 0
+      && state.calls.filter(isMatrix).length === matrix0
+      && state.calls.filter(isBatchEnv).length === env0,
+      '新增矩阵 ' + state.calls.slice(mark).filter(isMatrix).length + ' 次 / 新增环境 '
+      + state.calls.slice(mark).filter(isBatchEnv).length + ' 次');
+  }
+
   // 日期与角度筛选作用于所选巡检轮次。
   $('#fromDate').value = '2026-09-15'; $('#fromDate').dispatchEvent(new window.Event('change'));
   await sleep(150);

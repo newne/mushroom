@@ -198,6 +198,32 @@
   #roomband .rb-misslbl.blank{fill:#6b7785;font-weight:400}
   #roomband .rb-covline{fill:none;stroke:#18794e;stroke-width:1.8}
   #roomband .rb-covpt{fill:#18794e;stroke:#fff;stroke-width:.8}
+  /* ---- 时间刷选 + 筛选（票 06）----
+     刷选条 = **一份共享窗口**的入口：总览 / 节点放大 / 库房分位数带三处都由它定窗口
+     （三处各算各的窗口就是互相打架）。筛选只作用于总览这张矩阵，格数变了要有计数。
+     零依赖：刷选条同样是手写内联 SVG（spec 硬规则 3）。
+     内边距一律走 --sp-* token：页面有"间距棘轮"断言按字面量的**出现次数**登记，
+     新写一个 px 数值会把那条断言弄红（这里不新数值）。 */
+  #brushwrap{padding:var(--sp-1) 0}
+  .brushhead{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
+  .brushhead .brushlbl{font-size:12.5px;font-weight:600;color:var(--fg)}
+  .brushhead .brushmeta{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+  #brushsvgbox svg.brush-svg{display:block;width:100%;height:auto;cursor:crosshair;touch-action:none}
+  .brush-track{fill:#eef1f5;stroke:#dbe3ef}
+  .brush-dim{fill:#ffffff;fill-opacity:.55}
+  .brush-sel{fill:#1f6feb;fill-opacity:.12;stroke:#1f6feb;stroke-opacity:.45;stroke-width:.8}
+  .brush-handle{stroke:#1f6feb;stroke-width:1.4}
+  .brush-tick{stroke:#1f6feb;stroke-width:1.2;stroke-opacity:.5}
+  .brush-hit{fill:transparent}
+  .brush-ticklbl{font-size:10px;fill:#6b7785}
+  .brush-sellbl{font-size:11px;fill:#24292f;font-weight:600}
+  #ovfilters{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;padding:var(--sp-1) 0}
+  .tlfgroup{display:inline-flex;border:1px solid var(--line);border-radius:var(--r-md);overflow:hidden;
+            background:var(--soft);padding:var(--sp-1);gap:var(--sp-1)}
+  .tlfgroup button{min-height:34px;padding:var(--sp-1) var(--sp-2);font-size:12.5px;background:var(--panel)}
+  .tlfgroup button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+  #ovfilterinfo{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
+
   /* ---- 同一站位跨轮次对比（2026-10-13，积累期主线）----
      固定"当前选中的站位"，把最近几轮的同一个框并排摆出来，一眼看出这几天怎么长的。
      纯前端：逐轮问 /api/images?round_id=…&station_id=…，图仍走 /api/image 同源代理。
@@ -778,6 +804,19 @@
            取数是**一次** /api/timeline（不给 station_id = 全站位矩阵）——不在页面上发 48 次请求。
            时间轴约定与上面两张卡同源（票 01 立的、spec 三条硬规则）：真实时间 x / 缺口断开 /
            无帧不画成 0。布局按 grid.cols × grid.layers（与平面图、巡检拼图同一套 col/layer 顺序）。 -->
+      <!-- 票 06：刷选条（**一份**共享窗口 ⇒ 时序总览 / 节点放大 / 库房分位数带同步聚焦）
+           + 筛选（层 / 列 / 有没有数据）。两者都只是把**已经拿回的矩阵**换一种画法：
+           窗口化不重新取数；筛选只作用于这张矩阵，被筛掉多少写在计数里。 -->
+      <div id="brushwrap">
+        <div class="brushhead">
+          <span class="brushlbl">时间刷选</span>
+          <button type="button" id="brushclear" disabled>清除刷选</button>
+          <span class="brushmeta" id="brushmeta"></span>
+        </div>
+        <div id="brushsvgbox"></div>
+      </div>
+      <div id="ovfilters"></div>
+      <div id="ovfilterinfo" class="navinfo"></div>
       <div id="overview" class="empty">读取本批全部站位的巡检轨迹…</div>
       <div id="ovnote" class="empty"></div>
     </div>
@@ -2440,6 +2479,9 @@ const hist = { rows: [], rounds: [], growth: null, measure: null, picked: null, 
                // 节点放大（票 04）：入口是点总览的格子；逐轮格点复用上面的矩阵，
                // 环境按**本批窗口一次**取回（nodeEnvKey = 批次 + 窗口；失败不落 key ⇒ 下次重试）
                nodeDetailOpen: false, nodeDetailStationId: '', nodeEnv: null, nodeEnvKey: '',
+               // 时间刷选 + 筛选（票 06）：**一份**共享窗口（null = 不刷，画本批整段）
+               // 驱动总览 / 节点放大 / 库房分位数带三处；筛选只作用于总览那张矩阵
+               brush: null, tlFilter: { layer: 'all', col: 'all', data: 'all' },
                selectedRoundId: '', selectedBatchKey: '', focusedStationId: '',
   roundIndex: -1, roundCount: 0, hiddenRounds: 0,
                // 跨轮次对比（按天）：blocks = 每天一块（该天最接近参考时段的那一轮）；
@@ -3805,9 +3847,11 @@ function ovCellSvg(node, pts, t0, t1){
   return out.join("");
 }
 
-/** 配置里有这个站位、本批却一张帧都没有：灰格（无数据）——**不画零线**（那是"拍到 0 张"）。 */
-function ovEmptyCell(layer, col, stationId, why){
-  return "<div class='ov-cell none' data-layer='" + layer + "' data-col='" + col
+/** 配置里有这个站位、本批却一张帧都没有：灰格（无数据）——**不画零线**（那是"拍到 0 张"）。
+ *  `extraAttrs`（票 06）：筛选的 data-kept/data-hasbatch 与 hidden —— 被筛掉的格子只是隐藏，
+ *  不从 DOM 里删（删掉的话"被筛掉多少"这件事就没法核对、也没法再打开）。 */
+function ovEmptyCell(layer, col, stationId, why, extraAttrs){
+  return "<div class='ov-cell none'" + (extraAttrs || "") + " data-layer='" + layer + "' data-col='" + col
     + "' data-station-id='" + esc(stationId) + "' data-status='none' data-noframe-all='1'>"
     + "<svg viewBox='0 0 " + OV.W + " " + OV.H + "' role='img' aria-label='"
     + esc(stationId + " · " + why + "（无数据，不是 0 帧）") + "'><title>"
@@ -3817,6 +3861,305 @@ function ovEmptyCell(layer, col, stationId, why){
     + "<span class='ov-meta'>" + esc(stationId) + "</span></div>";
 }
 
+/* ---- 时间刷选（票 06）：拖一段真实时间，**一份共享窗口**驱动三处视图 ----
+   窗口只有**一个**来源：`tlWindow()`。总览（ovX）、放大视图（mdScale）、分位数带（mdScale）
+   都从它取 t0/t1 —— 谁自己再算一遍窗口，三处就会各聚焦各的（票面明令不许：不许各算各自的窗口）。
+   "窗口里有没有轮次"也只有这一个答案：三处的空态因此是**同一句话**（`tlEmptyWindowText`），
+   而不是一处判"没轮次"、另一处画出一条空轴或一堆 0。
+   取数：**一个请求都不发**——窗口化的是票 03 已经拿回的那份矩阵（与换站/换轮次同一条护栏）。 */
+const BR = { W: 920, H: 46, padL: 66, padR: 22, trackY: 20, trackH: 12 };
+/** 小于一小时的拖拽算误触（点一下、蹭一下）：窗口**不动**，不把"差点点到"当成一次刷选。 */
+const BRUSH_MIN_MS = 3600000;
+
+/** 毫秒 → 本地 ISO 串（无时区、无毫秒）：窗口的**唯一**书写形式。
+ *  三处视图与刷选条都写这个串，"三处是不是同一份窗口"因此是**逐字节**可比的。 */
+function tlStamp(ms){
+  const d = new Date(ms), p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+       + 'T' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+/** 本批**整段**（首末轮的真实时间戳）：刷选条的横轴，也是"没刷选"时三处视图的窗口。 */
+function tlFullExtent(){
+  const ov = hist.overview || {};
+  const rounds = ov.rounds || [];
+  const axis = ov.axis || {};
+  const t0 = (rounds.length && rounds[0].ts) || axis.t0 || null;
+  const t1 = (rounds.length && rounds[rounds.length - 1].ts) || axis.t1 || null;
+  return { t0: t0, t1: t1, ms0: tsMs(t0), ms1: tsMs(t1) };
+}
+
+/** **唯一**的窗口：刷选生效时是刷选窗口，否则是本批整段。
+ *  `rounds` = 落在窗口里的轮次（含端点）；`empty` = 刷了、但这一段里**一个轮次都没有**
+ *  —— 三处视图据此同时显示同一句空态，**不是**把"没有数据"画成 0。 */
+function tlWindow(){
+  const full = tlFullExtent();
+  let ms0 = full.ms0, ms1 = full.ms1, brushed = false;
+  if(hist.brush){
+    const b0 = tsMs(hist.brush.t0), b1 = tsMs(hist.brush.t1);
+    if(b0 !== null && b1 !== null){
+      brushed = true;
+      ms0 = Math.min(b0, b1); ms1 = Math.max(b0, b1);
+    }
+  }
+  const rounds = ((hist.overview && hist.overview.rounds) || []).filter(r => {
+    const t = tsMs(r && r.ts);
+    return t !== null && (ms0 === null || t >= ms0) && (ms1 === null || t <= ms1);
+  });
+  return { t0: ms0 === null ? null : tlStamp(ms0), t1: ms1 === null ? null : tlStamp(ms1),
+           ms0: ms0, ms1: ms1, brushed: brushed, rounds: rounds,
+           empty: brushed && !rounds.length };
+}
+
+/** 窗口内的格点（矩阵形态先摊平、再按窗口裁）：三处视图拿的是**同一份**裁好的数据。 */
+function tlPointsInWindow(points, win){
+  return (points || []).filter(p => {
+    const t = tsMs(p && p.ts);
+    return t !== null && (win.ms0 === null || t >= win.ms0) && (win.ms1 === null || t <= win.ms1);
+  });
+}
+
+/** 刷选到"没有轮次"的一段时，三处视图说的**同一句话**（一处写、三处用，免得说漂）。
+ *  措辞里"不拿 0 顶替"是刻意的：这一段没有轮次，与"拍到 0 张 / 分位是 0"是两件事。 */
+function tlEmptyWindowText(win){
+  return '刷选窗口内没有巡检轮次（' + mdWhen(win.t0) + ' → ' + mdWhen(win.t1)
+       + '）：这一段没有任何轮次可画——三处视图一起显示空态，不拿 0 顶替';
+}
+
+/** 一格在不在筛选范围内：**唯一**判据（画格子与数计数都走它，免得"筛掉几个"与"剩几格"两处漂）。
+ *  「有数据 / 无数据」看的是**本批**有没有拍到帧（与刷选窗口无关——窗口只决定格子里画几轮）；
+ *  「空位」是没配置站位，既不算"有数据"也不算"无数据"。 */
+function tlCellKept(rec){
+  const f = hist.tlFilter;
+  if(f.layer !== 'all' && String(rec.layer) !== String(f.layer)) return false;
+  if(f.col !== 'all' && String(rec.col) !== String(f.col)) return false;
+  if(f.data === 'has' && !rec.hasBatchFrame) return false;
+  if(f.data === 'none' && !(rec.configured && !rec.hasBatchFrame)) return false;
+  return true;
+}
+
+function tlFilterCounts(recs){
+  const out = { total: recs.length, kept: 0, hidden: 0,
+                keptFramed: 0, keptNone: 0, keptVacant: 0,
+                dropFramed: 0, dropNone: 0, dropVacant: 0 };
+  for(const rec of recs){
+    const kind = rec.hasBatchFrame ? 'Framed' : (rec.configured ? 'None' : 'Vacant');
+    if(tlCellKept(rec)){ out.kept++; out['kept' + kind]++; }
+    else { out.hidden++; out['drop' + kind]++; }
+  }
+  return out;
+}
+
+/** 计数的人话：**被筛掉多少要看得见**（票面验收）——留下多少、筛掉多少、丢掉的都是什么，
+ *  三个数一起写在卡片上；格子只是 hidden，不从 DOM 里删（删了"被筛掉"这件事就没了）。 */
+function tlCountText(c){
+  return c.total + ' 格 → 留下 ' + c.kept + ' 格；筛掉 ' + c.hidden + ' 格（丢掉：有数据 '
+       + c.dropFramed + ' · 无数据 ' + c.dropNone + ' · 空位 ' + c.dropVacant + '）';
+}
+
+/** 三个筛选组的按钮（沿用页面既有 `data-station-filter` 的**手法**：按钮 + aria-pressed +
+ *  一档「全部」）。⚠️ 属性名**不能**照抄 `data-station-filter`：站位卡的 drawList() 会把**所有**
+ *  `[data-station-filter]` 的 onclick 收走，还要按它自己那套规则改 disabled —— 照抄过来
+ *  两个筛选器会互相踩。手法照旧，名字分开。 */
+function drawOverviewFilters(extent, counts){
+  const box = $('#ovfilters'), info = $('#ovfilterinfo');
+  if(!box) return;
+  const f = hist.tlFilter;
+  const group = (kind, label, items) => '<span class="tlfgroup" role="group" aria-label="' + esc(label) + '">'
+    + items.map(it => {
+        const on = String(f[kind]) === String(it.value);
+        return '<button type="button" data-tl-filter="' + esc(kind) + '" data-tl-value="'
+          + esc(String(it.value)) + '" aria-pressed="' + (on ? 'true' : 'false') + '"'
+          + (on ? ' class="on"' : '') + (it.title ? ' title="' + esc(it.title) + '"' : '') + '>'
+          + esc(it.text) + '</button>';
+      }).join('') + '</span>';
+  const layerItems = [{ value: 'all', text: '全部' }];
+  for(let L = 1; L <= extent.layers; L++)
+    layerItems.push({ value: String(L), text: '第' + L + '层', title: '只看第 ' + L + ' 层' });
+  const colItems = [{ value: 'all', text: '全部' }];
+  for(let c = 1; c <= extent.cols; c++)
+    colItems.push({ value: String(c), text: String(c).padStart(2, '0'), title: '只看第 ' + c + ' 列' });
+  const dataItems = [{ value: 'all', text: '全部' },
+    { value: 'has', text: '有数据', title: '本批拍到过帧的站位' },
+    { value: 'none', text: '无数据', title: '有站位、本批一张帧都没拍到（空位不算"无数据"）' }];
+  box.innerHTML = '<span class="navlbl">层</span>' + group('layer', '按层筛选', layerItems)
+    + '<span class="navlbl">列</span>' + group('col', '按列筛选', colItems)
+    + '<span class="navlbl">数据</span>' + group('data', '按有没有数据筛选', dataItems);
+  if(info) info.textContent = tlCountText(counts);
+}
+
+/** 刷选条（**手写内联 SVG**，零依赖）：横轴 = 本批整段（与下面三处视图同一套内边距，
+ *  所以刻度与三处的 x 对齐）；一轮一条刻度；选区就是那份**共享窗口**。
+ *  拖动只改选区（brushPaint），**松开才提交**：提交后三处视图按这一份窗口一起重画。 */
+function brushSvgMarkup(brush, rounds, full){
+  const ms0 = full.ms0, ms1 = full.ms1;
+  const iw = BR.W - BR.padL - BR.padR;
+  const usable = ms0 !== null && ms1 !== null && ms1 > ms0;
+  const X = ms => usable ? BR.padL + (ms - ms0) / (ms1 - ms0) * iw : BR.padL + iw / 2;
+  const clampX = x => Math.max(BR.padL, Math.min(BR.W - BR.padR, x));
+  const selA = brush ? clampX(X(tsMs(brush.t0))) : BR.padL;
+  const selB = brush ? clampX(X(tsMs(brush.t1))) : BR.padL;
+  const out = ['<svg class="brush-svg" viewBox="0 0 ' + BR.W + ' ' + BR.H + '" role="img"'
+    + ' data-full-t0="' + esc(String(full.t0 || '')) + '" data-full-t1="' + esc(String(full.t1 || '')) + '"'
+    + ' data-sel-t0="' + esc(brush ? brush.t0 : '') + '" data-sel-t1="' + esc(brush ? brush.t1 : '') + '"'
+    + ' aria-label="' + esc('时间刷选：本批 ' + rounds.length + ' 轮'
+        + (brush ? '，已选 ' + mdWhen(brush.t0) + ' 到 ' + mdWhen(brush.t1) : '，未刷选（三处视图画本批整段）')) + '">'];
+  out.push('<rect class="brush-track" x="' + BR.padL + '" y="' + BR.trackY + '" width="' + iw
+    + '" height="' + BR.trackH + '"/>');
+  out.push('<rect class="brush-dim brush-dim-l" x="' + BR.padL + '" y="' + BR.trackY
+    + '" width="0" height="' + BR.trackH + '"/>');
+  out.push('<rect class="brush-dim brush-dim-r" x="' + (BR.W - BR.padR) + '" y="' + BR.trackY
+    + '" width="0" height="' + BR.trackH + '"/>');
+  out.push('<rect class="brush-sel" data-from="' + esc(brush ? brush.t0 : '') + '" data-to="'
+    + esc(brush ? brush.t1 : '') + '" x="' + selA.toFixed(1) + '" y="' + BR.trackY + '" width="'
+    + Math.max(0, selB - selA).toFixed(1) + '" height="' + BR.trackH + '"/>');
+  out.push('<line class="brush-handle brush-handle-l" x1="' + selA.toFixed(1) + '" y1="'
+    + (BR.trackY - 4) + '" x2="' + selA.toFixed(1) + '" y2="' + (BR.trackY + BR.trackH + 4) + '"/>');
+  out.push('<line class="brush-handle brush-handle-r" x1="' + selB.toFixed(1) + '" y1="'
+    + (BR.trackY - 4) + '" x2="' + selB.toFixed(1) + '" y2="' + (BR.trackY + BR.trackH + 4) + '"/>');
+  rounds.forEach(r => {
+    const x = clampX(X(tsMs(r.ts))).toFixed(1);
+    out.push('<line class="brush-tick" data-ts="' + esc(r.ts) + '" data-round-id="' + esc(r.round_id || '')
+      + '" x1="' + x + '" y1="' + (BR.trackY - 7) + '" x2="' + x + '" y2="' + BR.trackY + '"><title>'
+      + esc(mdWhen(r.ts) + (r.day === null || r.day === undefined ? '' : ' · 第 ' + r.day + ' 天'))
+      + '</title></line>');
+  });
+  // 命中区画在最后（透明，压在刻度上）：整条都能按下去拖
+  out.push('<rect class="brush-hit" x="' + BR.padL + '" y="' + (BR.trackY - 14) + '" width="' + iw
+    + '" height="' + (BR.trackH + 28) + '"/>');
+  out.push('<text class="brush-ticklbl" x="' + BR.padL + '" y="' + (BR.H - 4) + '">'
+    + esc(mdWhen(full.t0)) + '</text>');
+  out.push('<text class="brush-ticklbl" x="' + (BR.W - BR.padR) + '" y="' + (BR.H - 4)
+    + '" text-anchor="end">' + esc(mdWhen(full.t1)) + '</text>');
+  out.push('<text class="brush-sellbl" x="' + BR.padL + '" y="12">'
+    + esc(brush ? '已选 ' + mdWhen(brush.t0) + ' → ' + mdWhen(brush.t1) : '未刷选：下面三处画本批整段')
+    + '</text>');
+  out.push('</svg>');
+  return out.join('');
+}
+
+/** 拖动中的即时反馈：只改选区的几个图元——**不重画整条**（重画会把正按着的那个 svg 换掉），
+ *  也**不动三处视图**（三处是"松开"时按这一份窗口一起重画的）。 */
+function brushPaint(svg, aMs, bMs, full){
+  if(!svg || !full || full.ms0 === null || full.ms1 === null || full.ms1 <= full.ms0) return;
+  const iw = BR.W - BR.padL - BR.padR;
+  const clampX = x => Math.max(BR.padL, Math.min(BR.W - BR.padR, x));
+  const X = ms => clampX(BR.padL + (ms - full.ms0) / (full.ms1 - full.ms0) * iw);
+  const lo = Math.min(aMs, bMs), hi = Math.max(aMs, bMs);
+  const a = X(lo), b = X(hi);
+  const set = (sel, attrs) => {
+    const el = svg.querySelector(sel);
+    if(!el) return;
+    Object.keys(attrs).forEach(k => el.setAttribute(k, attrs[k]));
+  };
+  set('.brush-sel', { 'data-from': tlStamp(lo), 'data-to': tlStamp(hi), x: a.toFixed(1),
+                      width: Math.max(0, b - a).toFixed(1) });
+  set('.brush-dim-l', { x: BR.padL, width: Math.max(0, a - BR.padL).toFixed(1) });
+  set('.brush-dim-r', { x: b.toFixed(1), width: Math.max(0, (BR.W - BR.padR) - b).toFixed(1) });
+  set('.brush-handle-l', { x1: a.toFixed(1), x2: a.toFixed(1) });
+  set('.brush-handle-r', { x1: b.toFixed(1), x2: b.toFixed(1) });
+  const lbl = svg.querySelector('.brush-sellbl');
+  if(lbl) lbl.textContent = '已选 ' + mdWhen(tlStamp(lo)) + ' → ' + mdWhen(tlStamp(hi));
+}
+
+/** 指针位置 → 时间戳：**唯一**的拖拽换算。
+ *  量不到布局框（未布局 / 卡片还藏着）就**什么都不做**——宁可不刷，也不拿一个错的像素比例去刷。
+ *  无头回归里由用例按 mapsvg 那条老惯例补一个 getBoundingClientRect（宽 = viewBox 宽 ⇒ 1:1）。 */
+function brushTsAt(clientX, svg, full){
+  const rect = svg && svg.getBoundingClientRect ? svg.getBoundingClientRect() : null;
+  if(!rect || !(rect.width > 0)) return null;
+  if(!full || full.ms0 === null || full.ms1 === null || full.ms1 <= full.ms0) return null;
+  const iw = BR.W - BR.padL - BR.padR;
+  const vx = (clientX - rect.left) / rect.width * BR.W;
+  const frac = Math.max(0, Math.min(1, (vx - BR.padL) / iw));
+  return Math.round((full.ms0 + frac * (full.ms1 - full.ms0)) / 60000) * 60000;   // 拖到分钟
+}
+
+let brushDrag = null;      // 正在拖的那一次（松开即提交）
+
+function brushDragStart(ev){
+  if(ev.button !== undefined && ev.button !== 0) return;      // 只认左键
+  const svg = ev.currentTarget;
+  const full = tlFullExtent();
+  const ms = brushTsAt(ev.clientX, svg, full);
+  if(ms === null) return;
+  brushDrag = { svg: svg, fromMs: ms, toMs: ms, full: full };
+  brushPaint(svg, ms, ms, full);
+  if(ev.preventDefault) ev.preventDefault();
+}
+
+function brushDragMove(ev){
+  if(!brushDrag) return;
+  const ms = brushTsAt(ev.clientX, brushDrag.svg, brushDrag.full);
+  if(ms === null) return;
+  brushDrag.toMs = ms;
+  brushPaint(brushDrag.svg, brushDrag.fromMs, ms, brushDrag.full);
+}
+
+function brushDragEnd(){
+  if(!brushDrag) return;
+  const d = brushDrag;
+  brushDrag = null;
+  const a = Math.min(d.fromMs, d.toMs), b = Math.max(d.fromMs, d.toMs);
+  if(b - a < BRUSH_MIN_MS) return;          // 误触（点一下 / 蹭一下）：窗口不动
+  applyBrush(a, b);
+}
+
+/** 刷选提交：写**唯一**那份窗口状态，然后让三处视图一起重画（**不取数**）。 */
+function applyBrush(aMs, bMs){
+  hist.brush = { t0: tlStamp(Math.min(aMs, bMs)), t1: tlStamp(Math.max(aMs, bMs)) };
+  redrawTimelineViews();
+}
+
+function clearBrush(){
+  if(!hist.brush) return;
+  hist.brush = null;
+  redrawTimelineViews();
+}
+
+/** 共享窗口 / 筛选一变，**三处**由这一个入口一起重画：总览（内部连带刷选条与分位数带——
+ *  票 05 钉的"同一次渲染"）与放大视图。取数：**一个请求都不发**。 */
+function redrawTimelineViews(){
+  drawOverview();
+  refreshNodeDetail();
+}
+
+function brushMetaText(win, full){
+  if(!win.brushed) return '未刷选：下面三处画本批整段（' + mdWhen(full.t0) + ' → ' + mdWhen(full.t1) + '）';
+  if(win.empty) return '已刷选 ' + mdWhen(win.t0) + ' → ' + mdWhen(win.t1)
+    + '：这一段时间里没有巡检轮次（三处一起显示空态，不拿 0 顶替）';
+  const total = ((hist.overview && hist.overview.rounds) || []).length;
+  return '已刷选 ' + mdWhen(win.t0) + ' → ' + mdWhen(win.t1) + '（本批 ' + total + ' 轮里有 '
+    + win.rounds.length + ' 轮）：总览 / 节点放大 / 库房分位数带一起聚焦';
+}
+
+/** 刷选条：数据同样来自票 03 那一次矩阵（**不另发请求**）。没有可用的时间轴时如实说。 */
+function drawBrush(){
+  const box = $('#brushsvgbox'), meta = $('#brushmeta'), btn = $('#brushclear');
+  if(!box) return;
+  const ov = hist.overview;
+  const win = tlWindow();
+  const full = tlFullExtent();
+  const say = text => {
+    box.innerHTML = '<div class="empty">' + esc(text) + '</div>';
+    if(meta) meta.textContent = '';
+    if(btn) btn.disabled = true;
+  };
+  if(!ov){ say('读取本批的逐轮矩阵…（刷选条用的是这一次取数）'); return; }
+  if(!ov.ok){ say(ov.no_scope ? '还没有批次信息' : '查不到本批的逐轮矩阵'); return; }
+  const rounds = ov.rounds || [];
+  if(!rounds.length){ say('本批还没有可归属的巡检轮次：没有可刷的时间轴'); return; }
+  if(full.ms0 === null || full.ms1 === null || full.ms1 <= full.ms0){
+    say('本批的轮次没有真实时间戳：画不出时间轴（不拿"第几个点"凑一条轴）');
+    return;
+  }
+  box.innerHTML = brushSvgMarkup(hist.brush, rounds, full);
+  const svg = box.querySelector('svg.brush-svg');
+  if(svg) svg.onmousedown = brushDragStart;
+  if(meta) meta.textContent = brushMetaText(win, full);
+  if(btn) btn.disabled = !hist.brush;
+}
+
 /** 时序总览的画法：**格数 = grid.cols × grid.layers**，与平面图/巡检拼图同一套 col/layer 顺序。 */
 function drawOverview(){
   const box = $("#overview"), note = $("#ovnote"), title = $("#ovtitle");
@@ -3824,6 +4167,8 @@ function drawOverview(){
   // 票 05：分位数带与总览**同一次渲染、同一份矩阵**（它自己不发请求）——画在这里，
   // 是为了让"矩阵一变，两处一起变"成为结构上的事实，而不是靠两处各自记得刷新。
   drawRoomBand();
+  // 票 06：刷选条也从这份矩阵来（还没有矩阵时它自己说"读取中"）
+  drawBrush();
   const ov = hist.overview;
   if(!ov){
     box.className = "empty";
@@ -3842,6 +4187,9 @@ function drawOverview(){
     note.textContent = "⚠ " + (ov.error || "未知原因");
     return;
   }
+  const win = tlWindow();          // 票 06：**唯一**的窗口（刷选条与三处视图都从这里取）
+  box.setAttribute("data-t0", String(win.t0 || ""));
+  box.setAttribute("data-t1", String(win.t1 || ""));
   const batch = ov.batch || {};
   const rounds = ov.rounds || [];
   const nodes = ov.nodes || [];
@@ -3854,7 +4202,7 @@ function drawOverview(){
     note.textContent = notes.join(" · ") || (batchText + " 还没有轮次");
     return;
   }
-  const t0 = tsMs(rounds[0].ts), t1 = tsMs(rounds[rounds.length - 1].ts);
+  const t0 = win.ms0, t1 = win.ms1;
   const extent = gridExtent(nodes);
   const cols = extent.cols, layers = extent.layers;
   const nodeByCell = new Map();
@@ -3863,25 +4211,52 @@ function drawOverview(){
   for(const st of stations){
     if(st && st.layer && st.col) stationByCell.set(String(st.layer) + ":" + String(st.col), st);
   }
+  // 每一格的**格子事实**（与刷选窗口无关：有没有配置站位、本批拍没拍到）——
+  // 筛选与计数只走这一份记录，免得"画了几格"与"筛掉几格"两处各数各的。
+  const recs = [];
+  for(let layer = 1; layer <= layers; layer++){
+    for(let col = 1; col <= cols; col++){
+      const node = nodeByCell.get(layer + ":" + col);
+      const st = stationByCell.get(layer + ":" + col);
+      const ptsFull = node ? overviewPoints(node, rounds) : [];
+      recs.push({ layer: layer, col: col, node: node, st: st, ptsFull: ptsFull,
+                  configured: !!(node || st), hasBatchFrame: ptsFull.some(p => p.has_frame) });
+    }
+  }
+  const counts = tlFilterCounts(recs);
+  drawOverviewFilters(extent, counts);
+  // 刷选到没有轮次的一段：与放大视图、分位数带说**同一句话**（票 06 验收：空态不是 0）
+  if(win.empty){
+    box.className = "empty";
+    box.textContent = tlEmptyWindowText(win);
+    note.textContent = counts.hidden ? ("筛选生效（" + tlCountText(counts) + "）") : "";
+    return;
+  }
+  const recOf = new Map();
+  for(const rec of recs) recOf.set(rec.layer + ":" + rec.col, rec);
   const cells = ["<div class='ov-axis'>Y →</div>"];
   for(let col = 1; col <= cols; col++) cells.push("<div class='ov-col'>" + String(col).padStart(2, "0") + "</div>");
   let withData = 0, emptyCells = 0, vacant = 0;
   for(let layer = 1; layer <= layers; layer++){
     cells.push("<div class='ov-layer'>第 " + layer + " 层</div>");
     for(let col = 1; col <= cols; col++){
-      const node = nodeByCell.get(layer + ":" + col);
-      const st = stationByCell.get(layer + ":" + col);
+      const rec = recOf.get(layer + ":" + col);
+      const node = rec.node, st = rec.st;
+      const kept = tlCellKept(rec);
+      // 被筛掉的格子：**留在 DOM 里**、只是 hidden + data-kept=0（"被筛掉"这件事要看得见）
+      const keptAttr = " data-kept='" + (kept ? "1" : "0") + "' data-hasbatch='"
+        + (rec.hasBatchFrame ? "1" : "0") + "'" + (kept ? "" : " hidden");
       if(!node){
-        if(st){ emptyCells++; cells.push(ovEmptyCell(layer, col, st.id, "本批没有帧记录")); }
-        else { vacant++; cells.push("<div class='ov-cell vacant' data-layer='" + layer + "' data-col='" + col + "' data-station-id='' data-status='vacant' aria-label='第 " + layer + " 层第 " + col + " 框未配置'>—</div>"); }
+        if(st){ emptyCells++; cells.push(ovEmptyCell(layer, col, st.id, "本批没有帧记录", keptAttr)); }
+        else { vacant++; cells.push("<div class='ov-cell vacant'" + keptAttr + " data-layer='" + layer + "' data-col='" + col + "' data-station-id='' data-status='vacant' aria-label='第 " + layer + " 层第 " + col + " 框未配置'>—</div>"); }
         continue;
       }
-      const pts = overviewPoints(node, rounds);
+      const pts = tlPointsInWindow(rec.ptsFull, win);   // 票 06：同一份窗口裁出来的格点
       const status = overviewStatus(pts);
       const framed = pts.filter(p => p.has_frame).length;
       if(status === "none") emptyCells++; else withData++;
       const id = String(node.node_id || (st && st.id) || "");
-      cells.push("<div class='ov-cell " + status + "' data-layer='" + layer + "' data-col='" + col
+      cells.push("<div class='ov-cell " + status + "'" + keptAttr + " data-layer='" + layer + "' data-col='" + col
         + "' data-station-id='" + esc(id) + "' data-status='" + status + "'>"
         + ovCellSvg(node, pts, t0, t1)
         + "<span class='ov-meta'>" + esc(id + " · " + framed + "/" + pts.length) + "</span></div>");
@@ -3897,11 +4272,14 @@ function drawOverview(){
     + "<span><i style='background:#18794e'></i>上升</span>"
     + "<span><i style='background:#d94a3d'></i>下降/异常</span>"
     + "<span>" + cols + " × " + layers + " = " + (cols * layers) + " 格（与平面图同一套 col/layer 顺序）</span>"
-    + "<span>" + withData + " 格有帧 / " + emptyCells + " 格无数据</span>"
+    + "<span>" + (win.brushed ? "本窗口 " : "") + withData + " 格有帧 / " + emptyCells + " 格无数据</span>"
+    + "<span>" + (counts.hidden ? "筛掉 " + counts.hidden + " 格" : "未筛选") + "</span>"
     + "</div>"
     + "<div class='empty' style='padding:4px 0 0'>一格一个站位，x 是**真实时间**（不是第几个点）；"
-    + "没帧的轮次断开、画灰块，**不补零、不插值、不连线跳过**。数据来自 "
-    + "<code>/api/timeline?metric=coverage</code>（不给 station_id = 一次拿回本批全部站位）。</div>";
+    + "没帧的轮次断开、画灰块，**不补零、不插值、不连线跳过**。"
+    + (win.brushed ? "刷选生效：只画 " + esc(mdWhen(win.t0)) + " → " + esc(mdWhen(win.t1))
+        + " 这一段里的轮次（与节点放大、库房分位数带是**同一份窗口**；窗口外的不画，数据没重取）。" : "")
+    + "数据来自 <code>/api/timeline?metric=coverage</code>（不给 station_id = 一次拿回本批全部站位）。</div>";
   // 票 04 的入口：点**这里**的任一格 ⇒ 进入这个节点的放大视图（谜面就写在卡片上）。
   // 空位（vacant，没有站位）不绑；"本批没有记录"的灰格**要**绑——那一格也有话要说
   // （环境与天数刻度照画），只是不拿 0 帧的格子冒充它。
@@ -3911,6 +4289,8 @@ function drawOverview(){
     el.onclick = () => openNodeDetail(id);
   });
   if(!withData) notes.push("本批还没有任何一个站位拍到帧");
+  if(counts.hidden) notes.push("筛选生效：筛掉 " + counts.hidden + " / " + counts.total
+    + " 格——格子只是隐藏、没有被删掉，计数就在筛选条上");
   note.textContent = notes.join(" · ");
 }
 
@@ -4283,7 +4663,9 @@ function mdFootnote(){
     + '不参与切段，也不拿它对时间积分当「点亮时长」（现场口径是开几秒、停约两小时，两侧各取自不同的档）。'
     + '环境来自 <code>/api/environment</code>（按本批窗口<b>一次</b>取回；缺测的小时断开、不插值），'
     + '逐轮格点来自 <code>/api/timeline</code> 的<b>本批矩阵</b>（票 03 一次拿回全部站位，'
-    + '这里不再逐站或逐轮去问）。</div>';
+    + '这里不再逐站或逐轮去问）。时间刷选把这条轴**窗口化**：窗口由上面「时序总览」的刷选条给，'
+    + '与总览 / 库房分位数带是同一份（同一段真实时间）；刷到没有轮次的一段时三处一起显示空态，'
+    + '不拿 0 顶替。</div>';
 }
 
 /** 点时序总览的任一格 ⇒ 进入这个节点的放大视图（票 04）。
@@ -4361,13 +4743,14 @@ function refreshNodeDetail(){
 function drawNodeDetail(){
   const box = $('#nodedetail'), note = $('#mdnote'), card = $('#mdcard');
   if(!box || !note || !card) return;
-  if(!hist.nodeDetailOpen || !hist.nodeDetailStationId){
+  const hide = () => {
     card.style.display = 'none';
     box.className = 'empty';
     box.textContent = '点上面「时序总览」里的任一格，进入这个节点的放大视图';
     note.textContent = '';
-    return;
-  }
+    box.setAttribute('data-t0', ''); box.setAttribute('data-t1', '');
+  };
+  if(!hist.nodeDetailOpen || !hist.nodeDetailStationId){ hide(); return; }
   card.style.display = '';
   const stationId = String(hist.nodeDetailStationId);
   const ov = hist.overview;
@@ -4383,43 +4766,66 @@ function drawNodeDetail(){
     note.textContent = '⚠ ' + (ov.error || '未知原因');
     return;
   }
-  const rounds = ov.rounds || [];
+  const win = tlWindow();          // 票 06：与总览 / 分位数带**同一份**窗口
+  box.setAttribute('data-t0', String(win.t0 || ''));
+  box.setAttribute('data-t1', String(win.t1 || ''));
+  const allRounds = ov.rounds || [];
   const node = (ov.nodes || []).find(item => String(item.node_id) === stationId);
-  const batch = ov.batch || {}, axis = ov.axis || {};
+  const batch = ov.batch || {};
   const batchText = '本批 ' + (batch.batch_no || batch.entry_date || '?');
   $('#mdtitle').textContent = ' · ' + stationId + (node && node.box_id ? ' · ' + node.box_id : '')
     + ' · ' + batchText;
   const notes = (ov.notes || []).slice();
+  if(win.brushed) notes.push('刷选生效：只画 ' + mdWhen(win.t0) + ' → ' + mdWhen(win.t1)
+    + ' 这一段（窗口外的轮次与小时行都不画；数据没重取）');
   // 环境三态**分开说**：还没取到（undefined）/ 取不到（null）/ 窗口内确实没有行（[]）——
   // 把"还在读"说成"没有数据"就是另一种欺骗。
   const envPending = !hist.nodeEnv;
   const envFailed = !!(hist.nodeEnv && hist.nodeEnv.ok === false);
-  const envRows = envPending ? undefined : (envFailed ? null : (hist.nodeEnv.rows || []));
+  let envRows = envPending ? undefined : (envFailed ? null : (hist.nodeEnv.rows || []));
+  // 票 06：刷选生效时环境只画窗口内的那些小时行（窗口外的**不画**，不是压在边缘上）
+  if(Array.isArray(envRows) && win.brushed){
+    envRows = envRows.filter(r => {
+      const t = tsMs(r && r.ts);
+      return t !== null && t >= win.ms0 && t <= win.ms1;
+    });
+  }
   if(envFailed) notes.push('⚠ 环境取不到：' + (hist.nodeEnv.error || '未知原因')
     + '——本站的逐轮覆盖与天数刻度照常画（环境是另一路数据，不拿空白或 0 顶替）');
   else if(hist.nodeEnv && !envRows.length) notes.push('本批窗口内没有环境小时行（不是 0）');
-  const pts = node ? overviewPoints(node, rounds) : [];
-  if(!rounds.length){
+  const pts = node ? tlPointsInWindow(overviewPoints(node, allRounds), win) : [];
+  if(!allRounds.length){
     box.className = 'empty';
     box.textContent = '本批还没有可归属的巡检轮次（时间轴是空的）';
     note.textContent = notes.join(' · ');
     return;
   }
-  if(!axis.t0 || !axis.t1){
+  if(!win.t0 || !win.t1){
     box.className = 'empty';
     box.textContent = '本批的轮次没有真实时间戳：画不出时间轴（不拿"第几个点"凑）';
     note.textContent = notes.join(' · ');
     return;
   }
+  // 票 06：刷到没有轮次的一段 ⇒ 与总览、分位数带说**同一句话**（三处一致空态，不是 0）
+  if(win.empty){
+    box.className = 'empty';
+    box.textContent = tlEmptyWindowText(win);
+    note.textContent = notes.filter(item => item.indexOf('刷选生效') !== 0).join(' · ');
+    return;
+  }
   if(!pts.length){
-    notes.push('本批的矩阵里没有这个站位的记录（矩阵只排本批拍到过帧的站位，'
+    if(node) notes.push('刷选窗口内没有这个站位的轮次（本批它有记录，只是不在这一段里）——'
+      + '环境与天数刻度照画');
+    else notes.push('本批的矩阵里没有这个站位的记录（矩阵只排本批拍到过帧的站位，'
       + '不拿一行 0 帧的格子凑数）——环境与天数刻度照画');
   }else if(!pts.some(p => p.has_frame)){
     notes.push('本批这个站位一张帧都没有');
   }
   const where = stationId + (node && node.box_id ? '（' + node.box_id + '）' : '');
   box.className = '';
-  box.innerHTML = mdSvgMarkup(stationId, pts, rounds, axis, envRows, where) + mdLegend() + mdFootnote();
+  // 天数带只看窗口内的轮次；覆盖条与帧数轨迹用窗口内的格点；x 一律走 mdScale(窗口)
+  box.innerHTML = mdSvgMarkup(stationId, pts, win.rounds, { t0: win.t0, t1: win.t1 }, envRows, where)
+    + mdLegend() + mdFootnote();
   note.textContent = notes.join(' · ');
 }
 
@@ -4670,7 +5076,9 @@ function rbFootnote(){
     + '在那一轮打「样本不足」并把带**断开**；一个站位都没拍到的轮次说「整轮无帧」。'
     + '覆盖率 = 本轮有帧站位数 / 本轮参与统计站位数（本批已知站位）——'
     + '这里的 0 是**真的 0**，所以它不断开。数据来自 <code>/api/timeline</code> 的<b>本批矩阵</b>'
-    + '（票 03 一次取回全部站位）：这张卡**不另发请求**，也不缓存第二份聚合结果。</div>';
+    + '（票 03 一次取回全部站位）：这张卡**不另发请求**，也不缓存第二份聚合结果。'
+    + '时间刷选把这条带**窗口化**：窗口由总览上面那条刷选条给，与总览 / 节点放大是同一份'
+    + '（同一段真实时间）；刷到没有轮次的一段时三处一起显示空态，不拿 0 顶替。</div>';
 }
 
 /** 库房分位数带的画法：**不取数**——从票 03 的矩阵（hist.overview）现算现画。
@@ -4697,12 +5105,13 @@ function drawRoomBand(){
     if(note) note.textContent = '⚠ ' + (ov.error || '未知原因');
     return;
   }
+  const win = tlWindow();          // 票 06：与总览 / 放大视图**同一份**窗口
+  box.setAttribute('data-t0', String(win.t0 || ''));
+  box.setAttribute('data-t1', String(win.t1 || ''));
   const rounds = ov.rounds || [], nodes = ov.nodes || [], axis = ov.axis || {};
   const batch = ov.batch || {};
   const batchText = '本批 ' + (batch.batch_no || batch.entry_date || '?');
   if(title) title.textContent = ' · ' + batchText;
-  const stationIds = (stations || []).map(s => s && s.id).filter(Boolean);
-  const rows = roomBandRounds(rounds, nodes, stationIds);
   if(!rounds.length){
     box.className = 'empty'; box.textContent = '本批还没有可归属的巡检轮次';
     if(note) note.textContent = (ov.notes || []).join(' · ') || (batchText + ' 还没有轮次');
@@ -4714,8 +5123,23 @@ function drawRoomBand(){
     if(note) note.textContent = (ov.notes || []).join(' · ');
     return;
   }
+  // 刷选到没有轮次的一段：与总览、放大视图说**同一句话**（票 06 验收：空态不是 0）
+  if(win.empty){
+    box.className = 'empty';
+    box.textContent = tlEmptyWindowText(win);
+    if(note) note.textContent = '';
+    return;
+  }
+  const stationIds = (stations || []).map(s => s && s.id).filter(Boolean);
+  // 窗口内的样本：节点格点先按**整段**轮次摊平（矩阵形态要靠它对齐），再用**同一个**
+  // tlPointsInWindow 裁窗口——与总览是同一份矩阵、同一个判据（口径只有一处）。
+  const winNodes = nodes.map(n => ({ node_id: n.node_id,
+    points: tlPointsInWindow(overviewPoints(n, rounds), win) }));
+  const rows = roomBandRounds(win.rounds, winNodes, stationIds);
   const drawable = rows.filter(r => r.drawable);
   const notes = [];
+  if(win.brushed) notes.push('刷选生效：只画 ' + mdWhen(win.t0) + ' → ' + mdWhen(win.t1)
+    + ' 这一段（与总览 / 放大视图同一份窗口；窗口外不画，数据没重取）');
   const miss = rows.filter(r => !r.drawable);
   if(miss.length){
     const short = miss.filter(r => !r.blank), blank = miss.filter(r => r.blank);
@@ -4735,7 +5159,8 @@ function drawRoomBand(){
     return;
   }
   box.className = '';
-  box.innerHTML = roomBandSvg(rows, axis) + rbLegend() + rbFootnote();
+  // 带的家当与放大视图**逐像素相同**：x 一律走 mdScale，窗口就是上面那一份
+  box.innerHTML = roomBandSvg(rows, { t0: win.t0, t1: win.t1 }) + rbLegend() + rbFootnote();
   if(note) note.textContent = notes.join(' · ');
 }
 
@@ -4749,7 +5174,10 @@ async function loadHistory(force){
     hist.overview = null; hist.overviewBatchKey = ''; overviewRequestSeq++;
     // 票 04：环境按"批次 + 窗口"缓存 ⇒ 换批次必须清；放大视图本身**不关**
     // （用户点开的那一站还开着，换批后按新批重画；这一站新批没有记录也会如实说）
-    hist.nodeEnv = null; hist.nodeEnvKey = ''; nodeEnvPending = ''; nodeEnvFailedKey = ''; detailEnvRequestSeq++; }
+    hist.nodeEnv = null; hist.nodeEnvKey = ''; nodeEnvPending = ''; nodeEnvFailedKey = ''; detailEnvRequestSeq++;
+    // 票 06：刷选窗口是**这一批**的一段 ⇒ 换批（重新读取）必须清掉；在飞的那次拖拽也丢掉。
+    // 筛选（层/列/有没有数据）是用户的看法，不跟着批次清。
+    hist.brush = null; brushDrag = null; }
   const requestId = ++historyRequestSeq;
   hist.roundsLoading = true;
   $('#timeline').className = 'empty';
@@ -5492,6 +5920,24 @@ function wireHistory(){
     refreshFilteredRounds();
   };
   $('#reloadbtn').onclick = () => loadHistory(true);
+  /* 票 06：刷选条的清除、三个筛选组、拖拽的移动/松开。
+     拖拽的 move/up 挂在 window 上（与下面大图拖动同一手法）：指针滑出刷选条也照样跟手；
+     没在拖时直接返回，不抢别处的鼠标事件。筛选走**委托**（按钮是每次重画出来的）。 */
+  if($('#brushclear')) $('#brushclear').onclick = () => clearBrush();
+  const filtersBox = $('#ovfilters');
+  if(filtersBox) filtersBox.addEventListener('click', ev => {
+    const target = ev.target;
+    const btn = target && target.closest ? target.closest('button[data-tl-filter]') : null;
+    if(!btn) return;
+    const kind = btn.getAttribute('data-tl-filter');
+    const value = btn.getAttribute('data-tl-value');
+    if(!kind || value === null) return;
+    hist.tlFilter = Object.assign({}, hist.tlFilter, { [kind]: value });
+    // 筛选只改这张矩阵的画法：不重取矩阵、不动刷选窗口，也不动分位数带的口径
+    drawOverview();
+  });
+  window.addEventListener('mousemove', ev => { if(brushDrag) brushDragMove(ev); });
+  window.addEventListener('mouseup', () => { if(brushDrag) brushDragEnd(); });
   document.querySelectorAll('[data-zoom]').forEach(b => b.onclick = () => {
     hist.zoom = Number(b.dataset.zoom); hist.px = hist.py = 0; applyZoom();
   });
