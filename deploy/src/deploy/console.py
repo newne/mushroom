@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from patrol.room import RoomStateError, load_room_state
 from patrol.stations import GRID_ANGLES, grid_geometry, load_stations
@@ -1077,6 +1077,45 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
             return {"ok": True, "rows": got, "count": len(got)}
         return {"ok": False, "error": "prod 返回了看不懂的形状（既不是信封也不是列表）",
                 "rows": []}
+
+    @app.get("/api/timeline")
+    def api_timeline(request: Request) -> Response:
+        """本批「每轮 × 站位」的覆盖轨迹——**代理 prod 的 `/timeline`**，页面不直连 prod。
+
+        为什么必须有这一条：页面（票 02）调 `/api/timeline`，而本文件是**逐端点注册**、
+        没有通配转发（nginx 只把 `/api/` 指到 console）——不补这条，机上它一直是 404，
+        页面只能如实说"查不到覆盖轨迹 ⚠"（ADR-0003：浏览器只与 console 一个 origin 通信）。
+
+        三件事与既有代理同一口径，但这里**连状态码也要照抄**：
+
+        1. **query 原样**：把请求的原始查询串直接贴到上游 URL 上，**不重建**——重建就得
+           在代理层给参数建白名单，将来上游（或页面）多一个筛选项就要改两处，改漏了
+           就是"参数被吞"这种最难查的漂移；
+        2. **状态码与信封原样**：上游 400 是"这个请求本身有问题"（`metric=growth` 还没开、
+           缺 `station_id`……），页面必须拿到 400 与**同一份**错误体才能照实说；在代理层
+           折成 200 等于替上游改口（与 `/api/ranges` 不补 `state` 是同一个道理）；
+        3. **不通就明说**：链路失败给明确错误，**不返回一个空 `nodes` 的信封冒充成功**
+           ——"问不到"与"这批确实没有轮次"在现场是两件事。
+
+        用 `transport.fetch`（原样给状态码）而不是 `transport(...)`（非 2xx 折算成异常）：
+        后者在代理层就拿不到状态码，只能猜一个。
+        """
+        if deps.transport is None:
+            return JSONResponse({"ok": False, "error": "未接入 prod 分析服务（transport 未配置）"},
+                                status_code=502)
+        query = request.url.query
+        url = f"{deps.analysis_url}/timeline{('?' + query) if query else ''}"
+        try:
+            status, payload = deps.transport.fetch(url)
+        except Exception as e:  # noqa: BLE001 - prod 不通不该让页面整页报错
+            return JSONResponse({"ok": False, "error": f"prod 查询失败：{e}"}, status_code=502)
+        if payload is None:
+            # 上游回话了，但不是 JSON 信封 ⇒ 状态码照抄、如实说"看不懂"。
+            # **绝不在这里编一个空信封**：页面会把空信封读成"这批没有轮次"。
+            return JSONResponse(
+                {"ok": False, "error": f"prod 返回了非 JSON 响应（HTTP {status}）"},
+                status_code=status if status >= 400 else 502)
+        return JSONResponse(payload, status_code=status)   # 状态码与信封原样
 
     @app.get("/api/measurements")
     def api_measurements(
