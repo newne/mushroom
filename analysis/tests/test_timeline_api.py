@@ -158,14 +158,18 @@ def test_rounds_without_a_round_id_are_not_guessed_into_the_grid(client, pg):
         "1 轮没有 round_id（旧轮次）：帧挂不到它头上，未进网格——**不猜**"]
 
 
-def test_timeline_only_knows_coverage_and_one_station(client, pg):
+def test_timeline_only_knows_coverage(client, pg):
+    """口径面：metric 只认 coverage；库房号要规范；batch_id 的库房要与 zone 同间。
+
+    ⚠️ 2026-10-16（票 03）：`station_id` 由**必填**改为**可选**——不给就是"本批全部站位的
+    矩阵"（spec 的规范调用式里本来就没有它）。这一条原来断言"不给就 400"，那是票 02 的
+    临时限制（当时的报错文案就写着"48 站总览见票 03"）；票 03 落地即放开，
+    矩阵形态本身由 `test_timeline_matrix_api.py` 逐条钉住。
+    """
     seed(pg)
     growth = timeline(client, metric="growth")
     assert growth.status_code == 400
     assert "只认 coverage" in growth.json()["detail"]
-
-    none = timeline(client, station_id="")
-    assert none.status_code == 400 and "station_id" in none.json()["detail"]
 
     bad_room = timeline(client, zone="999")
     assert bad_room.status_code == 400 and "不是规范库房号" in bad_room.json()["detail"]

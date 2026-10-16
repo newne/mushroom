@@ -72,6 +72,7 @@ __all__ = [
     "insert_measurements", "fetch_measurements",
     "insert_images", "fetch_images", "fetch_room_box_ids",
     "insert_rounds", "fetch_rounds", "fetch_round_coverage",
+    "fetch_station_coverage_matrix",
     "replace_ranges", "fetch_ranges", "fetch_advice_ranges",
     "write_ranges_state", "fetch_ranges_state",
 ]
@@ -722,6 +723,46 @@ def fetch_round_coverage(
     """
     return _fetch_dicts(conn, sql, [station_id, list(room_ids), entry_date])
 
+
+def fetch_station_coverage_matrix(
+    conn: PgConnection, *, room_ids: list[str], entry_date: str
+) -> list[dict]:
+    """本批**每轮 × 每站位**的帧数矩阵（票 03 的取数口径，只读）。
+
+    一行 = 一轮 × 一个站位。站位集合 = **本批帧里出现过的站位**（`images` 里有记录就有
+    位置）：一个站位整批一张帧都没有时它不在矩阵里——那是"本批没有这个站位的记录"，
+    不是"这个站位每轮都缺帧"；拿一行 0 帧的格子凑数会把这两件事混成一件。站位自带框号
+    （`max(box_id)`：同一站位换过框号时取一个，页面按框聚合时才有键）。
+
+    `rounds` 侧是 LEFT JOIN：**没有站位的轮次也要出现一行**（`station_id` 为 NULL），
+    否则"本批一张帧都没有"会把时间轴一起吞掉，页面连"这批有几轮"都读不出来。
+
+    没有帧的格子 `n_frames` 是 `count(i.ts)` = **0**（不是 NULL）——"这一轮这一站拍到 0 张"
+    这件事不存在，0 只表示 join 没命中，由上层（`analysis.timeline.matrix_of`）翻译成
+    `has_frame=False` + `n_frames=None`。批次按 `entry_date` 过滤（ADR-0020 的身份列）。
+    """
+    sql = f"""
+    WITH stations AS (
+        SELECT station_id, max(box_id) AS box_id
+        FROM {_table(conn, 'images')}
+        WHERE room_id = ANY(%s) AND entry_date = %s AND station_id IS NOT NULL
+        GROUP BY station_id
+    )
+    SELECT r.ts            AS ts,
+           r.round_id      AS round_id,
+           r.batch_no      AS batch_no,
+           s.station_id    AS station_id,
+           s.box_id        AS box_id,
+           count(i.ts)     AS n_frames
+    FROM {_table(conn, 'rounds')} r
+    LEFT JOIN stations s ON TRUE
+    LEFT JOIN {_table(conn, 'images')} i
+      ON i.round_id = r.round_id AND i.station_id = s.station_id
+    WHERE r.room_id = ANY(%s) AND r.entry_date = %s
+    GROUP BY r.ts, r.round_id, r.batch_no, s.station_id, s.box_id
+    ORDER BY r.ts, s.station_id
+    """
+    return _fetch_dicts(conn, sql, [list(room_ids), entry_date, list(room_ids), entry_date])
 
 def insert_rounds(conn: PgConnection, rows: list[dict]) -> None:
     """按 `ts` 覆盖写轮次行；列表型字段（`dup_groups`）序列化成 JSON 文本（与读侧成对）。"""

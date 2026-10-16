@@ -79,9 +79,21 @@ def pg(pg_dsn, pg_schema):
 
 
 @pytest.fixture
-def app(pg_dsn, pg_schema) -> FastAPI:
-    """被测 API；连的 schema 与本用例的 `pg` 是**同一个**（夹具链共享 `pg_schema`）。"""
-    return create_app(store_dsn=pg_dsn, store_schema=pg_schema)
+def app(pg_dsn, pg_schema) -> Iterator[FastAPI]:
+    """被测 API；连的 schema 与本用例的 `pg` 是**同一个**（夹具链共享 `pg_schema`）。
+
+    **用完要关掉那条存储连接**（2026-10-16）：`create_app` 每建一个应用就开一份连接，
+    不关的话每条用例攒一份 —— 实测 130s 内从 20 涨到 89，272 条用例就把开发库的
+    `max_connections=100` 撑满（后面的用例全变 "sorry, too many clients already"）。
+    夹具收尾关掉它，连接数全程平着走（20 上下）。
+    """
+    application = create_app(store_dsn=pg_dsn, store_schema=pg_schema)
+    try:
+        yield application
+    finally:
+        conn = getattr(application.state, "store_conn", None)
+        if conn is not None:
+            conn.close()
 
 
 @pytest.fixture

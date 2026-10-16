@@ -232,11 +232,26 @@ const COV_ROUNDS = [
 ];
 // S102：09-12 那一轮**没有帧**（缺口 ⇒ 灰块 + 断开）。前三个有帧的格点成一段、
 // 后两个成另一段——"一段一条 path"才验得出来。
+// S412（票 03 补）：六轮**都有帧**且帧数在涨（1/1/2/2/3/4）⇒ 状态色"上升"（绿）；
+//   S102 最近两个有帧轮次是 5 → 1 ⇒ "下降"（红）；S101 整批没帧 ⇒ "无数据"（灰）。
 const COV_FRAMES = { S102: { "round-20260910": 3, "round-20260910b": 4,
                             "round-20260911": 2, "round-20260913": 5,
                             "round-20260913b": 1 },
+                     S412: { "round-20260910": 1, "round-20260910b": 1,
+                            "round-20260911": 2, "round-20260912": 2,
+                            "round-20260913": 3, "round-20260913b": 4 },
                      S101: {} };
 const COV_BOX = { S101: "B101", S102: "B102", S412: "B412" };
+// 明细形态（票 02）的格点：每格自带 ts/round_id/day。矩阵形态不给这些（共享时间轴）。
+const covPoints = stationId => {
+  const frames = COV_FRAMES[stationId] || {};
+  return COV_ROUNDS.map(r => {
+    const n = frames[r.round_id];
+    const has = typeof n === "number";
+    return { ts: r.ts, round_id: r.round_id, day: r.day, has_frame: has,
+             n_frames: has ? n : null };
+  });
+};
 
 // 环境模式用：两个小时点，补光一个是"停止"(2) 一个是"关闭"(3)。
 // 分类量走色带，不走折线——对它求平均没有意义（ADR-0021）。
@@ -467,24 +482,38 @@ function route(method, url, body) {
     return json(200, { ok: true, box_id: boxId, rows, n: rows.length });
   }
   if (path === "/api/timeline") {
-    // 票 02 的端点：**本批逐轮**的覆盖轨迹（单站位）。缺帧是 null、不是 0。
+    // 票 02/03 的端点：**本批逐轮**的覆盖轨迹。
+    //   · 给了 station_id = 那一个站位的明细（票 02）：每格自带 ts/round_id/day；
+    //   · 不给 station_id = **全部站位的矩阵**（票 03）：共享时间轴 rounds[] + 每站的
+    //     points[i] 与之对齐（逐点重复 ts/round_id 会把单次响应抬到约 690 KB）。
+    // 缺帧一律是 null、不是 0 —— 假件与端点契约逐字段对齐（spec 硬规则 2）。
     if (state.timeline_error) return json(500, { error: "boom" });
     const params = new URL("http://console.local" + url).searchParams;
     const stationId = params.get("station_id") || "";
-    const frames = COV_FRAMES[stationId] || {};
-    const points = COV_ROUNDS.map(r => {
-      const n = frames[r.round_id];
-      const has = typeof n === "number";
-      return { ts: r.ts, round_id: r.round_id, day: r.day, has_frame: has,
-               n_frames: has ? n : null };
-    });
+    const batch = { room_id: "611", entry_date: "2026-09-04", batch_no: "BATCH-10" };
+    const axis = { t0: COV_ROUNDS[0].ts, t1: COV_ROUNDS[COV_ROUNDS.length - 1].ts,
+                   n_rounds: COV_ROUNDS.length };
+    if (stationId) {
+      return json(200, { ok: true, metric: "coverage", zone: "611", zone_requested: "611",
+        station_id: stationId, batch, axis,
+        nodes: [{ node_id: stationId, box_id: COV_BOX[stationId] || null,
+                  points: covPoints(stationId) }],
+        notes: [] });
+    }
+    // 矩阵里的站位 = **本批帧里出现过的站位**（S101 整批一张都没有 ⇒ 不在 nodes 里，
+    // 页面按"无数据"灰格画——"本批没有记录"与"拍了 0 张"是两件事）。
+    const nodes = STATIONS.filter(s => Object.keys(COV_FRAMES[s.id] || {}).length).map(s => ({
+      node_id: s.id, layer: s.layer, col: s.col, box_id: s.box_id,
+      points: COV_ROUNDS.map(r => {
+        const n = (COV_FRAMES[s.id] || {})[r.round_id];
+        const has = typeof n === "number";
+        return { has_frame: has, n_frames: has ? n : null };
+      }),
+    }));
     return json(200, { ok: true, metric: "coverage", zone: "611", zone_requested: "611",
-      station_id: stationId,
-      batch: { room_id: "611", entry_date: "2026-09-04", batch_no: "BATCH-10" },
-      axis: { t0: COV_ROUNDS[0].ts, t1: COV_ROUNDS[COV_ROUNDS.length - 1].ts,
-              n_rounds: COV_ROUNDS.length },
-      nodes: [{ node_id: stationId, box_id: COV_BOX[stationId] || null, points }],
-      notes: [] });
+      station_id: null, batch, axis,
+      rounds: COV_ROUNDS.map(r => ({ ts: r.ts, round_id: r.round_id, day: r.day })),
+      nodes, notes: [] });
   }
   if (path === '/api/environment') {
     if (state.env_error) return json(200, { ok: false, error: 'prod 查询失败：不通', rows: [] });
@@ -1963,6 +1992,121 @@ await sleep(150);
     await click("#timeline .mosaic-cell[data-station-id=\"S102\"]");
     await sleep(300);
   }
+
+  // ---- 票 03：时序总览（**本批全部站位**的小倍数矩阵；真实时间 x / 缺口断开 / null≠0）----
+  // 与上面两张卡同一套护栏，外加两条本卡特有的：
+  //   · **格数 = grid.cols × grid.layers**（按 grid 算，不是死写 48），且与巡检拼图**同序**；
+  //   · **一次请求**拿回全部站位（带 station_id 的才是单站明细请求）。
+  {
+    await waitFor(() => document.querySelectorAll('#overview .ov-cell').length > 0, 4000);
+    const ovCells = () => Array.from(document.querySelectorAll('#overview .ov-cell'));
+    const ovCell = id => document.querySelector('#overview .ov-cell[data-station-id="' + id + '"]');
+    const ovPts = el => el ? Array.from(el.querySelectorAll('circle.ov-pt')) : [];
+    const ovGaps = el => el ? Array.from(el.querySelectorAll('rect.ov-gapmark')) : [];
+    const ovSegXs = el => el ? Array.from(el.querySelectorAll('path.ov-line')).map(pa =>
+      [...((pa.getAttribute('d')) || '').matchAll(/(-?[0-9.]+),(-?[0-9.]+)/g)]
+        .map(m => Number(m[1]))) : [];
+    const tlCalls = () => state.calls.filter(c => c.url.split('?')[0] === '/api/timeline');
+    // 矩阵请求 = 不带 station_id 的那条（带的是上面「覆盖轨迹」卡的单站明细）
+    const matrixCalls = () => tlCalls().filter(c => !/[?&]station_id=/.test(c.url));
+    // 读 title 一律走它：断言要**红**，不许在缺元素时把整轮跑崩（崩了就看不清红了几条）
+    const titleOf = el => {
+      const t = el && el.querySelector ? el.querySelector('title') : null;
+      return (t && t.textContent) || '';
+    };
+
+    // 一次装载**最多一条**矩阵请求（带上限的是「历史装载」次数，也就是 /api/rounds 的条数）。
+    // 每站一次的实现会得到 3 倍的条数（真机 48 倍）⇒ 这条当场红。
+    const roundsCalls = state.calls.filter(c => c.url.split('?')[0] === '/api/rounds').length;
+    check('时序总览一次拿回本批全部站位（矩阵请求不带 station_id，也不随站位数增长）',
+      matrixCalls().length >= 1 && matrixCalls().length <= Math.max(1, roundsCalls),
+      matrixCalls().length + ' 次矩阵请求 / ' + roundsCalls + ' 次历史装载（3 个站位的格子都在这一次载荷里）：'
+      + ((matrixCalls()[0] || {}).url || '(没发过)'));
+    check('时序总览按**选中的那一批**取数（zone + metric + batch_id=库房|入库日，且不带 station_id）',
+      !!matrixCalls()[0] && matrixCalls()[0].url.includes('zone=611')
+      && matrixCalls()[0].url.includes('metric=coverage')
+      && matrixCalls()[0].url.includes('batch_id=' + encodeURIComponent('611|2026-09-04')),
+      (matrixCalls()[0] || {}).url || '没有矩阵请求');
+
+    // 格数 = 站位格数：12 × 4 = 48 是从 GRID 算出来的，**不是**写死的常量
+    check('总览格数 = grid.cols × grid.layers（按 grid 算，不是死写 48）',
+      ovCells().length === GRID.cols * GRID.layers,
+      ovCells().length + ' 格 / grid = ' + GRID.cols + ' × ' + GRID.layers);
+    const ovOrder = ovCells().map(el => el.dataset.layer + ':' + el.dataset.col);
+    const wantOrder = [];
+    for(let L = 1; L <= GRID.layers; L++) for(let c = 1; c <= GRID.cols; c++) wantOrder.push(L + ':' + c);
+    check('布局与平面图同一套 col/layer 顺序（第 1 层在最上、层内框号从左到右）',
+      ovOrder.length === wantOrder.length && ovOrder.every((k, i) => k === wantOrder[i]),
+      ovOrder.slice(0, 3).join(' ') + ' … ' + ovOrder[ovOrder.length - 1]);
+    const mosaicIdx = id => Array.from(document.querySelectorAll('#timeline .mosaic-cell'))
+      .findIndex(el => el.dataset.stationId === id);
+    const ovIdx = id => ovCells().findIndex(el => el.dataset.stationId === id);
+    check('同站在总览与巡检拼图里落在**同一个格位**（现场一眼能对上位置）',
+      ['S101', 'S102', 'S412'].every(id => mosaicIdx(id) >= 0 && mosaicIdx(id) === ovIdx(id)),
+      ['S101', 'S102', 'S412'].map(id => id + '=' + mosaicIdx(id) + '/' + ovIdx(id)).join(' '));
+
+    const s102 = ovCell('S102');
+    check('S102 那张 sparkline：6 轮里 5 轮有帧、1 轮无帧',
+      ovPts(s102).length === 5 && ovGaps(s102).length === 1,
+      ovPts(s102).length + ' 个格点 / ' + ovGaps(s102).length + ' 个灰块');
+    const xs = ovPts(s102).map(c => Number(c.getAttribute('cx')));
+    check('总览 x 用真实时间戳（跨缺口那段的间距是段内的 4 倍，不是等距）',
+      xs.length === 5 && (xs[1] - xs[0]) > 0
+      && Math.abs((xs[3] - xs[2]) / (xs[1] - xs[0]) - 4) <= 0.2,
+      'cx=' + xs.map(v => v.toFixed(1)).join(','));
+    const segXs = ovSegXs(s102);
+    check('缺口断开：有帧的连续轮次各成一段（3 个点 + 2 个点），不跨过缺帧那一轮连线',
+      segXs.length === 2 && segXs[0].length === 3 && segXs[1].length === 2
+      && Math.max(...segXs[0]) < Math.min(...segXs[1]),
+      segXs.length + ' 段线：' + segXs.map(s => s.map(x => x.toFixed(1)).join('→')).join(' | '));
+    const gap = ovGaps(s102)[0];
+    check('缺帧画灰块（data-noframe，带轮次时间），**不是** 0 帧的点',
+      !!gap && gap.getAttribute('data-noframe') === '1' && !gap.hasAttribute('data-frames')
+      && gap.getAttribute('data-ts') === '2026-09-12T10:00:00'
+      && !ovPts(s102).some(c => c.getAttribute('data-ts') === '2026-09-12T10:00:00'),
+      gap ? gap.getAttribute('data-ts') + ' / noframe=' + gap.getAttribute('data-noframe') : '没有灰块');
+    check('整张总览里没有 data-frames="0" 的元素（缺帧 ≠ 0 帧）',
+      document.querySelectorAll('#overview [data-frames="0"]').length === 0,
+      'data-frames="0" 的元素数：' + document.querySelectorAll('#overview [data-frames="0"]').length);
+
+    // 状态色（票 03 交付物）：灰 = 无数据、蓝 = 有帧、绿 = 上升、红 = 下降/异常
+    check('状态色：帧数在涨的站（S412）= 绿（上升）',
+      !!ovCell('S412') && ovCell('S412').dataset.status === 'up'
+      && ovCell('S412').classList.contains('up'),
+      ovCell('S412') ? ovCell('S412').dataset.status : '(无)');
+    check('状态色：最近一轮帧数掉下来的站（S102）= 红（下降）',
+      !!ovCell('S102') && ovCell('S102').dataset.status === 'down',
+      ovCell('S102') ? ovCell('S102').dataset.status : '(无)');
+    check('状态色：本批一张帧都没有的站（S101）= 灰（无数据，不是一条零线）',
+      !!ovCell('S101') && ovCell('S101').dataset.status === 'none'
+      && ovCell('S101').dataset.noframeAll === '1'
+      && ovPts(ovCell('S101')).length === 0 && ovGaps(ovCell('S101')).length === 0,
+      ovCell('S101') ? ovCell('S101').dataset.status : '(无)');
+    check('没配置站位的格子是空位（—），不冒充"有数据"',
+      ovCells().filter(el => el.dataset.status === 'vacant').length
+      === GRID.cols * GRID.layers - STATIONS.length,
+      ovCells().filter(el => el.dataset.status === 'vacant').length + ' 个空位');
+
+    // hover：站位、轮次时间、帧数
+    const s102Title = titleOf(s102);
+    check('hover 一格给出**站位/框/格位**（第 1 层第 2 框）',
+      s102Title.includes('S102') && s102Title.includes('B102') && s102Title.includes('第 1 层第 2 框'),
+      s102Title);
+    const ptTitle = titleOf(ovPts(s102)[0]);
+    check('hover 一个格点给出**轮次时间 + 帧数**',
+      ptTitle.includes('2026-09-10 06:00') && ptTitle.includes('3 帧'), ptTitle);
+    const gapTitle = titleOf(gap);
+    check('hover 灰块说清"无帧（不是 0 帧）"', gapTitle.includes('2026-09-12 10:00')
+      && gapTitle.includes('无帧'), gapTitle);
+
+    // 换轮次不重取：矩阵是"每批一次"的（48 站 × N 轮不该跟着轮次来回拉）
+    const beforeRounds = matrixCalls().length;
+    await click('#prevround');
+    await click('#nextround');
+    check('时序总览每批只取一次：换轮次不重取矩阵（+0）',
+      matrixCalls().length === beforeRounds,
+      beforeRounds + ' → ' + matrixCalls().length + ' 次矩阵请求');
+  }
   // 日期与角度筛选作用于所选巡检轮次。
   $('#fromDate').value = '2026-09-15'; $('#fromDate').dispatchEvent(new window.Event('change'));
   await sleep(150);
@@ -2874,6 +3018,14 @@ await sleep(150);
                'n_frames_recorded'],
       required: ['round_id', 'ts', 'ok', 'n_results', 'n_failures', 'room_id', 'entry_date',
                  'batch_no'] },
+    // analysis 票 02/03（`GET /timeline`）：单站明细（带 station_id）与**全站位矩阵**（不带）。
+    // 这里查的是**矩阵形态**的顶层键：`rounds[]` 是共享时间轴，`nodes[].points[i]` 与之对齐
+    // （逐点重复 ts/round_id 会把单次响应从约 240 KB 抬到约 690 KB，越不过 ≤500 KB 的验收）。
+    '/api/timeline': { q: '?zone=611&metric=coverage&batch_id=' + encodeURIComponent('611|2026-09-04'),
+      pick: 'top',
+      fields: ['ok', 'metric', 'zone', 'zone_requested', 'station_id', 'batch', 'axis', 'rounds',
+               'nodes', 'notes'],
+      required: ['ok', 'metric', 'zone', 'batch', 'axis', 'rounds', 'nodes', 'notes'] },
     // analysis 票 05 §5（2026-10-14 **破坏性变更**：裸列表 → 信封）
     // 行形状不变（仍带 metric/unit/rate_per_h）；六态具名，空态用 state_text 原文。
     // 票 26 另给信封 `flags`（整维标注）与行上的 tier/unverified/n_verified/n_estimate
@@ -2934,6 +3086,7 @@ await sleep(150);
                           'mean_area_mm2', 'n', 'mean_cluster_w_mm', 'mean_cluster_h_mm',
                           'p10_len', 'p90_len', 'estimated_fields', 'scale_source',
                           'scale_ref_mm'],
+    '/api/timeline': ['ok', 'nodes', 'rounds', 'batch', 'axis', 'notes'],
     '/api/rounds': ['round_id', 'ts', 'ok', 'n_results', 'n_failures', 'room_id', 'entry_date',
                     'batch_no', 'suspect_duplicate', 'dup_groups', 'content_check_error',
                     'n_duplicate', 'n_frames_recorded'],
@@ -2968,6 +3121,22 @@ await sleep(150);
     check(`契约 ${key}：fixture 含页面必需的字段`,
       missing.length === 0, missing.join(',') || 'ok');
   }
+  // 时序总览的**嵌套形状**（票 03）：顶层键相等盖不住「共享时间轴 + 对齐数组」这件事——
+  // 端点若改回「每格重复 ts/round_id/day」，体积会翻三倍（≤500 KB 的验收就没了）。
+  const tlMatrix = await (await route('GET', '/api/timeline?zone=611&metric=coverage&batch_id='
+    + encodeURIComponent('611|2026-09-04'))).json();
+  check('契约 /api/timeline（矩阵形态）：rounds[] 带 ts/round_id/day，nodes[] 带 layer/col/box_id',
+    tlMatrix.station_id === null
+    && (tlMatrix.rounds || []).length > 0
+    && tlMatrix.rounds.every(r => ['ts', 'round_id', 'day'].every(k => k in r))
+    && (tlMatrix.nodes || []).every(n => ['node_id', 'layer', 'col', 'box_id', 'points'].every(k => k in n)
+        && n.points.every(p => ['has_frame', 'n_frames'].every(k => k in p)))
+    && tlMatrix.nodes.every(n => n.points.length === tlMatrix.rounds.length),
+    JSON.stringify({ rounds: (tlMatrix.rounds || []).length, nodes: (tlMatrix.nodes || []).length }));
+  check('契约 /api/timeline：矩阵格点里**没有** 0 帧（缺帧是 null，不是 0）',
+    (tlMatrix.nodes || []).every(n => n.points.every(p => p.n_frames !== 0
+      && (p.has_frame ? Number.isInteger(p.n_frames) && p.n_frames > 0 : p.n_frames === null))),
+    JSON.stringify(((tlMatrix.nodes || [])[0] || {}).points || []));
   // 同一个 bug 的直接负向钉子：页面不许再把测量列当 `/growth` 的 delta 字段读
   // （上一版就是 `p.mean_len_mm`，而 delta 行里根本没有这一列）。
   check('页面不再把 mean_len_mm/mean_cap_mm 当 /growth 的字段读',

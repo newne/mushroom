@@ -31,7 +31,7 @@ from analysis.environment import (
 from analysis.growth import latest_delta, room_summary, series
 from analysis.rooms import canonical_room, canonical_rooms, display_room, resolve_rooms
 from analysis.setpoints import SetpointError, daily_states_from_db
-from analysis.timeline import axis_of, coverage_points
+from analysis.timeline import axis_of, coverage_points, legacy_round_count, matrix_of
 
 #: 台账物化缓存的陈旧阈值（小时）。刷一次是每天 05:20（票 12 的 `BATCH_AT`）⇒ 26h 留 2h 余量。
 DEFAULT_LEDGER_STALE_AFTER_H = 26.0
@@ -126,6 +126,10 @@ def create_app(
                 print("[ingest] 作业已停止")
 
     app = FastAPI(title="mushroom-analysis", lifespan=lifespan)
+    # 这份连接是**谁建谁关**：挂到 `app.state` 上，调用方（生产是进程退出、测试是夹具收尾）
+    # 才拿得到它。2026-10-16 实测：不挂出来时测试夹具只能等 GC 回收 —— 每条用例攒一份，
+    # 跑到后面撞上开发库 `max_connections=100`（"sorry, too many clients already"）。
+    app.state.store_conn = conn
 
     @app.get("/healthz")
     def healthz() -> dict:
@@ -477,24 +481,32 @@ def create_app(
         batch_id: str = "",
         entry_date: str = "",
     ) -> dict:
-        """本批「每轮 × 站位」的覆盖轨迹（票 02：**只做 metric=coverage、只支持单站位**）。
+        """本批「每轮 × 站位」的覆盖轨迹：**不给 `station_id` = 全部站位的矩阵**（票 03），
+        给了就是那一个站位的明细（票 02）；metric 只认 `coverage`。
 
-        现场要回答的是"这一批从时间维度看，这个节点哪几轮拍到了、哪几轮断了"，
+        现场要回答的是"这一批从时间维度看，每个节点哪几轮拍到了、哪几轮断了"，
         所以应答是**一格一轮**的轨迹，不是聚合数字：
 
         - `batch`：`room_id` / `entry_date` / `batch_no`（身份是 ADR-0020 的
           「库房号 + 入库日期」；`batch_no` 是派生显示名，缺台账行就如实给 null，**不编**）；
         - `axis`：`t0` / `t1` / `n_rounds`——网格首末轮的**真实时间戳**，页面按它定位 x；
-        - `nodes[]`：本期只有一项（`node_id` 站位 / `box_id` 框 / `points[]`）；
-        - `points[]`：`ts` / `round_id` / `day` / `has_frame` / `n_frames`；
-        - `notes[]`：数据侧说明（空批、无法归属的旧轮次）。
+        - `rounds[]`（**只有矩阵形态有**）：本批逐轮的**共享时间轴**（`ts` / `round_id` / `day`）；
+        - `nodes[]`：站位一行（`node_id` / `layer` / `col` / `box_id` / `points[]`），
+          按**与平面图同一套 col/layer 顺序**排（层升序、层内框升序）；
+        - `points[]`：明细形态每格一个对象（`ts` / `round_id` / `day` / `has_frame` / `n_frames`）；
+          矩阵形态**与 `rounds[i]` 一一对应**（`has_frame` / `n_frames`）——48 站 × 16 天 × 8 轮
+          逐点重复 `ts`+`round_id` 会把单次响应抬到约 690 KB，而验收 4 要求 ≤500 KB；
+        - `notes[]`：数据侧说明（空批、本批一张帧都没有、无法归属的旧轮次）。
 
         三条硬规则里，本端点负责把前两条**做成数据**（第三条"零前端依赖"在页面上）：
 
-        1. 每个格点带**真实时间戳** `ts`，`day`（生长天数，入库当天 = 0）由 `entry_date` 派生；
-           应答里**没有**任何"第几个点"的序号——页面想按下标画都无从下手。
+        1. 每个格点的 x 由**真实时间戳**定位：明细形态的格点自带 `ts`，矩阵形态的格点对齐
+           `rounds[i].ts`（下标只是对齐键，**不是 x**）。`day`（生长天数，入库当天 = 0）由
+           `entry_date` 派生；应答里**没有**任何"第几个点"的序号。
         2. `null ≠ 0`：这一轮这一站没有帧 ⇒ `has_frame=false` 且 **`n_frames` 为 null**
            （不是 0）。"没拍到"是缺口（页面断开、画灰），"拍到 0 张"这件事不存在。
+        3. `layer` / `col` 由站位 id 的编码派生（`S{层}{框:02d}`，见 `analysis.timeline.cell_of`）；
+           解析不出来就是 null（**不猜**），页面按"不知道在哪格"画。
 
         **批次口径**：`batch_id`（`<库房号>|<入库日期>`，ADR-0020）→ `entry_date` →
         台账（`/batches` 的当前批 = 这个库房最新的一批）。过滤直接用 `rounds.entry_date`，
@@ -510,12 +522,10 @@ def create_app(
                 detail=(f"metric={metric!r} 还不支持：P0 只认 coverage"
                         "（长势 growth 等测量管线接通再开，P1）"),
             )
+        # 给了 station_id = 那一个站位的明细；不给 = **本批全部站位的矩阵**（票 03）。
+        # 这是 spec 的规范调用式（`GET /timeline?zone=…&batch_id=…&metric=coverage`），
+        # 页面因此**一次请求**就能拿到 48 站的逐轮格，不发 48 次。
         station = (station_id or "").strip()
-        if not station:
-            raise HTTPException(
-                status_code=400,
-                detail="要指定 station_id：本票只做单站位查询（48 站总览见票 03）",
-            )
         raw_zone = (zone or "").strip()
         if not raw_zone:
             raise HTTPException(status_code=400, detail="要指定 zone（轨迹按库房算）")
@@ -566,15 +576,33 @@ def create_app(
             if raw_batch_room and raw_batch_room not in rooms:
                 rooms.append(raw_batch_room)
 
-        rows = store.fetch_round_coverage(
-            conn, room_ids=rooms, entry_date=entry, station_id=station
-        )
-        points = coverage_points(rows, entry_date=entry)
-        n_excluded = len(rows) - len(points)
+        rounds: list[dict] | None = None
+        if station:
+            rows = store.fetch_round_coverage(
+                conn, room_ids=rooms, entry_date=entry, station_id=station
+            )
+            points = coverage_points(rows, entry_date=entry)
+            nodes = [{
+                "node_id": station,
+                "box_id": next((r.get("box_id") for r in rows if r.get("box_id")), None),
+                "points": points,
+            }]
+        else:
+            rows = store.fetch_station_coverage_matrix(
+                conn, room_ids=rooms, entry_date=entry
+            )
+            matrix = matrix_of(rows, entry_date=entry)
+            rounds, nodes = matrix["rounds"], matrix["nodes"]
+        # 旧轮次数按 ts 去重：矩阵是「轮 × 站」一行一轮，直接数行数会把一轮数成 48 轮
+        n_excluded = legacy_round_count(rows)
         notes: list[str] = []
         if not rows:
             notes.append(
                 f"本批（{want} {entry}）还没有巡检轮次：轨迹要等这一批有轮次之后才有内容"
+            )
+        elif rounds is not None and not nodes:
+            notes.append(
+                f"本批（{want} {entry}）一轮都没有帧：没有站位能排进矩阵——**不拿空站位凑数**"
             )
         if n_excluded:
             notes.append(
@@ -583,21 +611,23 @@ def create_app(
         if batch_no is None:
             # 没走台账（调用方直接点了批次/日期）时用轮次行上的派生名；一个都没有 ⇒ null
             batch_no = next((r.get("batch_no") for r in rows if r.get("batch_no")), None)
-        return {
+        out = {
             "ok": True,
             "metric": "coverage",
             "zone": want,
             "zone_requested": raw_zone,
-            "station_id": station,
+            # 矩阵形态没有"某一个站位"：null = 本批全部站位（页面按 layer/col 排矩阵）
+            "station_id": station or None,
             "batch": {"room_id": want, "entry_date": entry, "batch_no": batch_no},
-            "axis": axis_of(points),
-            "nodes": [{
-                "node_id": station,
-                "box_id": next((r.get("box_id") for r in rows if r.get("box_id")), None),
-                "points": points,
-            }],
-            "notes": notes,
+            "axis": axis_of(rounds if rounds is not None else nodes[0]["points"]),
         }
+        if rounds is not None:
+            # 共享时间轴只给矩阵形态：明细形态的每个格点自带 ts（票 02 的契约一个字不动）
+            out["rounds"] = rounds
+        out["nodes"] = nodes
+        out["notes"] = notes
+        return out
+
     @app.get("/environment/summary")
     def environment_summary(zone: str = "", start: str = "", end: str = "") -> dict:
         """窗口内的极值/分位数、缺口清单与"整列无源"标记（都基于小时聚合）。"""

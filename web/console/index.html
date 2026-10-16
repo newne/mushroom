@@ -116,6 +116,32 @@
   .mosaic-cell.dup .mosaic-meta small{color:var(--warn)}
   .mosaic-cell.local .mosaic-meta small{color:var(--warn)}
   .mosaic-cell.vacant{cursor:default;background:transparent;border-style:dashed;color:var(--dim)}
+  /* ---- 时序总览（票 03）：本批**全部站位**的小倍数矩阵，一格一张 sparkline ----
+     格子数与排序跟巡检拼图/平面图同源（grid.cols × grid.layers、第 1 层在最上、层内按框号
+     从左到右），所以现场一眼能对上位置。零依赖：格子里的图是手写内联 SVG（spec 硬规则 3）。
+     状态色走 'color'（SVG 里的线/点用 currentColor 继承）——配色只有一处，不会两处漂。 */
+  .ovscroll{overflow-x:auto;padding:var(--sp-1) 0 var(--sp-3)}
+  .ovgrid{display:grid;gap:3px;align-items:stretch}
+  .ov-axis,.ov-col,.ov-layer{display:flex;align-items:center;justify-content:center;
+    min-width:0;color:var(--dim);font-size:11px;text-align:center}
+  .ov-axis,.ov-col{height:22px;font-weight:600}
+  .ov-layer{border-right:1px solid var(--line)}
+  .ov-cell{display:flex;flex-direction:column;gap:1px;min-width:0;padding:var(--sp-1);
+    border:1px solid var(--line);border-radius:var(--r-sm);background:var(--soft);text-align:center}
+  .ov-cell:hover{border-color:#b5ccdf;box-shadow:0 1px 4px rgba(15,23,42,.08)}
+  .ov-cell svg{display:block;width:100%;height:auto}
+  .ov-cell .ov-meta{font-size:var(--fs-micro);color:var(--dim);line-height:1.1;
+    white-space:nowrap;overflow:hidden;text-overflow:clip}
+  /* 状态色（票 03 交付物）：灰 = 无数据、蓝 = 有帧、绿 = 上升、红 = 下降/异常 */
+  .ov-cell.none{color:#c2c8d0}
+  .ov-cell.none .ov-meta{color:var(--dim)}
+  .ov-cell.flat{color:#1f6feb}
+  .ov-cell.up{color:#18794e}
+  .ov-cell.down{color:#d94a3d}
+  .ov-cell.vacant{cursor:default;background:transparent;border-style:dashed;color:var(--dim)}
+  .ov-cell .ov-line{fill:none;stroke:currentColor;stroke-width:1.6}
+  .ov-cell .ov-pt{fill:currentColor}
+  .ov-cell .ov-gapmark{fill:#c2c8d0}
   /* ---- 同一站位跨轮次对比（2026-10-13，积累期主线）----
      固定"当前选中的站位"，把最近几轮的同一个框并排摆出来，一眼看出这几天怎么长的。
      纯前端：逐轮问 /api/images?round_id=…&station_id=…，图仍走 /api/image 同源代理。
@@ -690,6 +716,15 @@
       <div id="coverage" class="empty">选一个站位，看它本批每一轮的巡检覆盖</div>
       <div id="covernote" class="empty"></div>
     </div>
+    <div class="card">
+      <h2>时序总览 <span id="ovtitle" style="color:var(--dim);font-weight:400"></span></h2>
+      <!-- 票 03：本批**全部站位**的小倍数矩阵（一格一张 sparkline）。
+           取数是**一次** /api/timeline（不给 station_id = 全站位矩阵）——不在页面上发 48 次请求。
+           时间轴约定与上面两张卡同源（票 01 立的、spec 三条硬规则）：真实时间 x / 缺口断开 /
+           无帧不画成 0。布局按 grid.cols × grid.layers（与平面图、巡检拼图同一套 col/layer 顺序）。 -->
+      <div id="overview" class="empty">读取本批全部站位的巡检轨迹…</div>
+      <div id="ovnote" class="empty"></div>
+    </div>
   </section>
 
   <section id="envmain" style="display:none">
@@ -865,6 +900,10 @@ let stationRequestSeq = 0;
 let historyRequestSeq = 0;
 let growthRequestSeq = 0;
 let coverageRequestSeq = 0;
+let overviewRequestSeq = 0;
+// 矩阵请求是否在飞：同一次渲染会被调用多遍（拼图格/换轮次/换批次都走 renderHistory），
+// "在飞 + 同批"不能再发一次——否则 48 站 × N 轮的矩阵会被拉第二遍。
+let overviewInFlight = false;
 let cmdRequestInFlight = false;
 let cmdRefreshTimer = null;
 let statusRequestInFlight = false;
@@ -2312,6 +2351,8 @@ let mode = 'realtime';
 const hist = { rows: [], rounds: [], growth: null, measure: null, picked: null, zoom: 1, px: 0, py: 0,
                // 覆盖轨迹（票 02）：envelope + 这批数据是为哪个站位/哪一批取的（幂等护栏）
                coverage: null, coverageStationId: '', coverageBatchKey: '',
+               // 时序总览（票 03）：本批**全部站位**的矩阵 + 它是为哪一批取的（幂等护栏）
+               overview: null, overviewBatchKey: '',
                selectedRoundId: '', selectedBatchKey: '', focusedStationId: '',
   roundIndex: -1, roundCount: 0, hiddenRounds: 0,
                // 跨轮次对比（按天）：blocks = 每天一块（该天最接近参考时段的那一轮）；
@@ -2457,6 +2498,21 @@ function filtered(){
   });
 }
 
+/** 网格有多大（列 × 层）：**格数 = cols × layers**，来源是 /api/grid（`grid_geometry()`）。
+ *
+ *  没有 grid（老后端/还没取回）时退到站位表里的最大层/框；时序总览还会把应答里的站位
+ *  矩阵（`extra`）一起递进来。平面图、巡检拼图、时序总览三处都按它算 —— **没有任何一处
+ *  死写 48**：现场换 12×4 之外的布局时它们一起变。 */
+function gridExtent(extra){
+  const items = (stations || []).concat(extra || []);
+  const colsFromItems = Math.max(0, ...items.map(item => Number(item.col) || 0));
+  const layersFromItems = Math.max(0, ...items.map(item => Number(item.layer) || 0));
+  return {
+    cols: Math.max(1, Math.min(100, Math.trunc(Number(grid?.cols) || colsFromItems))),
+    layers: Math.max(1, Math.min(20, Math.trunc(Number(grid?.layers) || layersFromItems))),
+  };
+}
+
 function renderHistory(){
   if(mode !== 'history') return;
   const rows = filtered();
@@ -2488,17 +2544,15 @@ function renderHistory(){
     else tl.textContent = '还没有带轮次 ID 的巡检记录';
     drawCurve();
     drawCoverage();
+    loadOverview();
+    drawOverview();
     updateFrameInfo();
     renderCompare();
     return;
   }
 
-  const colsFromStations = Math.max(0, ...stations.map(item => Number(item.col) || 0));
-  const layersFromStations = Math.max(0, ...stations.map(item => Number(item.layer) || 0));
-  const colsValue = Number(grid?.cols) || colsFromStations;
-  const layersValue = Number(grid?.layers) || layersFromStations;
-  const cols = Math.max(1, Math.min(100, Math.trunc(colsValue)));
-  const layers = Math.max(1, Math.min(20, Math.trunc(layersValue)));
+  const extent = gridExtent();
+  const cols = extent.cols, layers = extent.layers;
   const stationByCell = new Map();
   for(const station of stations){
     const layer = Number(station.layer), col = Number(station.col);
@@ -2566,6 +2620,8 @@ function renderHistory(){
   });
   drawCurve();
   drawCoverage();
+  loadOverview();     // 幂等（同一批次只取一次）：本卡是"全站位"，与选中哪个站位无关
+  drawOverview();
   updateFrameInfo();
   renderCompare();
 }
@@ -3560,13 +3616,244 @@ async function loadCoverage(){
   hist.coverage = data;
   drawCoverage();
 }
+/* ---- 时序总览（票 03）：本批**全部站位**的小倍数矩阵 ----
+   与上面两张卡同一套时间轴约定（票 01 立的、spec 三条硬规则）：
+     ① x 由**真实时间戳**定位（矩阵的 rounds[i].ts）——下标只是对齐键，不是 x；
+     ② 缺口**断开**：有帧的连续轮次接成一段，一段一条 path，段与段之间不连线；
+     ③ null ≠ 0：这一轮没帧画**灰块**（data-noframe）、整批没帧画**灰格**，绝不画成 0。
+   布局：站位按 layer/col 排进 grid.cols × grid.layers 的格子（与平面图、巡检拼图同一套顺序：
+   第 1 层在最上、层内框号从左到右）——**格数由 grid 算，不是死写 48**。
+   取数：**一次** /api/timeline（不给 station_id = 全站位矩阵），不在页面上发 48 次。 */
+const OV = {W: 116, H: 40, padX: 4, axisY: 27, gapY: 34, top: 8};
+
+/** 矩阵形态的格点 → 与明细形态同形状（ts / round_id / day / has_frame / n_frames）。
+ *
+ *  端点为什么给"共享时间轴 + 对齐数组"：48 站 × 128 轮逐点重复 ts+round_id 会把单次响应
+ *  从约 240 KB 抬到约 690 KB（验收 4 要 ≤500 KB）。页面上在这里摊平，往后画法与覆盖轨迹卡
+ *  共用同一套判据（has_frame / n_frames，缺帧是 null）。若拿到的是自带 ts 的明细形态，直接用。 */
+function overviewPoints(node, rounds){
+  const cells = (node && node.points) || [];
+  if(!cells.length) return [];
+  if(cells[0] && cells[0].ts !== undefined) return cells;
+  return (rounds || []).map((r, i) => {
+    const cell = cells[i] || {};
+    const has = !!cell.has_frame;
+    return { ts: r.ts, round_id: r.round_id, day: r.day,
+             has_frame: has, n_frames: has ? cell.n_frames : null };
+  });
+}
+
+/** 一格的状态色（票 03 交付物：灰 = 无数据、蓝 = 有帧、绿 = 上升、红 = 下降/异常）。
+ *
+ *  P0 只有覆盖可画，所以"上升/下降"看的是**帧数**：
+ *   · none：本批一张帧都没有（**不是**"0 帧"）；
+ *   · down：最近一轮**缺帧**（最近这一轮就断了＝异常），或最近两个有帧轮次里后一轮更少；
+ *   · up：最近两个有帧轮次里后一轮更多；其余（一样多、只有一轮）= flat。
+ *  P1 长势接通后判据改成 measurement —— 只改这条函数，别在画法里另写一套。 */
+function overviewStatus(points){
+  const pts = points || [];
+  const framed = pts.filter(p => p.has_frame);
+  if(!framed.length) return "none";
+  const last = pts[pts.length - 1];
+  if(last && !last.has_frame) return "down";
+  if(framed.length < 2) return "flat";
+  const prev = framed[framed.length - 2], cur = framed[framed.length - 1];
+  if(cur.n_frames > prev.n_frames) return "up";
+  if(cur.n_frames < prev.n_frames) return "down";
+  return "flat";
+}
+
+function ovX(ts, t0, t1){
+  const mid = OV.padX + (OV.W - 2 * OV.padX) / 2;
+  if(t0 === null || t1 === null || t1 === t0) return mid;
+  const t = tsMs(ts);
+  return t === null ? mid : OV.padX + (t - t0) / (t1 - t0) * (OV.W - 2 * OV.padX);
+}
+
+/** 一格的 sparkline：真实时间 x、缺口断开、没帧画灰块（**不是** 0 帧的点）。
+ *  零依赖：手写内联 SVG（spec 硬规则 3）。 */
+function ovCellSvg(node, pts, t0, t1){
+  const framed = pts.filter(p => p.has_frame);
+  const xs = p => ovX(p.ts, t0, t1);
+  const hi = framed.length ? Math.max.apply(null, framed.map(p => p.n_frames)) : 0;
+  const span = hi || 1;
+  const ys = v => OV.axisY - (v / span) * (OV.axisY - OV.top);
+  const segs = [];
+  let cur = [];
+  for(const p of pts){
+    if(!p.has_frame){ if(cur.length) segs.push(cur); cur = []; continue; }
+    cur.push(p);
+  }
+  if(cur.length) segs.push(cur);
+  const d = seg => seg.map((p, i) => (i ? "L" : "M") + xs(p).toFixed(1) + "," + ys(p.n_frames).toFixed(1)).join(" ");
+  const id = String(node.node_id || "");
+  const where = [id, node.box_id, "第 " + node.layer + " 层第 " + node.col + " 框"].filter(Boolean).join(" · ");
+  const ptTitle = p => String(p.ts || "").replace("T", " ")
+    + (p.has_frame ? " · " + p.n_frames + " 帧" : " · 无帧（不是 0 帧）");
+  const out = [];
+  out.push("<svg viewBox='0 0 " + OV.W + " " + OV.H + "' role='img' aria-label='"
+    + esc(where + "：本批 " + pts.length + " 轮里 " + framed.length + " 轮有帧") + "'>");
+  out.push("<title>" + esc(where + " · 本批 " + pts.length + " 轮里 " + framed.length
+    + " 轮有帧" + (hi ? "（单轮最多 " + hi + " 帧）" : "")) + "</title>");
+  out.push("<line x1='" + OV.padX + "' y1='" + OV.axisY + "' x2='" + (OV.W - OV.padX)
+    + "' y2='" + OV.axisY + "' stroke='#dbe3ef'/>");
+  if(hi) out.push("<text x='" + OV.padX + "' y='" + (OV.top - 1) + "' font-size='7' fill='#6b7785'>" + hi + "</text>");
+  for(const seg of segs){
+    if(seg.length > 1) out.push("<path class='ov-line' d='" + d(seg) + "'/>");
+  }
+  for(const p of framed){
+    out.push("<circle class='ov-pt' data-ts='" + esc(p.ts) + "' data-round-id='" + esc(p.round_id)
+      + "' data-frames='" + esc(String(p.n_frames)) + "' cx='" + xs(p).toFixed(1) + "' cy='"
+      + ys(p.n_frames).toFixed(1) + "' r='1.9'><title>" + esc(ptTitle(p)) + "</title></circle>");
+  }
+  for(const p of pts){
+    if(p.has_frame) continue;
+    out.push("<rect class='ov-gapmark' data-ts='" + esc(p.ts) + "' data-round-id='" + esc(p.round_id)
+      + "' data-noframe='1' x='" + (xs(p) - 2.5).toFixed(1) + "' y='" + (OV.gapY - 2.5)
+      + "' width='5' height='5'><title>" + esc(ptTitle(p)) + "</title></rect>");
+  }
+  out.push("</svg>");
+  return out.join("");
+}
+
+/** 配置里有这个站位、本批却一张帧都没有：灰格（无数据）——**不画零线**（那是"拍到 0 张"）。 */
+function ovEmptyCell(layer, col, stationId, why){
+  return "<div class='ov-cell none' data-layer='" + layer + "' data-col='" + col
+    + "' data-station-id='" + esc(stationId) + "' data-status='none' data-noframe-all='1'>"
+    + "<svg viewBox='0 0 " + OV.W + " " + OV.H + "' role='img' aria-label='"
+    + esc(stationId + " · " + why + "（无数据，不是 0 帧）") + "'><title>"
+    + esc(stationId + " · 第 " + layer + " 层第 " + col + " 框 · " + why + "（无数据，不是 0 帧）")
+    + "</title><line x1='" + OV.padX + "' y1='" + OV.axisY + "' x2='" + (OV.W - OV.padX)
+    + "' y2='" + OV.axisY + "' stroke='#dbe3ef'/></svg>"
+    + "<span class='ov-meta'>" + esc(stationId) + "</span></div>";
+}
+
+/** 时序总览的画法：**格数 = grid.cols × grid.layers**，与平面图/巡检拼图同一套 col/layer 顺序。 */
+function drawOverview(){
+  const box = $("#overview"), note = $("#ovnote"), title = $("#ovtitle");
+  if(!box) return;
+  const ov = hist.overview;
+  if(!ov){
+    box.className = "empty";
+    box.textContent = "读取本批全部站位的巡检轨迹…";
+    note.textContent = "";
+    return;
+  }
+  // "问不到端点"与"这批确实没有轮次"要分得开（与覆盖轨迹卡同一口径）
+  if(!ov.ok){
+    if(ov.no_scope){
+      box.className = "empty"; box.textContent = "还没有批次信息";
+      note.textContent = ov.error || "";
+      return;
+    }
+    box.className = "empty"; box.textContent = "查不到时序总览";
+    note.textContent = "⚠ " + (ov.error || "未知原因");
+    return;
+  }
+  const batch = ov.batch || {};
+  const rounds = ov.rounds || [];
+  const nodes = ov.nodes || [];
+  const batchText = "本批 " + (batch.batch_no || batch.entry_date || "?");
+  if(title) title.textContent = " · " + batchText;
+  const notes = (ov.notes || []).slice();
+  if(!rounds.length){
+    box.className = "empty";
+    box.textContent = "本批还没有可归属的巡检轮次";
+    note.textContent = notes.join(" · ") || (batchText + " 还没有轮次");
+    return;
+  }
+  const t0 = tsMs(rounds[0].ts), t1 = tsMs(rounds[rounds.length - 1].ts);
+  const extent = gridExtent(nodes);
+  const cols = extent.cols, layers = extent.layers;
+  const nodeByCell = new Map();
+  for(const node of nodes) nodeByCell.set(String(node.layer) + ":" + String(node.col), node);
+  const stationByCell = new Map();
+  for(const st of stations){
+    if(st && st.layer && st.col) stationByCell.set(String(st.layer) + ":" + String(st.col), st);
+  }
+  const cells = ["<div class='ov-axis'>Y →</div>"];
+  for(let col = 1; col <= cols; col++) cells.push("<div class='ov-col'>" + String(col).padStart(2, "0") + "</div>");
+  let withData = 0, emptyCells = 0, vacant = 0;
+  for(let layer = 1; layer <= layers; layer++){
+    cells.push("<div class='ov-layer'>第 " + layer + " 层</div>");
+    for(let col = 1; col <= cols; col++){
+      const node = nodeByCell.get(layer + ":" + col);
+      const st = stationByCell.get(layer + ":" + col);
+      if(!node){
+        if(st){ emptyCells++; cells.push(ovEmptyCell(layer, col, st.id, "本批没有帧记录")); }
+        else { vacant++; cells.push("<div class='ov-cell vacant' data-layer='" + layer + "' data-col='" + col + "' data-station-id='' data-status='vacant' aria-label='第 " + layer + " 层第 " + col + " 框未配置'>—</div>"); }
+        continue;
+      }
+      const pts = overviewPoints(node, rounds);
+      const status = overviewStatus(pts);
+      const framed = pts.filter(p => p.has_frame).length;
+      if(status === "none") emptyCells++; else withData++;
+      const id = String(node.node_id || (st && st.id) || "");
+      cells.push("<div class='ov-cell " + status + "' data-layer='" + layer + "' data-col='" + col
+        + "' data-station-id='" + esc(id) + "' data-status='" + status + "'>"
+        + ovCellSvg(node, pts, t0, t1)
+        + "<span class='ov-meta'>" + esc(id + " · " + framed + "/" + pts.length) + "</span></div>");
+    }
+  }
+  box.className = "ovscroll";
+  box.innerHTML = "<div class='ovgrid' data-cols='" + cols + "' data-layers='" + layers
+    + "' style='grid-template-columns:62px repeat(" + cols + ",minmax(78px,1fr));min-width:"
+    + (62 + cols * 78) + "px'>" + cells.join("") + "</div>"
+    + "<div class='legend'>"
+    + "<span><i style='background:#c2c8d0'></i>无数据</span>"
+    + "<span><i style='background:#1f6feb'></i>有帧</span>"
+    + "<span><i style='background:#18794e'></i>上升</span>"
+    + "<span><i style='background:#d94a3d'></i>下降/异常</span>"
+    + "<span>" + cols + " × " + layers + " = " + (cols * layers) + " 格（与平面图同一套 col/layer 顺序）</span>"
+    + "<span>" + withData + " 格有帧 / " + emptyCells + " 格无数据</span>"
+    + "</div>"
+    + "<div class='empty' style='padding:4px 0 0'>一格一个站位，x 是**真实时间**（不是第几个点）；"
+    + "没帧的轮次断开、画灰块，**不补零、不插值、不连线跳过**。数据来自 "
+    + "<code>/api/timeline?metric=coverage</code>（不给 station_id = 一次拿回本批全部站位）。</div>";
+  if(!withData) notes.push("本批还没有任何一个站位拍到帧");
+  note.textContent = notes.join(" · ");
+}
+
+/** 时序总览的取数：**一次**拿回本批全部站位（不给 station_id）。
+ *
+ *  幂等键 = 批次（coverageScope().batchKey）：换批次才重取，换轮次/点格位不重取——
+ *  这就是"页面上不发 48 次请求"那条验收在代码里的落点。 */
+async function loadOverview(){
+  if(mode !== "history") return;
+  const scope = coverageScope();
+  if(!scope.hasRoom){
+    hist.overview = { ok: false, no_scope: true,
+      error: "还没有批次信息：先读取巡检轮次，或选一个批次" };
+    hist.overviewBatchKey = "";
+    drawOverview();
+    return;
+  }
+  if(hist.overviewBatchKey === scope.batchKey
+     && (hist.overview || overviewInFlight)){ drawOverview(); return; }
+  const requestId = ++overviewRequestSeq;
+  hist.overviewBatchKey = scope.batchKey;
+  overviewInFlight = true;
+  let data;
+  try{
+    // **不给 station_id**：一次拿回本批全部站位的逐轮格（票 03 的端点契约）
+    data = await jget("/api/timeline?zone=" + encodeURIComponent(scope.zone)
+      + "&metric=coverage&batch_id=" + encodeURIComponent(scope.batchKey));
+  }catch(e){
+    data = { ok: false, error: "时序总览接口不可达：" + e.message };
+  }
+  if(requestId !== overviewRequestSeq) return;   // 被更新的请求取代：在飞标记由那一次收尾
+  overviewInFlight = false;
+  hist.overview = data;
+  drawOverview();
+}
 async function loadHistory(force){
   if(!force && hist.roundsLoaded){
     const roundId = syncRoundOptions();
     return loadRoundImages(roundId);
   }
   if(force){ hist.growth = null; hist.measure = null; growthRequestSeq++; hist.compareRows = []; hist.compareStationId = '';
-    hist.coverage = null; hist.coverageStationId = ''; hist.coverageBatchKey = ''; coverageRequestSeq++; }
+    hist.coverage = null; hist.coverageStationId = ''; hist.coverageBatchKey = ''; coverageRequestSeq++;
+    hist.overview = null; hist.overviewBatchKey = ''; overviewRequestSeq++; }
   const requestId = ++historyRequestSeq;
   hist.roundsLoading = true;
   $('#timeline').className = 'empty';
