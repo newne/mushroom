@@ -176,6 +176,41 @@ const MEASUREMENTS = {
       estimated_fields: null, scale_source: null, scale_ref_mm: null, scale_ref_px: null,
       mm_per_px: null },
   ],
+  // 票 01 的假数据：**间隔不等 + 中间缺轮次**。
+  // 09-12 那一轮 `/api/rounds` 里**有**（round-20260912），B412 却**一行测量都没有**
+  // ——连"这一轮没测到"的行都没有（B102 的 09-11/09-12 是另一种缺口：有行、值全 null）。
+  // 两只框各钉一种缺口语义，合起来覆盖"中间缺轮次 ⇒ 断开"。
+  B412: [
+    { ts: '2026-09-10T09:30:00', room_id: '611', box_id: 'B412', n: 6,
+      mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
+      quality: 'verified+no_angle_profile',
+      mean_cluster_w_mm: 41.0, mean_cluster_h_mm: 33.0,
+      mean_area_mm2: 1500.0, mean_projected_d_mm: 30.0,
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, scale_ref_px: null,
+      mm_per_px: null },
+    { ts: '2026-09-11T09:30:00', room_id: '611', box_id: 'B412', n: 6,
+      mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
+      quality: 'verified+no_angle_profile',
+      mean_cluster_w_mm: 43.0, mean_cluster_h_mm: 34.0,
+      mean_area_mm2: 1720.0, mean_projected_d_mm: 33.0,
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, scale_ref_px: null,
+      mm_per_px: null },
+    // 09-12 故意没有行：这一轮巡检到了库房，这只框没有任何测量记录 ⇒ 缺口。
+    { ts: '2026-09-13T09:30:00', room_id: '611', box_id: 'B412', n: 6,
+      mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
+      quality: 'verified+no_angle_profile',
+      mean_cluster_w_mm: 48.0, mean_cluster_h_mm: 38.0,
+      mean_area_mm2: 2400.0, mean_projected_d_mm: 40.0,
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, scale_ref_px: null,
+      mm_per_px: null },
+    { ts: '2026-09-14T09:30:00', room_id: '611', box_id: 'B412', n: 6,
+      mean_len_mm: null, mean_cap_mm: null, p10_len: null, p90_len: null,
+      quality: 'verified+no_angle_profile',
+      mean_cluster_w_mm: 50.0, mean_cluster_h_mm: 40.0,
+      mean_area_mm2: 2600.0, mean_projected_d_mm: 42.0,
+      estimated_fields: null, scale_source: null, scale_ref_mm: null, scale_ref_px: null,
+      mm_per_px: null },
+  ],
 };
 
 // 环境模式用：两个小时点，补光一个是"停止"(2) 一个是"关闭"(3)。
@@ -1764,6 +1799,53 @@ await sleep(150);
     T('#growthnote').slice(0, 120));
   await click('#timeline .mosaic-cell[data-station-id="S102"]');
   await sleep(300);
+
+  // ---- 票 01：时间轴约定（真实时间戳 / 缺口断开 / null≠0）----
+  // 先在这一张**已有**卡上把约定立起来，02–06 的三块视图全部复用——各写一套一定会漂。
+  // 两条硬规则（spec「三条硬规则」）：
+  //   ① x 永远由 `ts` 定位，间隔不等的点按**真实比例**排布（数组下标当 x＝时间轴在骗人）；
+  //   ② 中间缺轮次 ⇒ **断开**，不插值、不补零、不连过去。
+  {
+    const circleXs = () => Array.from(document.querySelectorAll('#curve svg circle'))
+      .map(c => Number(c.getAttribute('cx')));
+    const pathXy = p => [...((p.getAttribute('d')) || '').matchAll(/(-?[0-9.]+),(-?[0-9.]+)/g)]
+      .map(m => [Number(m[1]), Number(m[2])]);
+    const curvePaths = () => Array.from(document.querySelectorAll('#curve svg path'));
+
+    // B102 的测量行是 09-10 / 09-13 / 09-14（09-11、09-12 两轮有行但"没测到"）。
+    // 相邻两点的真实间隔是 72h 与 24h ⇒ 图上水平间距必须约 3:1。等距（数组下标）就是 1:1。
+    const xs102 = circleXs();
+    const gapA = xs102[1] - xs102[0], gapB = xs102[2] - xs102[1];
+    check('生长曲线 x 用真实时间戳：间隔差 3 倍的两段，图上水平间距也差 3 倍',
+      xs102.length === 3 && gapB > 0 && Math.abs(gapA / gapB - 3) <= 0.15,
+      'cx=' + xs102.map(v => v.toFixed(1)).join(',') + ' ⇒ 间距比 '
+      + (gapB > 0 ? (gapA / gapB).toFixed(2) : 'n/a') + ':1');
+    check('中间缺轮次处断开：3 个点只连成一段 2 个点的线（不跨过缺口直连）',
+      curvePaths().length === 1 && pathXy(curvePaths()[0]).length === 2,
+      curvePaths().length + ' 段线，各 ' + curvePaths().map(p => pathXy(p).length).join('/') + ' 个点');
+
+    // B412：09-12 那一轮有轮次、这只框却一行测量都没有 ⇒ 两段断开的线，中间是空的。
+    await click('#timeline .mosaic-cell[data-station-id="S412"]');
+    await waitFor(() => T('#curvetitle').includes('B412')
+      && document.querySelectorAll('#curve svg circle').length === 4, 4000);
+    const xs412 = circleXs();
+    const segs = curvePaths();
+    const segXs = segs.map(p => pathXy(p).map(([x]) => x));
+    check('缺轮次处是两段断开的线（连起来就红）',
+      xs412.length === 4 && segs.length === 2 && segs.every(p => pathXy(p).length === 2)
+      && Math.max(...segXs[0]) < Math.min(...segXs[1]),
+      xs412.length + ' 个点 / ' + segs.length + ' 段线（'
+      + segXs.map(g => g.map(x => x.toFixed(1)).join('→')).join(' | ') + '）');
+    // 缺口在**时间轴**上也真的空着：09-11 → 09-13 中间缺一轮 ⇒ 那一段点距是段内的 2 倍。
+    // 等距排布（数组下标）会把这条也弄红——"比例"是这条约定的另一半。
+    check('缺口那段在时间轴上真的空着（空档 ≈ 段内点距的 2 倍，不是等距）',
+      xs412.length === 4 && (xs412[2] - xs412[1]) > 0
+      && Math.abs((xs412[2] - xs412[1]) / (xs412[1] - xs412[0]) - 2) <= 0.1,
+      '相邻点距 ' + [1, 2, 3].map(i => (xs412[i] - xs412[i - 1]).toFixed(1)).join(' / ')
+      + '（真实间隔 1d / 2d / 1d）');
+    await click('#timeline .mosaic-cell[data-station-id="S102"]');
+    await sleep(300);
+  }
 
   // 日期与角度筛选作用于所选巡检轮次。
   $('#fromDate').value = '2026-09-15'; $('#fromDate').dispatchEvent(new window.Event('change'));

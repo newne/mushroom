@@ -3177,6 +3177,63 @@ function growthDeltaByTs(){
   return map;
 }
 
+/** 时间戳 → 毫秒。真构造是 `YYYY-MM-DDTHH:MM:SS`（`measurements.ts` / `rounds.ts` 同一写法），
+ *  空格分隔也认。**认不出来就返回 null**——宁可不画，也不猜一个假时间摆上去。 */
+function tsMs(ts){
+  const t = Date.parse(String(ts || '').replace(' ', 'T'));
+  return Number.isFinite(t) ? t : null;
+}
+
+/** 这一轮有没有可用的量。`null` / 缺列**都不是 0**（spec 硬规则 2）——数不出来就说不知道。 */
+function rowHasValue(row, key){
+  return !!row && typeof row[key] === 'number';
+}
+
+/** 当前批次的**可归属轮次**（带 `round_id` 的；无 ID 的旧轮次不猜测归组，与拼图同一口径）。
+ *  判"中间缺轮次"要用它：轮次表里发生过、这只框却没留下任何测量。 */
+function curveKnownRounds(){
+  const sel = hist.selectedBatchKey;
+  return ((hist && hist.rounds) || [])
+    .filter(r => r && r.round_id && r.ts && (!sel || batchKey(r) === sel));
+}
+
+/** 相邻两轮之间**缺轮次**了吗（spec 硬规则 2：缺口断开，不插值、不补零、不连过去）。
+ *  两条判据，任一成立即缺口：
+ *    ① 中间夹着测量行、但这一轮这个量没有数（`null`）——"这一轮没测到"；
+ *    ② 中间夹着**轮次表里的轮次**，而这只框在这些轮次上没有可用的数（连"没测到"的行都没有）。
+ *  两条都不成立 ⇒ 这两点是相邻的两轮，连起来。
+ *  （02–06 的逐轮格点由 `/timeline` 显式给出，判据就只剩"这一格有没有值"——同一条约定。） */
+function curveHasGap(rows, key, aTs, bTs){
+  const a = tsMs(aTs), b = tsMs(bTs);
+  if(a === null || b === null || b <= a) return false;
+  for(const row of rows || []){
+    const t = tsMs(row && row.ts);
+    if(t === null || t <= a || t >= b) continue;
+    if(!rowHasValue(row, key)) return true;
+  }
+  for(const round of curveKnownRounds()){
+    const t = tsMs(round.ts);
+    if(t === null || t <= a || t >= b) continue;
+    if(!rowHasValue(measureRowNear(rows, round.ts), key)) return true;
+  }
+  return false;
+}
+
+/** 把测量行切成**段**：有数的行接成一段，中间缺轮次就在那里断开（`curveHasGap`）。
+ *  段与段之间是空的——没有数据的那段时间不画任何东西。 */
+function curveSegments(rows, key){
+  const segs = [];
+  let cur = [];
+  for(const row of rows || []){
+    if(!rowHasValue(row, key)) continue;
+    const prev = cur[cur.length - 1];
+    if(prev && curveHasGap(rows, key, prev.ts, row.ts)){ segs.push(cur); cur = []; }
+    cur.push(row);
+  }
+  if(cur.length) segs.push(cur);
+  return segs;
+}
+
 /** 速率显示：`rate_per_h` **必须带单位**（"每天 +320 mm²" / "每天 +1.2 mm"）。
  *  契约给的是每小时，这里折算成每天显示；原始值留在 title 里可追溯。 */
 function rateText(delta){
@@ -3235,16 +3292,31 @@ function drawCurve(){
       + '说明这一批没有有效检出——不是 0。';
     return;
   }
-  const pts = rows.filter(r => typeof r[metric.key] === 'number');
+  const pts = rows.filter(r => rowHasValue(r, metric.key));
   const deltas = growthDeltaByTs();
   const W = 640, H = 170, padL = 46, padR = 12, padT = 12, padB = 24;
   const vals = pts.map(r => r[metric.key]);
   const lo = Math.min(...vals), hi = Math.max(...vals);
   const span = (hi - lo) || 1;
-  const X = i => padL + (pts.length === 1 ? (W - padL - padR) / 2
-                                          : i * (W - padL - padR) / (pts.length - 1));
+  /* x 由**真实时间戳**定位（spec 硬规则 1）：窗口 = 这只框自己的测量窗口（首行 → 末行），
+     窗口内间隔不等的点按**真实比例**排布。**禁止再拿数组下标当 x**——巡检节奏一抖，
+     图上的"等距"就是假的（时间轴骗人，而"从时间维度看"正是这张卡的全部意义）。
+     窗口宽为零（只有一轮 / 时刻相同）时才落回中间：那时"比例"本身没有定义。 */
+  const instants = rows.map(r => tsMs(r.ts)).filter(t => t !== null);
+  const t0 = instants.length ? Math.min(...instants) : null;
+  const t1 = instants.length ? Math.max(...instants) : null;
+  const iw = W - padL - padR;
+  const X = ts => {
+    const t = tsMs(ts);
+    if(t === null || t0 === null || t1 === null || t1 === t0) return padL + iw / 2;
+    return padL + (t - t0) / (t1 - t0) * iw;
+  };
   const Y = v => padT + (1 - (v - lo) / span) * (H - padT - padB);
-  const line = pts.map((r, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(r[metric.key]).toFixed(1)}`).join(' ');
+  /* 缺口断开（spec 硬规则 2）：**一段一条 path**，段与段之间不连线——不插值、不补零。
+     单点成不了一段线，交给下面的圆点表示（孤立的一个测量点，拉出一条"线"反而是假的）。 */
+  const segs = curveSegments(rows, metric.key).filter(seg => seg.length > 1);
+  const lineD = seg => seg.map((r, i) =>
+    `${i ? 'L' : 'M'}${X(r.ts).toFixed(1)},${Y(r[metric.key]).toFixed(1)}`).join(' ');
   box.className = '';
   /* P0-1：曲线图整体改用浅色主题色（原来是暗色主题遗留的硬编码：深灰轴 #2a3340、
      中灰刻度 #8b98a5、蓝 #58a6ff / 浅绿 #7ee2a8——贴在白卡片上像一块补丁，
@@ -3254,12 +3326,12 @@ function drawCurve(){
     <line x1="${padL}" y1="${H-padB}" x2="${W-padR}" y2="${H-padB}" stroke="#6b7785"/>
     <text x="2" y="${Y(hi)+4}" fill="#6b7785" font-size="10">${hi.toFixed(1)}</text>
     <text x="2" y="${Y(lo)+4}" fill="#6b7785" font-size="10">${lo.toFixed(1)}</text>
-    <text x="${padL}" y="${H-6}" fill="#6b7785" font-size="10">${esc(String(pts[0].ts).slice(0,16))}</text>
-    <text x="${W-padR}" y="${H-6}" text-anchor="end" fill="#6b7785" font-size="10">${esc(String(pts[pts.length-1].ts).slice(0,16))}</text>
-    <path d="${line}" fill="none" stroke="#1f6feb" stroke-width="2"/>
-    ${pts.map((r, i) => {
+    <text x="${padL}" y="${H-6}" fill="#6b7785" font-size="10">${esc(String(rows[0].ts).slice(0,16))}</text>
+    <text x="${W-padR}" y="${H-6}" text-anchor="end" fill="#6b7785" font-size="10">${esc(String(rows[rows.length-1].ts).slice(0,16))}</text>
+    ${segs.map(seg => `<path d="${lineD(seg)}" fill="none" stroke="#1f6feb" stroke-width="2"/>`).join('')}
+    ${pts.map(r => {
       const d = deltas.get(String(r.ts));
-      return `<circle cx="${X(i).toFixed(1)}" cy="${Y(r[metric.key]).toFixed(1)}" r="3" fill="#1f6feb"><title>${esc(String(r.ts).replace('T',' '))} · ${esc(metric.label)} ${esc(String(r[metric.key]))} ${esc(metric.unit)} · 判词 ${esc((d && (d.verdict_text || d.verdict)) || '—')}</title></circle>`;
+      return `<circle cx="${X(r.ts).toFixed(1)}" cy="${Y(r[metric.key]).toFixed(1)}" r="3" fill="#1f6feb"><title>${esc(String(r.ts).replace('T',' '))} · ${esc(metric.label)} ${esc(String(r[metric.key]))} ${esc(metric.unit)} · 判词 ${esc((d && (d.verdict_text || d.verdict)) || '—')}</title></circle>`;
     }).join('')}
   </svg>
   <div class="legend"><span><i style="background:#1f6feb"></i>${esc(metric.label)} ${esc(metric.unit)}（绝对量）</span>
