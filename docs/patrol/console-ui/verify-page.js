@@ -242,12 +242,25 @@ const COV_FRAMES = { S102: { "round-20260910": 3, "round-20260910b": 4,
                             "round-20260913": 3, "round-20260913b": 4 },
                      S101: {} };
 const COV_BOX = { S101: "B101", S102: "B102", S412: "B412" };
+// 票 05（库房分位数带）的假件开关：把某几轮**整轮**抹成"一个站位都没拍到"
+// （下标指 COV_ROUNDS）。它造的是"整轮无帧"——与"某轮样本不足"（S102 在 09-12 缺帧、
+// 那一轮只剩 1 个站位）是两句不同的话，两张卡（总览 / 带）必须**同时**在那个 ts 上断开。
+// 默认 [] = 不动，前面的用例一条都不受影响。
+const covFramesFor = (stationId, blanked) => {
+  const frames = COV_FRAMES[stationId] || {}, out = {};
+  COV_ROUNDS.forEach((r, i) => {
+    if (blanked && blanked.has(i)) return;                  // 整轮抹掉：不是 0 帧，是没拍到
+    const n = frames[r.round_id];
+    if (typeof n === 'number') out[r.round_id] = n;
+  });
+  return out;
+};
 // 明细形态（票 02）的格点：每格自带 ts/round_id/day。矩阵形态不给这些（共享时间轴）。
-const covPoints = stationId => {
-  const frames = COV_FRAMES[stationId] || {};
+const covPoints = (stationId, blanked) => {
+  const frames = covFramesFor(stationId, blanked);
   return COV_ROUNDS.map(r => {
     const n = frames[r.round_id];
-    const has = typeof n === "number";
+    const has = typeof n === 'number';
     return { ts: r.ts, round_id: r.round_id, day: r.day, has_frame: has,
              n_frames: has ? n : null };
   });
@@ -357,6 +370,7 @@ const state = {
   growth_error: false,                        // 让 /api/growth 回"prod 查不到"
   measure_error: false,                       // 让 /api/measurements 回"prod 查不到"
   timeline_error: false,                      // 让 /api/timeline 回 500（覆盖轨迹取不到）
+  timeline_blank_rounds: [],                  // 票 05：把这几轮整轮抹成无帧（下标指 COV_ROUNDS）
   env_error: false,                           // 让 /api/environment 回"prod 查不到"
   env_empty: false,                           // 让 /api/environment 回"窗口内没有数据"
   ops_error: false,                           // 让 /api/operations 回"prod 查不到"
@@ -525,6 +539,9 @@ function route(method, url, body) {
     if (state.timeline_error) return json(500, { error: "boom" });
     const params = new URL("http://console.local" + url).searchParams;
     const stationId = params.get("station_id") || "";
+    // 票 05：本轮被整轮抹掉的那几轮（下标）——明细与矩阵两条路都照同一个开关走，
+    // 这样"总览断在哪里"与"带断在哪里"在假件这一侧也是同一个事实。
+    const blanked = new Set(state.timeline_blank_rounds || []);
     const batch = { room_id: "611", entry_date: "2026-09-04", batch_no: "BATCH-10" };
     const axis = { t0: COV_ROUNDS[0].ts, t1: COV_ROUNDS[COV_ROUNDS.length - 1].ts,
                    n_rounds: COV_ROUNDS.length };
@@ -532,15 +549,15 @@ function route(method, url, body) {
       return json(200, { ok: true, metric: "coverage", zone: "611", zone_requested: "611",
         station_id: stationId, batch, axis,
         nodes: [{ node_id: stationId, box_id: COV_BOX[stationId] || null,
-                  points: covPoints(stationId) }],
+                  points: covPoints(stationId, blanked) }],
         notes: [] });
     }
     // 矩阵里的站位 = **本批帧里出现过的站位**（S101 整批一张都没有 ⇒ 不在 nodes 里，
     // 页面按"无数据"灰格画——"本批没有记录"与"拍了 0 张"是两件事）。
-    const nodes = STATIONS.filter(s => Object.keys(COV_FRAMES[s.id] || {}).length).map(s => ({
+    const nodes = STATIONS.filter(s => Object.keys(covFramesFor(s.id, blanked)).length).map(s => ({
       node_id: s.id, layer: s.layer, col: s.col, box_id: s.box_id,
       points: COV_ROUNDS.map(r => {
-        const n = (COV_FRAMES[s.id] || {})[r.round_id];
+        const n = covFramesFor(s.id, blanked)[r.round_id];
         const has = typeof n === "number";
         return { has_frame: has, n_frames: has ? n : null };
       }),
@@ -2410,6 +2427,213 @@ await sleep(150);
     check("点这种灰格也不发请求（矩阵与本批环境都只取一次）",
       urlCount(mark, isMatrix) === 0 && urlCount(mark, isBatchEnv) === 0,
       urlCount(mark, isMatrix) + " 次矩阵 / " + urlCount(mark, isBatchEnv) + " 次环境");
+  }
+
+  // ---- 票 05：库房分位数带（本批**全部站位**按轮次聚合成中位线 + IQR 带）----
+  // 与上面三张卡**同源**：样本集就是票 03 那一次 /api/timeline 拿回的本批矩阵。
+  // 四条护栏（逐条对应票面上的验收）：
+  //   · 样本不足**不画成 0**：那一轮不给任何分位值，打「样本不足（n=X）」标记；
+  //   · 中位/IQR 与总览同源：逐轮 n 由**两边的 DOM 各自数出来**必须相等（不是从页面上读同一个数）；
+  //   · 缺口与总览**同时断开**：同一个 ts 上，总览画灰块、带在那一轮断成两段；
+  //   · 只取一次数：带上画什么都**不额外发请求**（矩阵请求数不随重画增长）。
+  // 分位定义 = 线性插值分位（R-7 / numpy 默认）。断言里的数字是**手算**的：
+  //   轮次 ts            有帧样本（站位帧数）→ p25 / p50 / p75
+  //   2026-09-10 06:00   [1,3]            → 1.5 / 2 / 2.5
+  //   2026-09-10 18:00   [1,4]            → 1.75 / 2.5 / 3.25
+  //   2026-09-11 10:00   [2,2]            → 2 / 2 / 2
+  //   2026-09-12 10:00   [2]              → **样本不足**（n=1 < 2：不画分位数）
+  //   2026-09-13 10:00   [3,5]            → 3.5 / 4 / 4.5
+  //   2026-09-13 18:00   [1,4]            → 1.75 / 2.5 / 3.25
+  //   覆盖率（有帧站位 / 参与统计站位＝本批已知站位 3 个）：2/3,2/3,2/3,1/3,2/3,2/3
+  {
+    const R0 = '2026-09-10T06:00:00', R1 = '2026-09-10T18:00:00', R2 = '2026-09-11T10:00:00',
+          R3 = '2026-09-12T10:00:00', R4 = '2026-09-13T10:00:00', R5 = '2026-09-13T18:00:00';
+    const RTS = [R0, R1, R2, R3, R4, R5];
+    const rbSvg = () => document.querySelector('#roomband svg.rb-svg');
+    const rbRounds = () => Array.from(document.querySelectorAll('#roomband g.rb-round'));
+    const rbRound = ts => document.querySelector('#roomband g.rb-round[data-ts=' + JSON.stringify(ts) + ']');
+    const rbBands = () => Array.from(document.querySelectorAll('#roomband path.rb-band'));
+    const rbCovPts = () => Array.from(document.querySelectorAll('#roomband circle.rb-covpt'));
+    const attr1 = (el, k) => (el ? el.getAttribute(k) : null);
+    const numAttr = (el, k) => Number(attr1(el, k));
+    const rbTitle = el => (el && el.querySelector('title') ? el.querySelector('title').textContent : '');
+    const isMatrix = c => c.url.split('?')[0] === '/api/timeline' && !/[?&]station_id=/.test(c.url);
+    const matrixCalls = () => state.calls.filter(isMatrix);
+    // 逐轮**从总览的 DOM 自己数**有帧格数（与带上的 data-n 各自独立地数出来）
+    const ovFramedAt = ts => Array.from(document.querySelectorAll('#overview .ov-cell circle.ov-pt'))
+      .filter(c => c.getAttribute('data-ts') === ts).length;
+    const relTo = (a, b) => (b ? a / b : NaN);
+
+    check('库房分位数带画出来了（本批 6 轮一格不少），且是手写内联 SVG（零新前端依赖）',
+      !!rbSvg() && rbRounds().length === COV_ROUNDS.length
+      && document.querySelectorAll('#roomband canvas, #roomband img, #roomband iframe').length === 0
+      && document.querySelectorAll('script[src], link[rel="stylesheet"]').length === 0,
+      rbRounds().length + ' 轮 / svg=' + (rbSvg() ? '有' : '没有')
+      + ' / 外部资源 ' + document.querySelectorAll('script[src], link[rel="stylesheet"]').length + ' 个');
+
+    // ① 手算的分位数：与总览同一批帧数（S102 3/4/2/5/1、S412 1/1/2/2/3/4）
+    const want = {};
+    want[R0] = [1.5, 2, 2.5]; want[R1] = [1.75, 2.5, 3.25]; want[R2] = [2, 2, 2];
+    want[R4] = [3.5, 4, 4.5]; want[R5] = [1.75, 2.5, 3.25];
+    const qBad = RTS.filter(ts => want[ts] && rbRound(ts)
+      && (numAttr(rbRound(ts), 'data-p25') !== want[ts][0]
+          || numAttr(rbRound(ts), 'data-p50') !== want[ts][1]
+          || numAttr(rbRound(ts), 'data-p75') !== want[ts][2]));
+    check('中位线 + IQR 与手算一致：每轮样本 = 该轮**有帧站位**的帧数，线性插值分位',
+      Object.keys(want).every(ts => !!rbRound(ts)) && qBad.length === 0,
+      qBad.length ? qBad.map(ts => ts + ' 实得 ' + [25, 50, 75].map(p => attr1(rbRound(ts), 'data-p' + p)).join('/')
+        + '，应为 ' + want[ts].join('/')).join('；')
+      : RTS.filter(ts => want[ts]).map(ts => ts.slice(5, 16) + '=' + [25, 50, 75]
+          .map(p => attr1(rbRound(ts), 'data-p' + p)).join('/')).join(' '));
+
+    // ② 样本不足：09-12 那一轮只剩 S412 一个站位有帧 ⇒ 明说「样本不足（n=1）」，**不给分位值**
+    const short = rbRound(R3);
+    check('样本不足的轮次明说「样本不足（n=1）」，且**不给任何分位值**（更不写 0）',
+      !!short && attr1(short, 'data-shortfall') === '1' && numAttr(short, 'data-n') === 1
+      && !short.hasAttribute('data-p25') && !short.hasAttribute('data-p50') && !short.hasAttribute('data-p75')
+      && rbTitle(short).indexOf('样本不足') >= 0 && rbTitle(short).indexOf('n=1') >= 0
+      && T('#rbnote').indexOf('样本不足（n=1）') >= 0 && T('#rbnote').indexOf('2026-09-12 10:00') >= 0,
+      (short ? 'n=' + attr1(short, 'data-n') + ' p25=' + attr1(short, 'data-p25')
+        + ' 标记=' + rbTitle(short).slice(0, 40) : '没有这一轮')
+      + ' / 说明=' + T('#rbnote').slice(0, 80));
+
+    check('整张带里没有任何把「样本不足」画成 0 的痕迹（没有 data-p25/p50/p75="0" 的点）',
+      document.querySelectorAll('#roomband [data-p25="0"], #roomband [data-p50="0"], #roomband [data-p75="0"]').length === 0
+      && document.querySelectorAll('#roomband [data-frames="0"]').length === 0,
+      'data-p*="0" 的元素 ' + document.querySelectorAll('#roomband [data-p25="0"], #roomband [data-p50="0"], #roomband [data-p75="0"]').length + ' 个');
+
+    // ③ 断开：有值的轮次各成一段（0,1,2 与 4,5），09-12 那一轮不连
+    const segs = rbBands().map(b => ({ from: attr1(b, 'data-from-ts'), to: attr1(b, 'data-to-ts'),
+                                       rounds: numAttr(b, 'data-rounds') }));
+    check('带在样本不足处**断开**：断点两侧各成一段（前 3 轮 + 后 2 轮），不跨过 09-12 连线',
+      segs.length === 2 && segs[0].from === R0 && segs[0].to === R2
+      && segs[1].from === R4 && segs[1].to === R5
+      && segs.every(s => s.from !== R3 && s.to !== R3),
+      segs.map(s => (s.from || '?').slice(5, 16) + '→' + (s.to || '?').slice(5, 16)).join(' | ') || '(没有带)');
+
+    // ④ 同源（一）：带上的每轮 n 与**总览 DOM 里数出来的**有帧格数一致
+    const nBad = RTS.filter(ts => numAttr(rbRound(ts), 'data-n') !== ovFramedAt(ts));
+    check('同源：带上每轮的 n 与总览里那一轮的有帧格数**各自数出来**相等（不是各算各的）',
+      RTS.every(ts => !!rbRound(ts)) && nBad.length === 0,
+      nBad.length ? nBad.map(ts => ts.slice(5, 16) + ' 带=' + attr1(rbRound(ts), 'data-n')
+        + ' 总览=' + ovFramedAt(ts)).join('；')
+      : RTS.map(ts => attr1(rbRound(ts), 'data-n') + '/' + ovFramedAt(ts)).join(' '));
+
+    // ④ 同源（二）：缺口**同时**断开——带在 09-12 断，总览那一轮也是灰块（同一个 ts）
+    const ovGapAt = ts => Array.from(document.querySelectorAll('#overview rect.ov-gapmark'))
+      .filter(g => g.getAttribute('data-ts') === ts).length;
+    check('缺口与总览**同时**断开：带断在 2026-09-12 10:00，总览那一轮正是 S102 的灰块',
+      ovGapAt(R3) === 1 && ovFramedAt(R3) === 1
+      && segs.some(s => s.to === R2) && segs.some(s => s.from === R4),
+      '09-12 总览灰块 ' + ovGapAt(R3) + ' 个 / 有帧 ' + ovFramedAt(R3) + ' 格，带 ' + segs.length + ' 段');
+
+    // ⑤ x 是**真实时间**（不是第几个点）：覆盖率线 6 个点，相邻间距比 = 真实间隔比 12:16:24:24:8
+    const covX = rbCovPts().map(c => Number(c.getAttribute('cx')));
+    const gaps = [];
+    for(let i = 1; i < covX.length; i++) gaps.push(covX[i] - covX[i - 1]);
+    check('带上的 x 用真实时间戳：相邻五点间距比 = 12:16:24:24:8（按下标画会全相等）',
+      covX.length === 6 && gaps.every(g => g > 0)
+      && Math.abs(relTo(gaps[1], gaps[0]) - 16 / 12) <= 0.02
+      && Math.abs(relTo(gaps[2], gaps[3]) - 1) <= 0.02
+      && Math.abs(relTo(gaps[0], gaps[4]) - 12 / 8) <= 0.02,
+      '间距 ' + gaps.map(g => g.toFixed(1)).join(' / ') + '（真实 12h/16h/24h/24h/8h）');
+
+    // ⑥ 覆盖率：有帧站位 / 参与统计站位（＝本批已知站位 3 个）；**真的 0 不断开**是下一段的题
+    const covOf = ts => rbCovPts().find(c => c.getAttribute('data-ts') === ts);
+    const covTxt = ts => { const c = covOf(ts); return c ? attr1(c, 'data-framed') + '/' + attr1(c, 'data-seen') : '(无)'; };
+    check('覆盖率线：每轮 = 有帧站位 / 参与统计站位（2/3 2/3 2/3 1/3 2/3 2/3），与总览同一批数',
+      rbCovPts().length === 6
+      && RTS.every(ts => !!covOf(ts))
+      && [R0, R1, R2, R3, R4, R5].map(covTxt).join(' ') === '2/3 2/3 2/3 1/3 2/3 2/3'
+      && Math.abs(numAttr(covOf(R3), 'data-coverage') - 1 / 3) <= 0.005,
+      [R0, R1, R2, R3, R4, R5].map(covTxt).join(' '));
+
+    // ⑦ 图上的高低来自数据：IQR 宽度比（1.75-1.5… 用 p75-p25）= 1.5 : 1（第 2 轮 vs 第 5 轮）
+    const whiskerOf = ts => document.querySelector('#roomband line.rb-whisker[data-ts=' + JSON.stringify(ts) + ']');
+    const wLen = ts => { const w = whiskerOf(ts); return w ? Math.abs(Number(w.getAttribute('y2')) - Number(w.getAttribute('y1'))) : NaN; };
+    check('带的高低来自数据：IQR 越宽画得越宽（[1,4] 的 3 倍于 [2,2] 的 0 宽 ⇒ 不画成一样）',
+      !!whiskerOf(R1) && !!whiskerOf(R2) && !!whiskerOf(R4)
+      && wLen(R2) < 0.5 && wLen(R1) > 2 && Math.abs(relTo(wLen(R1), wLen(R4)) - 1.5) <= 0.05,
+      '09-10 18:00=' + wLen(R1).toFixed(1) + 'px / 09-11=' + wLen(R2).toFixed(1)
+      + 'px / 09-13 10:00=' + wLen(R4).toFixed(1) + 'px');
+
+    // ⑧ 只取一次数：重画（换轮次 ⇒ renderHistory ⇒ 重画总览与带）**不重取矩阵**
+    const beforeM = matrixCalls().length;
+    await click('#prevround');
+    await click('#nextround');
+    check('分位数带只认那一次矩阵：重画（换轮次来回）不重取（+0 次矩阵请求）',
+      matrixCalls().length === beforeM && rbRounds().length === COV_ROUNDS.length,
+      beforeM + ' → ' + matrixCalls().length + ' 次矩阵请求');
+  }
+
+  // ---- 票 05 之二：整轮无帧（假件把 09-11T10:00 那一轮**所有站位**抹掉）----
+  // 与"某轮样本不足"是两句不同的话：前者一个站位都没拍到，后者拍到了但不够算分位。
+  // 两者都必须：明说、断开；而**覆盖率那一轮的 0 是真的 0**（拍到 0 个站），不许断、不许说成缺测。
+  {
+    const R2 = '2026-09-11T10:00:00';
+    const rbRound = ts => document.querySelector('#roomband g.rb-round[data-ts=' + JSON.stringify(ts) + ']');
+    const rbBands = () => Array.from(document.querySelectorAll('#roomband path.rb-band'));
+    const segsOf = () => rbBands().map(b => b.getAttribute('data-from-ts') + '→' + b.getAttribute('data-to-ts'));
+    const covPt = ts => document.querySelector('#roomband circle.rb-covpt[data-ts=' + JSON.stringify(ts) + ']');
+    const isMatrix = c => c.url.split('?')[0] === '/api/timeline' && !/[?&]station_id=/.test(c.url);
+    const ovPtsAt = ts => Array.from(document.querySelectorAll('#overview .ov-cell circle.ov-pt'))
+      .filter(c => c.getAttribute('data-ts') === ts).length;
+    const rbTitle = el => (el && el.querySelector('title') ? el.querySelector('title').textContent : '');
+    const reload = async pred => { $('#reloadbtn').click(); return waitFor(pred, 6000); };
+
+    state.timeline_blank_rounds = [COV_ROUNDS.findIndex(r => r.ts === R2)];
+    const mark = state.calls.length;
+    await reload(() => !!rbRound(R2) && rbRound(R2).getAttribute('data-blank') === '1');
+    check('整轮无帧：那一轮明说「整轮无帧」（不是样本不足、更不是 0 帧）',
+      !!rbRound(R2) && rbRound(R2).getAttribute('data-blank') === '1'
+      && !rbRound(R2).hasAttribute('data-p25')
+      && rbTitle(rbRound(R2)).indexOf('整轮无帧') >= 0
+      && T('#rbnote').indexOf('整轮无帧') >= 0
+      && T('#rbnote').indexOf('2026-09-11 10:00') >= 0,
+      (rbRound(R2) ? 'n=' + rbRound(R2).getAttribute('data-n') + ' 标记=' + rbTitle(rbRound(R2)).slice(0, 40) : '没有这一轮')
+      + ' / 说明=' + T('#rbnote').slice(0, 90));
+    check('整轮无帧也把带**断开**：两段（0-1 与 4-5），09-11 与 09-12 一起隔开',
+      segsOf().length === 2
+      && segsOf()[0] === '2026-09-10T06:00:00→2026-09-10T18:00:00'
+      && segsOf()[1] === '2026-09-13T10:00:00→2026-09-13T18:00:00',
+      segsOf().join(' | ') || '(没有带)');
+    check('总览也**同时**断在同一个 ts：09-11 那一轮两个站位都成了灰块',
+      ovPtsAt(R2) === 0
+      && document.querySelectorAll('#overview rect.ov-gapmark[data-ts="2026-09-11T10:00:00"]').length === 2,
+      '09-11 总览有帧 ' + ovPtsAt(R2) + ' 格 / 灰块 '
+      + document.querySelectorAll('#overview rect.ov-gapmark[data-ts="2026-09-11T10:00:00"]').length + ' 个');
+    const covPath = document.querySelector('#roomband path.rb-covline');
+    const covD = covPath ? (covPath.getAttribute('d') || '') : '';
+    check('覆盖率那一轮的 0 是**真的 0**（拍到 0 个站）：线不断开、点还在，不许说成缺测',
+      !!covPt(R2) && covPt(R2).getAttribute('data-framed') === '0'
+      && Number(covPt(R2).getAttribute('data-coverage')) === 0
+      && !covPt(R2).hasAttribute('data-noframe')
+      && document.querySelectorAll('#roomband circle.rb-covpt').length === 6
+      && (covD.match(/M/g) || []).length === 1,
+      '覆盖率 09-11 = ' + (covPt(R2) ? covPt(R2).getAttribute('data-framed') + '/'
+        + covPt(R2).getAttribute('data-seen') : '(无)') + '，线 ' + (covD.match(/M/g) || []).length + ' 段');
+    check('整轮无帧这一轮之后没有悄悄再取一次矩阵（一次重新读取 = 一次矩阵请求）',
+      state.calls.slice(mark).filter(isMatrix).length === 1,
+      state.calls.slice(mark).filter(isMatrix).length + ' 次矩阵请求');
+
+    // 整批都没有帧：不是"每轮都是 0"，而是"这一批什么都没拍到"——空态，不画带
+    state.timeline_blank_rounds = COV_ROUNDS.map((r, i) => i);
+    await reload(() => !document.querySelector('#roomband svg.rb-svg')
+      && T('#roomband').indexOf('拍到帧') >= 0);
+    check('整批一个站位都没拍到帧时：说清"本批还没有任何一个站位拍到帧"，不画带、不画成 0',
+      !document.querySelector('#roomband svg.rb-svg')
+      && T('#roomband').indexOf('本批还没有任何一个站位拍到帧') >= 0
+      && document.querySelectorAll('#roomband [data-p25], #roomband [data-p50], #roomband [data-p75]').length === 0,
+      T('#roomband').slice(0, 70));
+
+    // 还原（后面的用例接着跑）：默认矩阵回来，带也回到"样本不足处断开"的形状
+    state.timeline_blank_rounds = [];
+    await reload(() => !!document.querySelector('#roomband g.rb-round[data-ts="2026-09-10T06:00:00"]')
+      && segsOf().length === 2);
+    check('还原后再读一次：带回到默认形状（09-12 样本不足处断开，6 轮都在）',
+      document.querySelectorAll('#roomband g.rb-round').length === 6 && segsOf().length === 2
+      && document.querySelectorAll('#roomband circle.rb-covpt').length === 6,
+      document.querySelectorAll('#roomband g.rb-round').length + ' 轮 / ' + segsOf().length + ' 段带');
   }
   // 日期与角度筛选作用于所选巡检轮次。
   $('#fromDate').value = '2026-09-15'; $('#fromDate').dispatchEvent(new window.Event('change'));

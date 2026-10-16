@@ -173,6 +173,31 @@
   #nodedetail .md-covcell.off{fill:#eef1f5;stroke:#c2c8d0}
   /* 图例复用页面既有的 .legend（不再写一套自己的圆角/间距）；只有色带那一档要更高的色块 */
   #nodedetail .legend i.seg{height:9px;border:1px solid var(--line)}
+
+  /* ---- 库房分位数带（票 05）：本批**全部站位**按轮次聚合成中位线 + IQR 带 ----
+     与放大视图**同一套 x 映射**（mdScale）、同一份矩阵（票 03 一次取回）——不立第二套比例。
+     分位 / 样本不足 / 断开的定义都在 JS 那一段注释里，这里只管画。
+     零依赖：整张图是手写内联 SVG（spec 硬规则 3）。 */
+  #roomband svg{display:block;width:100%;height:auto}
+  #roomband .rb-band{fill:#1f6feb;fill-opacity:.16;stroke:#1f6feb;stroke-opacity:.35;stroke-width:.8}
+  #roomband .rb-median{fill:none;stroke:#1f6feb;stroke-width:2}
+  #roomband .rb-pt{fill:#1f6feb;stroke:#fff;stroke-width:.8}
+  #roomband .rb-whisker{stroke:#1f6feb;stroke-width:1;stroke-opacity:.55}
+  #roomband .rb-lane{font-size:10.5px;fill:#6b7785}
+  #roomband .rb-val{font-size:10.5px;fill:#24292f;font-weight:600}
+  #roomband .rb-tick{font-size:10px;fill:#6b7785}
+  #roomband .rb-day{font-size:10px;fill:#41505f}
+  #roomband .rb-grid{stroke:#dbe3ef;stroke-width:.8}
+  #roomband .rb-axis{stroke:#6b7785;stroke-width:1}
+  /* 样本不足 / 整轮无帧：**不画成 0**——虚线标出那一轮，带在那里断开 */
+  #roomband .rb-missline{stroke:#c9a227;stroke-width:1;stroke-dasharray:3 3}
+  #roomband .rb-missline.blank{stroke:#b6bec8}
+  #roomband .rb-missmark{fill:none;stroke:#c9a227;stroke-width:1.2}
+  #roomband .rb-missmark.blank{stroke:#b6bec8}
+  #roomband .rb-misslbl{font-size:10.5px;fill:#8a6d1a;font-weight:600}
+  #roomband .rb-misslbl.blank{fill:#6b7785;font-weight:400}
+  #roomband .rb-covline{fill:none;stroke:#18794e;stroke-width:1.8}
+  #roomband .rb-covpt{fill:#18794e;stroke:#fff;stroke-width:.8}
   /* ---- 同一站位跨轮次对比（2026-10-13，积累期主线）----
      固定"当前选中的站位"，把最近几轮的同一个框并排摆出来，一眼看出这几天怎么长的。
      纯前端：逐轮问 /api/images?round_id=…&station_id=…，图仍走 /api/image 同源代理。
@@ -766,6 +791,22 @@
            零依赖：整张图是手写内联 SVG。 -->
       <div id="nodedetail" class="empty">点上面「时序总览」里的任一格，进入这个节点的放大视图</div>
       <div id="mdnote" class="empty"></div>
+    </div>
+    <div class="card">
+      <h2>库房分位数带 <span id="rbtitle" style="color:var(--dim);font-weight:400"></span></h2>
+      <!-- 票 05：把本批**全部站位**按轮次聚合成一条带宽（中位线 + IQR 带），回答"这批整体在怎么长"。
+           取数：**这张卡自己不发请求**——样本集就是票 03 已经拿回的本批矩阵（hist.overview），
+           在 drawOverview() 的同一次渲染里现场算出来；页面上不缓存第二份聚合结果，
+           所以它不可能与总览各算各的。
+           口径（P0 有值的量只有每站帧数 n_frames；P1 长势接通后同一套带宽换 growth 即可）：
+             · 每轮样本 = 该轮**有帧站位**的帧数；p25/p50/p75 用线性插值分位（R-7）；
+             · **样本不足就不画**（n < ROOM_BAND_MIN_N）：不给任何分位值、更不写 0，
+               那一轮打「样本不足（n=X）」标记，带在那里断开；
+             · 一个站位都没拍到的轮次是另一句话（「整轮无帧」），同样断开；
+             · 另给一条覆盖率线（有帧站位 / 参与统计站位）：这里的 0 是**真的 0**，
+               所以它不断开——null ≠ 0 的另一半：真 0 也不许说成"没数据"。 -->
+      <div id="roomband" class="empty">读取本批全部站位的逐轮矩阵…（这张卡用的是时序总览那一次取数）</div>
+      <div id="rbnote" class="empty"></div>
     </div>
   </section>
 
@@ -3780,6 +3821,9 @@ function ovEmptyCell(layer, col, stationId, why){
 function drawOverview(){
   const box = $("#overview"), note = $("#ovnote"), title = $("#ovtitle");
   if(!box) return;
+  // 票 05：分位数带与总览**同一次渲染、同一份矩阵**（它自己不发请求）——画在这里，
+  // 是为了让"矩阵一变，两处一起变"成为结构上的事实，而不是靠两处各自记得刷新。
+  drawRoomBand();
   const ov = hist.overview;
   if(!ov){
     box.className = "empty";
@@ -4377,6 +4421,322 @@ function drawNodeDetail(){
   box.className = '';
   box.innerHTML = mdSvgMarkup(stationId, pts, rounds, axis, envRows, where) + mdLegend() + mdFootnote();
   note.textContent = notes.join(' · ');
+}
+
+/* ---- 库房分位数带（票 05）：本批**全部站位**按轮次聚合成中位线 + IQR 带 ----
+   回答"这批整体在怎么长"：中位线吸收单点噪声，IQR 带给出离散程度。
+   取数：**这一张卡自己不发请求**——样本集就是票 03 已经拿回的本批矩阵（`hist.overview`，
+   一次 `/api/timeline`、不带 station_id），在 `drawOverview()` 的同一次渲染里现场算出来。
+   页面上**不缓存**第二份聚合结果，所以带与总览不可能各算各的。
+   为什么画帧数而不是"有没有帧"：布尔量算四分位没有意义（每格只有 has_frame 与 n_frames），
+   所以带宽画"有帧站位这一轮各拍了多少张"，另用一条覆盖率线回答"这一轮拍到几个站"——
+   后者才是现场问的那个问题。
+   P1 长势接通后：只把 `roomBandValue()` 那一步换成 growth（缺即 null），
+   分位 / 样本不足 / 断开这套机制一个字都不用改；现在**不为它造数据**。 */
+
+/** 少于两个站位不叫"整体"：一个样本的"四分位"就是它自己（画出来是假精确）。
+ *  阈值就这一处：图例、说明与断言都按它说话。 */
+const ROOM_BAND_MIN_N = 2;
+
+/** 分位数的**唯一定义**：线性插值分位（R-7 / numpy 默认那一套）。
+ *  h = (n-1)p，落在相邻两点之间按小数部分插值。样本为空 ⇒ null——
+ *  **空样本不是 0**：没有样本与"样本值都是 0"是两件不同的事（spec 硬规则 2）。 */
+function roomBandQuantile(sorted, p){
+  const n = (sorted || []).length;
+  if(!n) return null;
+  if(n === 1) return Number(sorted[0]);
+  const h = (n - 1) * p, lo = Math.floor(h), hi = Math.min(n - 1, lo + 1);
+  const a = Number(sorted[lo]), b = Number(sorted[hi]);
+  if(!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  return a + (b - a) * (h - lo);
+}
+
+/** 这一格对"整体"的贡献：P0 = 有帧的帧数；**没帧是 null，不是 0**（硬规则 2）。
+ *  P1 长势：这里换成 cell.growth（缺即 null），其余不动。 */
+function roomBandValue(cell){
+  if(!cell || !cell.has_frame) return null;
+  const n = Number(cell.n_frames);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** 逐轮聚合：每轮一行 {ts, day, n, p25, p50, p75, framed, seen, coverage, shortfall, blank}。
+ *
+ *  · **样本集** = 该轮**有帧站位**的帧数；
+ *  · **参与统计的站位**（覆盖率的分母）= 本批页面已知的站位（配置表，与总览网格的站位格
+ *    同源）∪ 矩阵里出现的站位——两处取并集，谁也不漏。整批都没拍到过的站位也要算在分母里，
+ *    否则"48 个站只拍到 2 个"会被读成 100%；
+ *  · n < ROOM_BAND_MIN_N ⇒ **三个分位一个都不给**（绝不写 0），并分两种情形：
+ *    `blank`（这一轮一个站位都没拍到）与 `shortfall`（拍到了，但不够算分位）。 */
+function roomBandRounds(rounds, nodes, stationIds){
+  const list = rounds || [];
+  const known = new Set();
+  for(const id of (stationIds || [])) if(id) known.add(String(id));
+  for(const node of (nodes || [])) if(node && node.node_id) known.add(String(node.node_id));
+  const seen = known.size;                     // 0（两边都空）⇒ 覆盖率没有分母：null，不是 0
+  return list.map((r, i) => {
+    const values = [];
+    let framed = 0;
+    for(const node of (nodes || [])){
+      const cell = (node.points || [])[i] || {};
+      if(cell.has_frame) framed++;
+      const v = roomBandValue(cell);
+      if(v !== null) values.push(v);
+    }
+    values.sort((a, b) => a - b);
+    const n = values.length;
+    const drawable = n >= ROOM_BAND_MIN_N;
+    return {
+      ts: (r && r.ts) || null, day: (r && r.day !== undefined) ? r.day : null,
+      round_id: (r && r.round_id) || '', n: n, framed: framed, seen: seen,
+      coverage: seen > 0 ? framed / seen : null,
+      p25: drawable ? roomBandQuantile(values, 0.25) : null,
+      p50: drawable ? roomBandQuantile(values, 0.50) : null,
+      p75: drawable ? roomBandQuantile(values, 0.75) : null,
+      drawable: drawable,
+      blank: framed === 0,
+      shortfall: !drawable && framed > 0,
+    };
+  });
+}
+
+/** 带的家当：左右边界与放大视图**逐像素相同**（x 一律走 mdScale —— 页面里只有这一套比例）。 */
+const RB = { W: MD.W, top: 16, bandH: 88,
+             covTop: 124, covH: 34,
+             axisY: 182, timeY: 195, dayY: 208, missY: 223, H: 232 };
+
+/** 一排标签的**贪心排布**：密了宁可少画几个（挤成一团等于没说）。
+ *  对齐按"会不会出血"选 start / end / middle——**不平移**：平移过的标签指着别处，
+ *  那是另一种撒谎。 */
+function rbLabelRow(items, y, minGap){
+  const out = [];
+  let lastX = -Infinity;
+  for(const it of items){
+    const x = it.x;
+    if(!Number.isFinite(x) || x - lastX < minGap) continue;
+    lastX = x;
+    const anchor = x < MD.padL + 20 ? 'start' : (x > RB.W - MD.padR - 20 ? 'end' : 'middle');
+    out.push('<text class="' + it.cls + '" data-ts="' + esc(it.ts) + '"'
+      + (it.attrs || '') + ' x="' + x.toFixed(1) + '" y="' + y + '" text-anchor="' + anchor
+      + '">' + esc(it.text) + '</text>');
+  }
+  return out;
+}
+
+/** 库房分位数带（**手写内联 SVG**，零依赖）：
+ *  ① 分位数泳道：IQR 带 + 中位线，**有值的连续轮次**各成一段；
+ *  ② 覆盖率泳道：**自己一根纵轴**（比率与帧数共用一根轴是在骗人）；
+ *  ③ 底部：真实时间（主）+ 生长第 N 天（次，端点派生）——与放大视图同一条轴。
+ *  断开三种、都**不画成 0**：样本不足 / 整轮无帧 / 分母未知（0/0 不是 0%）。
+ *  而覆盖率里的 0 是**真的 0**（这一轮拍到 0 个站）⇒ 它**不断开**：真 0 也不许说成缺测。 */
+function roomBandSvg(rows, axis){
+  const X = mdScale(axis.t0, axis.t1);
+  const drawable = rows.filter(r => r.drawable);
+  const hi = Math.max(1, ...drawable.map(r => Number(r.p75)));
+  const Y = v => RB.top + RB.bandH - (Number(v) / hi) * RB.bandH;
+  const CY = c => RB.covTop + RB.covH - Number(c) * RB.covH;
+  const out = ['<svg class="rb-svg" viewBox="0 0 ' + RB.W + ' ' + RB.H + '" role="img"'
+    + ' data-t0="' + esc(String(axis.t0 || '')) + '" data-t1="' + esc(String(axis.t1 || '')) + '"'
+    + ' data-min-n="' + ROOM_BAND_MIN_N + '" aria-label="'
+    + esc('本批全部站位按轮次聚合：中位线与四分位带（' + rows.length + ' 轮）') + '">'];
+  // ① 分位数泳道
+  out.push('<text class="rb-lane" x="6" y="' + (RB.top + 13) + '">每站帧数</text>');
+  out.push('<text class="rb-val" x="6" y="' + (RB.top + 27) + '">' + mdNumText(hi) + '</text>');
+  out.push('<text class="rb-lane" x="6" y="' + (RB.top + RB.bandH + 4) + '">0</text>');
+  out.push('<line class="rb-grid" x1="' + MD.padL + '" y1="' + (RB.top + RB.bandH) + '" x2="'
+    + (RB.W - MD.padR) + '" y2="' + (RB.top + RB.bandH) + '"/>');
+  const segs = [];
+  let cur = [];
+  for(const r of rows){
+    if(!r.drawable){ if(cur.length) segs.push(cur); cur = []; continue; }
+    cur.push(r);
+  }
+  if(cur.length) segs.push(cur);
+  for(const seg of segs){
+    if(seg.length < 2) continue;               // 单点成不了一段带：交给下面的点
+    const fromTs = seg[0].ts, toTs = seg[seg.length - 1].ts;
+    let d = '';
+    seg.forEach((r, i) => { d += (i ? 'L' : 'M') + X.at(r.ts).toFixed(1) + ',' + Y(r.p75).toFixed(1) + ' '; });
+    for(let i = seg.length - 1; i >= 0; i--)
+      d += 'L' + X.at(seg[i].ts).toFixed(1) + ',' + Y(seg[i].p25).toFixed(1) + ' ';
+    out.push('<path class="rb-band" data-from-ts="' + esc(fromTs) + '" data-to-ts="' + esc(toTs)
+      + '" data-rounds="' + seg.length + '" d="' + d + 'Z"><title>'
+      + esc('IQR 带（p25–p75）：' + mdWhen(fromTs) + ' → ' + mdWhen(toTs) + '，' + seg.length + ' 轮')
+      + '</title></path>');
+    out.push('<path class="rb-median" data-from-ts="' + esc(fromTs) + '" data-to-ts="' + esc(toTs)
+      + '" d="' + seg.map((r, i) => (i ? 'L' : 'M') + X.at(r.ts).toFixed(1) + ',' + Y(r.p50).toFixed(1)).join(' ')
+      + '"><title>' + esc('中位线（p50）：' + mdWhen(fromTs) + ' → ' + mdWhen(toTs)) + '</title></path>');
+  }
+  for(const r of rows){
+    const x = X.at(r.ts);
+    const base = ' data-ts="' + esc(r.ts) + '" data-day="' + esc(String(r.day))
+      + '" data-n="' + r.n + '" data-framed="' + r.framed + '" data-seen="' + r.seen + '"'
+      + ' data-coverage="' + (r.coverage === null ? '' : mdNumText(r.coverage)) + '"';
+    const covText = (r.coverage === null ? '分母未知（这一批两个来源都没有站位）'
+      : '拍到 ' + r.framed + ' / ' + r.seen + ' 个站（' + mdNumText(r.coverage * 100) + '%）'
+        + (r.framed ? '' : '——这一轮确实一个站都没拍到（是真的 0，不是缺测）'));
+    if(r.drawable){
+      const title = mdWhen(r.ts) + ' · ' + r.framed + ' 个站位有帧（参与统计 ' + r.seen + '）· 中位 '
+        + mdNumText(r.p50) + ' 帧 · IQR ' + mdNumText(r.p25) + '–' + mdNumText(r.p75) + ' 帧';
+      out.push('<g class="rb-round" data-drawable="1"' + base
+        + ' data-p25="' + mdNumText(r.p25) + '" data-p50="' + mdNumText(r.p50)
+        + '" data-p75="' + mdNumText(r.p75) + '"><title>' + esc(title) + '</title>'
+        + '<line class="rb-whisker" data-ts="' + esc(r.ts) + '" data-p25="' + mdNumText(r.p25)
+        + '" data-p75="' + mdNumText(r.p75) + '" x1="' + x.toFixed(1) + '" y1="' + Y(r.p75).toFixed(1)
+        + '" x2="' + x.toFixed(1) + '" y2="' + Y(r.p25).toFixed(1) + '"/>'
+        + '<circle class="rb-pt" data-ts="' + esc(r.ts) + '" data-p50="' + mdNumText(r.p50)
+        + '" cx="' + x.toFixed(1) + '" cy="' + Y(r.p50).toFixed(1) + '" r="3.2"><title>'
+        + esc(title + ' · ' + covText) + '</title></circle></g>');
+    } else {
+      const why = r.blank ? '整轮无帧' : '样本不足';
+      const detail = r.blank
+        ? '整轮无帧：这一轮没有一个站位拍到帧（不是 0 帧）'
+        : '样本不足（n=' + r.n + ' < ' + ROOM_BAND_MIN_N + '）：不画分位数（不是 0）';
+      out.push('<g class="rb-round' + (r.blank ? ' rb-blank' : ' rb-short') + '"'
+        + (r.blank ? ' data-blank="1"' : ' data-shortfall="1"') + base + '><title>'
+        + esc(mdWhen(r.ts) + ' · ' + detail + ' · ' + covText) + '</title>'
+        + '<line class="rb-missline' + (r.blank ? ' blank' : '') + '" data-ts="' + esc(r.ts) + '" x1="'
+        + x.toFixed(1) + '" y1="' + RB.top + '" x2="' + x.toFixed(1) + '" y2="' + RB.axisY + '"/>'
+        + '<rect class="rb-missmark' + (r.blank ? ' blank' : '') + '" data-ts="' + esc(r.ts) + '" x="'
+        + (x - 3).toFixed(1) + '" y="' + (RB.top + RB.bandH / 2 - 3) + '" width="6" height="6"/></g>');
+    }
+  }
+  // ② 覆盖率泳道（**自己一根纵轴**）
+  out.push('<text class="rb-lane" x="6" y="' + (RB.covTop + 13) + '">覆盖率</text>');
+  out.push('<text class="rb-val" x="6" y="' + (RB.covTop + 27) + '">100%</text>');
+  out.push('<text class="rb-lane" x="6" y="' + (RB.covTop + RB.covH + 4) + '">0%</text>');
+  out.push('<line class="rb-grid" x1="' + MD.padL + '" y1="' + (RB.covTop + RB.covH) + '" x2="'
+    + (RB.W - MD.padR) + '" y2="' + (RB.covTop + RB.covH) + '"/>');
+  // 只有"没有分母"（0/0）才断开：**真的 0 不断**（这一轮拍到 0 个站就是 0%）
+  const covRows = rows.filter(r => r.coverage !== null);
+  if(covRows.length){
+    out.push('<path class="rb-covline" data-rounds="' + covRows.length + '" d="'
+      + covRows.map((r, i) => (i ? 'L' : 'M') + X.at(r.ts).toFixed(1) + ',' + CY(r.coverage).toFixed(1)).join(' ')
+      + '"><title>' + esc('覆盖率：本轮有帧站位数 / 本轮参与统计站位数（参与统计 = 本批已知站位 '
+      + (rows[0] ? rows[0].seen : 0) + ' 个）') + '</title></path>');
+  }
+  covRows.forEach(r => {
+    const x = X.at(r.ts);
+    out.push('<circle class="rb-covpt" data-ts="' + esc(r.ts) + '" data-framed="' + r.framed
+      + '" data-seen="' + r.seen + '" data-coverage="' + mdNumText(r.coverage) + '" cx="' + x.toFixed(1)
+      + '" cy="' + CY(r.coverage).toFixed(1) + '" r="3"><title>'
+      + esc(mdWhen(r.ts) + ' · 覆盖率 ' + mdNumText(r.coverage * 100) + '%：拍到 ' + r.framed + ' / '
+        + r.seen + ' 个站' + (r.framed ? '' : '——是真的 0（这一轮一个站都没拍到），不是缺测'))
+      + '</title></circle>');
+  });
+  // ③ 底部：真实时间（主）+ 生长第 N 天（次）
+  out.push('<line class="rb-axis" x1="' + MD.padL + '" y1="' + RB.axisY + '" x2="'
+    + (RB.W - MD.padR) + '" y2="' + RB.axisY + '"/>');
+  const times = [];
+  if(rows.length) times.push({ x: X.at(rows[0].ts), ts: rows[0].ts, cls: 'rb-tick', text: mdWhen(rows[0].ts) });
+  if(rows.length > 1)
+    times.push({ x: X.at(rows[rows.length - 1].ts), ts: rows[rows.length - 1].ts, cls: 'rb-tick',
+                 text: mdWhen(rows[rows.length - 1].ts) });
+  out.push(...rbLabelRow(times, RB.timeY, 60));
+  const days = [];
+  rows.forEach((r, i) => {
+    const newDay = i === 0 || String(r.ts).slice(0, 10) !== String(rows[i - 1].ts).slice(0, 10);
+    const day = (r.day === null || r.day === undefined) ? null : Number(r.day);
+    if(!newDay || day === null || !Number.isFinite(day)) return;   // 端点没给天数就不猜
+    days.push({ x: X.at(r.ts), ts: r.ts, cls: 'rb-day', text: '第 ' + day + ' 天',
+                attrs: ' data-day="' + esc(String(day)) + '"' });
+  });
+  out.push(...rbLabelRow(days, RB.dayY, 54));
+  // 断点说明：样本不足 / 整轮无帧（说明**指着断点那一轮的 x**，不平移）
+  const misses = rows.filter(r => !r.drawable).map(r => ({
+    x: X.at(r.ts), ts: r.ts, cls: 'rb-misslbl' + (r.blank ? ' blank' : ''),
+    text: r.blank ? '整轮无帧' : '样本不足',
+    attrs: r.blank ? ' data-blank="1"' : ' data-shortfall="1"',
+  }));
+  out.push(...rbLabelRow(misses, RB.missY, 56));
+  out.push('</svg>');
+  return out.join('');
+}
+
+function rbLegend(){
+  return '<div class="legend">'
+    + '<span><i style="background:#1f6feb"></i>中位线（p50）</span>'
+    + '<span><i style="background:#1f6feb;opacity:.35;height:9px"></i>IQR 带（p25–p75）</span>'
+    + '<span><i style="background:#c9a227"></i>样本不足（n &lt; ' + ROOM_BAND_MIN_N + '）：不画分位数</span>'
+    + '<span><i style="background:#c2c8d0"></i>整轮无帧（一个站位都没拍到）</span>'
+    + '<span><i style="background:#18794e"></i>覆盖率（有帧站位 / 参与统计站位）</span>'
+    + '</div>';
+}
+
+function rbFootnote(){
+  return '<div class="empty" style="padding:4px 0 0">'
+    + '每轮一条样本：<b>该轮有帧站位各自的帧数</b>（没有帧的站位**不参与**，不是 0 帧）；'
+    + 'p25/p50/p75 用线性插值分位（R-7）。样本少于 ' + ROOM_BAND_MIN_N + ' 个站位的轮次'
+    + '**不画分位数**（一个样本的"四分位"就是它自己，画出来是假精确），'
+    + '在那一轮打「样本不足」并把带**断开**；一个站位都没拍到的轮次说「整轮无帧」。'
+    + '覆盖率 = 本轮有帧站位数 / 本轮参与统计站位数（本批已知站位）——'
+    + '这里的 0 是**真的 0**，所以它不断开。数据来自 <code>/api/timeline</code> 的<b>本批矩阵</b>'
+    + '（票 03 一次取回全部站位）：这张卡**不另发请求**，也不缓存第二份聚合结果。</div>';
+}
+
+/** 库房分位数带的画法：**不取数**——从票 03 的矩阵（hist.overview）现算现画。
+ *
+ *  与总览共用同一份矩阵、同一次渲染：本卡不缓存聚合结果（每次重画重算），
+ *  所以它与总览、放大视图不可能各算各的。 */
+function drawRoomBand(){
+  const box = $('#roomband'), note = $('#rbnote'), title = $('#rbtitle');
+  if(!box) return;
+  const ov = hist.overview;
+  if(!ov){
+    box.className = 'empty';
+    box.textContent = '读取本批全部站位的逐轮矩阵…（这张卡用的是时序总览那一次取数）';
+    if(note) note.textContent = '';
+    return;
+  }
+  if(!ov.ok){
+    if(ov.no_scope){
+      box.className = 'empty'; box.textContent = '还没有批次信息';
+      if(note) note.textContent = ov.error || '';
+      return;
+    }
+    box.className = 'empty'; box.textContent = '查不到本批的逐轮矩阵';
+    if(note) note.textContent = '⚠ ' + (ov.error || '未知原因');
+    return;
+  }
+  const rounds = ov.rounds || [], nodes = ov.nodes || [], axis = ov.axis || {};
+  const batch = ov.batch || {};
+  const batchText = '本批 ' + (batch.batch_no || batch.entry_date || '?');
+  if(title) title.textContent = ' · ' + batchText;
+  const stationIds = (stations || []).map(s => s && s.id).filter(Boolean);
+  const rows = roomBandRounds(rounds, nodes, stationIds);
+  if(!rounds.length){
+    box.className = 'empty'; box.textContent = '本批还没有可归属的巡检轮次';
+    if(note) note.textContent = (ov.notes || []).join(' · ') || (batchText + ' 还没有轮次');
+    return;
+  }
+  if(!axis.t0 || !axis.t1){
+    box.className = 'empty';
+    box.textContent = '本批的轮次没有真实时间戳：画不出时间轴（不拿"第几个点"凑）';
+    if(note) note.textContent = (ov.notes || []).join(' · ');
+    return;
+  }
+  const drawable = rows.filter(r => r.drawable);
+  const notes = [];
+  const miss = rows.filter(r => !r.drawable);
+  if(miss.length){
+    const short = miss.filter(r => !r.blank), blank = miss.filter(r => r.blank);
+    if(short.length) notes.push('样本不足（n=' + short.map(r => r.n).join('/') + '）：'
+      + short.map(r => mdWhen(r.ts)).join('、') + '——那一轮不画分位数，带在这里断开');
+    if(blank.length) notes.push('整轮无帧：' + blank.map(r => mdWhen(r.ts)).join('、')
+      + '——这一轮没有一个站位拍到帧（不是 0 帧），带同样断开');
+  }
+  if(!drawable.length){
+    // 整批都没有可算的量：说清是哪一种，**不画成 0**
+    const anyFrame = rows.some(r => r.framed > 0);
+    box.className = 'empty';
+    box.textContent = anyFrame
+      ? '每一轮的样本都不足（有帧站位少于 ' + ROOM_BAND_MIN_N + ' 个）：不画分位数带'
+      : '本批还没有任何一个站位拍到帧：不画分位数带（也不拿 0 顶替）';
+    if(note) note.textContent = notes.join(' · ');
+    return;
+  }
+  box.className = '';
+  box.innerHTML = roomBandSvg(rows, axis) + rbLegend() + rbFootnote();
+  if(note) note.textContent = notes.join(' · ');
 }
 
 async function loadHistory(force){
