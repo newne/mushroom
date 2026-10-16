@@ -71,6 +71,11 @@
 
 - 2026-10-14 15:4x 发版官写票。依据 Chief 当日裁定（归属：调用者=测试、部署=发版官；排期=解除冻结后第一批且早于 10-20）。
 - 修正 Chief 步骤②：`data/room.yaml` **已存在且与 `configs/room.yaml` 逐字节相同**，故 **`cp` 一步省掉**。
+- **2026-10-16 22:5x 用户发版（长势时序）明确不含本批**：用户当场裁定范围为"只发长势时序"
+  ⇒ 只重建了 `mushroom_analysis` + `mushroom_console`（镜像 `0.1.0-20261016224447-ceb7b2d`）+ 换页面，
+  **`mushroom_patrol` 一个字节没动**（仍 `89e4a54`）。发版记录见 `container-cutover.md` §22。
+  本票的第 0 步（调用者代码 `6005f01`）**已落地**、第 1 步（analysis `/batches`）**已上线**，
+  第 2/4/5 步仍**未执行**；硬边界 2026-10-20 不变。
 
 - **2026-10-15 13:01 执行（本票的 analysis 侧，第一批）**：镜像 `registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261015125805-b61d970`（digest `sha256:7957ce30…`，**从 `main`@`b61d970` 构建**、`-f docker/Dockerfile.patrol`、未走混淆——ADR-0012 明确混淆构建不覆盖 patrol）。prod `.env` 的 `PATROL_IMAGE` 改到该 tag；`mushroom_analysis.environment` 增 `BATCH_AT=05:20`；`docker compose up -d --force-recreate --no-deps mushroom_analysis`。
   - **为什么必须重新构建**：线上原有镜像最新只到 `c3dcbc5`（10-14 13:07），而 `/batches` 是提交 `3c30feb` 引入的（**在 `c3dcbc5` 之后**）⇒ 只改 env 再 recreate 修不了 404。

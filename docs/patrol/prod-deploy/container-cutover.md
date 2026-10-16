@@ -1644,3 +1644,124 @@ docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate 
 > 取证方式（可复验）：`git`-外的只读命令见本仓 `docs/patrol/prod-deploy/issues/01-analysis-compose-migration.md`
 > 的 Comments；分辨率不靠任何第三方库，直接解 JPEG 的 SOF 标记。
 
+---
+
+## 22. 2026-10-16 发版：长势时序（`ceb7b2d`）——只发 analysis + console + 页面，**patrol 不动**
+
+**起因**：用户 2026-10-16 22:0x 要求「提交代码并 push，之后发版到 prod」。范围由用户当场裁定为
+**只发长势时序**（选项 B"全量到 main"被否——patrol 容器连着导轨，且它要带的改动属票 10 那批）。
+
+### 22.1 发版前核查（2026-10-16 22:27 现场只读实测，逐条可复验）
+
+| 项 | 实测 |
+| --- | --- |
+| 容器 | `mushroom_analysis` = `0be3947`（10-15 19:25，Up 27h）、`mushroom_console` = `c3dcbc5`（10-14 13:07，Up 2d）、`mushroom_patrol` = `89e4a54`（10-13 20:43，Up 3d）；preview/capture/console_web/solution 另四个各自钉着旧 tag |
+| `GET :8000/timeline` | **404** —— 端点只在 `0be3947` 之后的提交里（`e8f20f7`/`9201247`） |
+| `GET :8001/api/timeline` | **404** —— console 没有这条代理（`0dbe4fc`） |
+| 页面 | 现场 sha `4f464986…`（= 提交 `ce0a461`，10-14 那版，4119 行） |
+| 机器 | `state:IDLE, connected:false`；上一轮 21:20–21:27 结束（48/48 成功）；下一档 **00:20** |
+
+⇒ 长势时序在机上**不可演示**：端点、代理、页面三层都缺；三层落在两个部署单元（镜像 + bind-mount 页面）上。
+
+### 22.2 发版范围与"为什么只有这三个落点"
+
+| 落点 | 动作 | 依据 |
+| --- | --- | --- |
+| `mushroom_analysis` | **重建**（`analysis/api.py`、`analysis/timeline.py`、`store.py` 在镜像里） | `/timeline` 404 只能在镜像层修 |
+| `mushroom_console` | **重建**（`deploy/console.py`、`transport.py`） | `/api/timeline` 代理 + hold 记录（票 13） |
+| 页面 | **换文件**（`../mushroom_patrol/web/index.html` bind-mount） | ADR-0015：页面是独立产物，改页面不必重建任何镜像 |
+| `mushroom_patrol` / `preview` / `capture` / `console_web` / `solution` | **一律不动** | 用户裁定"只发长势时序"；patrol 侧那批（观察高度档、`room.yaml` 轮前刷新链）要停轮 + 接管 + 逐层复核，归票 10 单独排期（硬边界 10-20） |
+
+### 22.3 产物
+
+```
+registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261016224447-ceb7b2d
+digest sha256:ab30f8c7791f9d5f005d65b2e31ac83184613080e961985f666942fb9784ac97
+image  sha256:c6eabaa9387a461f692479ca18bc51822fcf27aa91518378b837fbec021881d4（770 MB）
+从 main@ceb7b2d 构建，-f docker/Dockerfile.patrol，未走混淆（ADR-0012：混淆不覆盖 patrol）
+```
+
+构建（开发机 WSL，`/mnt/d/code/mushroom`）：
+
+```bash
+docker build -f docker/Dockerfile.patrol \
+  -t registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261016224447-ceb7b2d .
+docker push registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261016224447-ceb7b2d
+```
+
+⚠️ **踩到的两条（都不是现场，是开发机）**：
+1. **`wsl -- bash -lc '…$(date …)…'` 里命令替换会被吃掉**：`TAG=0.1.0-$(date +%Y%m%d%H%M%S)-ceb7b2d`
+   展开成空串 ⇒ 第一次 `docker build` 直接 `invalid reference format`。**tag 在 PowerShell 侧算好、当字面量传**。
+2. **800 MB 镜像 push 第一次超时**（`context deadline exceeded`，层已传了一部分）——**重试即续传**，
+   第二次 13 层 `Layer already exists`、秒过。别把一次超时当成"registry 不通"。
+
+### 22.4 发布前门禁（都在开发机，不碰现场）
+
+| 门禁 | 结果 |
+| --- | --- |
+| 镜像冒烟（`docker run` 内 import + 路由表；PG 连接换桩） | analysis 19 条路由**含 `/timeline`**；console 31 条含 `/api/timeline`、`/api/ranges`；**SMOKE PASS** |
+| 页面 harness（`docs/patrol/console-ui/verify-page.js`，jsdom） | **529/538**；9 条红的与**上一版页面（`ce0a461`）逐条相同**（地图点击坐标 / 站点选择那一组）⇒ 既有问题，与本次发版无关 |
+| 单元测试套件 | ⚠️ **本次没跑**：开发机几个 venv 都没有 pytest（`patrol-workspace/.venv` 的 `python.exe` 缺失、`deploy/.venv` 无 pytest），镜像里 `uv pip install pytest` 也没装进去。代码侧的绿以各提交自带记录为准——这条是**欠账**，不是"跑过了" |
+
+### 22.5 发版命令（现场侧，脚本落在 `/root/release-20261016.sh`）
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_service
+cp -p .env .env.bak-20261016-225942
+cp -p mushroom_solution.yml mushroom_solution.yml.bak-20261016-225942
+sed -i 's#^PATROL_IMAGE=.*#PATROL_IMAGE=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261016224447-ceb7b2d#' .env
+# console 补 hold 记录挂载（票 13 交办的那一行；插在 data/cmd 之后）
+sed -i '\|data/cmd:/app/data/cmd:rw|a\      - ../mushroom_patrol/data/hold:/app/data/hold:rw' mushroom_solution.yml
+mkdir -p ../mushroom_patrol/data/hold
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_analysis mushroom_console
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_analysis mushroom_console
+```
+
+页面（**先上传、核 sha、再同盘原子替换**，不重建 console_web）：
+
+```bash
+pscp web/console/index.html root@10.77.77.39:/home/sysadmin/algorithm/mushroom_patrol/web/index.html.new
+# 现场：sha256sum 核对 = bc1ff1fa… ⇒ cp -p index.html index.html.bak-20261016-230103 && mv index.html.new index.html
+```
+
+### 22.6 验收（逐条实测，2026-10-16 23:0x）
+
+| 检查 | 结果 |
+| --- | --- |
+| 容器 | analysis / console = `0.1.0-20261016224447-ceb7b2d`、**healthy**、`restarts=0` |
+| **patrol 未被触碰** | 仍 `89e4a54`，`StartedAt 2026-10-13T13:02:13Z`（uptime 未重置）；preview/capture/console_web/solution 同样未动 |
+| `/timeline?zone=611&metric=coverage` | **200**，本批 62 轮 / 48 站矩阵（`axis.t0=2026-10-09T12:27:43`、`t1=2026-10-16T21:27:46`；notes 如实写"25 轮没有 `round_id`（旧轮次）……不猜"） |
+| `/api/timeline` 经 `:8001` 与经 `:8002`（单一 origin） | **200 / 200**；页面用的是 `zone + station_id + metric + batch_id=611\|2026-09-30` 那条（实测 200、矩阵非空） |
+| 页面 | 现场 sha `bc1ff1fa510c1bdfbd7b623cdcd5e4cb6748e5c65920e99fd31bd583f1f836d5`（360,468 B）= **本地逐字节一致**；`GET :8002/` 200 |
+| **外部可达**（开发机 → `http://10.77.77.39:8002/`） | 页面 200（360,468 B）、`/api/timeline` 200（131,436 B）——不是只在宿主上通 |
+| hold 记录挂载生效 | `GET /api/patrol/hold/log` → 200 `{"ok":true,"rows":[],"writable":true,…}` |
+| 数据未被本次发版改动 | `/rounds` 25,405 B、`/images` 3,182 B、`/batches` 1,291 B、`/ranges` 672 B —— 与发版前**逐字节相同** |
+| analysis 常驻作业 | 日志 `[env_ingest] 完成，游标: 2026-10-16T23:00:00`；`/healthz` 200 连续 |
+| 镜像内单源 | 容器内 `python3 -c "import analysis.timeline"` 通过 |
+
+**一条别误判**：新 console 的 `/api/status.events` 发版后是**空数组**——那是**进程内环形缓冲**
+（`deploy/src/deploy/console.py:500`，`self.events`），容器一 recreate 就清空；旧容器那 24 条
+是它自己跑了两天攒的。**不是回归**，下一轮（00:20）会重新攒。
+
+### 22.7 备份与回滚
+
+| 项 | 值 |
+| --- | --- |
+| prod `.env` | `.env.bak-20261016-225942`（`PATROL_IMAGE=…0be3947`） |
+| prod compose | `mushroom_solution.yml.bak-20261016-225942`（无 hold 挂载那版） |
+| 页面 | `index.html.bak-20261016-230103`（`4f464986…`，232,618 B） |
+
+回滚 = 还原两份文件 → `up -d --force-recreate --no-deps mushroom_analysis mushroom_console` → 页面 `mv` 回备份。
+⚠️ **回滚会把 console 一起退到 `0be3947`**（`.env` 的 `PATROL_IMAGE` 是三个容器共用的一条），
+不是它原来的 `c3dcbc5`——可接受（`0be3947` 比 `c3dcbc5` 新，含 `/api/ranges` 与 hold 记录），
+但要记着"console 回不到 c3dcbc5"这件事。
+
+### 22.8 本次**没有**覆盖的（欠账，不是漏做）
+
+1. **patrol 侧那一批**：观察高度档（票 16）、`room.yaml` 轮前刷新链（票 17/18 + 票 10）——
+   patrol 容器仍停在 `89e4a54`（里面的 `fetch_room` 还是 mysql 通路、也没有轮前刷新调用者）。
+   票 10 的硬边界仍是 **2026-10-20**。
+2. `--measure` 开启与 mm 列（票 09 §5，等 P6）。
+3. `mushroom_preview` 仍 `station-calibration-20261008-…`（票 04：preview 的 tag 独立演进）。
+4. **单元测试套件本次未重跑**（§22.4 第 3 行）——下次发版前应先把一个能跑 pytest 的环境补上。
+
