@@ -1367,3 +1367,89 @@ def test_ranges_reports_prod_failure_honestly(tmp_path):
         got = c.get("/api/ranges").json()
     assert got["ok"] is False and "prod 不通" in got["error"]
     assert got["rows"] == [] and "state" not in got, "不许给一个假的 state 顶替"
+
+# ---------- 票 07：`/api/timeline` 代理（票 02 的端点在 analysis；console 侧这条路由之前不存在） ----------
+# 页面（票 02）调 `/api/timeline`，而 console 是**逐端点注册**、没有通配转发（nginx 只把
+# `/api/` 指到 console）——不补这条，机上就是 404，页面只能如实说"查不到覆盖轨迹"。
+# 与 `/api/ranges` 同一口径（query 与信封原样），多一条：**状态码也原样**（400 不许折成 200）。
+
+
+class _TimelineUpstream:
+    """假 analysis：只实现透传要用的 `fetch`（原样给状态码与解析后的信封）。
+
+    这一层与 `__call__` 分开是刻意的：`__call__` 把非 2xx 折算成异常，代理就照抄不了
+    上游的状态码——而"照抄状态码"正是本票要的东西。
+    """
+
+    def __init__(self, *, status=200, payload=None, error=None):
+        self.status, self.payload, self.error = status, payload, error
+        self.seen = []
+
+    def fetch(self, url, *, params=None, body=None):
+        self.seen.append(url)
+        if self.error is not None:
+            raise self.error
+        return self.status, self.payload
+
+
+def test_timeline_forwards_the_query_untouched(tmp_path):
+    """query 原样贴到上游：**不重建、不建参数白名单**（重建就会吞掉将来加的筛选项）。"""
+    envelope = {"ok": True, "batch": {"entry_date": "2026-09-30", "batch_no": "mogu-611"},
+                "axis": {"t0": "2026-09-30T08:00:00", "t1": "2026-10-16T08:00:00"},
+                "nodes": [{"node_id": "S101", "points": []}], "notes": []}
+    up = _TimelineUpstream(payload=envelope)
+    with make_client(tmp_path, transport=up) as c:
+        r = c.get("/api/timeline?zone=611&station_id=S101&metric=coverage"
+                  "&batch_id=611%7C2026-09-30")
+        assert r.status_code == 200, r.text
+        assert r.json() == envelope, "信封原样透传"
+        # 空值也是 query 的一部分：页面"还没批次"时发的就是 `zone=&…&batch_id=`
+        c.get("/api/timeline?zone=&station_id=&metric=coverage&batch_id=")
+    assert up.seen == [
+        ("http://172.17.0.1:8000/timeline?zone=611&station_id=S101&metric=coverage"
+         "&batch_id=611%7C2026-09-30"),
+        "http://172.17.0.1:8000/timeline?zone=&station_id=&metric=coverage&batch_id=",
+    ], up.seen
+
+
+def test_timeline_passes_a_400_and_its_error_body_through(tmp_path):
+    """上游 400 是"这个请求本身有问题"，页面必须拿到 400 与**同一份**错误体。
+
+    折成 200 等于替上游改口：页面会把一次参数错误读成"这批没有轮次"。
+    """
+    body = {"detail": "metric='growth' 还不支持：P0 只认 coverage"}
+    up = _TimelineUpstream(status=400, payload=body)
+    with make_client(tmp_path, transport=up) as c:
+        r = c.get("/api/timeline?zone=611&station_id=S101&metric=growth&batch_id=611")
+    assert r.status_code == 400, "上游 400 不许被折成 200：" + r.text
+    assert r.json() == body, "错误体要原样，不许换一句自己的话"
+
+
+def test_timeline_reports_prod_failure_honestly(tmp_path):
+    """"问不到"与"这批确实没有轮次"必须分开：不通给明确错误，**不返回空信封冒充成功**。"""
+    up = _TimelineUpstream(error=ConnectionError("prod 不通"))
+    with make_client(tmp_path, transport=up) as c:
+        r = c.get("/api/timeline?zone=611&station_id=S101&metric=coverage&batch_id=611")
+    got = r.json()
+    assert r.status_code == 502, r.text
+    assert got["ok"] is False and "prod 不通" in got["error"], got
+    assert "nodes" not in got and "axis" not in got, \
+        "不许给空信封顶替（页面会把空信封读成'这批没有轮次'）"
+
+
+def test_timeline_says_so_when_upstream_answers_without_json(tmp_path):
+    """上游回话了、但不是 JSON 信封：状态码照抄 + 如实说"看不懂"，**绝不自己编一个信封**。"""
+    up = _TimelineUpstream(status=502, payload=None)
+    with make_client(tmp_path, transport=up) as c:
+        r = c.get("/api/timeline?zone=611&station_id=S101&metric=coverage&batch_id=611")
+    got = r.json()
+    assert r.status_code == 502 and got["ok"] is False and "非 JSON" in got["error"], got
+    assert "nodes" not in got, "空信封会被页面读成'这批没有轮次'"
+
+
+def test_timeline_says_so_when_no_analysis_transport_is_wired(tmp_path):
+    """没接 prod 也要说清楚——"问都没问"不许长得像"问到了、是空的"。"""
+    with make_client(tmp_path) as c:
+        r = c.get("/api/timeline?zone=611&station_id=S101&metric=coverage&batch_id=611")
+    assert r.status_code == 502 and r.json()["ok"] is False, r.text
+    assert "transport" in r.json()["error"], r.json()

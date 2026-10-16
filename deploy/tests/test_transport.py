@@ -172,3 +172,37 @@ def test_accept_json_errors_does_not_swallow_foreign_500():
              accept_json_errors=("success",))
     with pytest.raises(TransportError, match="500"):
         t(CAPTURE_URL)
+
+# ---------- 原样透传：fetch() 给状态码，不折算 2xx（console 的 /api/timeline 代理用它） ----------
+
+
+def test_fetch_hands_back_status_and_json_without_folding_non_2xx():
+    """上游 400 是**回答**，不是链路故障：状态码与错误体都要原样留给调用方。
+
+    console 的 /api/timeline 代理要把 400 与同一份错误体转给页面——在这里被折算成
+    TransportError 就照抄不成了（__call__ 的"2xx 之外一律折算"语义不变，那是业务调用）。
+    """
+    body = {"detail": "metric='growth' 还不支持：P0 只认 coverage"}
+    t = make(lambda r: httpx.Response(400, json=body))
+    assert t.fetch(CAPTURE_URL) == (400, body)
+
+
+def test_fetch_gives_2xx_payload_and_none_for_non_json():
+    """非 JSON 响应给 None，由调用方决定怎么如实说——传输层不替它编一个信封。"""
+    t = make(lambda r: httpx.Response(200, json={"ok": True}))
+    assert t.fetch(CAPTURE_URL) == (200, {"ok": True})
+
+    page = make(lambda r: httpx.Response(502, text="<html>bad gateway</html>"))
+    assert page.fetch(CAPTURE_URL) == (502, None)
+
+
+def test_fetch_still_flags_link_failure_as_transport_error():
+    """"没问到"与"问到了、上游说 400"必须分得开：白名单外／连不上仍然抛 TransportError。"""
+    def handler(request):
+        raise httpx.ConnectError("connection refused")
+
+    t = make(handler)
+    with pytest.raises(TransportError, match="请求失败"):
+        t.fetch(CAPTURE_URL)
+    with pytest.raises(TransportError, match="白名单"):
+        t.fetch("http://192.168.1.250:9000/mogu/x.jpg")
