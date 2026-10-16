@@ -151,6 +151,7 @@
   table.meas th,table.meas td{border-bottom:1px solid var(--line);padding:5px var(--sp-3);text-align:left}
   table.meas th{color:var(--dim);font-weight:600;background:var(--soft)}
   #curve svg{width:100%;height:170px;display:block}
+  #coverage svg{width:100%;height:170px;display:block}
   /* 环境模式：四道泳道（温/湿/CO₂/补光）各自一根纵轴——两个单位共用一根轴是在骗人 */
   .envbars{display:flex;gap:var(--sp-3);align-items:center;margin:var(--sp-3) 0}
   .envbars select{flex:0 1 190px}
@@ -682,6 +683,13 @@
       <div id="curve" class="empty">选一个站位，看它所在框的生长</div>
       <div id="growthnote" class="empty"></div>
     </div>
+    <div class="card">
+      <h2>覆盖轨迹 <span id="covertitle" style="color:var(--dim);font-weight:400"></span></h2>
+      <!-- 票 02：本批**逐轮**的巡检覆盖（一格一轮）。数据走 `"/api/timeline`，
+           时间轴约定与上面的生长曲线卡同源（票 01 立的：真实时间 x / 缺口断开 / null≠0）。 -->
+      <div id="coverage" class="empty">选一个站位，看它本批每一轮的巡检覆盖</div>
+      <div id="covernote" class="empty"></div>
+    </div>
   </section>
 
   <section id="envmain" style="display:none">
@@ -856,6 +864,7 @@ let observedResultId = '';
 let stationRequestSeq = 0;
 let historyRequestSeq = 0;
 let growthRequestSeq = 0;
+let coverageRequestSeq = 0;
 let cmdRequestInFlight = false;
 let cmdRefreshTimer = null;
 let statusRequestInFlight = false;
@@ -2301,6 +2310,8 @@ const CMP_TOD_TOLERANCE_MIN = 90;  // 偏离参考时段超过这么久就标"�
 
 let mode = 'realtime';
 const hist = { rows: [], rounds: [], growth: null, measure: null, picked: null, zoom: 1, px: 0, py: 0,
+               // 覆盖轨迹（票 02）：envelope + 这批数据是为哪个站位/哪一批取的（幂等护栏）
+               coverage: null, coverageStationId: '', coverageBatchKey: '',
                selectedRoundId: '', selectedBatchKey: '', focusedStationId: '',
   roundIndex: -1, roundCount: 0, hiddenRounds: 0,
                // 跨轮次对比（按天）：blocks = 每天一块（该天最接近参考时段的那一轮）；
@@ -2476,6 +2487,7 @@ function renderHistory(){
     else if(hist.rounds.length) tl.textContent = '所选批次/日期没有可精确归属的巡检轮次';
     else tl.textContent = '还没有带轮次 ID 的巡检记录';
     drawCurve();
+    drawCoverage();
     updateFrameInfo();
     renderCompare();
     return;
@@ -2553,6 +2565,7 @@ function renderHistory(){
     pickHistoryCell(el);
   });
   drawCurve();
+  drawCoverage();
   updateFrameInfo();
   renderCompare();
 }
@@ -2875,7 +2888,8 @@ function normalCount(rows){
 function history_pick(id, url, stationId){
   const stationChanged = !!stationId && hist.focusedStationId !== stationId;
   if(stationId) hist.focusedStationId = stationId;
-  if(stationChanged){ hist.growth = null; hist.measure = null; growthRequestSeq++; }
+  if(stationChanged){ hist.growth = null; hist.measure = null; growthRequestSeq++;
+                      hist.coverage = null; coverageRequestSeq++; }
   hist.picked = id;
   const img = $('#bigimg');
   if(url){
@@ -2922,6 +2936,9 @@ function updateFrameInfo(){
   // 拼图格、对比条、"上一站/下一站"、"选最新帧"、方向键全都经过这个函数，挂一处就全覆盖。
   // loadCompare() 自己幂等，所以同一次点击里被调用两次也只逐轮取一遍。
   loadCompare();
+  // 覆盖轨迹同理：挂在 updateFrameInfo() 上就覆盖了拼图格/上一站下一站/换轮次/换批次
+  // 全部入口；幂等键是（站位, 批次），换批次会重取、同一次点击不会取两遍。
+  loadCoverage();
   // 详情区的内容可信度一行：**只在该帧不可信时显示**（正常帧零痕迹，票 12 附条件 1）。
   const dupBox = $('#dpdup');
   if(dupBox){
@@ -3389,12 +3406,167 @@ function drawCurve(){
       右三列是<b>探索项</b>（一期不交付）：${esc(metric.label)}绝对值另在上方曲线。</div>`;
 }
 
+
+/* ---- 覆盖轨迹（票 02）：本批**逐轮**的巡检覆盖，一格一轮 ----
+   与生长曲线卡同一套时间轴约定（票 01 立的、spec 三条硬规则）：
+     ① x 由**真实时间戳**定位（'X(ts)'）——禁止拿数组下标当 x：巡检节奏一抖，等距就是假的；
+     ② 缺口**断开**：有帧的连续轮次接成一段，一段一条 '<path>'，段与段之间不连线；
+     ③ 'null ≠ 0'：这一轮没有帧 ⇒ 画**灰块**（'data-noframe'），绝不画成"0 帧"的点或柱。
+   数据来自 '/api/timeline'（一格一轮：端点给的就是本批**全部**轮次），所以网格里缺的那个
+   格子本身就是"这一轮没拍到"——不必再拿轮次表在旁边猜一遍（两处各写一套一定会漂）。 */
+function drawCoverage(){
+  const box = $('#coverage'), note = $('#covernote'), title = $('#covertitle');
+  if(!box) return;
+  const stationId = mode === 'history' ? hist.focusedStationId : '';
+  if(title) title.textContent = stationId ? ' · ' + stationId : '';
+  if(!stationId){
+    box.className = 'empty';
+    box.textContent = '选一个站位，看它本批每一轮的巡检覆盖';
+    note.textContent = '';
+    return;
+  }
+  const cov = hist.coverage;
+  if(!cov){
+    box.className = 'empty'; box.textContent = '读取覆盖轨迹…'; note.textContent = '';
+    return;
+  }
+  if(!cov.ok){
+    // "问不到端点"与"这批确实没有轮次"必须分得开（与生长曲线卡同一口径）；
+    // "还没有批次可依"又是第三种，别说成"查不到"。
+    if(cov.no_scope){
+      box.className = 'empty'; box.textContent = '还没有批次信息';
+      note.textContent = cov.error || '';
+      return;
+    }
+    box.className = 'empty'; box.textContent = '查不到覆盖轨迹';
+    note.textContent = '⚠ ' + (cov.error || '未知原因');
+    return;
+  }
+  const node = (cov.nodes || [])[0] || { points: [] };
+  const pts = node.points || [];
+  const axis = cov.axis || {}, batch = cov.batch || {};
+  const batchText = '本批 ' + (batch.batch_no || batch.entry_date || '?');
+  if(title) title.textContent = ' · ' + stationId + ' · ' + batchText;
+  const notes = (cov.notes || []).slice();
+  if(!pts.length){
+    box.className = 'empty';
+    box.textContent = '本批还没有可归属的巡检轮次';
+    note.textContent = notes.join(' · ') || (batchText + ' 还没有轮次');
+    return;
+  }
+  const W = 640, H = 170, padL = 46, padR = 12, padT = 12, padB = 30;
+  const iw = W - padL - padR;
+  const t0 = tsMs(axis.t0), t1 = tsMs(axis.t1);
+  const X = ts => {
+    const t = tsMs(ts);
+    if(t === null || t0 === null || t1 === null || t1 === t0) return padL + iw / 2;
+    return padL + (t - t0) / (t1 - t0) * iw;
+  };
+  // 有帧的格子才有**值**；没有帧的格子连值都没有（`n_frames` 是 null，不是 0）
+  const filled = pts.filter(p => p.has_frame && typeof p.n_frames === 'number');
+  const gaps = pts.filter(p => !p.has_frame);
+  const vals = filled.map(p => p.n_frames);
+  const hi = vals.length ? Math.max(...vals) : 1;
+  const lo = vals.length ? Math.min(...vals) : 0;
+  const span = (hi - lo) || 1;
+  const axisY = H - padB;
+  const Y = v => padT + (1 - (v - lo) / span) * (axisY - padT);
+  // 段：有帧的**连续**轮次接成一段；中间隔着没帧的轮次就在那里断开
+  const segs = [];
+  let cur = [];
+  for(const p of pts){
+    if(!p.has_frame){ if(cur.length) segs.push(cur); cur = []; continue; }
+    cur.push(p);
+  }
+  if(cur.length) segs.push(cur);
+  const lineD = seg => seg.map((p, i) =>
+    (i ? 'L' : 'M') + X(p.ts).toFixed(1) + ',' + Y(p.n_frames).toFixed(1)).join(' ');
+  const gapY = axisY + 9;                 // 灰块走"无数据"那条带，不占值轴
+  const ptTitle = p => esc(String(p.ts).replace('T', ' ')) + (p.has_frame ? ' · ' + esc(String(p.n_frames)) + ' 帧' : ' · 无帧（不是 0 帧）');
+  box.className = '';
+  // 一格有帧的都没有时**不画值轴**：轴上那两个数字（1、0）会被读成"0 帧"，
+  // 而这时一个值都没有——只有"哪几轮没拍到"这件事可画。
+  const yAxis = filled.length
+    ? `<line x1="${padL}" y1="${padT}" x2="${padL}" y2="${axisY}" stroke="#6b7785"/>
+    <text x="2" y="${Y(hi)+4}" fill="#6b7785" font-size="10">${hi}</text>
+    <text x="2" y="${Y(lo)+4}" fill="#6b7785" font-size="10">${lo}</text>`
+    : '';
+  box.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img"
+      aria-label="${esc(stationId)} ${esc(batchText)}：${filled.length} 轮有帧、${gaps.length} 轮无帧">
+    ${yAxis}
+    <line x1="${padL}" y1="${axisY}" x2="${W-padR}" y2="${axisY}" stroke="#6b7785"/>
+    <text x="${padL}" y="${H-4}" fill="#6b7785" font-size="10">${esc(String(axis.t0).slice(0,16))}</text>
+    <text x="${W-padR}" y="${H-4}" text-anchor="end" fill="#6b7785" font-size="10">${esc(String(axis.t1).slice(0,16))}</text>
+    ${segs.filter(seg => seg.length > 1).map(seg => `<path d="${lineD(seg)}" fill="none" stroke="#1f6feb" stroke-width="2"/>`).join(``)}
+    ${filled.map(p => `<circle class="cov-pt" cx="${X(p.ts).toFixed(1)}" cy="${Y(p.n_frames).toFixed(1)}" r="3.5" fill="#1f6feb" data-ts="${esc(p.ts)}" data-round-id="${esc(p.round_id)}" data-frames="${esc(String(p.n_frames))}"><title>${ptTitle(p)}</title></circle>`).join(``)}
+    ${gaps.map(p => `<rect class="cov-gap" x="${(X(p.ts) - 3.5).toFixed(1)}" y="${gapY - 3.5}" width="7" height="7" fill="#c2c8d0" data-ts="${esc(p.ts)}" data-round-id="${esc(p.round_id)}" data-noframe="1"><title>${ptTitle(p)}</title></rect>`).join(``)}
+  </svg>
+  <div class="legend"><span><i style="background:#1f6feb"></i>有帧（轮内帧数）</span>
+    <span><i style="background:#c2c8d0"></i>无帧（该轮没拍到，不是零）</span>
+    <span>${filled.length} / ${pts.length} 轮有帧</span></div>
+  <div class="empty" style="padding:4px 0 0">一格一轮，x 是**真实时间**（不是"第几个点"）；
+    没有帧的轮次在这里是空的——不补零、不插值、不连线跳过。
+    数据来自 <code>/api/timeline?metric=coverage</code>（纯读端点，一格一轮）。</div>`;
+  if(!filled.length) notes.push('本批这个站位一张帧都没有');
+  note.textContent = notes.join(' · ');
+}
+
+/** 覆盖轨迹的取数：本批**逐轮**（一格一轮）。
+ *  幂等：同一站位 + 同一批次已有数据就不重取（与跨轮次对比同一手法）。
+ *  批次取**页面上选中的那一批**（`hist.selectedBatchKey`，默认就是最新/当前批），
+ *  身份按 ADR-0020 写成 `<库房号>|<入库日期>` —— 不拿"今天"去推算批次。 */
+function coverageScope(){
+  const sel = hist.selectedBatchKey;
+  let room = '', entry = '';
+  if(sel){
+    try{ const parts = JSON.parse(sel); room = String(parts[0] || ''); entry = String(parts[1] || ''); }
+    catch(e){ room = ''; entry = ''; }
+  }
+  if(!room){                       // 还没有批次选择时退到"最新的一条轮次"的批次
+    const newest = (hist.rounds || [])[0] || {};
+    room = String(newest.room_id || ''); entry = String(newest.entry_date || '');
+  }
+  return { zone: room, batchKey: room + '|' + entry, hasRoom: !!room };
+}
+
+async function loadCoverage(){
+  if(mode !== 'history') return;
+  const stationId = hist.focusedStationId;
+  const scope = coverageScope();
+  if(!stationId || !scope.hasRoom){
+    // 有站位、却没有批次可依（轮次还没读回来）⇒ 如实说"还没有批次信息"：
+    // 不是"查不到"（端点根本没被问过），也不是永远转下去的"读取中…"。
+    hist.coverage = !stationId ? null : {
+      ok: false, no_scope: true, error: '还没有批次信息：先读取巡检轮次，或选一个批次',
+    };
+    hist.coverageStationId = ''; hist.coverageBatchKey = '';
+    drawCoverage();
+    return;
+  }
+  if(hist.coverage && hist.coverageStationId === stationId
+     && hist.coverageBatchKey === scope.batchKey){ drawCoverage(); return; }
+  const requestId = ++coverageRequestSeq;
+  hist.coverageStationId = stationId;
+  hist.coverageBatchKey = scope.batchKey;
+  let data;
+  try{
+    data = await jget('/api/timeline?zone=' + encodeURIComponent(scope.zone)
+                      + '&station_id=' + encodeURIComponent(stationId)
+                      + '&metric=coverage&batch_id=' + encodeURIComponent(scope.batchKey));
+  }catch(e){
+    data = {ok: false, error: '覆盖轨迹接口不可达：' + e.message};
+  }
+  if(requestId !== coverageRequestSeq || hist.focusedStationId !== stationId) return;
+  hist.coverage = data;
+  drawCoverage();
+}
 async function loadHistory(force){
   if(!force && hist.roundsLoaded){
     const roundId = syncRoundOptions();
     return loadRoundImages(roundId);
   }
-  if(force){ hist.growth = null; hist.measure = null; growthRequestSeq++; hist.compareRows = []; hist.compareStationId = ''; }
+  if(force){ hist.growth = null; hist.measure = null; growthRequestSeq++; hist.compareRows = []; hist.compareStationId = '';
+    hist.coverage = null; hist.coverageStationId = ''; hist.coverageBatchKey = ''; coverageRequestSeq++; }
   const requestId = ++historyRequestSeq;
   hist.roundsLoading = true;
   $('#timeline').className = 'empty';

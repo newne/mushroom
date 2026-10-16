@@ -71,7 +71,7 @@ __all__ = [
     "upsert_batches", "replace_batches", "fetch_batches", "fetch_batches_state",
     "insert_measurements", "fetch_measurements",
     "insert_images", "fetch_images", "fetch_room_box_ids",
-    "insert_rounds", "fetch_rounds",
+    "insert_rounds", "fetch_rounds", "fetch_round_coverage",
     "replace_ranges", "fetch_ranges", "fetch_advice_ranges",
     "write_ranges_state", "fetch_ranges_state",
 ]
@@ -251,6 +251,7 @@ _TABLE_DDL: tuple[str, ...] = (
 #: - `images (ts)`：历史列表 `ORDER BY ts DESC LIMIT`（PG 可以反向扫这个索引）；
 #: - `images (room_id, ts)`：`/growth/room` 枚举框号、按库房取图；
 #: - `images (box_id, ts)`：`/images?box_id=` 与 `/growth?box_id=` 的按框历史；
+#: - `images (round_id, station_id)`：`/timeline` 的"这一轮这一站有几帧"；
 #: - `measurements (room_id, ts)` / `measurements (box_id, ts)`：区间表按库房分组、
 #:   `/measurements?box_id=` 按框取点（主键 `(ts, room_id, box_id)` 管不了这两个前缀）；
 #: - `operations (zone, ts)`：`/operations` 与 setpoints 基线的"库房 + 时间窗"。
@@ -262,6 +263,9 @@ _INDEX_DDL: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS images_ts ON {s}.images (ts)",
     "CREATE INDEX IF NOT EXISTS images_room_ts ON {s}.images (room_id, ts)",
     "CREATE INDEX IF NOT EXISTS images_box_ts ON {s}.images (box_id, ts)",
+    # `images (round_id, station_id)`：`/timeline` 的"按轮次 + 站位数帧"（票 02）。
+    # 现有三条 images 索引都不覆盖 `round_id`，而这个读法每一轮都要按它找一次帧。
+    "CREATE INDEX IF NOT EXISTS images_round_station ON {s}.images (round_id, station_id)",
     "CREATE INDEX IF NOT EXISTS measurements_room_ts ON {s}.measurements (room_id, ts)",
     "CREATE INDEX IF NOT EXISTS measurements_box_ts ON {s}.measurements (box_id, ts)",
     "CREATE INDEX IF NOT EXISTS operations_zone_ts ON {s}.operations (zone, ts)",
@@ -687,6 +691,36 @@ def fetch_room_box_ids(conn: PgConnection, *, room_id: str) -> list[str]:
         (room_id,),
     )
     return [row["box_id"] for row in rows]
+
+
+def fetch_round_coverage(
+    conn: PgConnection, *, room_ids: list[str], entry_date: str, station_id: str
+) -> list[dict]:
+    """本批**逐轮 × 这一个站位**的帧数（覆盖轨迹的取数口径，只读）。
+
+    一轮一行，`n_frames` 是这一轮这个站位的帧数；**没有帧的轮次也要出现**
+    （LEFT JOIN 保住"这一轮巡检到了、这一站一张都没有"这件事——它是缺口，
+    不是"这轮不存在"）。`round_id` 为空的旧轮次照样返回（`n_frames` 为 0、`round_id` 为 NULL），
+    **归不归属由上层判**：这里不拿 ts 去猜它属于哪一轮。
+
+    批次按 `entry_date` 过滤（ADR-0020 的身份列），不用"今天减入库日"这类推算；
+    `room_ids` 收一组是为了兼容台账里的旧编号（`7`/`8` 与 `607`/`608` 不是一套编码）。
+    """
+    sql = f"""
+    SELECT r.ts            AS ts,
+           r.round_id      AS round_id,
+           r.entry_date    AS entry_date,
+           r.batch_no      AS batch_no,
+           max(i.box_id)   AS box_id,
+           count(i.ts)     AS n_frames
+    FROM {_table(conn, 'rounds')} r
+    LEFT JOIN {_table(conn, 'images')} i
+      ON i.round_id = r.round_id AND i.station_id = %s
+    WHERE r.room_id = ANY(%s) AND r.entry_date = %s
+    GROUP BY r.ts, r.round_id, r.entry_date, r.batch_no
+    ORDER BY r.ts
+    """
+    return _fetch_dicts(conn, sql, [station_id, list(room_ids), entry_date])
 
 
 def insert_rounds(conn: PgConnection, rows: list[dict]) -> None:

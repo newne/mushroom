@@ -213,6 +213,31 @@ const MEASUREMENTS = {
   ],
 };
 
+// `/api/timeline?metric=coverage`（票 02）：**本批逐轮**的覆盖轨迹，一格一轮。
+// 与上面同一批（611 · 2026-09-04 · BATCH-10）六轮：S102 在 09-12 那一轮**没有帧**
+// （灰块 + 断开）；S101 六轮**一张都没有**（空态 ≠ 0）；帧数故意不等（3/4/2/5/1），
+// 这样"图上的高度/间距来自数据"才有意义。
+// ⚠️ 缺帧的格子 `n_frames` 是 **null**（不是 0）——假件照端点契约写：
+//    没拍到 ≠ 拍到 0 张（spec 硬规则 2）。
+// 轮次**不等距**（一天两三轮的巡检节奏）：这样"x 是真实时间"才验得出来。
+// 相邻轮的真实间隔是 0.5 / 0.667 / 1 / 1 / 0.333 天；有帧的格点之间是 0.5 / 0.667 / 2 / 0.333 天，
+// **按下标画**会得到 1 / 1 / 2 / 1（跨缺口是段内的 2 倍，真实时间是 4 倍）。
+const COV_ROUNDS = [
+  { ts: "2026-09-10T06:00:00", round_id: "round-20260910", day: 6 },
+  { ts: "2026-09-10T18:00:00", round_id: "round-20260910b", day: 6 },
+  { ts: "2026-09-11T10:00:00", round_id: "round-20260911", day: 7 },
+  { ts: "2026-09-12T10:00:00", round_id: "round-20260912", day: 8 },
+  { ts: "2026-09-13T10:00:00", round_id: "round-20260913", day: 9 },
+  { ts: "2026-09-13T18:00:00", round_id: "round-20260913b", day: 9 },
+];
+// S102：09-12 那一轮**没有帧**（缺口 ⇒ 灰块 + 断开）。前三个有帧的格点成一段、
+// 后两个成另一段——"一段一条 path"才验得出来。
+const COV_FRAMES = { S102: { "round-20260910": 3, "round-20260910b": 4,
+                            "round-20260911": 2, "round-20260913": 5,
+                            "round-20260913b": 1 },
+                     S101: {} };
+const COV_BOX = { S101: "B101", S102: "B102", S412: "B412" };
+
 // 环境模式用：两个小时点，补光一个是"停止"(2) 一个是"关闭"(3)。
 // 分类量走色带，不走折线——对它求平均没有意义（ADR-0021）。
 const ENV_ROWS = [
@@ -281,6 +306,7 @@ const state = {
   reject_cmd: null,                           // 覆盖 POST /api/cmd 的状态码（测拒绝显示）
   growth_error: false,                        // 让 /api/growth 回"prod 查不到"
   measure_error: false,                       // 让 /api/measurements 回"prod 查不到"
+  timeline_error: false,                      // 让 /api/timeline 回 500（覆盖轨迹取不到）
   env_error: false,                           // 让 /api/environment 回"prod 查不到"
   env_empty: false,                           // 让 /api/environment 回"窗口内没有数据"
   ops_error: false,                           // 让 /api/operations 回"prod 查不到"
@@ -439,6 +465,26 @@ function route(method, url, body) {
     const boxId = params.get('box_id') || '';
     const rows = MEASUREMENTS[boxId] || [];
     return json(200, { ok: true, box_id: boxId, rows, n: rows.length });
+  }
+  if (path === "/api/timeline") {
+    // 票 02 的端点：**本批逐轮**的覆盖轨迹（单站位）。缺帧是 null、不是 0。
+    if (state.timeline_error) return json(500, { error: "boom" });
+    const params = new URL("http://console.local" + url).searchParams;
+    const stationId = params.get("station_id") || "";
+    const frames = COV_FRAMES[stationId] || {};
+    const points = COV_ROUNDS.map(r => {
+      const n = frames[r.round_id];
+      const has = typeof n === "number";
+      return { ts: r.ts, round_id: r.round_id, day: r.day, has_frame: has,
+               n_frames: has ? n : null };
+    });
+    return json(200, { ok: true, metric: "coverage", zone: "611", zone_requested: "611",
+      station_id: stationId,
+      batch: { room_id: "611", entry_date: "2026-09-04", batch_no: "BATCH-10" },
+      axis: { t0: COV_ROUNDS[0].ts, t1: COV_ROUNDS[COV_ROUNDS.length - 1].ts,
+              n_rounds: COV_ROUNDS.length },
+      nodes: [{ node_id: stationId, box_id: COV_BOX[stationId] || null, points }],
+      notes: [] });
   }
   if (path === '/api/environment') {
     if (state.env_error) return json(200, { ok: false, error: 'prod 查询失败：不通', rows: [] });
@@ -1847,6 +1893,76 @@ await sleep(150);
     await sleep(300);
   }
 
+// ---- 票 02：覆盖轨迹（本批逐轮；真实时间 x / 缺口断开 / 无帧不是 0）----
+  // 与上面那张卡同一套时间轴约定（票 01 立的），所以这里的护栏也照着它写：
+  //   ① x 由 `ts` 定位（等距=按下标画 ⇒ 红）；② 缺口断开（连过去 ⇒ 红）；
+  //   ③ 无帧画灰块、`data-frames` 一个都没有（画成"0 帧" ⇒ 红）。
+  {
+    const covCall = lastCall("/api/timeline");
+    check("覆盖轨迹按**选中的那一批**取数（zone + station_id + metric + batch_id=库房|入库日）",
+      !!covCall && covCall.url.includes("zone=611") && covCall.url.includes("station_id=S102")
+      && covCall.url.includes("metric=coverage")
+      && covCall.url.includes("batch_id=" + encodeURIComponent("611|2026-09-04")),
+      covCall ? covCall.url : "没有发过 /api/timeline");
+
+    const covDots = () => Array.from(document.querySelectorAll("#coverage svg circle.cov-pt"));
+    const covGaps = () => Array.from(document.querySelectorAll("#coverage svg rect.cov-gap"));
+    const covPathXs = () => Array.from(document.querySelectorAll("#coverage svg path"))
+      .map(p => [...((p.getAttribute("d")) || "").matchAll(/(-?[0-9.]+),(-?[0-9.]+)/g)]
+        .map(m => Number(m[1])));
+
+    const dots = covDots();
+    check("覆盖轨迹画出本批逐轮：6 轮里 5 轮有帧、1 轮无帧",
+      dots.length === 5 && covGaps().length === 1,
+      dots.length + " 个有帧格点 / " + covGaps().length + " 个无帧格");
+
+    // x 用真实时间戳。有帧的五个格点，相邻真实间隔是 0.5 / 0.667 / 2 / 0.333 天：
+    //   · 跨缺口那一段（09-11 → 09-13）= 第一段的 **4 倍**（真实 2d / 0.5d）；
+    //   · 最后一段（09-13 → 09-13 傍晚，0.333d）比第一段（0.5d）**短**。
+    // 拿数组下标当 x：跨缺口那段只有 2 倍、最后一段与第一段**相等**（都是 1 格）——两条都红。
+    const xs = dots.map(c => Number(c.getAttribute("cx")));
+    check("覆盖轨迹 x 用真实时间戳（跨缺口那段的间距是段内的 4 倍，不是等距）",
+      xs.length === 5 && (xs[1] - xs[0]) > 0
+      && Math.abs((xs[3] - xs[2]) / (xs[1] - xs[0]) - 4) <= 0.15,
+      "cx=" + xs.map(v => v.toFixed(1)).join(",") + "（真实间隔 0.5d / 0.667d / 2d / 0.333d）");
+    check("覆盖轨迹 x 用真实时间戳：0.5 天与 0.33 天的两段间距不相等（等距 ⇒ 红）",
+      xs.length === 5 && (xs[4] - xs[3]) > 0
+      && Math.abs((xs[1] - xs[0]) / (xs[4] - xs[3]) - 1.5) <= 0.1,
+      "第一段 " + (xs[1] - xs[0]).toFixed(1) + "px / 最后一段 " + (xs[4] - xs[3]).toFixed(1) + "px");
+
+    const segXs = covPathXs();
+    check("缺口断开：有帧的连续轮次各成一段（3 个点 + 2 个点），不跨过 09-12 直连",
+      segXs.length === 2 && segXs[0].length === 3 && segXs[1].length === 2
+      && Math.max(...segXs[0]) < Math.min(...segXs[1]),
+      segXs.length + " 段线：" + segXs.map(s => s.map(x => x.toFixed(1)).join("→")).join(" | "));
+
+    const gap = covGaps()[0];
+    check("无帧的轮次画成灰块（data-noframe，带 ts），**不是** 0 帧的格点",
+      !!gap && gap.getAttribute("data-noframe") === "1" && !gap.hasAttribute("data-frames")
+      && gap.getAttribute("data-ts") === "2026-09-12T10:00:00",
+      gap ? JSON.stringify({ ts: gap.getAttribute("data-ts"),
+                             noframe: gap.getAttribute("data-noframe"),
+                             frames: gap.getAttribute("data-frames") }) : "没有灰块");
+    check("整张卡里没有 data-frames=\"0\" 的格点（缺帧 ≠ 0 帧）",
+      document.querySelectorAll("#coverage [data-frames=\"0\"]").length === 0
+      && !Array.from(document.querySelectorAll("#coverage svg circle"))
+        .some(c => c.getAttribute("data-frames") === "0"),
+      "data-frames=\"0\" 的元素数：" + document.querySelectorAll("#coverage [data-frames=\"0\"]").length);
+    check("图例说清灰块是什么（无帧，不是零）", T("#coverage").includes("无帧"),
+      T("#coverage").slice(-90));
+
+    // S101：这一批五轮**一张帧都没有** ⇒ 空态（没有任何格点/柱），且不许出现 0 帧。
+    await click("#timeline .mosaic-cell[data-station-id=\"S101\"]");
+    await waitFor(() => T("#covertitle").includes("S101"), 4000);
+    check("本批一张帧都没有时不给任何格点（空态 ≠ 0）",
+      covDots().length === 0 && covGaps().length === 6
+      && document.querySelectorAll("#coverage [data-frames=\"0\"]").length === 0
+      && T("#covernote").includes("一张帧都没有"),
+      covDots().length + " 个格点 / " + covGaps().length + " 个灰块 / " + T("#covernote").slice(0, 60));
+
+    await click("#timeline .mosaic-cell[data-station-id=\"S102\"]");
+    await sleep(300);
+  }
   // 日期与角度筛选作用于所选巡检轮次。
   $('#fromDate').value = '2026-09-15'; $('#fromDate').dispatchEvent(new window.Event('change'));
   await sleep(150);

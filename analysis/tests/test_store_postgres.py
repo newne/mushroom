@@ -176,12 +176,13 @@ def test_the_query_indexes_are_created(pg, catalog, pg_schema):
     )
     indexes = {name: ddl for name, ddl in catalog.fetchall()}
     for name in ("environment_zone_ts", "environment_ts", "images_ts", "images_room_ts",
-                 "images_box_ts", "measurements_room_ts", "measurements_box_ts",
-                 "operations_zone_ts"):
+                 "images_box_ts", "images_round_station", "measurements_room_ts",
+                 "measurements_box_ts", "operations_zone_ts"):
         assert name in indexes, f"{name} 没建出来"
     assert "(zone, ts)" in indexes["environment_zone_ts"], "库房 + 时间窗"
     assert "(ts)" in indexes["images_ts"], "历史列表按 ts 倒序取最近 N 条"
     assert "(room_id, ts)" in indexes["images_room_ts"]
+    assert "(round_id, station_id)" in indexes["images_round_station"], "/timeline 按轮次+站位数帧"
 
 
 def test_schema_name_must_be_a_plain_identifier(monkeypatch):

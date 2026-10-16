@@ -31,6 +31,7 @@ from analysis.environment import (
 from analysis.growth import latest_delta, room_summary, series
 from analysis.rooms import canonical_room, canonical_rooms, display_room, resolve_rooms
 from analysis.setpoints import SetpointError, daily_states_from_db
+from analysis.timeline import axis_of, coverage_points
 
 #: 台账物化缓存的陈旧阈值（小时）。刷一次是每天 05:20（票 12 的 `BATCH_AT`）⇒ 26h 留 2h 余量。
 DEFAULT_LEDGER_STALE_AFTER_H = 26.0
@@ -467,6 +468,136 @@ def create_app(
             "duplicates": dupe_report,
         }
 
+
+    @app.get("/timeline")
+    def timeline(
+        zone: str = "",
+        station_id: str = "",
+        metric: str = "coverage",
+        batch_id: str = "",
+        entry_date: str = "",
+    ) -> dict:
+        """本批「每轮 × 站位」的覆盖轨迹（票 02：**只做 metric=coverage、只支持单站位**）。
+
+        现场要回答的是"这一批从时间维度看，这个节点哪几轮拍到了、哪几轮断了"，
+        所以应答是**一格一轮**的轨迹，不是聚合数字：
+
+        - `batch`：`room_id` / `entry_date` / `batch_no`（身份是 ADR-0020 的
+          「库房号 + 入库日期」；`batch_no` 是派生显示名，缺台账行就如实给 null，**不编**）；
+        - `axis`：`t0` / `t1` / `n_rounds`——网格首末轮的**真实时间戳**，页面按它定位 x；
+        - `nodes[]`：本期只有一项（`node_id` 站位 / `box_id` 框 / `points[]`）；
+        - `points[]`：`ts` / `round_id` / `day` / `has_frame` / `n_frames`；
+        - `notes[]`：数据侧说明（空批、无法归属的旧轮次）。
+
+        三条硬规则里，本端点负责把前两条**做成数据**（第三条"零前端依赖"在页面上）：
+
+        1. 每个格点带**真实时间戳** `ts`，`day`（生长天数，入库当天 = 0）由 `entry_date` 派生；
+           应答里**没有**任何"第几个点"的序号——页面想按下标画都无从下手。
+        2. `null ≠ 0`：这一轮这一站没有帧 ⇒ `has_frame=false` 且 **`n_frames` 为 null**
+           （不是 0）。"没拍到"是缺口（页面断开、画灰），"拍到 0 张"这件事不存在。
+
+        **批次口径**：`batch_id`（`<库房号>|<入库日期>`，ADR-0020）→ `entry_date` →
+        台账（`/batches` 的当前批 = 这个库房最新的一批）。过滤直接用 `rounds.entry_date`，
+        **不用**"今天减入库日"这类推算——批次身份在台账与轮次行上，不在时钟上。
+
+        **纯读**：只 SELECT `rounds` / `images` / `batches`；不写任何表、不碰 TDengine
+        （ADR-0026：只读源）。`metric=growth` 是 P1，等测量管线接通再开（现在给 400，
+        不返回一条假的零增长线）。
+        """
+        if (metric or "").strip() != "coverage":
+            raise HTTPException(
+                status_code=400,
+                detail=(f"metric={metric!r} 还不支持：P0 只认 coverage"
+                        "（长势 growth 等测量管线接通再开，P1）"),
+            )
+        station = (station_id or "").strip()
+        if not station:
+            raise HTTPException(
+                status_code=400,
+                detail="要指定 station_id：本票只做单站位查询（48 站总览见票 03）",
+            )
+        raw_zone = (zone or "").strip()
+        if not raw_zone:
+            raise HTTPException(status_code=400, detail="要指定 zone（轨迹按库房算）")
+        want = canonical_room(raw_zone)
+        if want is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{raw_zone!r} 不是规范库房号（{'/'.join(canonical_rooms())}），"
+                    "也不是别名表里登记过的旧编号"
+                ),
+            )
+        rooms = [raw_zone]
+        batch_no = None
+        if (batch_id or "").strip():
+            left, sep, right = batch_id.strip().partition("|")
+            entry = (right if sep else left).strip()[:10]
+            if sep and left.strip() != raw_zone and canonical_room(left) != want:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"batch_id={batch_id!r} 的库房号与 zone={raw_zone!r} 不是同一间",
+                )
+            if not entry:
+                raise HTTPException(
+                    status_code=400,
+                    detail="batch_id 里没有入库日期：写法是 `<库房号>|<YYYY-MM-DD>`（ADR-0020）",
+                )
+        elif (entry_date or "").strip():
+            entry = entry_date.strip()[:10]
+        else:
+            # 当前批 = 台账里这个库房**最新**的一批（与 /batches 同一份台账、同一个口径）
+            ledger, _alias = resolve_rooms(store.fetch_batches(conn), label="/timeline")
+            ledger, _dupes = dedupe_by_identity(ledger)
+            mine = [b for b in ledger
+                    if b.get("room_id_canonical") == want and b.get("entry_date")]
+            if not mine:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"台账里没有库房 {want} 的批次（先跑 analysis.batch_ingest），"
+                            "也可以直接给 batch_id 或 entry_date"),
+                )
+            newest = max(mine, key=lambda b: str(b["entry_date"]))
+            entry = str(newest["entry_date"])[:10]
+            batch_no = newest.get("batch_no")
+            # 台账可能挂旧编号（`7`/`8` 与 `607`/`608` 不是一套编码）：两套房间号都收，
+            # 否则会"批次数得出来、轮次一条都查不到"。
+            raw_batch_room = str(newest.get("room_id") or "").strip()
+            if raw_batch_room and raw_batch_room not in rooms:
+                rooms.append(raw_batch_room)
+
+        rows = store.fetch_round_coverage(
+            conn, room_ids=rooms, entry_date=entry, station_id=station
+        )
+        points = coverage_points(rows, entry_date=entry)
+        n_excluded = len(rows) - len(points)
+        notes: list[str] = []
+        if not rows:
+            notes.append(
+                f"本批（{want} {entry}）还没有巡检轮次：轨迹要等这一批有轮次之后才有内容"
+            )
+        if n_excluded:
+            notes.append(
+                f"{n_excluded} 轮没有 round_id（旧轮次）：帧挂不到它头上，未进网格——**不猜**"
+            )
+        if batch_no is None:
+            # 没走台账（调用方直接点了批次/日期）时用轮次行上的派生名；一个都没有 ⇒ null
+            batch_no = next((r.get("batch_no") for r in rows if r.get("batch_no")), None)
+        return {
+            "ok": True,
+            "metric": "coverage",
+            "zone": want,
+            "zone_requested": raw_zone,
+            "station_id": station,
+            "batch": {"room_id": want, "entry_date": entry, "batch_no": batch_no},
+            "axis": axis_of(points),
+            "nodes": [{
+                "node_id": station,
+                "box_id": next((r.get("box_id") for r in rows if r.get("box_id")), None),
+                "points": points,
+            }],
+            "notes": notes,
+        }
     @app.get("/environment/summary")
     def environment_summary(zone: str = "", start: str = "", end: str = "") -> dict:
         """窗口内的极值/分位数、缺口清单与"整列无源"标记（都基于小时聚合）。"""
