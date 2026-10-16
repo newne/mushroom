@@ -369,7 +369,12 @@ const state = {
   reject_cmd: null,                           // 覆盖 POST /api/cmd 的状态码（测拒绝显示）
   growth_error: false,                        // 让 /api/growth 回"prod 查不到"
   measure_error: false,                       // 让 /api/measurements 回"prod 查不到"
-  timeline_error: false,                      // 让 /api/timeline 回 500（覆盖轨迹取不到）
+  // 让 /api/timeline 回错（覆盖轨迹取不到）。票 08 起可以指定**上游是怎么回的**：
+  //   false          ⇒ 正常
+  //   true           ⇒ 老行为：500 + {error:'boom'}
+  //   {status, body} ⇒ 状态码 + JSON 信封（上游 400 的 detail、上游不通 502 的 error）
+  //   {status, raw}  ⇒ 只给字节（空 body / nginx 的 HTML 错误页）
+  timeline_error: false,
   timeline_blank_rounds: [],                  // 票 05：把这几轮整轮抹成无帧（下标指 COV_ROUNDS）
   env_error: false,                           // 让 /api/environment 回"prod 查不到"
   env_empty: false,                           // 让 /api/environment 回"窗口内没有数据"
@@ -446,7 +451,19 @@ function mapMmFromSvgPx(px, py) {
   return [y, z];
 }
 
-function json(status, body) { return { status, ok: status < 400, json: async () => body }; }
+// 假后端的响应照**真 Response** 的形状给：status / ok / text / json 四样。
+// text() 是票 08 要用的：页面在非 2xx 时**必须读 body**（票 07 保证状态码与错误信封
+// 原样透传），不读就只能把上游 400 的"参数错了"说成"连不上"。
+function json(status, body) {
+  return { status, ok: status < 400, text: async () => JSON.stringify(body),
+           json: async () => body };
+}
+// 只给字节的响应（空 body / 非 JSON）：真机上这就是挂在 console 前面的 nginx 回的
+// HTML 错误页。页面对它只许退化成状态行文案——不抛、不显示 undefined。
+function raw(status, text) {
+  return { status, ok: status < 400, text: async () => text,
+           json: async () => JSON.parse(text) };
+}
 
 function route(method, url, body) {
   state.calls.push({ method, url, body });
@@ -536,7 +553,11 @@ function route(method, url, body) {
     //   · 不给 station_id = **全部站位的矩阵**（票 03）：共享时间轴 rounds[] + 每站的
     //     points[i] 与之对齐（逐点重复 ts/round_id 会把单次响应抬到约 690 KB）。
     // 缺帧一律是 null、不是 0 —— 假件与端点契约逐字段对齐（spec 硬规则 2）。
-    if (state.timeline_error) return json(500, { error: "boom" });
+    if (state.timeline_error) {
+      const e = state.timeline_error;
+      if (e === true) return json(500, { error: "boom" });
+      return ("raw" in e) ? raw(e.status, e.raw) : json(e.status, e.body);
+    }
     const params = new URL("http://console.local" + url).searchParams;
     const stationId = params.get("station_id") || "";
     // 票 05：本轮被整轮抹掉的那几轮（下标）——明细与矩阵两条路都照同一个开关走，
@@ -2052,6 +2073,74 @@ await sleep(150);
 
     await click("#timeline .mosaic-cell[data-station-id=\"S102\"]");
     await sleep(300);
+  }
+
+  // ---- 票 08：上游的错误原因要显示出来，且 4xx 与 5xx 不许都说成"不可达" ----
+  // 起因（票 07 报出来的**错标**）：页面取数走 jget，见非 2xx 就抛、不读 body，于是
+  // 上游 400 到了页面上只剩"覆盖轨迹接口不可达：… HTTP 400"——真正的原因（detail）丢了，
+  // 还把"你的参数错了"说成了"连不上"（这两类故障的排查方向正好相反）。
+  // 票 07 已保证 console BFF **状态码与信封原样透传**，所以原因就在手里，是页面没读。
+  // 假件照 deploy/src/deploy/console.py 的三种真实回法造（test_console.py:1415 / 1428 / 1440）：
+  //   上游 400 + {"detail": …}（原样透传）/ 上游不通 502 + {"ok":false,"error":…}
+  //   / 非 JSON（挂在 console 前面的 nginx 回的 HTML 错误页）。
+  // 站位在相邻两例之间**必须换**：覆盖轨迹按（站位, 批次）幂等，同站连测第二次根本不发请求。
+  {
+    const upstream400 = "metric='growth' 还不支持：P0 只认 coverage";   // 真话术（test_console.py:1420）
+    const upstream502 = "prod 查询失败：prod 不通";                       // 真话术（test_console.py:1435）
+    const note = () => T("#covernote");
+    const coverNote = async (stationId, want) => {
+      await click('#timeline .mosaic-cell[data-station-id="' + stationId + '"]');
+      await waitFor(() => note().includes(want), 4000);
+      return note();
+    };
+
+    // ① 上游 400（detail 原样透传）⇒ 卡上显示**上游给的原因**，且不许再说"不可达"
+    state.timeline_error = { status: 400, body: { detail: upstream400 } };
+    const note400 = await coverNote("S412", upstream400);
+    check("上游 400 时显示上游给的原因（detail），不是笼统的\"接口不可达\"",
+      note400.includes(upstream400) && note400.includes("HTTP 400")
+      && !note400.includes("不可达"), note400);
+
+    // ② 上游不通 502 ⇒ 显示上游给的原因，且说成"连不上/服务异常"这一类
+    state.timeline_error = { status: 502, body: { ok: false, error: upstream502 } };
+    const note502 = await coverNote("S101", upstream502);
+    check("上游 502 时显示上游给的原因，且归到\"连不上/服务异常\"（不是\"请求有问题\"）",
+      note502.includes(upstream502) && note502.includes("HTTP 502") && note502.includes("不可达")
+      && !note502.includes("请求有问题"), note502);
+
+    // ③ 两类文案分得开：把 4xx 也说成"不可达"、或把 5xx 说成"请求有问题"，这一条就红
+    check("4xx 与 5xx 的文案分得开（4xx=\"请求有问题\"，5xx/网络=\"不可达\"）",
+      note400.includes("请求有问题") && !note400.includes("不可达")
+      && note502.includes("不可达") && !note502.includes("请求有问题"),
+      "400 → " + note400.slice(0, 70) + " ｜ 502 → " + note502.slice(0, 70));
+
+    // ④ body 非 JSON（网关错误页）⇒ 退化成状态行文案：不抛、不显示 undefined
+    state.timeline_error = { status: 502,
+      raw: "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>" };
+    const noteHtml = await coverNote("S412", "HTTP 502");
+    // 退化成**状态行文案**：状态码还在、请求地址还在——"读不到东西就退回人话"，不是把
+    // 读到的空值印上去（undefined / null / [object Object] / SyntaxError 都算印上去）。
+    // ⚠️ 这一条在**没读 body 的旧页面**上是绿的（旧页面根本不解析，也就无从印错）：它的
+    //    用处是钉住**新的读法**——解析失败只许退回，不许漏到卡上、更不许把整轮跑崩。
+    const degradeTail = t => (t.split("：").pop() || "").startsWith("/api/timeline");
+    check("非 JSON body（网关错误页）退化成状态行文案：不抛异常、不显示 undefined",
+      noteHtml.includes("HTTP 502") && degradeTail(noteHtml)
+      && !/undefined|\[object Object\]|SyntaxError/.test(noteHtml) && errors.length === 0,
+      noteHtml + " ｜ 运行期错误 " + errors.length + " 条");
+
+    // ⑤ body 为空 ⇒ 同上（状态码是这时唯一的真信息，不能丢）
+    state.timeline_error = { status: 400, raw: "" };
+    const noteEmpty = await coverNote("S101", "HTTP 400");
+    check("空 body 时退化成状态行文案：不抛异常、不显示 undefined、也不说\"不可达\"",
+      noteEmpty.includes("HTTP 400") && degradeTail(noteEmpty)
+      && !/undefined|\[object Object\]|SyntaxError/.test(noteEmpty)
+      && !noteEmpty.includes("不可达") && errors.length === 0,
+      noteEmpty + " ｜ 运行期错误 " + errors.length + " 条");
+
+    // 收场：假后端与页面都恢复（后面几张卡还要用这份数据画）
+    state.timeline_error = false;
+    await click('#timeline .mosaic-cell[data-station-id="S102"]');
+    await waitFor(() => document.querySelectorAll("#coverage svg circle.cov-pt").length === 5, 4000);
   }
 
   // ---- 票 03：时序总览（**本批全部站位**的小倍数矩阵；真实时间 x / 缺口断开 / null≠0）----

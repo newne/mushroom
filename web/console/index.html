@@ -1097,12 +1097,53 @@ function request(url, opt){
 
 async function jget(url){
   const r = await request(url);
-  if(!r.ok) throw new Error(url + ' → HTTP ' + r.status);
+  if(!r.ok){
+    // 票 08：非 2xx **要读 body**。票 07 保证 console BFF 把状态码与错误信封**原样透传**
+    // （400 就是 400、错误体一字不改；上游不通是 502 + error），所以原因就在手里。
+    // 不读它，页面只能把"你的参数错了"说成"连不上"——这两类的排查方向正好相反。
+    const error = new Error(url + ' → HTTP ' + r.status);
+    error.status = r.status;
+    error.url = url;
+    error.detail = await errorReason(r);
+    throw error;
+  }
   return r.json();
 }
 
-function requestErrorText(error){
-  return error && error.code === 'TIMEOUT' ? '请求超时，请检查 console 服务' : '接口不可达：' + error.message;
+/** 非 2xx 的响应体里取"上游给的原因"（票 08）：`detail`（FastAPI 的 400）/ `error`
+ *  （console 的 502）/ `notes`（分析端附注）三种键都认。空 body、非 JSON（挂在 console
+ *  前面的 nginx 回的 HTML 错误页）、字段不是标量时一律给空串——调用侧退回状态行文案，
+ *  **不抛、不显示 undefined**。 */
+async function errorReason(response){
+  let text = '';
+  try{ if(response && typeof response.text === 'function') text = await response.text(); }
+  catch(e){ return ''; }
+  if(typeof text !== 'string' || !text.trim()) return '';
+  let body = null;
+  try{ body = JSON.parse(text); }catch(e){ return ''; }
+  if(!body || typeof body !== 'object') return '';
+  const one = v => Array.isArray(v) ? v.map(one).filter(Boolean).join(' · ')
+    : (typeof v === 'string' ? v.trim()
+      : (typeof v === 'number' || typeof v === 'boolean') ? String(v) : '');
+  return [one(body.detail), one(body.error), one(body.notes)].filter(Boolean).join(' · ');
+}
+
+/** 取数失败要说人话（票 08）：**请求有问题（4xx）** 与 **连不上 / 服务异常（5xx 与网络
+ *  故障）** 是两类故障，排查方向相反——4xx 重发一百次也一样（去改参数），5xx/网络才要
+ *  去看服务。`label` 是"这是哪张卡在取数"，可省。上游给的原因（`error.detail`）优先于
+ *  状态行；读不到 body 时退回状态行，状态码一个都不丢。 */
+function requestErrorText(error, label){
+  const prefix = label ? label + '：' : '';
+  if(!error) return prefix + '接口不可达：未知错误';
+  if(error.code === 'TIMEOUT') return prefix + '请求超时，请检查 console 服务';
+  const status = error.status, reason = error.detail || '', where = error.url || error.message || '';
+  if(typeof status === 'number' && status >= 400 && status < 500){
+    return prefix + '请求有问题（HTTP ' + status + '）：' + (reason || where || '检查筛选条件或请求参数');
+  }
+  if(typeof status === 'number'){
+    return prefix + '接口不可达（HTTP ' + status + '）：' + (reason || where);
+  }
+  return prefix + '接口不可达：' + (reason || error.message || '未知错误');
 }
 
 /* ---- 区间表 `/api/ranges`（票 05 §5，2026-10-14 **破坏性形状变更**：裸列表 → 信封；
@@ -2411,7 +2452,7 @@ async function pvTick(){
   // reason='patrolling'，那种情况走下面的不可用分支，话术照旧。
   let st;
   try{ st = await jget('/api/preview/status'); }
-  catch(e){ st = {available:false, error:'接口不通：' + e.message}; }
+  catch(e){ st = {available:false, error: requestErrorText(e, '预览')}; }
   if(!pv.wanted) return;
   if(st.available){
     const up = st.upstream || {};
@@ -2918,7 +2959,7 @@ async function loadCompare(){
                         + '&station_id=' + encodeURIComponent(stationId)
                         + '&limit=' + CMP_FRAME_LIMIT);
     }catch(e){
-      data = { rows: [], error: e.message };
+      data = { rows: [], error: requestErrorText(e, '对比图') };
     }
     if(mode !== 'history' || hist.focusedStationId !== stationId) return;  // 站位变了，这批结果作废
     rows.push({ ...block, frame: compareFrameOf(data, stationId, angleAtFetch), error: data.error || '' });
@@ -3741,7 +3782,7 @@ async function loadCoverage(){
                       + '&station_id=' + encodeURIComponent(stationId)
                       + '&metric=coverage&batch_id=' + encodeURIComponent(scope.batchKey));
   }catch(e){
-    data = {ok: false, error: '覆盖轨迹接口不可达：' + e.message};
+    data = {ok: false, error: requestErrorText(e, '覆盖轨迹')};
   }
   if(requestId !== coverageRequestSeq || hist.focusedStationId !== stationId) return;
   hist.coverage = data;
@@ -4319,7 +4360,7 @@ async function loadOverview(){
     data = await jget("/api/timeline?zone=" + encodeURIComponent(scope.zone)
       + "&metric=coverage&batch_id=" + encodeURIComponent(scope.batchKey));
   }catch(e){
-    data = { ok: false, error: "时序总览接口不可达：" + e.message };
+    data = { ok: false, error: requestErrorText(e, "时序总览") };
   }
   if(requestId !== overviewRequestSeq) return;   // 被更新的请求取代：在飞标记由那一次收尾
   overviewInFlight = false;
@@ -4714,7 +4755,7 @@ async function ensureNodeEnv(retry){
                                    start: String(axis.t0), end: String(axis.t1)});
     data = await jget('/api/environment?' + q.toString());
   }catch(e){
-    data = {ok: false, error: '环境接口不可达：' + e.message};
+    data = {ok: false, error: requestErrorText(e, '环境')};
   }
   if(nodeEnvPending === key) nodeEnvPending = '';
   if(requestId !== detailEnvRequestSeq) return;          // 被更新的一次取代
@@ -5444,12 +5485,12 @@ async function loadGrowth(){
   try{
     growth = await jget('/api/growth?box_id=' + encodeURIComponent(boxId));
   }catch(e){
-    growth = {ok: false, error: '生长接口不可达：' + e.message, points: []};
+    growth = {ok: false, error: requestErrorText(e, '生长'), points: []};
   }
   try{
     measure = await jget('/api/measurements?box_id=' + encodeURIComponent(boxId));
   }catch(e){
-    measure = {ok: false, error: '测量接口不可达：' + e.message, rows: []};
+    measure = {ok: false, error: requestErrorText(e, '测量'), rows: []};
   }
   const currentStationId = mode === 'history' ? hist.focusedStationId : selected;
   if(requestId !== growthRequestSeq || currentStationId !== stationId) return;
@@ -5533,7 +5574,7 @@ async function loadEnv(){
       const s = await jget('/api/environment/summary?' + q.toString());
       if(requestId !== envRequestSeq) return;
       sum = (s && s.ok === false) ? { error: s.error || '未知原因' } : s;
-    }catch(e){ sum = { error: String((e && e.message) || e) }; }
+    }catch(e){ sum = { error: requestErrorText(e, '环境统计') }; }
     env.summary = sum;
     // 操作日志与实测并行取：一张是"环境怎么走的"，一张是"人怎么动它的"
     try{
@@ -5542,7 +5583,7 @@ async function loadEnv(){
       env.ops = (o && o.ok === false) ? { ok: false, error: o.error || '未知原因' } : o;
     }catch(e){
       if(requestId !== envRequestSeq) return;
-      env.ops = { ok: false, error: String((e && e.message) || e) };
+      env.ops = { ok: false, error: requestErrorText(e, '操作记录') };
     }
     // 批次对比：取整段历史按断档切段，不受上面时间范围限制
     const bq = new URLSearchParams({ limit: '3' });
@@ -5553,7 +5594,7 @@ async function loadEnv(){
       env.batches = (b && b.ok === false) ? { ok: false, error: b.error || '未知原因' } : b;
     }catch(e){
       if(requestId !== envRequestSeq) return;
-      env.batches = { ok: false, error: String((e && e.message) || e) };
+      env.batches = { ok: false, error: requestErrorText(e, '环境批次') };
     }
     // 区间表（票 05 §5 的信封）：**失败也要记下来**——`undefined` 显示"还没取到"，
     // 与"取到了但是空的（六态之一）"是两件事。
@@ -5563,7 +5604,7 @@ async function loadEnv(){
       env.ranges = r;
     }catch(e){
       if(requestId !== envRequestSeq) return;
-      env.ranges = { ok: false, error: String((e && e.message) || e) };
+      env.ranges = { ok: false, error: requestErrorText(e, '区间表') };
     }
     if(env.error){
       box.className = 'empty'; box.textContent = '查不到环境数据';
@@ -5578,7 +5619,7 @@ async function loadEnv(){
   }catch(e){
     if(requestId !== envRequestSeq) return;
     env.data = null; env.summary = null;
-    env.error = String((e && e.message) || e);
+    env.error = requestErrorText(e, '环境');
     env.ops = { ok: false, error: env.error };
     box.className = 'empty'; box.textContent = '查不到环境数据';
     note.textContent = '⚠ ' + env.error + '（页面→console→prod 这条链断在哪一段，看 console 日志）';
