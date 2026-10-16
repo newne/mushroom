@@ -255,10 +255,17 @@ const covFramesFor = (stationId, blanked) => {
   });
   return out;
 };
+// 票 09：这一批**现在的**轮次表——默认就是 COV_ROUNDS 本身（一份不差，前面的用例一条都不受影响）；
+// 开了 timeline_drop_day 就把那一天的轮次整条拿掉，造「整天没有巡检」的空档。明细与矩阵两条路
+// 都走它，所以「哪几轮存在」在假件这一侧只有一个事实（与端点自己给 rounds[] 的道理一样）。
+const covRoundsNow = () => {
+  const drop = state.timeline_drop_day ? String(state.timeline_drop_day) : "";
+  return drop ? COV_ROUNDS.filter(r => String(r.ts).slice(0, 10) !== drop) : COV_ROUNDS;
+};
 // 明细形态（票 02）的格点：每格自带 ts/round_id/day。矩阵形态不给这些（共享时间轴）。
 const covPoints = (stationId, blanked) => {
   const frames = covFramesFor(stationId, blanked);
-  return COV_ROUNDS.map(r => {
+  return covRoundsNow().map(r => {
     const n = frames[r.round_id];
     const has = typeof n === 'number';
     return { ts: r.ts, round_id: r.round_id, day: r.day, has_frame: has,
@@ -376,6 +383,12 @@ const state = {
   //   {status, raw}  ⇒ 只给字节（空 body / nginx 的 HTML 错误页）
   timeline_error: false,
   timeline_blank_rounds: [],                  // 票 05：把这几轮整轮抹成无帧（下标指 COV_ROUNDS）
+  // 票 09：造「中间**整天没有巡检**」的假数据——把那一天（YYYY-MM-DD）的轮次整条拿掉。
+  // axis 两端仍按**全量** COV_ROUNDS 给（t0/t1 不变）⇒ 空档落在窗口**中间**，看得见；
+  // 端点给的 rounds[].day 也跟着少几条（它是数据事实，但不再是页面刻度的唯一来源）。
+  timeline_drop_day: null,
+  // 票 09：batch.entry_date 缺失（端点认不出入库日）⇒ 页面必须退化成票 04 的老行为。
+  timeline_no_entry_date: false,
   env_error: false,                           // 让 /api/environment 回"prod 查不到"
   env_empty: false,                           // 让 /api/environment 回"窗口内没有数据"
   ops_error: false,                           // 让 /api/operations 回"prod 查不到"
@@ -563,9 +576,14 @@ function route(method, url, body) {
     // 票 05：本轮被整轮抹掉的那几轮（下标）——明细与矩阵两条路都照同一个开关走，
     // 这样"总览断在哪里"与"带断在哪里"在假件这一侧也是同一个事实。
     const blanked = new Set(state.timeline_blank_rounds || []);
-    const batch = { room_id: "611", entry_date: "2026-09-04", batch_no: "BATCH-10" };
+    // 票 09：轮次表走 covRoundsNow()（默认 = COV_ROUNDS，全量）；axis 两端**仍按全量**给，
+    // 所以「中间整天没有巡检」时窗口不变、空档落在窗口中间，而不是把窗口缩到只剩有巡检的天。
+    const liveRounds = covRoundsNow();
+    const batch = { room_id: "611",
+                    entry_date: state.timeline_no_entry_date ? null : "2026-09-04",
+                    batch_no: "BATCH-10" };
     const axis = { t0: COV_ROUNDS[0].ts, t1: COV_ROUNDS[COV_ROUNDS.length - 1].ts,
-                   n_rounds: COV_ROUNDS.length };
+                   n_rounds: liveRounds.length };
     if (stationId) {
       return json(200, { ok: true, metric: "coverage", zone: "611", zone_requested: "611",
         station_id: stationId, batch, axis,
@@ -577,7 +595,7 @@ function route(method, url, body) {
     // 页面按"无数据"灰格画——"本批没有记录"与"拍了 0 张"是两件事）。
     const nodes = STATIONS.filter(s => Object.keys(covFramesFor(s.id, blanked)).length).map(s => ({
       node_id: s.id, layer: s.layer, col: s.col, box_id: s.box_id,
-      points: COV_ROUNDS.map(r => {
+      points: liveRounds.map(r => {
         const n = covFramesFor(s.id, blanked)[r.round_id];
         const has = typeof n === "number";
         return { has_frame: has, n_frames: has ? n : null };
@@ -585,7 +603,7 @@ function route(method, url, body) {
     }));
     return json(200, { ok: true, metric: "coverage", zone: "611", zone_requested: "611",
       station_id: null, batch, axis,
-      rounds: COV_ROUNDS.map(r => ({ ts: r.ts, round_id: r.round_id, day: r.day })),
+      rounds: liveRounds.map(r => ({ ts: r.ts, round_id: r.round_id, day: r.day })),
       nodes, notes: [] });
   }
   if (path === '/api/environment') {
@@ -2516,6 +2534,133 @@ await sleep(150);
     check("点这种灰格也不发请求（矩阵与本批环境都只取一次）",
       urlCount(mark, isMatrix) === 0 && urlCount(mark, isBatchEnv) === 0,
       urlCount(mark, isMatrix) + " 次矩阵 / " + urlCount(mark, isBatchEnv) + " 次环境");
+  }
+
+  // ---- 票 09：天数带按 batch.entry_date **连续派生**（整天没有巡检的那一天也要有带）----
+  // 四条护栏（三条对应票面验收 + 一条防漂移）：
+  //   · 中间整天无巡检 ⇒ 那一天的带**仍然出现**（空档看得见，第二刻度不缺格）；
+  //   · 天数带边界与真实午夜边界**逐条重合**（页面上不许有第二套天数口径）；
+  //   · entry_date 缺失 ⇒ 退化成票 04 的老行为（不抛异常、不显示 NaN）；
+  //   · **防漂移**：自己派生的天数与端点给的 rounds[].day 在两者都存在处**逐条相等**——
+  //     页面上有两个「第几天」的来源，一条断言把口径钉死，比写两句注释强。
+  // 假件开关（默认关，前面的用例一条都不受影响）：timeline_drop_day 把 09-12 那一整天整条拿掉；
+  // timeline_no_entry_date 让端点认不出入库日。axis 两端仍按全量给 ⇒ 空档落在窗口**中间**。
+  {
+    const T0 = "2026-09-10T06:00:00", T1 = "2026-09-13T18:00:00";
+    const GAP = "2026-09-12";                 // 这一天整天没有巡检（fixture 里它本来只有一轮）
+    const MS = t => Date.parse(String(t).replace(" ", "T"));
+    const mdAll = sel => Array.from(document.querySelectorAll("#nodedetail " + sel));
+    const mdSvg = () => document.querySelector("#nodedetail svg.md-svg");
+    const dayBands = () => mdAll("rect.md-dayband");
+    const dayLines = () => mdAll("line.md-dayline");
+    const bandDays = () => dayBands().map(b => b.getAttribute("data-day"));
+    const attrN = (el, k) => Number(el && el.getAttribute(k));
+    const cells = () => mdAll("rect.md-covcell");
+    const gapBand = () => dayBands().find(b => b.getAttribute("data-date") === GAP);
+    const roundDay = ts => { const r = COV_ROUNDS.find(e => e.ts === ts); return r ? r.day : undefined; };
+    const reload = async pred => { $('#reloadbtn').click(); return waitFor(pred, 6000); };
+    const openS412 = async pred => {
+      const cell = document.querySelector('#overview .ov-cell[data-station-id="S412"]');
+      if(cell) cell.click();
+      return waitFor(pred, 6000);
+    };
+
+    // 先把放大视图开到 S412（六轮都有帧）：它跨过整个窗口，空档落在中间看得见
+    await openS412(() => !!mdSvg() && mdSvg().getAttribute("data-station-id") === "S412"
+      && cells().length === COV_ROUNDS.length);
+
+    // ---- 防漂移：自己派生的天数 vs 端点给的 rounds[].day，在两者都存在处**逐条相等** ----
+    // 每个轮次的 x 取覆盖条格子的中心（真实时间轴上的一点），落在哪条带里就是那一天的带。
+    const bandAt = x => dayBands().map(b => ({ day: Number(b.getAttribute("data-day")),
+      x0: attrN(b, "x"), x1: attrN(b, "x") + attrN(b, "width") }))
+      .find(b => x >= b.x0 - 0.01 && x <= b.x1 + 0.01);
+    const drift = cells().map(c => {
+      const ts = c.getAttribute("data-ts");
+      const b = bandAt(attrN(c, "x") + attrN(c, "width") / 2);
+      return { ts: ts, endpoint: roundDay(ts), derived: b ? b.day : null };
+    }).filter(o => o.derived !== o.endpoint);
+    check("防漂移：自己派生的天数与端点给的 rounds[].day 在两者都存在处**逐条相等**（两套口径 ⇒ 红）",
+      cells().length === COV_ROUNDS.length && drift.length === 0,
+      cells().length + " 轮比对，漂移 " + drift.length + " 条"
+      + (drift.length ? "：" + JSON.stringify(drift) : ""));
+
+    // ---- ① 中间整天无巡检：那一天的带照画 ----
+    state.timeline_drop_day = GAP;
+    const dropped = await reload(() => cells().length === COV_ROUNDS.length - 1 && !!gapBand());
+    check("票 09：整天没有巡检的那一天，天数带**照画**（窗口里每一天一条：第 6/7/8/9 天都在）",
+      dropped && dayBands().length === 4 && bandDays().join(",") === "6,7,8,9"
+      && dayBands().every(b => attrN(b, "width") > 0)
+      && !!gapBand() && gapBand().getAttribute("data-date") === GAP,
+      dayBands().length + " 条带：" + dayBands().map(b => "第" + b.getAttribute("data-day")
+        + "天@" + b.getAttribute("data-date") + "(w=" + attrN(b, "width").toFixed(1) + ")").join(" "));
+    check("票 09：空档那一天的带里**没有数据点**——如实空着，不补 0 帧、也不把邻点挪进去",
+      !!gapBand() && cells().length === COV_ROUNDS.length - 1
+      && cells().every(c => {
+        const x = attrN(c, "x") + attrN(c, "width") / 2;
+        return x < attrN(gapBand(), "x") - 0.01
+            || x > attrN(gapBand(), "x") + attrN(gapBand(), "width") + 0.01;
+      })
+      && document.querySelectorAll('#nodedetail [data-frames="0"]').length === 0,
+      cells().length + " 个覆盖格（都在这条带外） / " + GAP);
+
+    // ---- ② 天数带边界与**真实午夜边界**逐条重合 ----
+    check("票 09：空档处的**真实午夜边界**还在（三条边界 = 三个午夜，09-12 那条不因为没巡检就消失）",
+      dayLines().map(l => l.getAttribute("data-ts")).join(",")
+        === "2026-09-11T00:00:00,2026-09-12T00:00:00,2026-09-13T00:00:00",
+      dayLines().map(l => l.getAttribute("data-ts")).join(" | ") || "(没有边界线)");
+    check("票 09：天数带边界与真实午夜边界**逐条重合**（每条线 = 前一条带的右端 = 后一条带的左端）",
+      dayLines().length === dayBands().length - 1 && dayLines().every((l, i) => {
+        const left = dayBands()[i], right = dayBands()[i + 1], x = Number(l.getAttribute("x1"));
+        return !!left && !!right
+          && Math.abs(attrN(left, "x") + attrN(left, "width") - x) <= 0.05
+          && Math.abs(attrN(right, "x") - x) <= 0.05;
+      }),
+      dayLines().map((l, i) => {
+        const left = dayBands()[i], right = dayBands()[i + 1];
+        return (left ? (attrN(left, "x") + attrN(left, "width")).toFixed(1) : "?") + "/"
+          + Number(l.getAttribute("x1")).toFixed(1) + "/" + (right ? attrN(right, "x").toFixed(1) : "?");
+      }).join(" | "));
+    // 这条带的两端必须是**真实午夜在真实时间轴上**的位置（测试自己从两个已知轮次拉出这条轴）
+    const cA = cells().find(c => c.getAttribute("data-ts") === "2026-09-11T10:00:00");
+    const cB = cells().find(c => c.getAttribute("data-ts") === "2026-09-13T10:00:00");
+    const pA = cA ? { t: MS("2026-09-11T10:00:00"), x: attrN(cA, "x") + attrN(cA, "width") / 2 } : null;
+    const pB = cB ? { t: MS("2026-09-13T10:00:00"), x: attrN(cB, "x") + attrN(cB, "width") / 2 } : null;
+    const axisX = t => (pA && pB && pB.t !== pA.t)
+      ? pA.x + (pB.x - pA.x) / (pB.t - pA.t) * (t - pA.t) : NaN;
+    check("票 09：这条带盖的就是那一天的**真实午夜区间**（x 由真实时间轴算出，不是等分摆上去）",
+      !!gapBand() && !!pA && !!pB
+      && Math.abs(attrN(gapBand(), "x") - axisX(MS("2026-09-12T00:00:00"))) <= 0.6
+      && Math.abs(attrN(gapBand(), "x") + attrN(gapBand(), "width")
+                  - axisX(MS("2026-09-13T00:00:00"))) <= 0.6,
+      "带 x=" + (gapBand() ? attrN(gapBand(), "x").toFixed(1) : "?") + " 宽="
+      + (gapBand() ? attrN(gapBand(), "width").toFixed(1) : "?") + "，午夜在 "
+      + axisX(MS("2026-09-12T00:00:00")).toFixed(1) + " → "
+      + axisX(MS("2026-09-13T00:00:00")).toFixed(1));
+
+    // ---- ③ entry_date 缺失：退化成票 04 的老行为 ----
+    state.timeline_no_entry_date = true;
+    // 等的是**新渲染真的回来了**：少了入库日 ⇒ svg 上的 data-entry-date 变空（旧的那次还带着 09-04）
+    const degraded = await reload(() => !!mdSvg() && dayBands().length === 3
+      && String(mdSvg().getAttribute("data-entry-date")) === "");
+    check("票 09：entry_date 缺失 ⇒ 退化成票 04 的老行为（只画端点给了 day 的天：6/7/9），不抛异常、不显示 NaN",
+      degraded && !!mdSvg() && dayBands().length === 3 && bandDays().join(",") === "6,7,9"
+      && String(mdSvg().getAttribute("data-entry-date")) === ""
+      && T("#nodedetail").indexOf("NaN") < 0
+      && dayBands().every(b => Number.isFinite(Number(b.getAttribute("data-day")))),
+      (mdSvg() ? "data-entry-date=" + JSON.stringify(mdSvg().getAttribute("data-entry-date")) : "(没有 svg)")
+      + " / " + dayBands().length + " 条带：" + bandDays().join(","));
+
+    // 还原（后面的用例接着跑）：默认矩阵 + 默认入库日回来
+    state.timeline_no_entry_date = false;
+    state.timeline_drop_day = null;
+    const restored = await reload(() => cells().length === COV_ROUNDS.length
+      && dayBands().length === COV_ROUNDS.length - 2);
+    check("还原后再读一次：六轮都在、四条天数带都在（假件开关不残留给后面的用例）",
+      restored && cells().length === COV_ROUNDS.length && bandDays().join(",") === "6,7,8,9"
+      && !!mdSvg() && mdSvg().getAttribute("data-entry-date") === "2026-09-04"
+      && mdSvg().getAttribute("data-t0") === T0 && mdSvg().getAttribute("data-t1") === T1,
+      cells().length + " 轮 / " + dayBands().length + " 条带 / entry="
+      + (mdSvg() ? mdSvg().getAttribute("data-entry-date") : "?"));
   }
 
   // ---- 票 05：库房分位数带（本批**全部站位**按轮次聚合成中位线 + IQR 带）----

@@ -4371,7 +4371,9 @@ async function loadOverview(){
 /* ---- 节点放大（票 04）：**一个节点**的放大视图；点时序总览里的任一格进入 ----
    三块内容叠在**同一条真实时间轴**上（spec 硬规则 1 / 票 04 的验收）：
      ① **双刻度**：下面一行是真实时间（主），上面一条带是**生长第 N 天**（次）——
-        `day` 由端点按入库日派生（入库当天 = 第 0 天），页面**不自己算**、也不拿别的数凑；
+        第 N 天 = 日历日 − `batch.entry_date`（入库当天 = 第 0 天），与端点
+        `analysis/timeline.day_of` **同一口径**（票 09：窗口里**每一天**一条带，
+        整天没有巡检也照画、带里如实空着——见 `mdDayBands`）；
         天数带的边界落在**真实午夜**上、宽度按**真实时长**（18h / 24h 不是等分）；
      ② **环境带**：温度 / 湿度 / CO₂ 三条线（各占一根纵轴）+ **光照循环制度**色带——
         把连续若干小时里 `(lamp_on_m, lamp_off_m)` 相同的并成一段（票 04 的口径）；
@@ -4437,13 +4439,82 @@ function mdScale(t0, t1){
   };
 }
 
-/** 生长天数带（双刻度的**次**刻度）：把端点给的 `day` 按**真实午夜**分段。
+/** 日期前缀 → 日历日编号（这一天 00:00 的 UTC 毫秒，只当**日历格子**的编号用）。
+ *
+ *  只认 `YYYY-MM-DD` 前缀——与端点的 `analysis/timeline._as_date` **同一口径**：
+ *  时间部分不参与。要是拿小时去算，"06:00 与 18:00 算不算两天"就成了第三套口径，
+ *  天数带与真实午夜边界立刻错开。
+ *  认不出来（缺 `entry_date`、格式不对、`2026-02-31` 这种不存在的日期）⇒ null：不猜。 */
+function mdDayKey(value){
+  const text = String(value === null || value === undefined ? '' : value).trim();
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(text);
+  if(!m) return null;
+  const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
+  const ms = Date.UTC(y, mo - 1, d);
+  const back = new Date(ms);
+  if(back.getUTCFullYear() !== y || back.getUTCMonth() !== mo - 1 || back.getUTCDate() !== d) return null;
+  return ms;
+}
+
+/** 日历日编号 → `YYYY-MM-DD`（带前导零）。 */
+function mdDayText(key){
+  const d = new Date(key), p = n => String(n).padStart(2, '0');
+  return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate());
+}
+
+/** 真实时间戳（毫秒）→ 它落在的**本地日历日**编号。 */
+function mdDayKeyOf(ms){
+  const d = new Date(ms);
+  return Date.UTC(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+/** 天数带要覆盖的日历日区间 `[首日, 末日]`（编号）：以**窗口两端**为准
+ *  （页面只有那一份窗口：本批整段或刷选段）；窗口时间戳认不出来时退回轮次自身的范围。 */
+function mdDaySpan(axis, points){
+  const a = tsMs(axis && axis.t0), b = tsMs(axis && axis.t1);
+  if(a !== null && b !== null && b >= a) return [mdDayKeyOf(a), mdDayKeyOf(b)];
+  let lo = null, hi = null;
+  for(const p of (points || [])){
+    const t = tsMs(p && p.ts);
+    if(t === null) continue;
+    if(lo === null || t < lo) lo = t;
+    if(hi === null || t > hi) hi = t;
+  }
+  return (lo === null || hi === null) ? null : [mdDayKeyOf(lo), mdDayKeyOf(hi)];
+}
+
+/** 生长天数带（双刻度的**次**刻度）：按 `entry_date` 做**连续的日历映射**，一天一条带。
  *
  *  边界一律是真实时间戳（`2026-09-11T00:00:00`）——所以它与真实时间刻度是**同一条轴**；
  *  把窗口按天数等分是另一回事（那会让边界离开真实午夜，图上就成了两套比例）。
- *  `day` 为 null（端点认不出入库日）⇒ 整段**不画**：不猜一个"第几天"摆上去
- *  （与 `analysis/timeline.day_of` 的 null 语义同口径）。 */
-function mdDayBands(points){
+ *  第 N 天 = 这一天（日历日）与入库日之差，入库当天 = 第 0 天——与端点
+ *  `analysis/timeline.day_of` **同一口径**：页面上"第几天"只有这一个来源。
+ *  **整天没有巡检也照常出现那一天的带**（票 09）：规格要的是"由 `entry_date` 派生"的连续
+ *  日历映射，不是"有巡检的天才有刻度"。带里没有数据点就**如实空着**，不补点、不插值。
+ *  `entry_date` 认不出来 ⇒ 退化成票 04 的老行为（`mdDayBandsByEndpoint`：只画端点给了
+ *  `day` 的那些天）：**不猜**一个"第几天"摆上去（与 `day_of` 的 null 语义同口径）。 */
+function mdDayBands(points, entryDate, axis){
+  const entry = mdDayKey(entryDate);
+  const span = entry === null ? null : mdDaySpan(axis, points);
+  if(span){
+    const out = [];
+    for(let k = span[0]; k <= span[1]; k += 86400000){
+      const startTs = mdDayText(k) + 'T00:00:00';
+      const startMs = tsMs(startTs), nextMs = tsMs(mdDayText(k + 86400000) + 'T00:00:00');
+      if(startMs === null || nextMs === null) continue;
+      out.push({ day: Math.round((k - entry) / 86400000), startTs: startTs,
+                 startMs: startMs, endMs: Math.max(nextMs, startMs + 1) });
+    }
+    return out;
+  }
+  return mdDayBandsByEndpoint(points);
+}
+
+/** 票 04 的老行为（**只在 `entry_date` 认不出来时**当退路）：把端点给的 `day` 按真实午夜分段。
+ *
+ *  它按"有巡检的天"出带 ⇒ 中间整天没有巡检时那一天会**缺格**（票 09 修的就是这个）。
+ *  `day` 为 null（端点也认不出入库日）⇒ 整段**不画**：不猜一个"第几天"摆上去。 */
+function mdDayBandsByEndpoint(points){
   const out = [];
   for(const p of (points || [])){
     const ts = p && p.ts;
@@ -4625,11 +4696,13 @@ function mdCoverageSvg(points, X){
 
 /** 整张放大图（**手写内联 SVG**，零依赖）：天数带（次刻度）+ 环境带 + 光照制度 + 覆盖条，
  *  全部走同一套 mdScale —— 这就是"双刻度在同一条轴上"在代码里的落点。 */
-function mdSvgMarkup(stationId, points, rounds, axis, envRows, where){
+function mdSvgMarkup(stationId, points, rounds, axis, envRows, where, entryDate){
   const X = mdScale(axis.t0, axis.t1);
-  const bands = mdDayBands(rounds);
+  // 票 09：天数带按**入库日**连续派生（窗口里每一天一条），不再只认端点给了 `day` 的那些天
+  const bands = mdDayBands(rounds, entryDate, axis);
   const out = ['<svg class="md-svg" viewBox="0 0 ' + MD.W + ' ' + MD.H + '" role="img"'
     + ' data-station-id="' + esc(stationId) + '"'
+    + ' data-entry-date="' + esc(String(entryDate || '')) + '"'
     + ' data-t0="' + esc(String(axis.t0 || '')) + '" data-t1="' + esc(String(axis.t1 || '')) + '"'
     + ' aria-label="' + esc(where + '：双刻度时间轴（真实时间 + 生长天数）、环境带与巡检覆盖') + '">'];
   // ① 生长天数带（次刻度）+ 真实午夜边界
@@ -4637,7 +4710,9 @@ function mdSvgMarkup(stationId, points, rounds, axis, envRows, where){
     const x0 = X.clamp(X.ms(b.startMs)), x1 = X.clamp(X.ms(b.endMs));
     const w = x1 - x0;
     if(w <= 0) return;
+    // `data-date` = 这条带盖住的**日历日**：天数（data-day）由它减入库日得到，两个都在带自己身上
     out.push('<rect class="md-dayband' + (i % 2 ? ' odd' : '') + '" data-day="' + esc(String(b.day))
+      + '" data-date="' + esc(String(b.startTs).slice(0, 10))
       + '" x="' + x0.toFixed(1) + '" y="' + MD.dayTop + '" width="' + w.toFixed(1)
       + '" height="' + MD.dayH + '"/>');
     out.push('<text class="md-daylbl" data-day="' + esc(String(b.day)) + '" x="'
@@ -4692,14 +4767,16 @@ function mdLegend(){
     + '<span><i class="seg" style="background:#fdf1dc"></i>光照循环制度（按 (OnMSet, OffMSet) 切段）</span>'
     + '<span><i style="background:#1f6feb"></i>有帧</span>'
     + '<span><i class="seg" style="background:#eef1f5"></i>无帧（不是 0 帧）</span>'
-    + '<span>第 N 天 = 端点按入库日派生（入库当天 = 第 0 天）</span>'
+    + '<span>第 N 天 = 按入库日派生（入库当天 = 第 0 天）：整天没有巡检的那天也画带，带里空着</span>'
     + '</div>';
 }
 
 function mdFootnote(){
   return '<div class="empty" style="padding:4px 0 0">一条轴上两套刻度：下面一行是<b>真实时间</b>（主），'
-    + '上面那条带是<b>生长第 N 天</b>（次，端点按入库日派生）——天数带的边界落在<b>真实午夜</b>上，'
-    + '宽度按真实时长，不是把窗口按天等分。光照按<b>循环制度</b>切段：连续若干小时里 '
+    + '上面那条带是<b>生长第 N 天</b>（次，按 <code>batch.entry_date</code> 派生，入库当天 = 第 0 天）'
+    + '——天数带的边界落在<b>真实午夜</b>上，宽度按真实时长，不是把窗口按天等分；'
+    + '<b>窗口里每一天都有一条带</b>，整天没有巡检的那一天照画（带里没有数据点，如实空着）。'
+    + '光照按<b>循环制度</b>切段：连续若干小时里 '
     + '<code>(OnMSet, OffMSet)</code> 相同的并成一段；<b>设备状态</b>（0=自动 / 1=手动 / 2=停止 / 3=关闭）'
     + '不参与切段，也不拿它对时间积分当「点亮时长」（现场口径是开几秒、停约两小时，两侧各取自不同的档）。'
     + '环境来自 <code>/api/environment</code>（按本批窗口<b>一次</b>取回；缺测的小时断开、不插值），'
@@ -4864,8 +4941,10 @@ function drawNodeDetail(){
   }
   const where = stationId + (node && node.box_id ? '（' + node.box_id + '）' : '');
   box.className = '';
-  // 天数带只看窗口内的轮次；覆盖条与帧数轨迹用窗口内的格点；x 一律走 mdScale(窗口)
-  box.innerHTML = mdSvgMarkup(stationId, pts, win.rounds, { t0: win.t0, t1: win.t1 }, envRows, where)
+  // 天数带按**入库日连续派生**（窗口里每一天一条，整天没巡检也照画——票 09）；
+  // 覆盖条与帧数轨迹用窗口内的格点；x 一律走 mdScale(窗口)：天数带与真实午夜边界共用这一套比例
+  box.innerHTML = mdSvgMarkup(stationId, pts, win.rounds, { t0: win.t0, t1: win.t1 }, envRows, where,
+                              batch.entry_date)
     + mdLegend() + mdFootnote();
   note.textContent = notes.join(' · ');
 }
