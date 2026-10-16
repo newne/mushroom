@@ -142,6 +142,37 @@
   .ov-cell .ov-line{fill:none;stroke:currentColor;stroke-width:1.6}
   .ov-cell .ov-pt{fill:currentColor}
   .ov-cell .ov-gapmark{fill:#c2c8d0}
+  /* ---- 节点放大（票 04）：真实时间（主）+ 生长第 N 天（次）叠在**同一条轴**上，
+     再叠环境带（温/湿/CO₂ + 光照循环制度色带）与巡检覆盖条。
+     零依赖：整张图是**手写内联 SVG**（spec 硬规则 3），不引任何图表库。
+     状态色/线色只有这一处：SVG 里的类名与这里一一对应。 */
+  #nodedetail svg{display:block;width:100%;height:auto}
+  #nodedetail .md-axis{stroke:#6b7785;stroke-width:1}
+  #nodedetail .md-grid{stroke:#dbe3ef;stroke-width:0.8}
+  #nodedetail .md-lane{font-size:10.5px;fill:#6b7785}
+  #nodedetail .md-val{font-size:10.5px;fill:#24292f;font-weight:600}
+  #nodedetail .md-dayband{fill:#f4f7fc}
+  #nodedetail .md-dayband.odd{fill:#e9f0f8}
+  #nodedetail .md-daylbl{font-size:10px;fill:#41505f;font-weight:600}
+  #nodedetail .md-dayline{stroke:#c7d2e2;stroke-width:1;stroke-dasharray:3 3}
+  #nodedetail .md-tick{font-size:10px;fill:#6b7785}
+  #nodedetail .md-envline{fill:none;stroke-width:1.6}
+  #nodedetail .md-envline[data-param="temp_c"]{stroke:#d94a3d}
+  #nodedetail .md-envline[data-param="rh_pct"]{stroke:#1f6feb}
+  #nodedetail .md-envline[data-param="co2_ppm"]{stroke:#18794e}
+  #nodedetail .md-envhit{fill:transparent}
+  #nodedetail .md-lampseg{fill:#fdf1dc;stroke:#c9b48c;stroke-width:0.8}
+  #nodedetail .md-lampseg.r1{fill:#e6eefb;stroke:#a9bedd}
+  #nodedetail .md-lampseg.r2{fill:#e8f4ea;stroke:#aecfb6}
+  #nodedetail .md-lampseg.r3{fill:#f3ecfb;stroke:#c3b3dd}
+  #nodedetail .md-lamplbl{font-size:10.5px;fill:#3b4654}
+  #nodedetail .md-covline{fill:none;stroke:#1f6feb;stroke-width:1.8}
+  #nodedetail .md-covpt{fill:#1f6feb}
+  #nodedetail .md-covcell{stroke:#ffffff;stroke-width:0.6}
+  #nodedetail .md-covcell.on{fill:#1f6feb}
+  #nodedetail .md-covcell.off{fill:#eef1f5;stroke:#c2c8d0}
+  /* 图例复用页面既有的 .legend（不再写一套自己的圆角/间距）；只有色带那一档要更高的色块 */
+  #nodedetail .legend i.seg{height:9px;border:1px solid var(--line)}
   /* ---- 同一站位跨轮次对比（2026-10-13，积累期主线）----
      固定"当前选中的站位"，把最近几轮的同一个框并排摆出来，一眼看出这几天怎么长的。
      纯前端：逐轮问 /api/images?round_id=…&station_id=…，图仍走 /api/image 同源代理。
@@ -725,6 +756,17 @@
       <div id="overview" class="empty">读取本批全部站位的巡检轨迹…</div>
       <div id="ovnote" class="empty"></div>
     </div>
+    <div class="card" id="mdcard" style="display:none">
+      <h2>节点放大 <span id="mdtitle" style="color:var(--dim);font-weight:400"></span></h2>
+      <!-- 票 04：点上面「时序总览」里的任一格 ⇒ 进入这一站的放大视图。
+           同一条轴上两套刻度：**真实时间（主）+ 生长第 N 天（次）**（day 由端点按入库日派生）；
+           叠环境带（温/湿/CO₂ 三条线 + **光照循环制度**按 (OnMSet, OffMSet) 切段）与巡检覆盖条。
+           取数：逐轮格点用票 03 已经拿回的**本批矩阵**（点一格不再发请求），环境按**本批窗口一次**问
+           /api/environment —— 不按站位、更不按轮次逐点去问（48 站 × N 轮就是 N+1）。
+           零依赖：整张图是手写内联 SVG。 -->
+      <div id="nodedetail" class="empty">点上面「时序总览」里的任一格，进入这个节点的放大视图</div>
+      <div id="mdnote" class="empty"></div>
+    </div>
   </section>
 
   <section id="envmain" style="display:none">
@@ -901,6 +943,7 @@ let historyRequestSeq = 0;
 let growthRequestSeq = 0;
 let coverageRequestSeq = 0;
 let overviewRequestSeq = 0;
+let detailEnvRequestSeq = 0;     // 节点放大的环境请求（本批窗口一次；失败不缓存）
 // 矩阵请求是否在飞：同一次渲染会被调用多遍（拼图格/换轮次/换批次都走 renderHistory），
 // "在飞 + 同批"不能再发一次——否则 48 站 × N 轮的矩阵会被拉第二遍。
 let overviewInFlight = false;
@@ -2353,6 +2396,9 @@ const hist = { rows: [], rounds: [], growth: null, measure: null, picked: null, 
                coverage: null, coverageStationId: '', coverageBatchKey: '',
                // 时序总览（票 03）：本批**全部站位**的矩阵 + 它是为哪一批取的（幂等护栏）
                overview: null, overviewBatchKey: '',
+               // 节点放大（票 04）：入口是点总览的格子；逐轮格点复用上面的矩阵，
+               // 环境按**本批窗口一次**取回（nodeEnvKey = 批次 + 窗口；失败不落 key ⇒ 下次重试）
+               nodeDetailOpen: false, nodeDetailStationId: '', nodeEnv: null, nodeEnvKey: '',
                selectedRoundId: '', selectedBatchKey: '', focusedStationId: '',
   roundIndex: -1, roundCount: 0, hiddenRounds: 0,
                // 跨轮次对比（按天）：blocks = 每天一块（该天最接近参考时段的那一轮）；
@@ -2546,6 +2592,7 @@ function renderHistory(){
     drawCoverage();
     loadOverview();
     drawOverview();
+    refreshNodeDetail();
     updateFrameInfo();
     renderCompare();
     return;
@@ -2622,6 +2669,7 @@ function renderHistory(){
   drawCoverage();
   loadOverview();     // 幂等（同一批次只取一次）：本卡是"全站位"，与选中哪个站位无关
   drawOverview();
+  refreshNodeDetail();   // 票 04：放大视图的逐轮格点也来自这份矩阵（矩阵到了才画得出来）
   updateFrameInfo();
   renderCompare();
 }
@@ -3810,6 +3858,14 @@ function drawOverview(){
     + "<div class='empty' style='padding:4px 0 0'>一格一个站位，x 是**真实时间**（不是第几个点）；"
     + "没帧的轮次断开、画灰块，**不补零、不插值、不连线跳过**。数据来自 "
     + "<code>/api/timeline?metric=coverage</code>（不给 station_id = 一次拿回本批全部站位）。</div>";
+  // 票 04 的入口：点**这里**的任一格 ⇒ 进入这个节点的放大视图（谜面就写在卡片上）。
+  // 空位（vacant，没有站位）不绑；"本批没有记录"的灰格**要**绑——那一格也有话要说
+  // （环境与天数刻度照画），只是不拿 0 帧的格子冒充它。
+  box.querySelectorAll(".ov-cell[data-station-id]").forEach(el => {
+    const id = el.getAttribute("data-station-id");
+    if(!id) return;
+    el.onclick = () => openNodeDetail(id);
+  });
   if(!withData) notes.push("本批还没有任何一个站位拍到帧");
   note.textContent = notes.join(" · ");
 }
@@ -3845,7 +3901,484 @@ async function loadOverview(){
   overviewInFlight = false;
   hist.overview = data;
   drawOverview();
+  refreshNodeDetail();      // 矩阵后到：把放大视图补上（幂等，不额外发请求）
 }
+/* ---- 节点放大（票 04）：**一个节点**的放大视图；点时序总览里的任一格进入 ----
+   三块内容叠在**同一条真实时间轴**上（spec 硬规则 1 / 票 04 的验收）：
+     ① **双刻度**：下面一行是真实时间（主），上面一条带是**生长第 N 天**（次）——
+        `day` 由端点按入库日派生（入库当天 = 第 0 天），页面**不自己算**、也不拿别的数凑；
+        天数带的边界落在**真实午夜**上、宽度按**真实时长**（18h / 24h 不是等分）；
+     ② **环境带**：温度 / 湿度 / CO₂ 三条线（各占一根纵轴）+ **光照循环制度**色带——
+        把连续若干小时里 `(lamp_on_m, lamp_off_m)` 相同的并成一段（票 04 的口径）；
+     ③ **巡检覆盖条**：这一站每一轮有没有帧（有帧实心、没帧空心——**不是** 0 帧），
+        帧数轨迹按"有帧的连续轮次"分段，中间缺轮次处断开、不连线跳过。
+   取数（**不许 N+1**）：逐轮格点来自**本批一次的矩阵**（票 03 的 hist.overview，页面手里已有——
+   点一格不再发 /timeline）；环境按**本批窗口一次**问 /api/environment，不按站位、更不按轮次。
+   环境**失败不缓存**：一次取不到不该把这条线钉成永久空白，下次打开照常重试。
+   ⚠️ 光照**不许**拿 `lamp_state`（设备状态：0=自动 1=手动 2=停止 3=关闭）对时间积分冒充
+   "点亮了多久"——现场口径是"开几秒、停约两小时"，两侧还各取自不同的档（OnSSet=2 秒 /
+   OffMSet=120 分）。这里只画**制度**（设定周期）切出来的段（ADR-0025）。 */
+const MD = { W: 920, padL: 66, padR: 22,
+             dayTop: 2, dayH: 16,
+             envTop: 26, envH: 46,
+             lampTop: 176, lampH: 16,
+             covLabelY: 202, covTop: 208, covBase: 246,
+             stripTop: 252, stripH: 11,
+             axisY: 266, H: 284 };
+const MD_ENV_LANES = [
+  { key: 'temp_c',  label: '温度', unit: '℃' },
+  { key: 'rh_pct',  label: '湿度', unit: '%' },
+  { key: 'co2_ppm', label: 'CO₂', unit: 'ppm' }
+];
+let nodeEnvPending = '';     // 正在取的环境窗口：同窗口不重复发
+let nodeEnvFailedKey = '';   // 取不到的那个窗口：自动刷新不再反复问，**重新打开节点**才重试
+
+function mdNum(value){
+  return (typeof value === 'number' && Number.isFinite(value)) ? value : null;
+}
+
+/** 数字显示：最多两位小数、去掉没意义的尾零（19.0 → 19、1600 → 1600）。 */
+function mdNumText(value){
+  return String(Math.round(Number(value) * 100) / 100);
+}
+
+/** 时间显示：`2026-09-10T06:00:00` → `2026-09-10 06:00`（秒对现场判断没用，省掉）。 */
+function mdWhen(ts){
+  return String(ts || '').replace('T', ' ').slice(0, 16);
+}
+
+/** 整点时间戳（毫秒 → 本地 ISO 串）：小时行都落在整点上，切段的两端要能写成时间。 */
+function mdHourStamp(ms){
+  const d = new Date(ms), p = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+       + 'T' + p(d.getHours()) + ':00:00';
+}
+
+/** 真实时间 → x 的**唯一**一套比例（主刻度与由它派生的次刻度都走这里）。
+ *
+ *  认不出时间、或窗口宽为零（只有一轮）⇒ 落在中间：那时"比例"本身没有定义，
+ *  与其编一个等距摆上去，不如诚实地摆在中间（与生长曲线卡同一手法）。 */
+function mdScale(t0, t1){
+  const iw = MD.W - MD.padL - MD.padR;
+  const msA = tsMs(t0), msB = tsMs(t1);
+  const usable = msA !== null && msB !== null && msB > msA;
+  return {
+    at: ts => {
+      const t = tsMs(ts);
+      return (!usable || t === null) ? MD.padL + iw / 2 : MD.padL + (t - msA) / (msB - msA) * iw;
+    },
+    ms: v => usable ? MD.padL + (v - msA) / (msB - msA) * iw : MD.padL + iw / 2,
+    clamp: x => Math.max(MD.padL, Math.min(MD.padL + iw, x))
+  };
+}
+
+/** 生长天数带（双刻度的**次**刻度）：把端点给的 `day` 按**真实午夜**分段。
+ *
+ *  边界一律是真实时间戳（`2026-09-11T00:00:00`）——所以它与真实时间刻度是**同一条轴**；
+ *  把窗口按天数等分是另一回事（那会让边界离开真实午夜，图上就成了两套比例）。
+ *  `day` 为 null（端点认不出入库日）⇒ 整段**不画**：不猜一个"第几天"摆上去
+ *  （与 `analysis/timeline.day_of` 的 null 语义同口径）。 */
+function mdDayBands(points){
+  const out = [];
+  for(const p of (points || [])){
+    const ts = p && p.ts;
+    const day = (p && p.day !== null && p.day !== undefined) ? Number(p.day) : null;
+    if(!ts || day === null || !Number.isFinite(day)) continue;
+    const startTs = String(ts).slice(0, 10) + 'T00:00:00';
+    const startMs = tsMs(startTs);
+    if(startMs === null) continue;
+    const last = out[out.length - 1];
+    if(last && last.startTs === startTs) continue;       // 同一天：带已经在了（点数不改带宽）
+    out.push({ day: day, startTs: startTs, startMs: startMs, endMs: startMs + 86400000 });
+  }
+  return out;
+}
+
+/** 光照**循环制度**的键：只看设定周期 `(OnMSet, OffMSet)`（票 04 的口径）。
+ *
+ *  `lamp_state`（设备状态：0=自动 1=手动 2=停止 3=关闭）**不参与**：它不是"灯亮没亮"，
+ *  更不是"亮了多久"——拿它对时间积分冒充点亮时长是错的（ADR-0025；现场口径是"开几秒、
+ *  停约两小时"，两侧还各取自不同的档：OnSSet=2 秒 / OffMSet=120 分）。
+ *  分档两个值都空 ⇒ 这一小时没有制度可依 ⇒ null（**不是**"开 0 分 / 停 0 分"那一段）。 */
+function lampRegimeOf(row){
+  const on = mdNum(row && row.lamp_on_m), off = mdNum(row && row.lamp_off_m);
+  if(on === null && off === null) return null;
+  return { key: (on === null ? '-' : on) + '|' + (off === null ? '-' : off), on_m: on, off_m: off };
+}
+
+/** 连续小时里制度相同 ⇒ 一段（票 04：OnMSet/OffMSet 相同的小时并成一段）。
+ *
+ *  **缺测的小时断开**：上一行与这一行不是相邻整点就不接过去——与轨迹同一套"缺口断开"
+ *  约定，不拿"制度没变"当理由跨过一段没有数据的时间。 */
+function mdLampSegments(rows){
+  const segs = [];
+  for(const r of (rows || [])){
+    const reg = lampRegimeOf(r);
+    const t = tsMs(r && r.ts);
+    if(!reg || t === null) continue;                     // 这一小时认不出制度/时间：断在这里
+    const last = segs[segs.length - 1];
+    if(last && last.key === reg.key && last.endMs === t){
+      last.endMs = t + 3600000; last.hours++; continue;
+    }
+    segs.push({ key: reg.key, on_m: reg.on_m, off_m: reg.off_m,
+                fromTs: r.ts, startMs: t, endMs: t + 3600000, hours: 1 });
+  }
+  return segs;
+}
+
+/** 制度的人话：分档（OnMSet/OffMSet）是**设定周期**，不是"实测亮了多久"。 */
+function mdLampCycleText(seg){
+  return 'OnMSet ' + (seg.on_m === null ? '—' : mdNumText(seg.on_m)) + ' 分 · OffMSet '
+       + (seg.off_m === null ? '—' : mdNumText(seg.off_m)) + ' 分';
+}
+
+/** 一条环境泳道（温/湿/CO₂ 各一根纵轴——两个单位共用一根轴是在骗人）。
+ *  **缺测的小时断开**：这一小时没有数就不 pen，绝不插值、不连线跳过。 */
+function mdEnvLaneSvg(rows, lane, yTop, X){
+  const base = yTop + 40, plotTop = yTop + 8;
+  const out = ['<text class="md-lane" x="6" y="' + (yTop + 13) + '">' + esc(lane.label) + ' '
+    + esc(lane.unit) + '</text>',
+    '<line class="md-grid" x1="' + MD.padL + '" y1="' + base + '" x2="' + (MD.W - MD.padR)
+    + '" y2="' + base + '"/>'];
+  const vals = rows.map(r => mdNum(r[lane.key])).filter(v => v !== null);
+  if(!vals.length){
+    out.push('<text class="md-lane" x="' + MD.padL + '" y="' + (plotTop + 12)
+      + '">整段没有数（不是 0）</text>');
+    return out.join('');
+  }
+  const lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+  const span = hi - lo;
+  // 整段一个值（span=0）时画在**泳道中间**：贴在基线上会被读成"0 / 就是那根轴"
+  const Y = v => span > 0 ? base - (v - lo) / span * (base - plotTop) : (base + plotTop) / 2;
+  out.push('<text class="md-val" x="6" y="' + (yTop + 27) + '">' + mdNumText(hi) + '</text>');
+  out.push('<text class="md-lane" x="6" y="' + (yTop + 39) + '">' + mdNumText(lo) + '</text>');
+  let d = '', pen = false, prevMs = null;
+  const hits = [];
+  for(const r of rows){
+    const v = mdNum(r[lane.key]);
+    const t = tsMs(r && r.ts);
+    if(v === null || t === null){ pen = false; prevMs = null; continue; }   // 这一小时没有数
+    // **缺了整行**也要断开：上一行与这一行不相邻（差 ≠ 1 小时）⇒ 不连线跳过缺测段。
+    // 只判"值是不是 null"是不够的——那行可能根本不在应答里（环境断档就是这么来的）。
+    if(prevMs !== null && t - prevMs !== 3600000) pen = false;
+    const x = X.at(r.ts), y = Y(v);
+    d += (pen ? 'L' : 'M') + x.toFixed(1) + ',' + y.toFixed(1) + ' ';
+    pen = true; prevMs = t;
+    hits.push('<circle class="md-envhit" data-param="' + esc(lane.key) + '" data-ts="' + esc(r.ts)
+      + '" cx="' + x.toFixed(1) + '" cy="' + y.toFixed(1) + '" r="4"><title>' + esc(mdWhen(r.ts))
+      + ' · ' + esc(lane.label) + ' ' + mdNumText(v) + esc(lane.unit) + '</title></circle>');
+  }
+  out.push('<path class="md-envline" data-param="' + esc(lane.key) + '" d="' + d.trim() + '"/>');
+  out.push(hits.join(''));
+  return out.join('');
+}
+
+/** 光照循环制度的色带：一段一个色块，悬停给出制度原值与时段。 */
+function mdLampSvg(segs, X){
+  const yTop = MD.lampTop;
+  const out = ['<text class="md-lane" x="6" y="' + (yTop + 12) + '">光照循环制度</text>'];
+  if(!segs.length){
+    out.push('<text class="md-lane" x="' + MD.padL + '" y="' + (yTop + 12)
+      + '">没有读到循环设定（OnMSet/OffMSet）：不画制度段，也不拿设备状态凑</text>');
+    return out.join('');
+  }
+  segs.forEach((seg, i) => {
+    const x0 = X.clamp(X.ms(seg.startMs)), x1 = X.clamp(X.ms(seg.endMs));
+    const w = Math.max(1, x1 - x0);
+    const title = '光照循环制度：' + mdLampCycleText(seg) + ' · ' + mdWhen(seg.fromTs) + ' → '
+      + mdWhen(mdHourStamp(seg.endMs)) + '（' + seg.hours + ' 小时）';
+    out.push('<rect class="md-lampseg r' + (i % 4) + '"'
+      + ' data-on-m="' + esc(String(seg.on_m)) + '" data-off-m="' + esc(String(seg.off_m))
+      + '" data-from="' + esc(seg.fromTs) + '" data-to="' + esc(mdHourStamp(seg.endMs))
+      + '" data-hours="' + seg.hours + '" x="' + x0.toFixed(1) + '" y="' + yTop
+      + '" width="' + w.toFixed(1) + '" height="' + MD.lampH + '"><title>' + esc(title)
+      + '</title></rect>');
+    if(w >= 150){
+      // 文字**居中在段里**：靠左会被左侧的泳道名压住（"光照循环制度"那一列）
+      out.push('<text class="md-lamplbl" x="' + (x0 + w / 2).toFixed(1) + '" y="' + (yTop + 11)
+        + '" text-anchor="middle">开 ' + esc(seg.on_m === null ? '—' : mdNumText(seg.on_m)) + ' 分 / 停 '
+        + esc(seg.off_m === null ? '—' : mdNumText(seg.off_m)) + ' 分</text>');
+    }
+  });
+  return out.join('');
+}
+
+/** 巡检覆盖：帧数轨迹（缺口断开）+ 一格一轮的覆盖条（有帧实心 / 没帧空心）。 */
+function mdCoverageSvg(points, X){
+  const out = [];
+  const pts = points || [];
+  const framed = pts.filter(p => p && p.has_frame);
+  const vals = framed.map(p => Number(p.n_frames)).filter(v => Number.isFinite(v));
+  const hi = vals.length ? Math.max.apply(null, vals) : null;
+  out.push('<text class="md-lane" x="6" y="' + MD.covLabelY + '">巡检覆盖</text>');
+  out.push('<line class="md-grid" x1="' + MD.padL + '" y1="' + MD.covBase + '" x2="'
+    + (MD.W - MD.padR) + '" y2="' + MD.covBase + '"/>');
+  if(hi === null){
+    out.push('<text class="md-lane" x="' + MD.padL + '" y="' + (MD.covTop + 12)
+      + '">本批没有这个站位的记录：不画覆盖轨迹（「没记录」不是「每轮都缺帧」）</text>');
+    return out.join('');
+  }
+  const Y = v => MD.covBase - (v / hi) * (MD.covBase - MD.covTop);
+  out.push('<text class="md-val" x="6" y="' + (MD.covTop + 10) + '">' + hi + '</text>');
+  // 段：**有帧的连续轮次**接成一段；中间隔着没帧的轮次就在那里断开（不连线跳过）
+  const segs = []; let cur = [];
+  for(const p of pts){
+    if(!p.has_frame){ if(cur.length) segs.push(cur); cur = []; continue; }
+    cur.push(p);
+  }
+  if(cur.length) segs.push(cur);
+  for(const seg of segs){
+    if(seg.length < 2) continue;                         // 单点成不了一段线：交给下面的点
+    const d = seg.map((p, i) => (i ? 'L' : 'M') + X.at(p.ts).toFixed(1) + ','
+      + Y(Number(p.n_frames)).toFixed(1)).join(' ');
+    out.push('<path class="md-covline" d="' + d + '"/>');
+  }
+  framed.forEach(p => {
+    const n = Number(p.n_frames);
+    out.push('<circle class="md-covpt" data-ts="' + esc(p.ts) + '" data-round-id="'
+      + esc(p.round_id || '') + '" data-frames="' + esc(String(n)) + '" cx="' + X.at(p.ts).toFixed(1)
+      + '" cy="' + Y(n).toFixed(1) + '" r="3.2"><title>' + esc(mdWhen(p.ts)) + ' · ' + esc(String(n))
+      + ' 帧</title></circle>');
+  });
+  // 覆盖条：一格一轮。有帧实心（带帧数）、没帧空心（data-noframe，**不是** 0 帧）
+  const xs = pts.map(p => X.at(p.ts));
+  let minGap = Infinity;
+  for(let i = 1; i < xs.length; i++) minGap = Math.min(minGap, xs[i] - xs[i - 1]);
+  const w = Math.max(3, Math.min(11, Number.isFinite(minGap) ? minGap * 0.6 : 8));
+  pts.forEach((p, i) => {
+    const has = !!p.has_frame;
+    const attrs = has ? ' data-frames="' + esc(String(Number(p.n_frames))) + '"' : ' data-noframe="1"';
+    const title = mdWhen(p.ts) + ' · '
+      + (has ? String(Number(p.n_frames)) + ' 帧' : '无帧（不是 0 帧）');
+    out.push('<rect class="md-covcell ' + (has ? 'on' : 'off') + '" data-ts="' + esc(p.ts)
+      + '" data-round-id="' + esc(p.round_id || '') + '"' + attrs + ' x="'
+      + (xs[i] - w / 2).toFixed(1) + '" y="' + MD.stripTop + '" width="' + w.toFixed(1)
+      + '" height="' + MD.stripH + '"><title>' + esc(title) + '</title></rect>');
+  });
+  return out.join('');
+}
+
+/** 整张放大图（**手写内联 SVG**，零依赖）：天数带（次刻度）+ 环境带 + 光照制度 + 覆盖条，
+ *  全部走同一套 mdScale —— 这就是"双刻度在同一条轴上"在代码里的落点。 */
+function mdSvgMarkup(stationId, points, rounds, axis, envRows, where){
+  const X = mdScale(axis.t0, axis.t1);
+  const bands = mdDayBands(rounds);
+  const out = ['<svg class="md-svg" viewBox="0 0 ' + MD.W + ' ' + MD.H + '" role="img"'
+    + ' data-station-id="' + esc(stationId) + '"'
+    + ' data-t0="' + esc(String(axis.t0 || '')) + '" data-t1="' + esc(String(axis.t1 || '')) + '"'
+    + ' aria-label="' + esc(where + '：双刻度时间轴（真实时间 + 生长天数）、环境带与巡检覆盖') + '">'];
+  // ① 生长天数带（次刻度）+ 真实午夜边界
+  bands.forEach((b, i) => {
+    const x0 = X.clamp(X.ms(b.startMs)), x1 = X.clamp(X.ms(b.endMs));
+    const w = x1 - x0;
+    if(w <= 0) return;
+    out.push('<rect class="md-dayband' + (i % 2 ? ' odd' : '') + '" data-day="' + esc(String(b.day))
+      + '" x="' + x0.toFixed(1) + '" y="' + MD.dayTop + '" width="' + w.toFixed(1)
+      + '" height="' + MD.dayH + '"/>');
+    out.push('<text class="md-daylbl" data-day="' + esc(String(b.day)) + '" x="'
+      + (x0 + w / 2).toFixed(1) + '" y="' + (MD.dayTop + 12) + '" text-anchor="middle">第 '
+      + esc(String(b.day)) + ' 天</text>');
+  });
+  bands.slice(1).forEach(b => {
+    const x = X.clamp(X.ms(b.startMs)).toFixed(1);
+    out.push('<line class="md-dayline" data-ts="' + esc(b.startTs) + '" x1="' + x + '" y1="'
+      + (MD.dayTop + MD.dayH) + '" x2="' + x + '" y2="' + MD.axisY + '"/>');
+  });
+  // ② 环境带（**还在读 / 取不到 / 没有行**三态各说各的，**都不画成 0**）
+  if(envRows === undefined){
+    out.push('<text class="md-lane" x="' + MD.padL + '" y="' + (MD.envTop + 40)
+      + '">读取环境小时行…</text>');
+  }else if(envRows === null){
+    out.push('<text class="md-lane" x="' + MD.padL + '" y="' + (MD.envTop + 40)
+      + '">环境这一路取不到：不画线，也不拿 0 或空白顶替（见下方说明）</text>');
+  }else if(!envRows.length){
+    out.push('<text class="md-lane" x="' + MD.padL + '" y="' + (MD.envTop + 40)
+      + '">这段时间没有环境小时行（不是 0）</text>');
+  }else{
+    MD_ENV_LANES.forEach((lane, i) => {
+      out.push(mdEnvLaneSvg(envRows, lane, MD.envTop + i * MD.envH, X));
+    });
+    out.push(mdLampSvg(mdLampSegments(envRows), X));
+  }
+  // ③ 巡检覆盖（缺测段断开）
+  out.push(mdCoverageSvg(points, X));
+  // 底部：**真实时间**刻度（主）——首末轮 + 每一条真实午夜
+  out.push('<line class="md-axis" x1="' + MD.padL + '" y1="' + MD.axisY + '" x2="'
+    + (MD.W - MD.padR) + '" y2="' + MD.axisY + '"/>');
+  const ticks = [{ ts: axis.t0, anchor: 'start', label: mdWhen(axis.t0) }];
+  bands.slice(1).forEach(b => {
+    ticks.push({ ts: b.startTs, anchor: 'middle', label: mdWhen(b.startTs).slice(0, 10) });
+  });
+  ticks.push({ ts: axis.t1, anchor: 'end', label: mdWhen(axis.t1) });
+  ticks.forEach(t => {
+    if(!t.ts || !t.label) return;
+    out.push('<text class="md-tick" data-ts="' + esc(t.ts) + '" x="' + X.clamp(X.at(t.ts)).toFixed(1)
+      + '" y="' + (MD.axisY + 13) + '" text-anchor="' + t.anchor + '">' + esc(t.label) + '</text>');
+  });
+  out.push('</svg>');
+  return out.join('');
+}
+
+function mdLegend(){
+  return '<div class="legend">'
+    + '<span><i style="background:#d94a3d"></i>温度 ℃</span>'
+    + '<span><i style="background:#1f6feb"></i>湿度 %</span>'
+    + '<span><i style="background:#18794e"></i>CO₂ ppm</span>'
+    + '<span><i class="seg" style="background:#fdf1dc"></i>光照循环制度（按 (OnMSet, OffMSet) 切段）</span>'
+    + '<span><i style="background:#1f6feb"></i>有帧</span>'
+    + '<span><i class="seg" style="background:#eef1f5"></i>无帧（不是 0 帧）</span>'
+    + '<span>第 N 天 = 端点按入库日派生（入库当天 = 第 0 天）</span>'
+    + '</div>';
+}
+
+function mdFootnote(){
+  return '<div class="empty" style="padding:4px 0 0">一条轴上两套刻度：下面一行是<b>真实时间</b>（主），'
+    + '上面那条带是<b>生长第 N 天</b>（次，端点按入库日派生）——天数带的边界落在<b>真实午夜</b>上，'
+    + '宽度按真实时长，不是把窗口按天等分。光照按<b>循环制度</b>切段：连续若干小时里 '
+    + '<code>(OnMSet, OffMSet)</code> 相同的并成一段；<b>设备状态</b>（0=自动 / 1=手动 / 2=停止 / 3=关闭）'
+    + '不参与切段，也不拿它对时间积分当「点亮时长」（现场口径是开几秒、停约两小时，两侧各取自不同的档）。'
+    + '环境来自 <code>/api/environment</code>（按本批窗口<b>一次</b>取回；缺测的小时断开、不插值），'
+    + '逐轮格点来自 <code>/api/timeline</code> 的<b>本批矩阵</b>（票 03 一次拿回全部站位，'
+    + '这里不再逐站或逐轮去问）。</div>';
+}
+
+/** 点时序总览的任一格 ⇒ 进入这个节点的放大视图（票 04）。
+ *
+ *  同时把这一站变成历史 tab 的聚焦站位——拼图、覆盖轨迹、生长曲线、放大视图说的是同一个站
+ *  （与点拼图格位同一手法，不另立一套选择状态）。
+ *  取数：**逐轮格点用票 03 已经拿回的本批矩阵**（点一格不再发 /timeline）；
+ *  环境按**本批窗口一次**问（ensureNodeEnv，幂等）。 */
+function openNodeDetail(stationId){
+  if(mode !== 'history' || !stationId) return;
+  hist.nodeDetailOpen = true;
+  hist.nodeDetailStationId = stationId;
+  const changed = hist.focusedStationId !== stationId;
+  const row = filtered().find(item => item.station_id === stationId);
+  history_pick(String((row && (row.object_name || row.ts)) || stationId),
+               row ? imageUrlFor(row) : '', stationId);
+  if(changed || !hist.growth) loadGrowth();
+  ensureNodeEnv(true);        // 明确动作（再点一格）⇒ 失败过的窗口也重试一次
+  drawNodeDetail();
+  const card = $('#mdcard');
+  if(card && card.scrollIntoView) card.scrollIntoView({block: 'nearest'});
+}
+
+/** 放大视图的环境：按**本批窗口一次**取回（幂等）。
+ *
+ *  窗口 = 矩阵的 axis（本批首末轮的**真实时间戳**）——环境是**批次**的属性，不是某个站位的，
+ *  所以换站不重取；**失败不落 key**：一次取不到不该把这条线钉成永久空白。 */
+async function ensureNodeEnv(retry){
+  if(mode !== 'history' || !hist.nodeDetailOpen) return;
+  const ov = hist.overview;
+  if(!ov || !ov.ok) return;              // 矩阵还没到：等它到了再问（画法会说"读取中"）
+  const axis = ov.axis || {};
+  const scope = coverageScope();
+  if(!axis.t0 || !axis.t1){
+    hist.nodeEnv = {ok: true, rows: []}; hist.nodeEnvKey = scope.batchKey + '|'; return;
+  }
+  const key = scope.batchKey + '|' + axis.t0 + '|' + axis.t1;
+  if(hist.nodeEnvKey === key && hist.nodeEnv) return;    // 同批次同窗口：不重取
+  if(nodeEnvPending === key) return;                     // 在飞：不重复发
+  if(!retry && nodeEnvFailedKey === key) return;         // 上一次就失败过：自动刷新不反复问
+  nodeEnvPending = key;
+  const requestId = ++detailEnvRequestSeq;
+  let data;
+  try{
+    const q = new URLSearchParams({zone: String(scope.zone || ''), granularity: 'hour',
+                                   start: String(axis.t0), end: String(axis.t1)});
+    data = await jget('/api/environment?' + q.toString());
+  }catch(e){
+    data = {ok: false, error: '环境接口不可达：' + e.message};
+  }
+  if(nodeEnvPending === key) nodeEnvPending = '';
+  if(requestId !== detailEnvRequestSeq) return;          // 被更新的一次取代
+  if(data && data.ok === false){
+    // 失败：**照实记下来**（页面要如实说"环境取不到"，不能装作还在读），
+    // 但**不落成功 key** ⇒ 下一次**打开这个节点**（明确动作）照常重试，不钉成永久空白。
+    hist.nodeEnv = data;
+    hist.nodeEnvKey = '';
+    nodeEnvFailedKey = key;
+    drawNodeDetail();
+    return;
+  }
+  hist.nodeEnv = data;
+  hist.nodeEnvKey = key;
+  nodeEnvFailedKey = '';
+  drawNodeDetail();
+}
+
+/** 放大视图的刷新入口：矩阵 / 环境谁后到都能把图补上（幂等，不额外发请求）。 */
+function refreshNodeDetail(){
+  if(!hist.nodeDetailOpen){ drawNodeDetail(); return; }
+  ensureNodeEnv();
+  drawNodeDetail();
+}
+
+function drawNodeDetail(){
+  const box = $('#nodedetail'), note = $('#mdnote'), card = $('#mdcard');
+  if(!box || !note || !card) return;
+  if(!hist.nodeDetailOpen || !hist.nodeDetailStationId){
+    card.style.display = 'none';
+    box.className = 'empty';
+    box.textContent = '点上面「时序总览」里的任一格，进入这个节点的放大视图';
+    note.textContent = '';
+    return;
+  }
+  card.style.display = '';
+  const stationId = String(hist.nodeDetailStationId);
+  const ov = hist.overview;
+  if(!ov){
+    box.className = 'empty';
+    box.textContent = '读取本批的逐轮矩阵…（放大视图的逐轮格点来自它）';
+    note.textContent = '';
+    return;
+  }
+  if(!ov.ok){
+    box.className = 'empty';
+    box.textContent = '查不到本批的逐轮矩阵（放大视图的逐轮格点来自它）';
+    note.textContent = '⚠ ' + (ov.error || '未知原因');
+    return;
+  }
+  const rounds = ov.rounds || [];
+  const node = (ov.nodes || []).find(item => String(item.node_id) === stationId);
+  const batch = ov.batch || {}, axis = ov.axis || {};
+  const batchText = '本批 ' + (batch.batch_no || batch.entry_date || '?');
+  $('#mdtitle').textContent = ' · ' + stationId + (node && node.box_id ? ' · ' + node.box_id : '')
+    + ' · ' + batchText;
+  const notes = (ov.notes || []).slice();
+  // 环境三态**分开说**：还没取到（undefined）/ 取不到（null）/ 窗口内确实没有行（[]）——
+  // 把"还在读"说成"没有数据"就是另一种欺骗。
+  const envPending = !hist.nodeEnv;
+  const envFailed = !!(hist.nodeEnv && hist.nodeEnv.ok === false);
+  const envRows = envPending ? undefined : (envFailed ? null : (hist.nodeEnv.rows || []));
+  if(envFailed) notes.push('⚠ 环境取不到：' + (hist.nodeEnv.error || '未知原因')
+    + '——本站的逐轮覆盖与天数刻度照常画（环境是另一路数据，不拿空白或 0 顶替）');
+  else if(hist.nodeEnv && !envRows.length) notes.push('本批窗口内没有环境小时行（不是 0）');
+  const pts = node ? overviewPoints(node, rounds) : [];
+  if(!rounds.length){
+    box.className = 'empty';
+    box.textContent = '本批还没有可归属的巡检轮次（时间轴是空的）';
+    note.textContent = notes.join(' · ');
+    return;
+  }
+  if(!axis.t0 || !axis.t1){
+    box.className = 'empty';
+    box.textContent = '本批的轮次没有真实时间戳：画不出时间轴（不拿"第几个点"凑）';
+    note.textContent = notes.join(' · ');
+    return;
+  }
+  if(!pts.length){
+    notes.push('本批的矩阵里没有这个站位的记录（矩阵只排本批拍到过帧的站位，'
+      + '不拿一行 0 帧的格子凑数）——环境与天数刻度照画');
+  }else if(!pts.some(p => p.has_frame)){
+    notes.push('本批这个站位一张帧都没有');
+  }
+  const where = stationId + (node && node.box_id ? '（' + node.box_id + '）' : '');
+  box.className = '';
+  box.innerHTML = mdSvgMarkup(stationId, pts, rounds, axis, envRows, where) + mdLegend() + mdFootnote();
+  note.textContent = notes.join(' · ');
+}
+
 async function loadHistory(force){
   if(!force && hist.roundsLoaded){
     const roundId = syncRoundOptions();
@@ -3853,7 +4386,10 @@ async function loadHistory(force){
   }
   if(force){ hist.growth = null; hist.measure = null; growthRequestSeq++; hist.compareRows = []; hist.compareStationId = '';
     hist.coverage = null; hist.coverageStationId = ''; hist.coverageBatchKey = ''; coverageRequestSeq++;
-    hist.overview = null; hist.overviewBatchKey = ''; overviewRequestSeq++; }
+    hist.overview = null; hist.overviewBatchKey = ''; overviewRequestSeq++;
+    // 票 04：环境按"批次 + 窗口"缓存 ⇒ 换批次必须清；放大视图本身**不关**
+    // （用户点开的那一站还开着，换批后按新批重画；这一站新批没有记录也会如实说）
+    hist.nodeEnv = null; hist.nodeEnvKey = ''; nodeEnvPending = ''; nodeEnvFailedKey = ''; detailEnvRequestSeq++; }
   const requestId = ++historyRequestSeq;
   hist.roundsLoading = true;
   $('#timeline').className = 'empty';

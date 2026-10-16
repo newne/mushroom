@@ -253,6 +253,41 @@ const covPoints = stationId => {
   });
 };
 
+// 票 04（节点放大）用的**本批窗口内**环境小时行。三件事要钉住：
+//   ① 光照**循环制度**（OnMSet/OffMSet）在 2026-09-12T10:00 **变过一次**（2/120 → 5/60）
+//      ⇒ 按制度切段应切出**三段**（2/120 两段 + 5/60 一段）；
+//   ② 2026-09-11T04:00 这一个小时**故意缺行**（环境断档）⇒ 制度段与温度线都在这里断开，
+//      不许跨过缺口接过去；
+//   ③ 设备状态 'lamp_state' 逐小时在 2/3 之间跳 —— 它在**同一段制度里照样跳**：
+//      "拿设备状态切段"（会切出几十段）或"拿它对时间积分当点亮时长"都会在这几条断言上现形
+//      （票 04 / ADR-0025：Running/lamp_state 是设备状态 0=自动/1=手动/2=停止/3=关闭）。
+// 数值是**手写可数**的：06:00 起每 6 小时温度 +0.1（19.0 起）、CO₂ +30（1600 起）、湿度平走 92.0。
+// 窗口 = 本批首末轮（2026-09-10T06:00 → 2026-09-13T18:00，85 个整点减 1 个断档 = 84 行）。
+const COV_ENV_ROWS = (() => {
+  const rows = [];
+  const t0 = Date.parse('2026-09-10T06:00:00');
+  const p = n => String(n).padStart(2, '0');
+  for (let i = 0; i < 85; i++) {
+    const d = new Date(t0 + i * 3600000);
+    const ts = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+             + 'T' + p(d.getHours()) + ':00:00';
+    if (ts === '2026-09-11T04:00:00') continue;          // 断档：这一小时没有行
+    const late = ts >= '2026-09-12T10:00:00';            // 制度在这一刻变
+    rows.push({ ts, zone: '611',
+      temp_c: Math.round((19.0 + Math.floor(i / 6) * 0.1) * 10) / 10,
+      temp_min: Math.round((18.8 + Math.floor(i / 6) * 0.1) * 10) / 10,
+      temp_max: Math.round((19.2 + Math.floor(i / 6) * 0.1) * 10) / 10,
+      rh_pct: 92.0, rh_min: 91.5, rh_max: 92.5,
+      co2_ppm: 1600 + Math.floor(i / 6) * 30,
+      co2_min: 1580 + Math.floor(i / 6) * 30, co2_max: 1620 + Math.floor(i / 6) * 30,
+      lamp_state: (i % 2) ? 3 : 2,
+      lamp_on_s: 0, lamp_off_s: 0,
+      lamp_on_m: late ? 5 : 2, lamp_off_m: late ? 60 : 120,
+      lamp_on_min: null, n: 60 });
+  }
+  return rows;
+})();
+
 // 环境模式用：两个小时点，补光一个是"停止"(2) 一个是"关闭"(3)。
 // 分类量走色带，不走折线——对它求平均没有意义（ADR-0021）。
 const ENV_ROWS = [
@@ -518,6 +553,15 @@ function route(method, url, body) {
   if (path === '/api/environment') {
     if (state.env_error) return json(200, { ok: false, error: 'prod 查询失败：不通', rows: [] });
     if (state.env_empty) return json(200, { ok: true, granularity: 'hour', rows: [] });
+    // 票 04：放大视图按**本批窗口**取数（start 落在 2026-09 这一批）⇒ 回本批窗口内的小时行。
+    // 过滤语义照真端点（含端点、前缀比较，analysis/environment.py:filter_rows）写，不另立一套；
+    // 不带 start 的（环境页那几条）照旧回 ENV_ROWS。
+    const eq = new URL('http://console.local' + url).searchParams;
+    const qStart = eq.get('start') || '', qEnd = eq.get('end') || '';
+    if (qStart.indexOf('2026-09') === 0) {
+      return json(200, { ok: true, granularity: 'hour',
+        rows: COV_ENV_ROWS.filter(r => (!qStart || r.ts >= qStart) && (!qEnd || r.ts <= qEnd)) });
+    }
     return json(200, { ok: true, granularity: 'hour', rows: ENV_ROWS });
   }
   if (path === '/api/environment/summary') {
@@ -2107,6 +2151,266 @@ await sleep(150);
       matrixCalls().length === beforeRounds,
       beforeRounds + ' → ' + matrixCalls().length + ' 次矩阵请求');
   }
+
+  // ---- 票 04：节点放大（双刻度时间轴 + 环境带叠加）--------------------------------
+  // 入口 = 点**时序总览**里的任一格。三块内容叠在**同一条轴**上：
+  //   ① 真实时间（主，下方刻度）+ **生长第 N 天**（次，上方那条带；day 由端点按入库日派生）；
+  //   ② 环境带：温/湿/CO₂ 三条线 + **光照循环制度**（按 OnMSet/OffMSet 切段，不碰 lamp_state）；
+  //   ③ 巡检覆盖条：这一站每一轮有没有帧（有帧实心、没帧空心——不是 0 帧）。
+  // 护栏与上面三张卡同源（真实时间 x / 缺口断开 / null≠0），另加票 04 自己的两条：
+  //   · 天数刻度必须与真实时间刻度**在同一条轴上对齐**（自成一套比例 ⇒ 红）；
+  //   · 光照按制度切段、**不拿设备状态积分**；取数不许 N+1。
+  {
+    // 测试**自己**知道这条时间轴（fixture 手写的常量，不从页面上读）：
+    //   窗口 = 本批首末轮 2026-09-10T06:00 → 2026-09-13T18:00（3.5 天 = 84 小时）
+    //   六轮：09-10 06:00 / 09-10 18:00 / 09-11 10:00 / 09-12 10:00 / 09-13 10:00 / 09-13 18:00
+    //   生长天数（入库 09-04）：6 / 6 / 7 / 8 / 9 / 9
+    //   天数带真实时长 18h / 24h / 24h / 18h —— **不相等**：等分画法在这里露馅
+    const T0 = "2026-09-10T06:00:00", T1 = "2026-09-13T18:00:00";
+    const MS = t => Date.parse(String(t).replace(" ", "T"));
+    const mdSvg = () => document.querySelector("#nodedetail svg.md-svg");
+    const mdAll = sel => Array.from(document.querySelectorAll("#nodedetail " + sel));
+    const attrN = (el, k) => Number(el && el.getAttribute(k));
+    const xOf = el => el ? Number(el.hasAttribute("cx") ? el.getAttribute("cx") : el.getAttribute("x")) : NaN;
+    const lineX = el => Number(el && el.getAttribute("x1"));
+    const byTs = (sel, ts) => mdAll(sel).find(e => e.getAttribute("data-ts") === ts);
+    const titleOf = el => (el && el.querySelector("title") ? el.querySelector("title").textContent : "");
+    const cellOf = id => document.querySelector('#overview .ov-cell[data-station-id="' + id + '"]');
+    const mdCard = () => document.querySelector("#mdcard");
+    const cardDisplay = () => (mdCard() ? mdCard().style.display : "(没有 #mdcard)");
+    // 断言要**红**，不许在缺元素时把整轮跑崩（崩了就看不清红了几条）
+    const dayBandsOf = pts =>
+      (typeof window.mdDayBands === "function" ? window.mdDayBands(pts) : "页面上没有 mdDayBands");
+    const covPts = () => mdAll("circle.md-covpt");
+    const covCells = () => mdAll("rect.md-covcell");
+    const dayBands = () => mdAll("rect.md-dayband");
+    const dayLines = () => mdAll("line.md-dayline");
+    const lampSegs = () => mdAll("rect.md-lampseg");
+    const envTempHits = () => mdAll('circle.md-envhit[data-param="temp_c"]');
+    const urlCount = (from, fn) => state.calls.slice(from).filter(fn).length;
+    const isMatrix = c => c.url.split("?")[0] === "/api/timeline" && !/[?&]station_id=/.test(c.url);
+    const isBatchEnv = c => c.url.split("?")[0] === "/api/environment" && /[?&]start=2026-09-10/.test(c.url);
+
+    check("放大视图在没点之前是收起的（进入放大视图 = 点总览的格子）",
+      cardDisplay() === "none" && !mdSvg(),
+      "#mdcard display=" + cardDisplay());
+
+    // ① 先看**环境那一路取不到**会怎样（两个资源互不拖累）：如实说，不拿空白或 0 顶替；
+    //    本站的覆盖与天数刻度照常画。也顺带钉住"失败不缓存"：下一次打开照常重试。
+    const scrollsBefore = scrolls.length;
+    let mark = state.calls.length;
+    state.env_error = true;
+    cellOf("S412").click();
+    await waitFor(() => !!mdSvg() && T("#mdnote").indexOf("环境") >= 0, 4000);
+    check("点总览的格子进入该节点的放大视图（卡片展开、标题 = 这一站 + 框 + 本批）",
+      !!mdCard() && cardDisplay() !== "none"
+      && T("#mdtitle").indexOf("S412") >= 0 && T("#mdtitle").indexOf("B412") >= 0,
+      T("#mdtitle"));
+    check("进入放大视图时落到这张卡上（不用自己找）",
+      scrolls.slice(scrollsBefore).indexOf("mdcard") >= 0, scrolls.slice(scrollsBefore).join(",") || "(没滚)");
+
+    check("环境取不到时如实说（说清是环境这一路，不拿空白或 0 顶替）",
+      T("#mdnote").indexOf("环境") >= 0 && T("#mdnote").indexOf("取不到") >= 0
+      && !!mdSvg() && mdSvg().getAttribute("data-station-id") === "S412"
+      && mdAll("path.md-envline").length === 0 && mdAll("circle.md-covpt").length === 6,
+      T("#mdnote").slice(0, 120));
+    check("环境按**本批窗口一次**取回（zone + granularity=hour + start/end = 首末轮真实时间戳）",
+      urlCount(mark, isBatchEnv) === 1
+      && (state.calls.filter(isBatchEnv)[0] || {}).url
+      && state.calls.filter(isBatchEnv)[0].url.indexOf("zone=611") >= 0
+      && state.calls.filter(isBatchEnv)[0].url.indexOf("granularity=hour") >= 0
+      && state.calls.filter(isBatchEnv)[0].url.indexOf("start=" + encodeURIComponent(T0)) >= 0
+      && state.calls.filter(isBatchEnv)[0].url.indexOf("end=" + encodeURIComponent(T1)) >= 0,
+      urlCount(mark, isBatchEnv) + " 次："
+      + (((state.calls.filter(isBatchEnv)[0] || {}).url) || "(没发过)"));
+    check("**不按轮次逐点问**：本批 6 轮只问 1 次环境（N+1 ⇒ 6 次）",
+      urlCount(mark, isBatchEnv) === 1 && COV_ROUNDS.length === 6,
+      urlCount(mark, isBatchEnv) + " 次环境 / " + COV_ROUNDS.length + " 轮");
+    state.env_error = false;
+    mark = state.calls.length;
+    cellOf("S412").click();
+    await waitFor(() => mdAll("path.md-envline").length === 3, 4000);
+    check("环境失败不缓存：下一次打开会重取（不是永久空白）",
+      urlCount(mark, isBatchEnv) === 1 && mdAll("path.md-envline").length === 3,
+      urlCount(mark, isBatchEnv) + " 次环境 / " + mdAll("path.md-envline").length + " 条环境线");
+
+    // ② 主视图：点 S102 的格子。环境已在**本批窗口**这一档取到 ⇒ 两个资源都不重取。
+    const startCalls = state.calls.length;
+    mark = state.calls.length;
+    cellOf("S102").click();
+    await waitFor(() => !!mdSvg() && mdSvg().getAttribute("data-station-id") === "S102", 4000);
+    check("放大视图**不重取矩阵**（逐轮格点来自本批一次的矩阵，页面手里已经有）",
+      urlCount(startCalls, isMatrix) === 0,
+      urlCount(startCalls, isMatrix) + " 次矩阵请求");
+    check("换站也不重取环境（按批次窗口一次，不随站位数增长）",
+      urlCount(startCalls, isBatchEnv) === 0,
+      urlCount(startCalls, isBatchEnv) + " 次环境（本批窗口）");
+
+    const svg = mdSvg();
+    check("放大视图 x 轴窗口 = 本批首末轮的**真实时间戳**",
+      !!svg && svg.getAttribute("data-t0") === T0 && svg.getAttribute("data-t1") === T1
+      && svg.getAttribute("data-station-id") === "S102",
+      svg ? svg.getAttribute("data-t0") + " → " + svg.getAttribute("data-t1") : "(没画)");
+    check("巡检覆盖条：本批 6 轮一格一轮（5 轮有帧 + 1 轮无帧）",
+      covCells().length === 6 && covPts().length === 5,
+      covCells().length + " 格 / " + covPts().length + " 个有帧点");
+
+    // ---- 双刻度：真实时间（主）+ 生长第 N 天（次）----
+    const dayBandOf = d => dayBands().find(b => b.getAttribute("data-day") === String(d));
+    check("双刻度：生长第 N 天刻度与真实时间刻度**在同一条轴**上（同一个 svg、同一套 x）",
+      dayBands().length === 4 && dayLines().length === 3
+      && mdAll("text.md-daylbl").map(t => t.textContent.trim()).join(" ")
+        === "第 6 天 第 7 天 第 8 天 第 9 天"
+      && dayBands().every(b => svg.contains(b)),
+      dayBands().length + " 条天数带：" + mdAll("text.md-daylbl").map(t => t.textContent.trim()).join(" "));
+    check("天数带的边界落在**真实的午夜**上（边界由真实时间戳定，不是把窗口等分）",
+      dayLines().map(l => l.getAttribute("data-ts")).join(",")
+        === "2026-09-11T00:00:00,2026-09-12T00:00:00,2026-09-13T00:00:00",
+      dayLines().map(l => l.getAttribute("data-ts")).join(" | ") || "(没有边界线)");
+    check("天数带的宽度与**真实时长**成比例（第 7 天 24h 是第 6 天 18h 的 4/3，不是等分）",
+      Math.abs(attrN(dayBandOf(7), "width") / attrN(dayBandOf(6), "width") - 24 / 18) <= 0.02
+      && Math.abs(attrN(dayBandOf(9), "width") / attrN(dayBandOf(7), "width") - 18 / 24) <= 0.02,
+      "第 6/7/8/9 天带宽 " + [6, 7, 8, 9].map(d => attrN(dayBandOf(d), "width").toFixed(1)).join(" / "));
+    const midLine = byTs("line.md-dayline", "2026-09-11T00:00:00");
+    const pA = byTs("circle.md-covpt", "2026-09-10T18:00:00");
+    const pB = byTs("circle.md-covpt", "2026-09-11T10:00:00");
+    const wantMid = xOf(pA) + (6 / 16) * (xOf(pB) - xOf(pA));
+    check("生长天数刻度与真实时间**对齐**：第 6/7 天的午夜边界落在 18:00→次日 10:00 之间 6/16 处",
+      !!midLine && !!pA && !!pB && Math.abs(lineX(midLine) - wantMid) <= 1,
+      "边界 x=" + (midLine ? lineX(midLine).toFixed(1) : "?") + "，期望 " + wantMid.toFixed(1)
+      + "（前一个格点 x=" + xOf(pA).toFixed(1) + "、后一个 x=" + xOf(pB).toFixed(1) + "）");
+    check("端点没给生长天数（day=null）时**不画**天数刻度（不猜一个第几天摆上去）",
+      dayBandsOf([{ ts: T0, day: null }, { ts: T1, day: null }]).length === 0
+      && dayBandsOf([{ ts: "2026-09-10T06:00:00", day: 6 }]).length === 1,
+      "day=null ⇒ " + dayBandsOf([{ ts: T0, day: null }]).length + " 条带");
+
+    // **同一条轴**的硬钉子：任取几个**已知真实时间**的图元，x 与 ts 必须落在同一个线性关系上。
+    // 天数刻度自成一套比例（按天等分）、或 x 用等距下标，都会在这里被抓住。
+    const pairs = [];
+    for (const el of covPts()) pairs.push({ t: MS(el.getAttribute("data-ts")), x: xOf(el) });
+    for (const el of dayLines()) pairs.push({ t: MS(el.getAttribute("data-ts")), x: lineX(el) });
+    for (const el of envTempHits()) pairs.push({ t: MS(el.getAttribute("data-ts")), x: xOf(el) });
+    for (const el of lampSegs()) pairs.push({ t: MS(el.getAttribute("data-from")), x: attrN(el, "x") });
+    pairs.sort((a, b) => a.t - b.t);
+    const usable = pairs.length >= 2 && pairs[pairs.length - 1].t > pairs[0].t;
+    const slopeB = usable ? (pairs[pairs.length - 1].x - pairs[0].x)
+      / (pairs[pairs.length - 1].t - pairs[0].t) : 0;
+    const axisX = t => (usable ? pairs[0].x + slopeB * (t - pairs[0].t) : NaN);
+    const offAxis = usable ? pairs.filter(p => Math.abs(p.x - axisX(p.t)) > 0.6) : [{ note: "图元不够" }];
+    check("整张图在同一条**真实时间**轴上：覆盖点/天数边界/环境点/光照段共用同一个线性映射",
+      pairs.length >= 90 && offAxis.length === 0,
+      pairs.length + " 个图元，偏轴 " + offAxis.length + " 个"
+      + (offAxis.length ? "：" + JSON.stringify(offAxis.slice(0, 2)) : ""));
+
+    // ---- 环境带 ----
+    check("环境带叠加：温度 / 湿度 / CO₂ 各一条线",
+      mdAll("path.md-envline").map(p => p.getAttribute("data-param")).join(",")
+        === "temp_c,rh_pct,co2_ppm",
+      mdAll("path.md-envline").map(p => p.getAttribute("data-param")).join(",") || "(没有环境线)");
+    const tempD = (mdAll("path.md-envline")[0] || { getAttribute: () => "" }).getAttribute("d");
+    const tempVx = [...tempD.matchAll(/(-?[0-9.]+),(-?[0-9.]+)/g)].map(m => Number(m[1]));
+    check("环境缺测的小时**断开**：09-11T04:00 没有行 ⇒ 温度线断成两段（84 点、2 段，不插值）",
+      (tempD.match(/M/g) || []).length === 2 && tempVx.length === 84
+      && !tempVx.some(v => Math.abs(v - axisX(MS("2026-09-11T04:00:00"))) < 1),
+      (tempD.match(/M/g) || []).length + " 段 / " + tempVx.length + " 个点");
+    check("悬停给出环境点的读数（时间 + 参数 + 值 + 单位）",
+      titleOf(envTempHits()[0]).indexOf("2026-09-10 06:00") >= 0
+      && titleOf(envTempHits()[0]).indexOf("温度") >= 0
+      && titleOf(envTempHits()[0]).indexOf("19") >= 0,
+      titleOf(envTempHits()[0]) || "(没有悬停信息)");
+
+    // ---- 光照：按**循环制度**切段（OnMSet/OffMSet），不碰设备状态 ----
+    check("光照按**循环制度**切段：OnMSet 2→5 处切一刀 ⇒ 3 段，段上带制度原值",
+      lampSegs().length === 3
+      && lampSegs().map(s => s.getAttribute("data-on-m") + "/" + s.getAttribute("data-off-m")).join(",")
+        === "2/120,2/120,5/60",
+      lampSegs().map(s => s.getAttribute("data-on-m") + "/" + s.getAttribute("data-off-m")).join(" ") || "(没有段)");
+    check("制度变的那一刀切在真实时间 2026-09-12T10:00 上（不是段数一等分）",
+      !!lampSegs()[2] && lampSegs()[2].getAttribute("data-from") === "2026-09-12T10:00:00"
+      && Math.abs(attrN(lampSegs()[2], "x") - axisX(MS("2026-09-12T10:00:00"))) <= 0.6,
+      lampSegs()[2] ? lampSegs()[2].getAttribute("data-from") : "(没有第 3 段)");
+    check("缺测的小时把制度段也断开（不跨过 09-11T04:00 接过去）",
+      !!lampSegs()[0] && lampSegs()[0].getAttribute("data-from") === "2026-09-10T06:00:00"
+      && lampSegs()[0].getAttribute("data-to") === "2026-09-11T04:00:00"
+      && !!lampSegs()[1] && lampSegs()[1].getAttribute("data-from") === "2026-09-11T05:00:00"
+      && lampSegs()[1].getAttribute("data-to") === "2026-09-12T10:00:00",
+      lampSegs().map(s => s.getAttribute("data-from") + "→" + s.getAttribute("data-to")).join(" | "));
+    check("设备状态（lamp_state 逐小时 2/3 跳）**不参与**切段：段数仍是 3（按状态切会是几十段）",
+      lampSegs().length === 3
+      && COV_ENV_ROWS.filter(r => r.lamp_state === 2).length > 10
+      && COV_ENV_ROWS.filter(r => r.lamp_state === 3).length > 10,
+      lampSegs().length + " 段（fixture 里状态 2/3 各出现 "
+      + COV_ENV_ROWS.filter(r => r.lamp_state === 2).length + "/"
+      + COV_ENV_ROWS.filter(r => r.lamp_state === 3).length + " 次）");
+    check("光照层说的是**循环制度**（OnMSet/OffMSet 设定周期），不是「点亮了多少分钟」",
+      T("#nodedetail").indexOf("OnMSet") >= 0 && T("#nodedetail").indexOf("OffMSet") >= 0
+      && !/点亮[^。]{0,12}[0-9]+\s*分/.test(T("#nodedetail")),
+      T("#nodedetail").slice(-160));
+    check("悬停光照段给出制度原值与时段",
+      titleOf(lampSegs()[2]).indexOf("OnMSet") >= 0
+      && titleOf(lampSegs()[2]).indexOf("2026-09-12 10:00") >= 0,
+      titleOf(lampSegs()[2]) || "(没有悬停信息)");
+
+    // ---- 覆盖条 / 缺测断开 ----
+    const segXs = mdAll("path.md-covline").map(p => [...(p.getAttribute("d") || "")
+      .matchAll(/(-?[0-9.]+),(-?[0-9.]+)/g)].map(m => Number(m[1])));
+    check("缺测段断开：S102 在 09-12 那一轮没有帧 ⇒ 线断成 3+2 两段（不跨过缺口直连）",
+      segXs.length === 2 && segXs[0].length === 3 && segXs[1].length === 2
+      && Math.max(...segXs[0]) < Math.min(...segXs[1]),
+      segXs.length + " 段：" + segXs.map(s => s.map(x => x.toFixed(1)).join("→")).join(" | "));
+    const offCells = covCells().filter(c => c.getAttribute("data-noframe") === "1");
+    check("覆盖条：没帧的那一轮是空心格（data-noframe=1、带轮次时间），**不是** 0 帧",
+      offCells.length === 1 && offCells[0].getAttribute("data-ts") === "2026-09-12T10:00:00"
+      && !offCells[0].hasAttribute("data-frames")
+      && document.querySelectorAll('#nodedetail [data-frames="0"]').length === 0,
+      offCells.length + " 个空心格" + (offCells[0] ? " @" + offCells[0].getAttribute("data-ts") : ""));
+    check("悬停覆盖点给出轮次时间 + 帧数；空格子说清「无帧（不是 0 帧）」",
+      titleOf(byTs("circle.md-covpt", "2026-09-10T06:00:00")).indexOf("2026-09-10 06:00") >= 0
+      && titleOf(byTs("circle.md-covpt", "2026-09-10T06:00:00")).indexOf("3 帧") >= 0
+      && titleOf(offCells[0]).indexOf("无帧") >= 0,
+      titleOf(byTs("circle.md-covpt", "2026-09-10T06:00:00")) + " / " + titleOf(offCells[0]));
+
+    check("零新前端依赖：放大视图是手写内联 SVG（页面无外部脚本/样式，也没有 canvas/iframe）",
+      document.querySelectorAll('script[src], link[rel="stylesheet"]').length === 0
+      && !!mdSvg()
+      && document.querySelectorAll("#nodedetail canvas, #nodedetail iframe, #nodedetail img").length === 0,
+      document.querySelectorAll('script[src], link[rel="stylesheet"]').length + " 个外部资源");
+
+    // ---- 幂等 / 换站：不重取、不 N+1 ----
+    mark = state.calls.length;
+    cellOf("S102").click();
+    await sleep(400);
+    check("再点同一格不重取（同站同批幂等）",
+      urlCount(mark, isBatchEnv) === 0 && urlCount(mark, isMatrix) === 0,
+      urlCount(mark, isBatchEnv) + " 次环境 / " + urlCount(mark, isMatrix) + " 次矩阵");
+    mark = state.calls.length;
+    cellOf("S412").click();
+    await waitFor(() => !!mdSvg() && mdSvg().getAttribute("data-station-id") === "S412", 4000);
+    check("换一站：环境**不重取**（按批次窗口一次，不随站位数增长）",
+      urlCount(mark, isBatchEnv) === 0 && urlCount(mark, isMatrix) === 0,
+      urlCount(mark, isBatchEnv) + " 次环境 / " + urlCount(mark, isMatrix) + " 次矩阵");
+    check("换一站后放大视图跟着换站（标题 + 图元都换成 S412，逐轮格点来自矩阵）",
+      T("#mdtitle").indexOf("S412") >= 0 && !!mdSvg()
+      && mdSvg().getAttribute("data-station-id") === "S412"
+      && mdAll("circle.md-covpt").length === 6,
+      T("#mdtitle") + " / " + mdAll("circle.md-covpt").length + " 个有帧点");
+
+    // ---- 本批没有这个站位的记录（矩阵只排本批拍到过帧的站位）----
+    // 这一格必须**照画**：环境与天数刻度是本批的事，但它**不画覆盖条**——
+    // "没记录"与"每轮都缺帧"是两件事，端点不拿一行 0 帧的格子凑数，页面也不许反过来说。
+    mark = state.calls.length;
+    cellOf("S101").click();
+    await waitFor(() => !!mdSvg() && mdSvg().getAttribute("data-station-id") === "S101", 4000);
+    check("本批没有这个站位的记录时**不画覆盖条**（「没记录」≠「每轮都缺帧」），环境与天数刻度照画",
+      mdAll("circle.md-covpt").length === 0 && covCells().length === 0
+      && mdAll("rect.md-dayband").length === 4 && mdAll("path.md-envline").length === 3
+      && T("#mdnote").indexOf("没有这个站位的记录") >= 0,
+      covCells().length + " 个覆盖格 / " + mdAll("path.md-envline").length + " 条环境线 / "
+      + T("#mdnote").slice(0, 90));
+    check("点这种灰格也不发请求（矩阵与本批环境都只取一次）",
+      urlCount(mark, isMatrix) === 0 && urlCount(mark, isBatchEnv) === 0,
+      urlCount(mark, isMatrix) + " 次矩阵 / " + urlCount(mark, isBatchEnv) + " 次环境");
+  }
   // 日期与角度筛选作用于所选巡检轮次。
   $('#fromDate').value = '2026-09-15'; $('#fromDate').dispatchEvent(new window.Event('change'));
   await sleep(150);
@@ -3090,8 +3394,9 @@ await sleep(150);
     '/api/rounds': ['round_id', 'ts', 'ok', 'n_results', 'n_failures', 'room_id', 'entry_date',
                     'batch_no', 'suspect_duplicate', 'dup_groups', 'content_check_error',
                     'n_duplicate', 'n_frames_recorded'],
+    // 票 04 的节点放大读制度列 lamp_on_m/lamp_off_m（按它们切段；lamp_state 只作展示，不参与切段）
     '/api/environment': ['ts', 'zone', 'temp_c', 'rh_pct', 'co2_ppm', 'lamp_state', 'lamp_on_min',
-                         'lamp_on_s', 'lamp_off_s', 'n'],
+                         'lamp_on_s', 'lamp_off_s', 'lamp_on_m', 'lamp_off_m', 'n'],
     '/api/images': ['ts', 'round_id', 'station_id', 'box_id', 'angle_profile', 'object_name',
                     'ok', 'source', 'frame_dup', 'dup_group', 'content_sha256', 'same_as_previous',
                     'duplicate_streak', 'elapsed_s'],
