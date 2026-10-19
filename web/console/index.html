@@ -224,30 +224,71 @@
   .tlfgroup button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
   #ovfilterinfo{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
 
-  /* ---- 同一站位跨轮次对比（2026-10-13，积累期主线）----
-     固定"当前选中的站位"，把最近几轮的同一个框并排摆出来，一眼看出这几天怎么长的。
-     纯前端：逐轮问 /api/images?round_id=…&station_id=…，图仍走 /api/image 同源代理。
-     ⚠️ 一帧约 750 KB，所以默认只铺 4 轮、其余按需展开——缩略图能力到了再换源。 */
-  .cmphead{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;
-    margin:14px 0 var(--sp-2);padding-top:var(--sp-4);border-top:1px solid var(--line)}
-  .cmphead .cmptitle{font-size:13px;font-weight:600;color:var(--fg)}
-  .cmphead .cmpmeta{font-size:11.5px;color:var(--dim);font-variant-numeric:tabular-nums}
-  .cmpstrip{display:grid;gap:var(--sp-3);padding:2px 0 var(--sp-1);
-    grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
-  .cmpstrip .cmp{display:block;padding:var(--sp-1);border:1px solid var(--line);border-radius:var(--r-md);
-    background:var(--soft);cursor:pointer;text-align:left}
-  .cmpstrip .cmp:hover{border-color:#b5ccdf;box-shadow:0 1px 4px rgba(15,23,42,.08)}
-  .cmpstrip .cmp.sel{outline:2px solid var(--accent);outline-offset:-2px}
-  .cmpstrip .cmp-shot{display:block;width:100%;aspect-ratio:16/9;overflow:hidden;
-    border-radius:5px;background:var(--panel)}
-  .cmpstrip .cmp-shot img{display:block;width:100%;height:100%;object-fit:contain;background:var(--panel)}
-  .cmpstrip .cmp-empty{display:flex;align-items:center;justify-content:center;width:100%;height:100%}
-  .cmpstrip .cmp-meta{display:flex;flex-direction:column;gap:1px;padding:var(--sp-1) 2px 0;font-size:11px}
-  .cmpstrip .cmp-when{color:var(--fg);font-variant-numeric:tabular-nums}
-  .cmpstrip .cmp-note{color:var(--dim);font-size:var(--fs-micro)}
-  .cmpstrip .cmp-meas{color:var(--fg);font-size:var(--fs-micro);font-variant-numeric:tabular-nums}
-  .cmpstrip .cmp-note.bad{color:var(--bad)}
-  .cmpstrip .cmp-note.warn{color:var(--warn)}
+  /* ---- 历史视图切换：时序（本批逐帧回放） / 空间（单轮全库房快照）----
+     两次口径别混：**时序**固定一个格点、沿真实时间走；**空间**固定一轮、看全部格点。
+     页面不再按格点分析环境——不同拍照位置只是同一库房里的不同视角。 */
+  .viewbar{display:flex;align-items:center;gap:var(--sp-4);flex-wrap:wrap;padding:0 0 var(--sp-3)}
+  .viewbar .seg{background:var(--soft);border-color:var(--line);padding:2px}
+  .viewbar .seg button{min-height:36px;padding:4px 14px;font-size:12.5px;font-weight:600;color:var(--dim)}
+  .viewbar .seg button.on{background:var(--panel);color:var(--fg);box-shadow:var(--shadow)}
+  #hmain .card[hidden]{display:none}
+  #hcol .lbl[hidden],#hcol .row[hidden]{display:none}
+  /* ---- 时序历史：视频帧回放 ----
+     一帧就是一张原图（约 280 KB–1.1 MB），所以**只预取当前帧后面两帧**，
+     不把整批 84 帧一次铺出来；播放节奏跟着图加载走，不跳黑帧。 */
+  .playgrid{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,300px);
+    gap:var(--sp-4);align-items:start}
+  @media (max-width:1180px){
+    .playgrid{grid-template-columns:minmax(0,1fr)}
+    .playside{position:static}   /* 堆叠后别再粘顶，否则会压住画面 */
+  }
+  .playstage{position:relative;display:flex;align-items:center;justify-content:center;
+    width:100%;aspect-ratio:16/9;max-height:70vh;background:#16212b;
+    border:1px solid #c6d1dc;border-radius:var(--r-md);overflow:hidden}
+  .playstage img{display:none;width:100%;height:100%;object-fit:contain;background:#16212b}
+  .playoverlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    text-align:center;padding:var(--sp-5);color:#d5dee7;font-size:13.5px;line-height:1.6;
+    background:rgba(15,23,42,.58);pointer-events:none}
+  .playoverlay[hidden]{display:none}
+  .playbadges{position:absolute;left:10px;top:10px;display:flex;gap:var(--sp-2);flex-wrap:wrap}
+  .playbadge{display:inline-block;padding:2px var(--sp-3);border-radius:var(--r-pill);
+    font-size:var(--fs-micro);font-weight:600;background:#fdf3e3;border:1px solid #e6c07a;color:#8a5a00}
+  .playbar{display:flex;align-items:center;gap:var(--sp-2);flex-wrap:wrap;padding:var(--sp-3) 0 0}
+  .playbar button{min-height:36px;padding:5px 10px;font-size:12.5px}
+  .playbar #playtoggle{min-width:104px;font-weight:600}
+  .playfield{display:inline-flex;align-items:center;gap:var(--sp-2);font-size:12px;color:var(--dim)}
+  .playfield[hidden]{display:none}
+  .playfield select{min-height:34px;padding:4px 8px;width:auto}
+  .playmeta{padding-top:var(--sp-2);font-size:12px;color:var(--dim);
+    font-variant-numeric:tabular-nums;line-height:1.45}
+  .playdays{display:flex;gap:2px;overflow-x:auto;padding:var(--sp-3) 0 var(--sp-1);
+    border-bottom:1px solid var(--line)}
+  /* 每天一组；组有最小宽度，天多时整条横向滚，而不是让"第 N 天"互相压字。 */
+  .playday{display:flex;flex-direction:column;gap:2px;min-width:44px}
+  .playdaylbl{font-size:var(--fs-micro);color:var(--dim);white-space:nowrap;text-align:center}
+  .playticks{display:flex;gap:1px;height:20px}
+  .ptick{flex:1 1 8px;min-width:4px;min-height:20px;height:20px;padding:0;border-radius:2px;
+    border:1px solid transparent;background:#e6ebf1;box-shadow:none;cursor:default}
+  .ptick.on{background:#a9c2dc;border-color:#a9c2dc;cursor:pointer}
+  .ptick.on:hover{background:var(--accent);border-color:var(--accent)}
+  .ptick.gap{background:repeating-linear-gradient(135deg,#eef1f5,#eef1f5 3px,#dfe5ec 3px,#dfe5ec 6px)}
+  .ptick.cur{background:var(--accent);border-color:#14538f;box-shadow:0 0 0 1px var(--accent)}
+  .playhint{font-size:11.5px;color:var(--dim);padding-top:var(--sp-2);line-height:1.55}
+  .playhint.bad{color:var(--bad)}
+  /* 格点选择器：12 列 × 4 层，与巡检拼图同一套物理布局；只写列号，省地方。 */
+  .playside{border:1px solid var(--line);border-radius:var(--r-md);background:var(--soft);
+    padding:var(--sp-3);position:sticky;top:0}
+  .playsidehead{display:flex;justify-content:space-between;gap:var(--sp-2);font-size:12px;
+    color:var(--dim);font-weight:600;padding-bottom:var(--sp-2)}
+  #playstationSel{width:100%;margin-bottom:var(--sp-2);font-size:12px}
+  .stationpick{display:grid;gap:2px}
+  /* 列数由 JS 按 /api/grid 写进 style（与平面图/拼图同一套 cols），不在这里死写 12。 */
+  .picklayer{display:grid;gap:2px;align-items:center}
+  .picklayerlbl{font-size:var(--fs-micro);color:var(--dim);white-space:nowrap}
+  .pick{min-height:26px;padding:0;font-size:var(--fs-micro);font-variant-numeric:tabular-nums;
+    border-radius:3px;background:var(--panel);color:var(--dim)}
+  .pick[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:700}
+  .pick:hover:not(:disabled){border-color:var(--accent);color:var(--fg)}
   /* ---- 大图查看器 ---- */
   .viewer{position:relative;overflow:hidden;border:1px solid var(--line);border-radius:var(--r-md);
           display:flex;align-items:center;justify-content:center;cursor:grab}
@@ -543,9 +584,10 @@
   .seg{background:var(--soft);border-color:var(--line);padding:2px}
   .seg button{color:var(--dim);min-height:34px;border-radius:var(--r-sm)}
   .seg button.on{background:var(--panel);color:var(--fg);font-weight:600;box-shadow:var(--shadow)}
-  /* 历史模式三张卡按 DOM 顺序排（2026-09-20 review P1-2）：原先靠 grid-row 把"大图"提到
+  /* 历史区按 DOM 顺序排（2026-09-20 review P1-2）：原先靠 grid-row 把"大图"提到
      第一行，于是 Tab 焦点先经过时间轴、读屏大纲顺序也和眼睛看到的相反。现在 DOM 顺序
-     就是视觉顺序（大图 → 时间轴 → 曲线），HTML 里已按此调整。
+     就是视觉顺序：空间视图里是「大图 → 拼图」，时序视图里是「回放 → 曲线」；
+     #mosaiccard 仍是整个历史区的第一张 .card（DOM 顺序，见 mosaicLandingIntact）。
      布局退回普通块级堆叠：原先的 grid 固定比例行（minmax(300px,1.25fr) 那套）把卡片卡死在
      小高度里各自内滚——帧导航、缩放按钮被折在大图卡折叠区，时间轴缩略图和曲线表格也被裁；
      试过 grid-template-rows:auto，但 align-content 会把 auto 行拉伸成等高，一样裁。块级
@@ -728,14 +770,30 @@
   </section>
 
   <section id="hmain" style="display:none">
-    <!-- 口径演进别记错（2026-10-13 四次改口，见 issues/06 §第二轮~第四轮）：
+    <!-- 历史 = 两个**互不混用**的视图（2026-10-19 口径）：
+         时序历史：固定一个格点，沿本批真实时间逐帧回放（视频帧）——回答"它怎么长"；
+         空间历史：固定一轮，看全库房各格点（拓扑拼图）——回答"这一刻各处什么样"。
+         不同拍照位置只是同一库房的多个视角，**不按位置分析环境**：环境只属于库房，
+         整批放在"环境"页。这两块视图里都不再叠逐位置的温湿/CO₂/光照。
+         结构约定：#mosaiccard 仍是 #hmain 里的**第一张** .card（换轮次落点口径），
+         切到"时序历史"时只是把它 hidden 掉，DOM 顺序不动。 -->
+    <div class="viewbar">
+      <div class="seg histseg" id="histViewSeg" role="group" aria-label="历史视图">
+        <button type="button" data-hist="temporal" class="on" aria-pressed="true">时序历史</button>
+        <button type="button" data-hist="spatial" aria-pressed="false">空间历史</button>
+      </div>
+      <span id="histviewhint" class="navinfo">本批同一格点 · 按时间逐帧回放</span>
+    </div>
+
+    <!-- ===== 空间历史：单轮全库房拓扑快照 =====
+         口径演进别记错（2026-10-13 四次改口，见 issues/06 §第二轮~第四轮）：
          第二轮曾把完整图放在拼图**旁边**（#detailpane 是窄侧栏）；**第四轮已改为大图在上、
          吃满整栏、object-fit:contain**（用户："图片还是太小…大图放预览图上面"）。
          现在是同一张卡里 **#detailpane 在上、#timeline 拼图在下**，
          点格位就地换图、不跳卡；换轮次的落点仍滚到这张卡的顶（拼图在视口内）。
          ⚠️ 别再按"在拼图旁边"改回去——那会直接弄坏第四轮。 -->
-    <div class="card" id="mosaiccard">
-      <h2>巡检拼图 <span id="tltitle" style="color:var(--dim);font-weight:400"></span></h2>
+    <div class="card" id="mosaiccard" hidden>
+      <h2>空间历史 · 单轮巡检拼图 <span id="tltitle" style="color:var(--dim);font-weight:400"></span></h2>
       <div class="roundnav">
         <div class="navgrp">
           <span class="navlbl">轮次</span>
@@ -770,82 +828,71 @@
       <div id="timeline" class="empty" role="group" aria-label="巡检拓扑拼图，Y 向右，层从上到下">
         读取巡检轮次…
       </div>
-      <div class="navhint">点任意格位，上面显示那张完整图像</div>
-      <!-- 跨轮次对比：固定当前选中的站位，把最近几轮同一个框并排（积累期主线）。
-           放在拼图**之下**、卡内——不动"第一眼是拼图"那个口径。 -->
-      <div id="comparewrap" style="display:none">
-        <div class="cmphead">
-          <span class="cmptitle" id="cmptitle">同一位置 · 按天对比</span>
-          <span class="cmpmeta">
-            <label class="sr-only" for="cmpTime">每天取样时段</label>
-            <select id="cmpTime" style="min-height:32px;padding:4px 8px;width:auto"></select>
-            <span id="cmphint">选中一个站位后，这里并排显示它最近几天的样子</span>
-          </span>
+      <div class="navhint">点任意格位，上面显示那一轮、那个位置的完整图像</div>
+    </div>
+
+    <!-- ===== 时序历史：本批单格点逐帧回放 =====
+         取数：**一次** /api/images?station_id=…&limit=2000 拿回该格点的帧索引，
+         页面按 round_id 归到当前批次（rounds 已在手），再按 ts 升序播放。
+         不逐轮发请求、不把整批图一次铺开：只加载当前帧 + 预取后面两帧。
+         缺帧的轮次在时间条上留灰条，不插值、不补帧。 -->
+    <div class="card" id="playcard">
+      <h2>时序历史 · 格点生长回放 <span id="playtitle" style="color:var(--dim);font-weight:400"></span></h2>
+      <div class="playgrid">
+        <div class="playmain">
+          <div class="playstage" id="playstage">
+            <img id="playimg" alt="当前回放帧" decoding="async">
+            <div class="playoverlay" id="playstatus">选一个格点，读取本批的帧…</div>
+            <div class="playbadges" id="playbadges"></div>
+          </div>
+          <div class="playbar">
+            <button type="button" id="playtoggle" class="primary">▶ 播放</button>
+            <span class="navgrp">
+              <button type="button" id="playfirst" title="最早一帧" aria-label="最早一帧">⏮</button>
+              <button type="button" id="playprev" title="上一帧" aria-label="上一帧">◀</button>
+              <button type="button" id="playnext" title="下一帧" aria-label="下一帧">▶</button>
+              <button type="button" id="playlast" title="最新一帧" aria-label="最新一帧">⏭</button>
+            </span>
+            <label class="playfield">速度
+              <select id="playspeed">
+                <option value="0.5">0.5×</option>
+                <option value="1" selected>1×</option>
+                <option value="2">2×</option>
+                <option value="4">4×</option>
+              </select>
+            </label>
+            <label class="playfield">步长
+              <select id="playstepsel">
+                <option value="all" selected>每一轮</option>
+                <option value="day">每天一帧</option>
+              </select>
+            </label>
+            <label class="playfield" id="playanglewrap" hidden>角度
+              <select id="playanglesel"></select>
+            </label>
+          </div>
+          <div class="playmeta" id="playmeta"></div>
+          <div class="playdays" id="playdays" role="group" aria-label="本批巡检时间条"></div>
+          <div class="playhint" id="playhint">读取本批帧…</div>
         </div>
-        <div class="cmpstrip" id="cmpstrip"></div>
-        <div class="empty" id="cmpnote" style="padding:4px 0 0"></div>
+        <aside class="playside" aria-label="格点选择">
+          <div class="playsidehead"><span>格点</span><span id="playstation">未选</span></div>
+          <!-- 触屏主入口：44px 原生下拉，按层分组；下面的 12 列小格子是鼠标/平板的快速定位 -->
+          <label class="sr-only" for="playstationSel">选择回放格点</label>
+          <select id="playstationSel"></select>
+          <div id="stationpick" class="stationpick"></div>
+          <div class="navhint">下拉或点格子切换本批的回放；播放只发生在当前格点内。<br>
+            格点只决定取景视角，不代表独立环境——温湿 / CO₂ / 光照看「环境」页的整批一条。</div>
+        </aside>
       </div>
     </div>
-    <div class="card">
+
+    <!-- 生长曲线：时序的历史量（测量接通后自动有内容）；与回放共用当前格点。
+         没有测量行就直说"还没测到"，**不画零增长线**。 -->
+    <div class="card" id="curvecard">
       <h2>生长曲线 <span id="curvetitle" style="color:var(--dim);font-weight:400"></span></h2>
       <div id="curve" class="empty">选一个站位，看它所在框的生长</div>
       <div id="growthnote" class="empty"></div>
-    </div>
-    <div class="card">
-      <h2>覆盖轨迹 <span id="covertitle" style="color:var(--dim);font-weight:400"></span></h2>
-      <!-- 票 02：本批**逐轮**的巡检覆盖（一格一轮）。数据走 `"/api/timeline`，
-           时间轴约定与上面的生长曲线卡同源（票 01 立的：真实时间 x / 缺口断开 / null≠0）。 -->
-      <div id="coverage" class="empty">选一个站位，看它本批每一轮的巡检覆盖</div>
-      <div id="covernote" class="empty"></div>
-    </div>
-    <div class="card">
-      <h2>时序总览 <span id="ovtitle" style="color:var(--dim);font-weight:400"></span></h2>
-      <!-- 票 03：本批**全部站位**的小倍数矩阵（一格一张 sparkline）。
-           取数是**一次** /api/timeline（不给 station_id = 全站位矩阵）——不在页面上发 48 次请求。
-           时间轴约定与上面两张卡同源（票 01 立的、spec 三条硬规则）：真实时间 x / 缺口断开 /
-           无帧不画成 0。布局按 grid.cols × grid.layers（与平面图、巡检拼图同一套 col/layer 顺序）。 -->
-      <!-- 票 06：刷选条（**一份**共享窗口 ⇒ 时序总览 / 节点放大 / 库房分位数带同步聚焦）
-           + 筛选（层 / 列 / 有没有数据）。两者都只是把**已经拿回的矩阵**换一种画法：
-           窗口化不重新取数；筛选只作用于这张矩阵，被筛掉多少写在计数里。 -->
-      <div id="brushwrap">
-        <div class="brushhead">
-          <span class="brushlbl">时间刷选</span>
-          <button type="button" id="brushclear" disabled>清除刷选</button>
-          <span class="brushmeta" id="brushmeta"></span>
-        </div>
-        <div id="brushsvgbox"></div>
-      </div>
-      <div id="ovfilters"></div>
-      <div id="ovfilterinfo" class="navinfo"></div>
-      <div id="overview" class="empty">读取本批全部站位的巡检轨迹…</div>
-      <div id="ovnote" class="empty"></div>
-    </div>
-    <div class="card" id="mdcard" style="display:none">
-      <h2>节点放大 <span id="mdtitle" style="color:var(--dim);font-weight:400"></span></h2>
-      <!-- 票 04：点上面「时序总览」里的任一格 ⇒ 进入这一站的放大视图。
-           同一条轴上两套刻度：**真实时间（主）+ 生长第 N 天（次）**（day 由端点按入库日派生）；
-           叠环境带（温/湿/CO₂ 三条线 + **光照循环制度**按 (OnMSet, OffMSet) 切段）与巡检覆盖条。
-           取数：逐轮格点用票 03 已经拿回的**本批矩阵**（点一格不再发请求），环境按**本批窗口一次**问
-           /api/environment —— 不按站位、更不按轮次逐点去问（48 站 × N 轮就是 N+1）。
-           零依赖：整张图是手写内联 SVG。 -->
-      <div id="nodedetail" class="empty">点上面「时序总览」里的任一格，进入这个节点的放大视图</div>
-      <div id="mdnote" class="empty"></div>
-    </div>
-    <div class="card">
-      <h2>库房分位数带 <span id="rbtitle" style="color:var(--dim);font-weight:400"></span></h2>
-      <!-- 票 05：把本批**全部站位**按轮次聚合成一条带宽（中位线 + IQR 带），回答"这批整体在怎么长"。
-           取数：**这张卡自己不发请求**——样本集就是票 03 已经拿回的本批矩阵（hist.overview），
-           在 drawOverview() 的同一次渲染里现场算出来；页面上不缓存第二份聚合结果，
-           所以它不可能与总览各算各的。
-           口径（P0 有值的量只有每站帧数 n_frames；P1 长势接通后同一套带宽换 growth 即可）：
-             · 每轮样本 = 该轮**有帧站位**的帧数；p25/p50/p75 用线性插值分位（R-7）；
-             · **样本不足就不画**（n < ROOM_BAND_MIN_N）：不给任何分位值、更不写 0，
-               那一轮打「样本不足（n=X）」标记，带在那里断开；
-             · 一个站位都没拍到的轮次是另一句话（「整轮无帧」），同样断开；
-             · 另给一条覆盖率线（有帧站位 / 参与统计站位）：这里的 0 是**真的 0**，
-               所以它不断开——null ≠ 0 的另一半：真 0 也不许说成"没数据"。 -->
-      <div id="roomband" class="empty">读取本批全部站位的逐轮矩阵…（这张卡用的是时序总览那一次取数）</div>
-      <div id="rbnote" class="empty"></div>
     </div>
   </section>
 
@@ -951,14 +998,14 @@
       <h2>筛选</h2>
       <div class="lbl">生产批次</div>
       <div class="row"><select id="batchSel"><option value="">读取中…</option></select></div>
-      <div class="lbl">巡检轮次</div>
-      <div class="row"><select id="roundSel"><option value="">读取中…</option></select></div>
+      <div class="lbl" id="roundlbl">巡检轮次（空间历史）</div>
+      <div class="row" id="roundrow"><select id="roundSel"><option value="">读取中…</option></select></div>
       <div class="lbl">日期范围</div>
       <div class="row">
         <input id="fromDate" type="date"><input id="toDate" type="date">
       </div>
-      <div class="lbl">角度档</div>
-      <div class="row"><select id="angleSel"><option value="">全部</option></select></div>
+      <div class="lbl" id="anglelbl">角度档（空间历史）</div>
+      <div class="row" id="anglerow"><select id="angleSel"><option value="">全部</option></select></div>
       <div class="grid2">
         <button id="clearfilter">清空筛选</button>
         <button id="reloadbtn">重新读取</button>
@@ -2512,7 +2559,17 @@ const CMP_TOD_STEP_MIN = 20;   // 时段选择器的步长
 const CMP_TOD_TOLERANCE_MIN = 90;  // 偏离参考时段超过这么久就标"邻近时段"（如实标注，不假装准）
 
 let mode = 'realtime';
-const hist = { rows: [], rounds: [], growth: null, measure: null, picked: null, zoom: 1, px: 0, py: 0,
+const hist = { rows: [], rounds: [], growth: null, measure: null, growthStationId: '',
+               picked: null, zoom: 1, px: 0, py: 0,
+               // 历史视图：'temporal' = 时序（单格点逐帧回放）；'spatial' = 空间（单轮全库房拼图）
+               view: 'temporal',
+               // 时序回放：一次拿回该格点的帧索引（按 round_id 归当前批次），
+               // view = 播放序列（步长"每天一帧"时是 list 的子集）。
+               // key 是幂等键（格点 + 批次 + 日期），seq 用来丢弃过期响应。
+               play: { stationId: '', angle: '', angleOptions: [], key: '', loading: false, loaded: false,
+                       error: '', rows: [], list: [], view: [], index: 0, rounds: [], missing: [],
+                       step: 'all', speed: 1, playing: false, timer: null, imgToken: 0,
+                       tickEls: [], truncated: false, seq: 0 },
                // 覆盖轨迹（票 02）：envelope + 这批数据是为哪个站位/哪一批取的（幂等护栏）
                coverage: null, coverageStationId: '', coverageBatchKey: '',
                // 时序总览（票 03）：本批**全部站位**的矩阵 + 它是为哪一批取的（幂等护栏）
@@ -2552,18 +2609,21 @@ function setMode(m){
   if(m === 'history'){
     if(!hist.focusedStationId) hist.focusedStationId = selected;
     stationRequestSeq++;
+    applyHistViewChrome();
     renderHistory();
     // 切回来时容器宽度与上一次渲染时可能不同（环境模式是单列），
     // 而且防抖里可能还压着一次没跑的重算——这里直接落定，别等下一拍。
     mosaicResizePending = false;
-    recalcMosaicCells();
+    if(hist.view === 'spatial') recalcMosaicCells();
     loadHistory(false);
   }else if(m === 'env'){
     historyRequestSeq++;          // 丢掉在飞的历史响应，别让它回来改状态
+    stopPlayback(false);
     loadEnv();
   }else{
     historyRequestSeq++;
     envRequestSeq++;
+    stopPlayback(false);
     if(cmd.session_active){
     openPreview('已回到实时模式');
     }
@@ -2671,8 +2731,8 @@ function filtered(){
 /** 网格有多大（列 × 层）：**格数 = cols × layers**，来源是 /api/grid（`grid_geometry()`）。
  *
  *  没有 grid（老后端/还没取回）时退到站位表里的最大层/框；时序总览还会把应答里的站位
- *  矩阵（`extra`）一起递进来。平面图、巡检拼图、时序总览三处都按它算 —— **没有任何一处
- *  死写 48**：现场换 12×4 之外的布局时它们一起变。 */
+ *  矩阵（`extra`）一起递进来。平面图、巡检拼图、时序回放的格点选择器三处都按它算 ——
+ *  **没有任何一处死写 48**：现场换 12×4 之外的布局时它们一起变。 */
 function gridExtent(extra){
   const items = (stations || []).concat(extra || []);
   const colsFromItems = Math.max(0, ...items.map(item => Number(item.col) || 0));
@@ -2692,9 +2752,7 @@ function renderHistory(){
     ? '· ' + String(round.ts || '').replace('T', ' ') + (round.batch_no ? ' · ' + round.batch_no : '')
     : '';
   $('#curvetitle').textContent = st ? '· ' + st.box_id : '';
-  $('#filterinfo').textContent = round
-    ? `本轮 ${hist.rows.length} 帧，筛出 ${rows.length} 帧`
-    : `${hist.rounds.length} 条巡检记录`;
+  updateFilterInfo();
 
   const tl = $('#timeline');
   const notes = [];
@@ -2713,12 +2771,9 @@ function renderHistory(){
     else if(hist.rounds.length) tl.textContent = '所选批次/日期没有可精确归属的巡检轮次';
     else tl.textContent = '还没有带轮次 ID 的巡检记录';
     drawCurve();
-    drawCoverage();
-    loadOverview();
-    drawOverview();
-    refreshNodeDetail();
     updateFrameInfo();
-    renderCompare();
+    renderTemporal();
+    if(hist.view === 'temporal' && hist.roundsLoaded) loadTemporal(false);
     return;
   }
 
@@ -2790,12 +2845,740 @@ function renderHistory(){
     pickHistoryCell(el);
   });
   drawCurve();
-  drawCoverage();
-  loadOverview();     // 幂等（同一批次只取一次）：本卡是"全站位"，与选中哪个站位无关
-  drawOverview();
-  refreshNodeDetail();   // 票 04：放大视图的逐轮格点也来自这份矩阵（矩阵到了才画得出来）
   updateFrameInfo();
-  renderCompare();
+  renderTemporal();
+  if(hist.view === 'temporal' && hist.roundsLoaded) loadTemporal(false);
+}
+
+/* ================= 时序历史：本批 · 单格点 · 逐帧回放 =================
+   需求口径（2026-10-19）：不同拍照位置只是同一库房里的不同视角，不按位置分析环境；
+   时间维度只看**一个格点**在本批里的连续照片。所以这里：
+     · 取数：一次 /api/images?station_id=…&limit=2000（索引很小），按 round_id 归当前批次；
+     · 播放：按 ts 升序，一帧一张；只加载当前帧 + 预取后面两帧，绝不把 84 帧一次铺开；
+     · 缺帧：时间条上留灰条，不插值、不补帧、不拿上一帧顶替；
+     · 角度：播放固定在**一个**角度档，避免画面在不同视角之间跳（默认 level0，没有就取帧数最多的档）；
+     · 环境：不在这里叠。库房环境整批在"环境"页，位置只是取景角度。 */
+const PLAY_BASE_MS = 850;          // 1× 时每帧停多久
+const PLAY_PRELOAD_AHEAD = 2;      // 只预取后面两帧（一帧约 0.3–1.1 MB）
+const PLAY_PRELOAD_MAX = 8;        // 预取对象上限，超了丢最早的，别把解码内存吃满
+const playPreload = new Map();
+
+/** 当前批次 + 日期筛选下的**全部**轮次（含没有帧的轮次），按时间升序。
+ *  与 visibleRounds() 的区别：那个还筛掉了"整轮无图"的轮次（拼图用），
+ *  这里必须保留它们——缺帧就是时间条上的灰条，不能当作那一轮不存在。 */
+function batchRoundsInScope(){
+  const from = $('#fromDate') ? $('#fromDate').value : '';
+  const to = $('#toDate') ? $('#toDate').value : '';
+  return hist.rounds
+    .filter(row => row && row.round_id && batchKey(row) === hist.selectedBatchKey)
+    .filter(row => {
+      const date = rowDate(row);
+      return (!from || !date || date >= from) && (!to || !date || date <= to);
+    })
+    .sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')));
+}
+
+function batchEntryDate(){
+  const row = hist.rounds.find(item => batchKey(item) === hist.selectedBatchKey);
+  return String((row && row.entry_date) || '').slice(0, 10);
+}
+
+/** 生长第几天：与 analysis/timeline.day_of 同口径，**入库当天 = 第 0 天**。
+ *  取不到入库日就返回 null，页面只显示真实时间，不猜一个天数出来。 */
+function dayOfFrame(ts){
+  const entry = batchEntryDate();
+  if(!entry) return null;
+  const t = Date.parse(String(ts || '').replace(' ', 'T'));
+  const e = Date.parse(entry + 'T00:00:00');
+  if(!Number.isFinite(t) || !Number.isFinite(e)) return null;
+  return Math.floor((t - e) / 86400000);
+}
+
+/** 回放的格点：**独立于空间历史选中的格子**。
+ *  初始化时借用实时/空间里的选中站；之后只在时序视图内切换，不写回 hist.focusedStationId，
+ *  免得"在空间里点了一个格子"把正在回放的格点换掉。 */
+function ensureTemporalStation(){
+  const P = hist.play;
+  if(P.stationId && stations.some(st => st.id === P.stationId)) return P.stationId;
+  if(hist.focusedStationId && stations.some(st => st.id === hist.focusedStationId)) return hist.focusedStationId;
+  const sorted = stations.slice().sort((a, b) =>
+    ((Number(a.layer) || 0) - (Number(b.layer) || 0)) || ((Number(a.col) || 0) - (Number(b.col) || 0)));
+  return sorted[0] ? sorted[0].id : '';
+}
+
+function updateFilterInfo(){
+  const el = $('#filterinfo');
+  if(!el) return;
+  if(hist.view === 'temporal'){
+    const P = hist.play;
+    el.textContent = P.stationId
+      ? `格点 ${P.stationId} · 本批 ${(P.list || []).length} 帧 / ${(P.rounds || []).length} 轮`
+      : '选一个格点开始回放';
+    return;
+  }
+  const round = hist.rounds.find(item => item.round_id === hist.selectedRoundId);
+  const rows = filtered();
+  el.textContent = round
+    ? `本轮 ${hist.rows.length} 帧，筛出 ${rows.length} 帧`
+    : `${hist.rounds.length} 条巡检记录`;
+}
+
+/** 视图 chrome：按钮、两张卡的 hidden、左栏只在空间历史出现的两个筛选。
+ *  只改外观，不取数——取数入口统一在 setHistView()。 */
+function applyHistViewChrome(){
+  const view = hist.view === 'spatial' ? 'spatial' : 'temporal';
+  document.querySelectorAll('#histViewSeg button').forEach(btn => {
+    const on = btn.dataset.hist === view;
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', String(on));
+  });
+  const spatial = $('#mosaiccard'), play = $('#playcard');
+  if(spatial) spatial.hidden = view !== 'spatial';
+  if(play) play.hidden = view !== 'temporal';
+  const hint = $('#histviewhint');
+  if(hint) hint.textContent = view === 'temporal'
+    ? '本批同一格点 · 按时间逐帧回放'
+    : '单轮全库房 · 同一时刻各格点的样子';
+  const roundLbl = $('#roundlbl'), roundRow = $('#roundrow');
+  const angleLbl = $('#anglelbl'), angleRow = $('#anglerow');
+  if(roundLbl) roundLbl.hidden = view !== 'spatial';
+  if(roundRow) roundRow.hidden = view !== 'spatial';
+  if(angleLbl) angleLbl.hidden = view !== 'spatial';
+  if(angleRow) angleRow.hidden = view !== 'spatial';
+  if(view !== 'temporal') stopPlayback(true);
+}
+
+/** 切视图。时间/空间的取数各走各的，互不触发对方那一份。 */
+function setHistView(view){
+  hist.view = view === 'spatial' ? 'spatial' : 'temporal';
+  applyHistViewChrome();
+  const hmain = $('#hmain');
+  if(hmain) hmain.scrollTop = 0;   // 换视图从新视图的顶部开始，不沿用上一张卡滚到一半的位置
+  if(mode !== 'history') return;
+  if(hist.view === 'spatial'){
+    loadGrowth();   // 曲线跟着"空间视图选中的站位"走；切过来时补一次（幂等）
+    if(!hist.rows.length || hist.loadedFor) loadRoundImages(syncRoundOptions());
+    else { renderHistory(); recalcMosaicCells(); }
+  }else{
+    loadTemporal(false);
+  }
+}
+
+function frameAngle(row){ return String((row && row.angle_profile) || ''); }
+function isProbeFrame(row){ return /-probe\d+/i.test(String((row && row.object_name) || '')); }
+/** 同一轮里若有多帧（正常帧 + 重试 probe）：优先非 probe，其次更晚的那张。 */
+function preferredFrame(a, b){
+  const pa = isProbeFrame(a), pb = isProbeFrame(b);
+  if(pa !== pb) return pb;
+  return String(a.ts || '') > String(b.ts || '');
+}
+
+/** 播放序列：'all' = 每一轮一帧；'day' = 每天取最接近参考时段的一帧（生长对比用）。
+ *  按天抽样**只改变播放步长**，不删除原始帧——切回"每一轮"仍是完整序列。 */
+function playViewFrames(){
+  const P = hist.play;
+  const list = P.list || [];
+  if(P.step !== 'day' || list.length < 2) return list.slice();
+  const ref = compareTod();
+  const byDate = new Map();
+  for(const frame of list){
+    const date = String(frame.ts || '').slice(0, 10);
+    const tod = todMinutes(frame.ts);
+    const drift = tod === null ? Infinity : Math.abs(tod - ref);
+    const prev = byDate.get(date);
+    if(!prev || drift < prev.drift) byDate.set(date, { frame, drift });
+  }
+  return [...byDate.values()]
+    .sort((a, b) => String(a.frame.ts || '').localeCompare(String(b.frame.ts || '')))
+    .map(item => item.frame);
+}
+
+function rebuildPlayView(keepTs){
+  const P = hist.play;
+  const keep = keepTs || (P.view[P.index] || {}).ts || '';
+  P.view = playViewFrames();
+  let index = -1;
+  if(keep){
+    // 换格点时尽量停在同一时刻（精确对不上就取之前最近的一帧）——这样"同时刻比不同位置"
+    // 不会因为某一站缺了那一轮而跳回批次开头。
+    for(let i = 0; i < P.view.length; i++){
+      if(String(P.view[i].ts || '') <= String(keep)) index = i;
+      else break;
+    }
+  }
+  if(index < 0) index = Math.min(P.index, Math.max(0, P.view.length - 1));
+  P.index = Math.max(0, index);
+}
+
+/** 清空舞台并把在飞的图片回调作废（换格点/换批次时用）。 */
+function clearPlayStage(text){
+  const P = hist.play;
+  P.imgToken += 1;
+  P.imgReady = false;
+  if(P.loadTimer){ clearTimeout(P.loadTimer); P.loadTimer = null; }
+  const img = $('#playimg');
+  if(img){
+    img.onload = null; img.onerror = null;
+    img.removeAttribute('src'); img.style.display = 'none'; img.dataset.url = '';
+  }
+  setPlayOverlay(text || '读取本批该格点的帧…');
+}
+
+/** 取本批该格点的帧索引。一次请求，前端用 round_id 归批；不逐轮发请求。 */
+async function loadTemporal(force){
+  if(mode !== 'history') return;
+  const P = hist.play;
+  // 轮次还没回来时**不要**把空结果落成"这一批没有帧"：先等 /api/rounds，
+  // 否则 P.key 会以空批次定稿，后面轮次到了也会被幂等护栏挡掉。
+  if(!hist.roundsLoaded || !hist.selectedBatchKey){
+    P.key = ''; P.loaded = false; P.loading = !hist.roundsLoaded;
+    P.rounds = []; P.list = []; P.view = []; P.index = 0;
+    P.angleOptions = []; P.missing = [];
+    P.stationId = hist.focusedStationId || P.stationId;
+    // 轮次还在路上和"轮次取回来了但一条可用批次都没有"是两件事，别都写成"读取中"。
+    P.error = (hist.roundsLoaded && hist.roundsError)
+      ? '巡检轮次读取失败：' + hist.roundsError : '';
+    clearPlayStage(!hist.roundsLoaded ? '读取巡检轮次…'
+      : (P.error || '还没有批次信息，无法按批回放'));
+    renderTemporal();
+    return;
+  }
+  const stationId = ensureTemporalStation();
+  P.stationId = stationId;
+  if(stationId && hist.growthStationId !== stationId) loadGrowth();
+  if(!stationId){
+    P.loading = false; P.loaded = false; P.error = '站位表里没有可播放的格点';
+    P.rows = []; P.list = []; P.view = []; P.rounds = batchRoundsInScope(); P.index = 0;
+    clearPlayStage(P.error);
+    renderTemporal();
+    return;
+  }
+  const key = [stationId, hist.selectedBatchKey,
+               $('#fromDate') ? $('#fromDate').value : '',
+               $('#toDate') ? $('#toDate').value : ''].join('|');
+  if(!force && P.key === key && (P.loaded || P.loading)){ renderTemporal(); return; }
+  const keepTs = (P.view[P.index] || {}).ts || '';
+  const scopeRounds = batchRoundsInScope();
+  const seq = ++P.seq;
+  stopPlayback(false);
+  if(force) playPreload.clear();
+  P.key = key;
+  P.loading = true; P.loaded = false; P.error = '';
+  P.rows = []; P.list = []; P.view = []; P.index = 0; P.truncated = false;
+  P.angleOptions = [];
+  P.rounds = scopeRounds;
+  P.missing = scopeRounds.slice();
+  clearPlayStage('读取本批该格点的帧…');
+  renderTemporal();
+  let data;
+  try{
+    data = await jget('/api/images?station_id=' + encodeURIComponent(stationId) + '&limit=2000');
+  }catch(e){
+    data = { rows: [], error: requestErrorText(e, '本批帧') };
+  }
+  if(seq !== P.seq || P.stationId !== stationId) return;
+  const rows = Array.isArray(data.rows) ? data.rows : [];
+  const roundIds = new Set(scopeRounds.map(row => row.round_id));
+  const from = $('#fromDate') ? $('#fromDate').value : '';
+  const to = $('#toDate') ? $('#toDate').value : '';
+  // 有 round_id 就按本批轮次集合归批；旧行没有 round_id 才退回"行自己的批次列 + 日期"，
+  // 这样既不会把上一批的帧混进来，也不会把本地待同步的旧形状静默丢掉。
+  const scoped = rows.filter(row => {
+    if(row.round_id && roundIds.size) return roundIds.has(row.round_id);
+    if(batchKey(row) !== hist.selectedBatchKey) return false;
+    const date = rowDate(row);
+    return (!from || !date || date >= from) && (!to || !date || date <= to);
+  });
+  // 播放必须固定在一个角度档：同一站在一轮里可能同时有 top0/top45/level0，
+  // 混着播会让画面在视角之间跳，看起来像"蘑菇变了"。
+  // 选档优先"真的有可用帧"的档（level0 优先）；某档全是失败帧时不拿它当默认，
+  // 否则播放器会莫名其妙地空着，而另一档其实有图。
+  const counts = new Map(), usable = new Map();
+  for(const row of scoped){
+    const angle = frameAngle(row);
+    counts.set(angle, (counts.get(angle) || 0) + 1);
+    if(rowOk(row) && row.object_name) usable.set(angle, (usable.get(angle) || 0) + 1);
+  }
+  const angles = [...counts.keys()].sort((a, b) =>
+    ((usable.get(b) || 0) - (usable.get(a) || 0))
+    || ((counts.get(b) || 0) - (counts.get(a) || 0))
+    || String(a).localeCompare(String(b)));
+  let angle = P.angle;
+  if(!usable.get(angle)){
+    angle = usable.get('level0') ? 'level0' : (angles.find(item => usable.get(item)) || angles[0] || '');
+  }
+  P.angle = angle;
+  // 只把**真的有可用帧**的档放进下拉：否则用户切到一个全失败档，loadTemporal 又会
+  // 因为 usable=0 把它弹回默认档，看起来像"下拉没反应"。
+  P.angleOptions = angles.filter(a => a !== '' && usable.get(a));
+  // 有未标注角度的可用帧时，把它作为一个可选项（而不是让下拉默认显示成另一个档位）
+  if(counts.has('') && usable.get('')) P.angleOptions = ['', ...P.angleOptions];
+  P.rows = scoped;
+  const byRound = new Map();
+  for(const row of scoped){
+    if(frameAngle(row) !== angle) continue;
+    if(!rowOk(row) || !row.object_name) continue;
+    const one = row.round_id || row.ts;
+    const prev = byRound.get(one);
+    if(!prev || preferredFrame(row, prev)) byRound.set(one, row);
+  }
+  P.list = [...byRound.values()].sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')));
+  const withFrame = new Set(P.list.map(frame => frame.round_id).filter(Boolean));
+  P.missing = scopeRounds.filter(row => !withFrame.has(row.round_id));
+  P.truncated = rows.length >= 2000;
+  P.loading = false;
+  P.loaded = true;
+  P.error = data.error || data.prod_error || '';
+  rebuildPlayView(keepTs);
+  // 离开历史页时只把结果缓存好，不在隐藏页面上继续拉图；
+  // 回到历史后 loadTemporal() 会命中 P.loaded 并直接重画。
+  if(mode !== 'history' || hist.view !== 'temporal') return;
+  renderTemporal();
+  preloadPlayNeighbors();
+}
+
+function renderTemporal(){
+  // 时序播放器在空间视图里是 hidden 的：不重画、更不拉图（否则点拼图会偷偷下载整帧）。
+  // 切回时序时 setHistView() 会走 loadTemporal()/renderTemporal() 重新画。
+  if(mode !== 'history' || hist.view !== 'temporal' || !$('#stationpick')) return;
+  const P = hist.play;
+  const station = stations.find(st => st.id === P.stationId);
+  const batchRow = hist.rounds.find(row => batchKey(row) === hist.selectedBatchKey);
+  const batchMain = batchRow ? batchIdentity(batchRow).main : '';
+  const title = $('#playtitle');
+  if(title) title.textContent = station
+    ? `· ${station.id}${station.box_id ? ' · ' + station.box_id : ''}${batchMain ? ' · ' + batchMain : ''}` : '';
+  const curveTitle = $('#curvetitle');
+  if(curveTitle) curveTitle.textContent = station && station.box_id ? '· ' + station.box_id : '';
+  const name = $('#playstation');
+  if(name) name.textContent = station ? station.id : '未选';
+  renderStationPicker();
+  renderPlayAngle();
+  renderPlayButtons();
+  renderPlayTrack();
+  renderPlayHint();
+  renderPlayFrame();
+  updateFilterInfo();
+}
+
+/** 格点选择器：列/层与拼图/平面图同一套物理布局（来自 /api/grid，不写死 12×4）；
+ *  只写列号，省地方。选中态用 aria-pressed 同步——**不重建 DOM**，刚点过的按钮还留着键盘焦点。 */
+function renderStationPicker(){
+  const box = $('#stationpick');
+  if(!box) return;
+  const P = hist.play;
+  const extent = gridExtent();
+  const sig = `${extent.cols}x${extent.layers}|`
+    + stations.map(station => `${station.id}:${station.layer}:${station.col}:${station.box_id || ''}`).join(',');
+  const byCell = new Map();
+  for(const station of stations){
+    const layer = Number(station.layer), col = Number(station.col);
+    if(!Number.isInteger(layer) || !Number.isInteger(col)
+       || layer < 1 || layer > extent.layers || col < 1 || col > extent.cols) continue;
+    const one = `${layer}:${col}`;
+    if(!byCell.has(one)) byCell.set(one, station);
+  }
+  if(box.dataset.sig !== sig){
+    box.dataset.sig = sig;
+    const groups = [];
+    for(let layer = 1; layer <= extent.layers; layer++){
+      const cells = [];
+      for(let col = 1; col <= extent.cols; col++){
+        const station = byCell.get(`${layer}:${col}`);
+        if(!station){ cells.push('<span class="pick" aria-hidden="true"></span>'); continue; }
+        const label = `${station.id}${station.box_id ? ' · ' + station.box_id : ''} · 第 ${layer} 层第 ${col} 框`;
+        cells.push(`<button type="button" class="pick" data-pick-station="${esc(station.id)}"
+          aria-pressed="false" aria-label="${esc(label)}" title="${esc(label)}"
+          >${String(col).padStart(2, '0')}</button>`);
+      }
+      groups.push(`<div class="picklayer" style="grid-template-columns:34px repeat(${extent.cols},minmax(0,1fr))">
+        <span class="picklayerlbl">第 ${layer} 层</span>${cells.join('')}</div>`);
+    }
+    box.innerHTML = groups.join('');
+    box.querySelectorAll('[data-pick-station]').forEach(el => {
+      el.onclick = () => pickTemporalStation(el.dataset.pickStation);
+    });
+  }
+  // 原生下拉（44px）是触屏主入口：12 列小格子只适合鼠标快速定位。
+  const sel = $('#playstationSel');
+  if(sel && sel.dataset.sig !== sig){
+    sel.dataset.sig = sig;
+    const groups = [];
+    for(let layer = 1; layer <= extent.layers; layer++){
+      const options = [];
+      for(let col = 1; col <= extent.cols; col++){
+        const station = byCell.get(`${layer}:${col}`);
+        if(!station) continue;
+        const label = `${String(col).padStart(2, '0')} · ${station.id}`
+          + (station.box_id ? ' · ' + station.box_id : '');
+        options.push(`<option value="${esc(station.id)}">${esc(label)}</option>`);
+      }
+      if(options.length) groups.push(`<optgroup label="第 ${layer} 层">${options.join('')}</optgroup>`);
+    }
+    sel.innerHTML = '<option value="" disabled>选一个格点…</option>' + groups.join('');
+    sel.onchange = () => pickTemporalStation(sel.value);
+  }
+  if(sel) sel.value = P.stationId || '';
+  box.querySelectorAll('[data-pick-station]').forEach(el => {
+    el.setAttribute('aria-pressed', String(el.dataset.pickStation === P.stationId));
+  });
+}
+
+function renderPlayAngle(){
+  const P = hist.play;
+  const wrap = $('#playanglewrap'), sel = $('#playanglesel');
+  if(!wrap || !sel) return;
+  const options = P.angleOptions || [];
+  wrap.hidden = options.length < 2;   // 只有一个档时没得选，别占一行
+  if(!options.length){ sel.innerHTML = ''; sel.dataset.sig = ''; return; }
+  const sig = options.join('|');
+  if(sel.dataset.sig !== sig){
+    sel.dataset.sig = sig;
+    sel.innerHTML = options.map(angle =>
+      `<option value="${esc(angle)}">${esc(angle || '未标注')}</option>`).join('');
+  }
+  if(options.includes(P.angle)) sel.value = P.angle;
+  sel.disabled = options.length < 2;
+}
+
+function renderPlayButtons(){
+  const P = hist.play;
+  const n = (P.view || []).length;
+  const set = (selector, disabled) => {
+    const el = $(selector);
+    if(el) el.disabled = !!disabled;
+  };
+  const toggle = $('#playtoggle');
+  if(toggle){
+    toggle.disabled = n < 2 || P.loading;
+    toggle.textContent = P.playing ? '⏸ 暂停' : '▶ 播放';
+    toggle.setAttribute('aria-pressed', String(!!P.playing));
+  }
+  set('#playfirst', n < 2 || P.index <= 0);
+  set('#playprev', n < 2 || P.index <= 0);
+  set('#playnext', n < 2 || P.index >= n - 1);
+  set('#playlast', n < 2 || P.index >= n - 1);
+  const speed = $('#playspeed');
+  if(speed) speed.value = String(P.speed);
+  const step = $('#playstepsel');
+  if(step) step.value = P.step;
+}
+
+function setPlayOverlay(text){
+  const el = $('#playstatus');
+  if(!el) return;
+  if(text){ el.textContent = text; el.hidden = false; }
+  else { el.textContent = ''; el.hidden = true; }
+}
+
+function playEmptyText(){
+  const P = hist.play;
+  if(!hist.roundsLoaded) return '读取巡检轮次…';
+  if(P.loading) return '读取本批该格点的帧…';
+  if(P.error) return P.error;
+  if(!P.stationId) return '还没有选中格点';
+  if((P.list || []).length === 0){
+    if((P.rows || []).length){
+      return `这一批里角度档 ${P.angle || '（未标注）'} 没有可用帧`;
+    }
+    return '这一批这个格点还没有拍到照片';
+  }
+  return '这一帧不是可用的图像';
+}
+
+/** 换图：**等这一帧加载完再走下一拍**，播放看起来是连续帧而不是黑闪。
+ *  当前帧取不到时如实写在画面上，然后继续（不把播放永远停在这一帧）。 */
+function showPlayImage(url, frame){
+  const P = hist.play;
+  const img = $('#playimg');
+  if(!img) return;
+  const token = ++P.imgToken;
+  P.imgReady = false;
+  if(P.loadTimer){ clearTimeout(P.loadTimer); P.loadTimer = null; }
+  setPlayOverlay('读取这一帧…');
+  let settled = false;
+  const done = () => {
+    if(settled || token !== P.imgToken) return;
+    settled = true;
+    P.imgReady = true;
+    if(P.loadTimer){ clearTimeout(P.loadTimer); P.loadTimer = null; }
+    if(P.playing) schedulePlayTick();
+  };
+  img.onload = () => {
+    if(token !== P.imgToken) return;
+    setPlayOverlay('');
+    done();
+  };
+  img.onerror = () => {
+    if(token !== P.imgToken) return;
+    setPlayOverlay('这张图取不到：' + String((frame && frame.object_name) || ''));
+    done();
+  };
+  img.src = url;
+  // 网络卡住时别让播放永远停在这一帧；6 秒后继续（图仍没到就显示下一帧）
+  if(!settled) P.loadTimer = setTimeout(done, 6000);
+}
+
+function renderPlayFrame(){
+  const P = hist.play;
+  const frames = P.view || [];
+  const frame = frames[P.index] || null;
+  const img = $('#playimg');
+  const meta = $('#playmeta');
+  const badges = $('#playbadges');
+  renderPlayButtons();
+  if(badges) badges.innerHTML = '';
+  if(!frame){
+    if(img){
+      img.onload = null; img.onerror = null;
+      img.style.display = 'none'; img.removeAttribute('src'); img.dataset.url = '';
+    }
+    P.imgReady = false;
+    if(meta) meta.textContent = '';
+    setPlayOverlay(playEmptyText());
+    highlightPlayTick('');
+    return;
+  }
+  const url = imageUrlFor(frame);
+  if(img){
+    // CSS 默认是 display:none（避免空 src 留一块黑）；这里必须显式改回 block，
+    // 写 '' 只会清掉内联样式，样式表里的 none 仍然生效。
+    img.style.display = 'block';
+    if(!url){
+      setPlayOverlay('这一帧没有对象名，取不到图');
+    }else if(img.dataset.url !== url){
+      img.dataset.url = url;
+      showPlayImage(url, frame);
+    }
+  }
+  if(meta){
+    const day = dayOfFrame(frame.ts);
+    const parts = [
+      `第 ${P.index + 1} / ${frames.length} 帧`,
+      String(frame.ts || '').replace('T', ' '),
+      day === null ? '' : `生长第 ${day} 天`,
+      (P.angle || (P.angleOptions || []).includes('')) ? `角度 ${P.angle || '未标注'}` : '',
+      frame.round_id ? `轮次 ${frame.round_id}` : '',
+      frame.source === 'local' ? '本地待同步' : '',
+    ].filter(Boolean);
+    meta.textContent = parts.join(' · ');
+  }
+  const dup = frameDupInfo(frame);
+  if(badges && dup.dup){
+    badges.innerHTML = `<span class="playbadge">${esc(dup.label)}</span>`;
+  }
+  highlightPlayTick(frame.ts);
+}
+
+function playEmptyHint(){
+  const P = hist.play;
+  const parts = [];
+  if(!hist.roundsLoaded) parts.push('读取巡检轮次…');
+  else if(P.loading) parts.push('读取本批该格点的帧…');
+  if(P.error) parts.push('取数提示：' + P.error);
+  if((P.rounds || []).length && !P.loading){
+    parts.push(`本批 ${P.rounds.length} 轮 · 这个格点当前角度档拍到 ${(P.list || []).length} 帧 · 缺 ${(P.missing || []).length} 轮`);
+  }
+  if(P.truncated) parts.push('帧索引达到 2000 条上限：更早的轮次可能没有加载');
+  if((P.angleOptions || []).length > 1) parts.push('播放固定在当前角度档，避免画面在不同视角之间跳');
+  parts.push('缺帧的轮次在时间条上留灰条，不插值、不补帧；入库当天记为生长第 0 天');
+  parts.push('←/→ 逐帧，空格播放/暂停');
+  return parts.join(' · ');
+}
+
+function renderPlayHint(){
+  const el = $('#playhint');
+  if(!el) return;
+  el.textContent = playEmptyHint();
+  el.className = 'playhint' + (hist.play.error ? ' bad' : '');
+}
+
+/** 时间条：一格 = 本批的一轮（升序），有帧可点、缺帧是灰条；按天分组。
+ *  它只画**轮次覆盖**，不画图；点有帧的格 = 跳到该轮（按天取样时就跳那天的那一帧）。 */
+function renderPlayTrack(){
+  const box = $('#playdays');
+  if(!box) return;
+  const P = hist.play;
+  const rounds = (P.rounds || []).slice().sort((a, b) => String(a.ts || '').localeCompare(String(b.ts || '')));
+  const sig = [P.stationId, P.angle, P.list.length, rounds.length, hist.selectedBatchKey,
+               $('#fromDate') ? $('#fromDate').value : '', $('#toDate') ? $('#toDate').value : '',
+               rounds[0] && rounds[0].round_id, rounds[rounds.length - 1] && rounds[rounds.length - 1].round_id].join('|');
+  if(box.dataset.sig !== sig){
+    box.dataset.sig = sig;
+    if(!rounds.length){
+      box.innerHTML = `<div class="empty" style="padding:2px 0">${esc(P.loading ? '读取本批轮次…' : '没有可用的巡检轮次')}</div>`;
+      P.tickEls = [];
+      return;
+    }
+    const frameRounds = new Set((P.list || []).map(frame => frame.round_id).filter(Boolean));
+    const groups = [];
+    let current = null;
+    for(const round of rounds){
+      const day = dayOfFrame(round.ts);
+      const key = day === null ? 'na' : String(day);
+      if(!current || current.key !== key){ current = { key, day, items: [] }; groups.push(current); }
+      current.items.push(round);
+    }
+    box.innerHTML = groups.map(group => {
+      const label = group.day === null ? '本批' : `第 ${group.day} 天`;
+      const ticks = group.items.map(round => {
+        const ok = !!(round.round_id && frameRounds.has(round.round_id));
+        const when = String(round.ts || '').replace('T', ' ');
+        if(ok){
+          return `<button type="button" class="ptick on" tabindex="-1" data-tick-ts="${esc(round.ts || '')}"
+            aria-label="${esc(when + ' · 有帧')}" title="${esc(when + ' · 有帧')}"></button>`;
+        }
+        return `<span class="ptick gap" title="${esc(when + ' · 这一轮没有可用帧')}"></span>`;
+      }).join('');
+      return `<div class="playday" style="flex:${Math.max(1, group.items.length)} 1 0">
+        <span class="playdaylbl">${esc(label)}</span>
+        <span class="playticks">${ticks}</span>
+      </div>`;
+    }).join('');
+    P.tickEls = [...box.querySelectorAll('.ptick.on')];
+    P.tickEls.forEach(el => {
+      el.onclick = () => seekPlayToTs(el.dataset.tickTs);
+    });
+  }
+  highlightPlayTick((P.view[P.index] || {}).ts || '');
+}
+
+function highlightPlayTick(ts){
+  const P = hist.play;
+  const want = String(ts || '');
+  const day = want.slice(0, 10);
+  (P.tickEls || []).forEach(el => {
+    const tickTs = String(el.dataset.tickTs || '');
+    const cur = !!want && (tickTs === want || (P.step === 'day' && tickTs.slice(0, 10) === day));
+    el.classList.toggle('cur', cur);
+  });
+}
+
+function seekPlayToTs(ts){
+  const P = hist.play;
+  const frames = P.view || [];
+  if(!frames.length) return;
+  // 取**时间上最近**的一帧（不是"最后一个早于它的"）：
+  // 按天取样时，点当天上午的灰/蓝条也应该落在当天那一帧，而不是跳回前一天。
+  const target = Date.parse(String(ts || '').replace(' ', 'T'));
+  let index = 0, best = Infinity;
+  frames.forEach((frame, i) => {
+    const when = Date.parse(String(frame.ts || '').replace(' ', 'T'));
+    if(!Number.isFinite(target) || !Number.isFinite(when)) return;
+    const distance = Math.abs(when - target);
+    if(distance < best){ best = distance; index = i; }
+  });
+  stopPlayback(true);
+  P.index = index;
+  renderPlayFrame();
+  preloadPlayNeighbors();
+}
+
+function playInterval(){
+  const speed = Math.max(0.25, Number(hist.play.speed) || 1);
+  return Math.max(160, Math.round(PLAY_BASE_MS / speed));
+}
+
+function stopPlayback(render){
+  const P = hist.play;
+  P.playing = false;
+  if(P.timer){ clearTimeout(P.timer); P.timer = null; }
+  if(render) renderPlayButtons();
+}
+
+function schedulePlayTick(delay){
+  const P = hist.play;
+  if(P.timer){ clearTimeout(P.timer); P.timer = null; }
+  if(!P.playing) return;
+  P.timer = setTimeout(advancePlayback, (delay === undefined) ? playInterval() : delay);
+}
+
+function advancePlayback(){
+  const P = hist.play;
+  P.timer = null;
+  if(!P.playing) return;
+  const frames = P.view || [];
+  if(P.index >= frames.length - 1){ stopPlayback(true); return; }
+  P.index += 1;
+  renderPlayFrame();
+  preloadPlayNeighbors();
+  // 到最后一帧就停下（别让按钮一直显示"暂停"卡在末帧等图加载）
+  if(P.index >= frames.length - 1){ stopPlayback(true); return; }
+  // 下一拍：换了图就等 onload/onerror；没换图（同一对象名）就直接排。
+  if(P.imgReady) schedulePlayTick(playInterval());
+}
+
+function togglePlayback(){
+  const P = hist.play;
+  if(P.playing){ stopPlayback(true); return; }
+  const frames = P.view || [];
+  if(frames.length < 2) return;
+  if(P.index >= frames.length - 1) P.index = 0;
+  P.playing = true;
+  renderPlayButtons();
+  renderPlayFrame();
+  if(P.imgReady) schedulePlayTick(playInterval());
+}
+
+function setPlayStep(step){
+  const P = hist.play;
+  const keep = (P.view[P.index] || {}).ts || '';
+  P.step = step === 'day' ? 'day' : 'all';
+  stopPlayback(true);
+  rebuildPlayView(keep);
+  renderPlayTrack();
+  renderPlayFrame();
+  preloadPlayNeighbors();
+}
+
+function setPlaySpeed(value){
+  const P = hist.play;
+  P.speed = Number(value) || 1;
+  renderPlayButtons();
+  if(P.playing && P.imgReady) schedulePlayTick(playInterval());
+}
+
+function preloadPlayNeighbors(){
+  const P = hist.play;
+  const frames = P.view || [];
+  for(let step = 1; step <= PLAY_PRELOAD_AHEAD; step++){
+    const frame = frames[P.index + step];
+    if(!frame) break;
+    const url = imageUrlFor(frame);
+    if(!url || playPreload.has(url)) continue;
+    const img = new Image();
+    img.decoding = 'async';
+    img.src = url;
+    playPreload.set(url, img);
+    while(playPreload.size > PLAY_PRELOAD_MAX){
+      const oldest = playPreload.keys().next().value;
+      playPreload.delete(oldest);
+    }
+  }
+}
+
+/** 跳到某一帧（逐帧按钮 / 键盘共用）。任何手动跳帧都先停下播放。 */
+function setPlayIndex(index){
+  const P = hist.play;
+  const n = (P.view || []).length;
+  if(!n) return;
+  stopPlayback(true);
+  P.index = Math.min(n - 1, Math.max(0, index));
+  renderPlayFrame();
+  preloadPlayNeighbors();
+}
+
+function pickTemporalStation(stationId){
+  if(!stationId) return;
+  const P = hist.play;
+  if(P.stationId === stationId && (P.loaded || P.loading)) return;
+  stopPlayback(true);
+  P.stationId = stationId;
+  P.key = ''; P.loaded = false; P.loading = false; P.index = 0; P.view = []; P.list = [];
+  P.error = '';
+  renderTemporal();
+  loadTemporal(true);
+  if(hist.growthStationId !== stationId) loadGrowth();
 }
 
 /* ---- 拼图格子尺寸：按容器实测宽度算；**窗口/栏位变化后要重算**（2026-10-13 补）----
@@ -2833,8 +3616,9 @@ function recalcMosaicCells(){
   return setCellSize(tl, cols);
 }
 
-/** 结构保证 > 注释约定：拼图卡必须仍然是历史模式第一张卡，且 #detailpane 在它**内部**
- *  （大图置顶之后，若把详情区挪出卡外或挪到拼图后，换轮次就不再"先看到整体"）。 */
+/** 结构保证 > 注释约定：拼图卡必须仍然是历史区 **DOM 里**的第一张卡（空间视图换轮次的落点口径），
+ *  且 #detailpane 在它**内部**（大图置顶之后，若把详情区挪出卡外或挪到拼图后，
+ *  换轮次就不再"先看到整体"）。时序视图只是把它 hidden 掉，DOM 顺序不动。 */
 function mosaicLandingIntact(){
   const card = $('#mosaiccard'), first = document.querySelector('#hmain > .card');
   if(!card || !first) return false;
@@ -3160,13 +3944,6 @@ function updateFrameInfo(){
   $('#frameinfo').textContent = els.length
     ? (i >= 0 ? `第 ${i + 1} / ${els.length} 站位` : `共 ${els.length} 个站位，未选`)
     : '当前轮次没有配置站位';
-  // 跨轮次对比跟着"当前选中站位"走。挂在这里而不是 pickHistoryCell()：
-  // 拼图格、对比条、"上一站/下一站"、"选最新帧"、方向键全都经过这个函数，挂一处就全覆盖。
-  // loadCompare() 自己幂等，所以同一次点击里被调用两次也只逐轮取一遍。
-  loadCompare();
-  // 覆盖轨迹同理：挂在 updateFrameInfo() 上就覆盖了拼图格/上一站下一站/换轮次/换批次
-  // 全部入口；幂等键是（站位, 批次），换批次会重取、同一次点击不会取两遍。
-  loadCoverage();
   // 详情区的内容可信度一行：**只在该帧不可信时显示**（正常帧零痕迹，票 12 附条件 1）。
   const dupBox = $('#dpdup');
   if(dupBox){
@@ -3189,10 +3966,8 @@ function pickRelative(delta){
 
 function pickHistoryCell(el){
   if(!el) return;
-  const stationChanged = hist.focusedStationId !== el.dataset.stationId;
   history_pick(decodeURIComponent(el.dataset.pick), el.dataset.url, el.dataset.stationId);
-  if(stationChanged || !hist.growth) loadGrowth();
-  // 对比条由 updateFrameInfo() 统一触发（幂等），这里不用再喊一次
+  loadGrowth();   // 幂等：同一个站位只重画，不重复问
 }
 
 /* ---- 长势量：绝对量来自 /api/measurements，判词/速率来自 /api/growth（2026-10-13）----
@@ -3503,10 +4278,17 @@ function bandWeakHint(delta){
   return '阈值未定标';
 }
 
+/** 当前该看哪个站位的生长曲线：时序历史看**回放的那个格点**，空间历史看拼图里选中的。
+ *  两套选中互不覆盖——空间里点一个格子，不该把正在回放的格点换掉。 */
+function activeHistoryStationId(){
+  if(mode !== 'history') return selected || '';
+  return hist.view === 'temporal' ? (hist.play.stationId || '') : (hist.focusedStationId || '');
+}
+
 function drawCurve(){
   const box = $('#curve'), note = $('#growthnote');
   const m = hist.measure;
-  const stationId = mode === 'history' ? hist.focusedStationId : selected;
+  const stationId = activeHistoryStationId();
   if(!stationId){ box.className = 'empty'; box.textContent = '选一个站位，看它所在框的生长'; note.textContent = ''; return; }
   if(!m){
     box.className = 'empty'; box.textContent = '读取测量数据…'; note.textContent = '';
@@ -5287,9 +6069,16 @@ function drawRoomBand(){
 async function loadHistory(force){
   if(!force && hist.roundsLoaded){
     const roundId = syncRoundOptions();
-    return loadRoundImages(roundId);
+    if(hist.view === 'temporal'){
+      // 时序视图不需要整轮 rows；清掉以免切回空间时拿上一批的旧图直接画。
+      hist.rows = []; hist.picked = null; hist.loadedFor = null;
+      loadTemporal(false);
+      return;
+    }
+    await loadRoundImages(roundId);
+    return;
   }
-  if(force){ hist.growth = null; hist.measure = null; growthRequestSeq++; hist.compareRows = []; hist.compareStationId = '';
+  if(force){ hist.growth = null; hist.measure = null; hist.growthStationId = ''; growthRequestSeq++; hist.compareRows = []; hist.compareStationId = '';
     hist.coverage = null; hist.coverageStationId = ''; hist.coverageBatchKey = ''; coverageRequestSeq++;
     hist.overview = null; hist.overviewBatchKey = ''; overviewRequestSeq++;
     // 票 04：环境按"批次 + 窗口"缓存 ⇒ 换批次必须清；放大视图本身**不关**
@@ -5297,7 +6086,16 @@ async function loadHistory(force){
     hist.nodeEnv = null; hist.nodeEnvKey = ''; nodeEnvPending = ''; nodeEnvFailedKey = ''; detailEnvRequestSeq++;
     // 票 06：刷选窗口是**这一批**的一段 ⇒ 换批（重新读取）必须清掉；在飞的那次拖拽也丢掉。
     // 筛选（层/列/有没有数据）是用户的看法，不跟着批次清。
-    hist.brush = null; brushDrag = null; }
+    hist.brush = null; brushDrag = null;
+    // 时序回放：帧索引、播放序列、预取缓存都作废（换批 = 换一组帧）
+    stopPlayback(false);
+    playPreload.clear();
+    hist.play.key = ''; hist.play.loaded = false; hist.play.loading = false; hist.play.error = '';
+    hist.play.list = []; hist.play.view = []; hist.play.index = 0; hist.play.angle = '';
+    hist.play.angleOptions = []; hist.play.rounds = []; hist.play.missing = [];
+    hist.play.seq++;
+    clearPlayStage('读取批次…');
+  }
   const requestId = ++historyRequestSeq;
   hist.roundsLoading = true;
   $('#timeline').className = 'empty';
@@ -5319,6 +6117,13 @@ async function loadHistory(force){
   hist.roundsLoading = false;
   syncBatchOptions();
   const roundId = syncRoundOptions();
+  if(hist.view === 'temporal'){
+    // 时序视图不拉整轮 rows：清空后切空间会走 loadRoundImages 重新取。
+    hist.rows = []; hist.picked = null; hist.loadedFor = null;
+    renderHistory();
+    loadTemporal(false);
+    return;
+  }
   renderHistory();
   await loadRoundImages(roundId);
 }
@@ -5466,7 +6271,6 @@ async function switchToRound(roundId, idx){
   hist.compareShown = CMP_DEFAULT_SHOWN;
   syncRoundOptions();
   await loadRoundImages(hist.selectedRoundId, true);
-  await loadCompare();
   scrollToMosaic();
 }
 
@@ -5500,9 +6304,11 @@ async function loadRoundImages(roundId, viaSwitch){
   const requestId = ++historyRequestSeq;
   hist.rows = [];
   hist.picked = null;
+  hist.loadedFor = null;   // 这一份 rows 是本轮全站帧，不再属于实时模式的单站历史
   // 换轮次先看整体：清掉上一轮选中的站位。这里原来只有 switchRound() 做，
   // 下拉直接选会沿用上一轮的站位——两条路行为不一致（2026-10-13 修）。
-  if(viaSwitch) hist.focusedStationId = '';
+  // 时序历史不跟着轮次走（播放的是整批），别把回放的格点一起清掉。
+  if(viaSwitch && hist.view === 'spatial') hist.focusedStationId = '';
   hist.imagesProdError = '';
   hist.imageError = '';
   clearHistoryImage(roundId ? '读取本轮原图…' : '选择有轮次 ID 的巡检记录查看原图');
@@ -5530,7 +6336,7 @@ async function loadRoundImages(roundId, viaSwitch){
     const row = filtered().find(item => item.station_id === hist.focusedStationId);
     history_pick(String(row?.object_name ?? row?.ts ?? hist.focusedStationId),
                  row ? imageUrlFor(row) : '', hist.focusedStationId);
-    if(!hist.growth) await loadGrowth();
+    if(hist.view === 'spatial') await loadGrowth();
   }
   // 兜底：多条入口（按钮/下拉/批次/日期/重新读取）都落到这里，
   // 每次都按**已生效的** selectedRoundId 重新定位导航状态，别再出现"第 N/M 轮"错位。
@@ -5554,10 +6360,17 @@ function syncAngleOptions(){
 }
 
 async function loadGrowth(){
-  const stationId = mode === 'history' ? hist.focusedStationId : selected;
+  const stationId = activeHistoryStationId();
   const requestId = ++growthRequestSeq;
   const st = stationId ? stations.find(s => s.id === stationId) : null;
-  if(!st){ hist.growth = null; hist.measure = null; drawCurve(); renderCompare(); return; }
+  if(!st){ hist.growth = null; hist.measure = null; hist.growthStationId = ''; drawCurve(); return; }
+  // 换站位先把上一站的曲线清掉：别让新站点的标题配旧站点的数（请求回来前显示"读取…"）。
+  if(hist.growthStationId !== stationId){
+    hist.growth = null; hist.measure = null; hist.growthStationId = '';
+    drawCurve();
+  }
+  // 同一个站位的数据已经在手：只重画，不重复问（两视图切换时会被频繁调到）
+  if(hist.growthStationId === stationId && hist.growth && hist.measure){ drawCurve(); return; }
   const boxId = st.box_id;
   // 两条路各取各的：绝对量走 /api/measurements（量），判词/速率走 /api/growth（派生）。
   let growth, measure;
@@ -5571,12 +6384,12 @@ async function loadGrowth(){
   }catch(e){
     measure = {ok: false, error: requestErrorText(e, '测量'), rows: []};
   }
-  const currentStationId = mode === 'history' ? hist.focusedStationId : selected;
+  const currentStationId = activeHistoryStationId();
   if(requestId !== growthRequestSeq || currentStationId !== stationId) return;
   hist.growth = growth;
   hist.measure = measure;
+  hist.growthStationId = stationId;
   drawCurve();
-  renderCompare();     // 对比卡的量与判词都靠这两份数据，取回来要重绘一次
 }
 
 /* ---------- 环境模式：实测参数（小时曲线）＋窗口统计 ----------
@@ -6017,29 +6830,64 @@ function wireEnv(){
 
 function wireHistory(){
   document.querySelectorAll('#modeSeg button').forEach(b => b.onclick = () => setMode(b.dataset.mode));
-  const refreshFilteredRounds = () => loadRoundImages(syncRoundOptions());
+  // 历史视图切换：时序（本批单格点逐帧）/ 空间（单轮全库房）
+  document.querySelectorAll('#histViewSeg button').forEach(b => {
+    b.onclick = () => setHistView(b.dataset.hist);
+  });
+  /** 换批次 / 换日期：两份数据都得重来。
+   *  时序的帧索引按批次归并，换批不清就会把上一批的帧留在播放器里；
+   *  空间那一份走 loadRoundImages()（它自己会重画）。 */
+  const refreshScope = () => {
+    stopPlayback(true);
+    playPreload.clear();
+    hist.play.key = ''; hist.play.loaded = false; hist.play.loading = false; hist.play.error = '';
+    hist.play.list = []; hist.play.view = []; hist.play.index = 0;
+    hist.play.angle = ''; hist.play.angleOptions = [];
+    hist.play.seq++;
+    clearPlayStage('读取该批次的帧…');
+    const roundId = syncRoundOptions();
+    if(hist.view === 'temporal'){
+      // 时序视图只按格点取帧，不需要"整轮全站位"那一份；空间视图切回来时会自己补。
+      hist.rows = []; hist.picked = null; hist.loadedFor = null;
+      loadTemporal(false);
+      return;
+    }
+    loadRoundImages(roundId).then(() => {
+      if(hist.view === 'temporal') loadTemporal(false);
+      else recalcMosaicCells();
+    });
+  };
   $('#batchSel').onchange = () => {
     hist.selectedBatchKey = decodeURIComponent($('#batchSel').value || '');
-    refreshFilteredRounds();
+    refreshScope();
   };
   // 下拉直接选轮次：走与"上一轮/下一轮"按钮**同一条路**（2026-10-13 修）。
   // 原来这里直接 loadRoundImages()，绕过 syncRoundOptions()：导航状态与按钮置灰
   // 停在上一轮的值，也不清选中站位。
   $('#roundSel').onchange = () => switchToRound($('#roundSel').value);
-  // 对比取样时段：改了就按新时段重新逐天取（幂等护栏会因 compareTodOf 变化而放行）
-  if($('#cmpTime')) $('#cmpTime').onchange = () => {
-    const raw = $('#cmpTime').value;
-    hist.compareTod = raw === 'auto' ? undefined : Number(raw);   // 数值 or undefined（undefined = 跟随当前轮次）
-    loadCompare();
-  };
-  $('#fromDate').onchange = refreshFilteredRounds;
-  $('#toDate').onchange = refreshFilteredRounds;
-  $('#angleSel').onchange = renderHistory;
+  $('#fromDate').onchange = refreshScope;
+  $('#toDate').onchange = refreshScope;
+  $('#angleSel').onchange = renderHistory;   // 只作用于空间历史（筛选栏在时序视图里隐藏这一项）
   $('#clearfilter').onclick = () => {
     $('#fromDate').value = ''; $('#toDate').value = ''; $('#angleSel').value = '';
-    refreshFilteredRounds();
+    refreshScope();
   };
   $('#reloadbtn').onclick = () => loadHistory(true);
+  /* 时序回放控件：播放/暂停、逐帧、速度、步长、角度档。
+     ⚠️ 换角度或换步长都会**先暂停**：播放中偷偷换一批帧，现场会以为"蘑菇跳了"。 */
+  if($('#playtoggle')) $('#playtoggle').onclick = togglePlayback;
+  if($('#playfirst')) $('#playfirst').onclick = () => setPlayIndex(0);
+  if($('#playprev')) $('#playprev').onclick = () => setPlayIndex(hist.play.index - 1);
+  if($('#playnext')) $('#playnext').onclick = () => setPlayIndex(hist.play.index + 1);
+  if($('#playlast')) $('#playlast').onclick = () => setPlayIndex((hist.play.view || []).length - 1);
+  if($('#playspeed')) $('#playspeed').onchange = () => setPlaySpeed($('#playspeed').value);
+  if($('#playstepsel')) $('#playstepsel').onchange = () => setPlayStep($('#playstepsel').value);
+  if($('#playanglesel')) $('#playanglesel').onchange = () => {
+    hist.play.angle = $('#playanglesel').value;
+    hist.play.key = ''; hist.play.loaded = false;
+    stopPlayback(true);
+    loadTemporal(true);
+  };
   /* 票 06：刷选条的清除、三个筛选组、拖拽的移动/松开。
      拖拽的 move/up 挂在 window 上（与下面大图拖动同一手法）：指针滑出刷选条也照样跟手；
      没在拖时直接返回，不抢别处的鼠标事件。筛选走**委托**（按钮是每次重画出来的）。 */
@@ -6076,9 +6924,19 @@ function wireHistory(){
     if(el.scrollIntoView) el.scrollIntoView({block:'nearest', inline:'nearest'});
   };
   document.addEventListener('keydown', e => {
-    if(mode !== 'history' || !hist.picked) return;
+    if(mode !== 'history') return;
     const t = e.target;
     if(t && (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    if(hist.view === 'temporal'){
+      // 时序：左右逐帧、空格播放/暂停（与视频播放器的直觉一致）。
+      // 焦点在按钮上时空格交给按钮本身（否则"下一帧"上按空格会变成播放/暂停）。
+      if((e.key === ' ' || e.key === 'Spacebar') && t && t.tagName === 'BUTTON') return;
+      if(e.key === 'ArrowLeft'){ e.preventDefault(); setPlayIndex(hist.play.index - 1); }
+      else if(e.key === 'ArrowRight'){ e.preventDefault(); setPlayIndex(hist.play.index + 1); }
+      else if(e.key === ' ' || e.key === 'Spacebar'){ e.preventDefault(); togglePlayback(); }
+      return;
+    }
+    if(!hist.picked) return;
     if(e.key === 'ArrowLeft'){ e.preventDefault(); pickRelative(-1); }
     else if(e.key === 'ArrowRight'){ e.preventDefault(); pickRelative(1); }
   });
@@ -6138,7 +6996,7 @@ let tickTimer = null;
 function startPolling(){ if(!tickTimer) tickTimer = setInterval(tick, 1000); }
 function stopPolling(){ if(tickTimer){ clearInterval(tickTimer); tickTimer = null; } }
 document.addEventListener('visibilitychange', () => {
-  if(document.hidden){ stopPolling(); }
+  if(document.hidden){ stopPolling(); stopPlayback(true); }
   else{ tick(); startPolling(); loadStationSummary(); }  // 回来先补一拍，别让显示停在隐藏前的旧值
 });
 
