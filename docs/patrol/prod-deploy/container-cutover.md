@@ -1765,3 +1765,99 @@ pscp web/console/index.html root@10.77.77.39:/home/sysadmin/algorithm/mushroom_p
 3. `mushroom_preview` 仍 `station-calibration-20261008-…`（票 04：preview 的 tag 独立演进）。
 4. **单元测试套件本次未重跑**（§22.4 第 3 行）——下次发版前应先把一个能跑 pytest 的环境补上。
 
+---
+
+## 23. 2026-10-20 发版：长势 v6 量测代码（`feat/growth-v6@97ea66c`）——patrol + console + analysis 同 tag
+
+**起因**：用户 2026-10-20 要求「提交并推送代码，之后发布到 prod」，范围当场裁定为
+**patrol / console / analysis 三件套滚到同一 tag**；`preview` / `console_web` / `solution` 不动。
+
+### 23.1 发版前核查（2026-10-20 17:41 现场只读）
+
+| 项 | 实测 |
+| --- | --- |
+| 容器 | `mushroom_patrol` = `89e4a54`（10-13，Up 6d）；`mushroom_console` / `mushroom_analysis` = `ceb7b2d`（10-16，Up 3d）；`preview` / `console_web` / `solution` 各自钉旧 tag |
+| `.env` | `PATROL_IMAGE` 已写 `ceb7b2d`，但 patrol 容器仍停在 `89e4a54`（上次没重建它） |
+| 页面 | 宿主 `web/index.html` 399,454 B，sha256 `6216824e6e6871c0c09daf5b59cd0a79219a702bd3417e73d2146b11daa2a899`（本次不动） |
+| 门禁 | 第 20 天、`allowed:true`（窗口 2–25） |
+| 机器 / 轮次 | `state:IDLE, connected:false`；上一轮 15:20:04–15:27:47，48/48 成功；下一档 **18:20** |
+
+### 23.2 产物
+
+```
+registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261020173701-97ea66c
+digest sha256:ba7953d7e32e774c15b3b57c1a61be247e97b490a171cbb533884789d17097e5
+image  sha256:e2685a04ffbe422a70963ec917ff81d540e61be6086b4a289f78da777f0e1d5b
+从 feat/growth-v6@97ea66c（= main@e13460f + 4 个提交）构建，-f docker/Dockerfile.patrol，未混淆
+```
+
+构建（开发机 WSL）：
+
+```bash
+TAG=0.1.0-20261020173701-97ea66c   # 在 PowerShell 侧算好再传，别在 wsl -- bash -lc 里写 $(date)
+docker build -f docker/Dockerfile.patrol \
+  -t registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:$TAG \
+  -t registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0 .
+docker push registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:$TAG
+docker push registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0
+```
+
+### 23.3 发布前门禁
+
+| 门禁 | 结果 |
+| --- | --- |
+| `measure` 全量单测 | **234 passed**（`PYTHONPATH=measure/src;analysis/src`，含票 12–16/20 的 66 条新用例） |
+| `ruff`（本次改动文件） | **All checks passed** |
+| 镜像 import 冒烟 | `measure.{bag_top,cluster_profile,debag,profile_result,curve,production}` + `deploy.{patrol_serve,console}` → **IMPORT OK** |
+| 全量 `patrol-workspace` 套件 | ⚠️ **未重跑**（沿用 §22.4 的欠账）；本次只有 `measure` 包变更，故以该包全量套件为准 |
+
+### 23.4 发版命令（现场 17:42:56）
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_service
+cp -p .env .env.bak-20261020-1745
+sed -i 's#^PATROL_IMAGE=.*#PATROL_IMAGE=registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.1.0-20261020173701-97ea66c#' .env
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_patrol mushroom_console mushroom_analysis
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps \
+  mushroom_patrol mushroom_console mushroom_analysis
+```
+
+`PATROL_PREVIEW_IMAGE` 保持 `station-calibration-20261008-…` 不变（**没有**回落到新的 `PATROL_IMAGE`）。
+
+### 23.5 验收（2026-10-20 17:45，逐条实测）
+
+| 检查 | 结果 |
+| --- | --- |
+| 三个容器 | `mushroom_patrol` / `mushroom_console` / `mushroom_analysis` 全部 **Up (healthy)**，`RestartCount=0`，镜像 tag 均为 `0.1.0-20261020173701-97ea66c` |
+| 未触碰 | `mushroom_preview` Up 12d（calibration tag）、`mushroom_console_web` Up 12d、`mushroom_solution` Up 13d |
+| `/healthz` | analysis **200**、console **200** |
+| 页面 | 本机 `:8002/` **200**；开发机 → `http://10.77.77.39:8002/` **200 / 399,454 B**；`/api/room` 经反代 **200** |
+| 门禁 | `allowed:true`，第 20 天（mogu-107，入库 2026-09-30） |
+| 机器 | `state:IDLE, connected:false, pos_source:parked` |
+| `/api/stations` | 200，`grid` 12×4、`y 0…4492`、`z −212…0`，`S101…` 齐全 |
+| `/api/status` | `patrol.active:false`；最近一轮文件 `20261020-152004-1.jsonl` 仍可读 |
+| 新代码在镜像里 | `docker exec mushroom_patrol python -c 'import measure.curve, measure.bag_top; print(1)'` → **1** |
+| `/rounds` | **200 / 35,598 B**（数据未被发版改动） |
+| 实时预览 | `available:true`，`last_frame_age_s 0.07`，`frames 15,528,897`，`restarts 54`（历史累计，未因本次发版增加） |
+| 日志 | 重建后 6 分钟内 `mushroom_patrol` 无 `traceback` / `error` |
+
+### 23.6 回滚
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_service
+cp .env.bak-20261020-1745 .env
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps \
+  mushroom_patrol mushroom_console mushroom_analysis
+```
+
+⚠️ 回滚会把三个容器带回 **`ceb7b2d`**（备份里 `.env` 的值），不是 patrol 之前的 `89e4a54`。
+要精确回到 `89e4a54`，需单独把 `PATROL_IMAGE` 指向 `0.1.0-20261013204311-89e4a54`。
+
+### 23.7 本次**没有**覆盖的（欠账，不是漏做）
+
+1. `measure` 仍未接进巡检：`PatrolDaemon(measure_fn=None)`（`deploy/README.md` §7），本次只交付
+   代码与契约；真指标落库仍归 P6，`/growth` 继续返回空/`no_prev` 是诚实结果。
+2. `console_web` 仍是 `20260917`、`solution` 仍是 `20261006`、`preview` 仍是 calibration tag——按范围不动。
+3. 分支 `feat/growth-v6` **未合并 main、未开 PR**；prod 跑的是分支构建，后续需补合并。
+4. 票 18（对照框架）等票 17 的人标数据；票 19（模型）仍 `needs-info`；静态重复对必须在 **10-25** 前抓。
+
