@@ -8,6 +8,7 @@ from measure.curve import (
     assert_no_delta_in_curve,
     layer_median,
     rates,
+    segment,
 )
 
 
@@ -47,6 +48,17 @@ def test_version_change_starts_a_new_segment():
     assert [p.segment_id for p in series] == [0, 0, 1, 1]
 
 
+def test_a_b_a_is_three_segments_not_two():
+    series = anchor_series([
+        row("2026-10-20T10:00:00", 50),
+        row("2026-10-20T13:00:00", 60, model_version="m2"),
+        row("2026-10-20T16:00:00", 70),
+    ])
+    assert [p.segment_id for p in series] == [0, 1, 2]
+    segs = segment(series)
+    assert [(s.segment_id, s.n_points) for s in segs] == [(0, 1), (1, 1), (2, 1)]
+
+
 def test_rate_only_when_same_segment_adjacent_with_values_and_sane_dt():
     series = anchor_series([
         row("2026-10-20T10:00:00", 50),
@@ -79,6 +91,14 @@ def test_segment_boundary_has_no_rate():
                             row("2026-10-20T13:00:00", 60, roi_version="r2")])
     got = rates(series)
     assert got[0].status == "segment_changed" and got[0].rate_per_h is None
+
+
+def test_out_of_order_points_never_produce_negative_rate():
+    series = anchor_series([row("2026-10-20T13:00:00", 60),
+                            row("2026-10-20T10:00:00", 50)])
+    got = rates(list(reversed(series)))
+    assert got[0].status == "out_of_order"
+    assert got[0].rate_per_h is None
 
 
 def test_layer_median_excludes_anchors_without_points():

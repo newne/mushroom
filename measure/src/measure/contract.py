@@ -24,22 +24,43 @@
 from __future__ import annotations
 
 #: 字段分级（spec §4.7）：`legacy` 退出活跃口径，`auxiliary` 仍产出但不作交付口径。
+#: 键一律用**线格式/JSONL 的 snake_case**，与 `record.RECORD_FIELDS`、`BagResult` 一致；
+#: spec 里的 CamelCase（`H_profile`）只是公式记号，由 `_FIELD_ALIASES` 归一。
 LEGACY_FIELDS = ("mean_len_mm", "p10_len", "p90_len", "StipeEstimate")
 AUXILIARY_FIELDS = ("mean_cap_mm", "mean_cluster_w_mm", "mean_cluster_h_mm",
-                    "mean_area_mm2", "mean_projected_d_mm", "cluster_h_px")
-ACTIVE_FIELDS = ("H_profile", "H_p50", "H_p90", "rel_profile_height",
+                    "mean_area_mm2", "mean_projected_d_mm")
+#: 像素口径的辅助量；**不是 mm**，别和上面那组混在一个清单里。
+AUXILIARY_PX_FIELDS = ("cluster_h_px",)
+ACTIVE_FIELDS = ("h_profile", "h_p50", "h_p90", "rel_profile_height",
                  "rel_top_height", "rel_width")
+
+_FIELD_ALIASES = {"H_profile": "h_profile", "H_p50": "h_p50", "H_p90": "h_p90"}
 
 FIELD_TIERS = {
     **{name: "legacy" for name in LEGACY_FIELDS},
     **{name: "auxiliary" for name in AUXILIARY_FIELDS},
+    **{name: "auxiliary_px" for name in AUXILIARY_PX_FIELDS},
     **{name: "active" for name in ACTIVE_FIELDS},
 }
 
 
 def field_tier(name: str) -> str:
-    """`active` / `auxiliary` / `legacy` / `unknown`。页面与曲线按它决定要不要消费。"""
-    return FIELD_TIERS.get(name, "unknown")
+    """`active` / `auxiliary` / `auxiliary_px` / `legacy` / `unknown`。"""
+    return FIELD_TIERS.get(_FIELD_ALIASES.get(name, name), "unknown")
+
+
+def assert_no_legacy_field_in_active_output(row: dict) -> None:
+    """新产出的活跃行不得携带 legacy 值；历史回读不走这个断言。"""
+    bad = {name: row[name] for name in LEGACY_FIELDS
+           if name in row and row[name] is not None}
+    if bad:
+        raise AssertionError(f"legacy 字段不得出现在活跃输出里：{bad}")
+
+
+def assert_not_region_height_as_cluster_height(metric: str) -> None:
+    """`cluster_h_px`/`cluster_h_mm` 是形态摘要，不是簇高；被当高度口径用就报错。"""
+    if metric in ("cluster_h_px", "cluster_h_mm", "mean_cluster_h_mm"):
+        raise AssertionError(f"{metric} 是外接框跨度，不是袋口以上高度（spec §4.2）")
 
 
 #: 票 11 §3 的枚举 + `no_angle_profile` + `level_view`。

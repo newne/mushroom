@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -46,7 +47,8 @@ def main(argv=None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     for anchor_id, items in sorted(grouped.items()):
         series = anchor_series(items, metric=args.metric)
-        path = out / f"{anchor_id}.csv"
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", anchor_id) or "unknown"
+        path = out / f"{safe}.csv"
         with path.open("w", encoding="utf-8", newline="") as fh:
             writer = csv.DictWriter(fh, fieldnames=COLUMNS)
             writer.writeheader()

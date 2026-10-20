@@ -1,6 +1,6 @@
 # 13. P3-3a 每帧主指标：`H_profile` / `H_p50` / `H_p90` 同生同灭
 
-Status: implemented（2026-10-20，算法；11 条单测；误差门槛待票 18 冻结）
+Status: implemented（2026-10-20，算法；12 条单测；误差门槛待票 18 冻结）
 归属：算法
 写域：`measure/**`（`measure/src/measure/**`、`measure/tests/**`）＋本票
 依据：`docs/patrol/growth-algo/spec.md` §4.1（三式与 `V` 三规则）、§4.4（逐指标独立有效性）、
@@ -96,11 +96,13 @@ uv run --no-project --offline --with pytest --with numpy --with pillow \
 ### 实现证据（2026-10-20）
 
 - 落点：`measure/src/measure/cluster_profile.py`（`ProfileConfig` / `HeightProfile` / `profile_heights`）。
-- 单测：`measure/tests/test_cluster_profile.py` **11 passed**。
+- 单测：`measure/tests/test_cluster_profile.py` **12 passed**。
   命令：`uv run --no-project --offline --with pytest --with numpy --with pillow pytest measure/tests/test_cluster_profile.py -q`
 - 已钉住：平顶三值相等；斜基线时 `H_p90` 与外接框高度不同；半空簇按 `top_gap` 被拒；
   `max_gap_px` 与 `reach_tol_px` 各自独立可测（间隙 6 / 两档容差）；`valid_column_ratio` 0.29/0.30 边界；
   插值基线列不进 `V`、只进 `h_profile_with_interp`；`baseline_invalid` 三值全 `None`；
   缺失列不被 `np.interp` 补进统计；同输入逐位一致。
+- review 修复：`supported_columns` 改为**簇掩码支撑列**（不再受基线槽位宽窄影响，
+  槽位外的簇列也进分母）；理由码统一为 `association_ambiguous`。
 - 实现口径：`height_valid` 用 §2 的统一谓词；插值列**默认不进 `V`**（待裁），
   `quantile(method="linear")` 已写进 docstring 与测试名。

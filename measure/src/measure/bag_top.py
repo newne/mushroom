@@ -116,6 +116,7 @@ def map_bag_top(
     columns = np.arange(x0, x1)
     in_frame = (columns >= 0) & (columns < w)
     b = np.interp(columns, xs, ys)
+    b[~in_frame] = np.nan  # 帧外没有基线，不外推
 
     valid = in_frame.copy()
     if occluded is not None:
@@ -128,8 +129,8 @@ def map_bag_top(
         slot_id=slot_id, x0=x0, b=b,
         valid_columns=valid,
         interpolated=np.zeros(len(columns), bool),
-        baseline_valid=True,
-        coverage=float(valid.mean()) if len(valid) else 0.0,
+        baseline_valid=False,      # 交给 evaluate_baseline 判，别先声明可用
+        coverage=0.0,
     )
     return evaluate_baseline(profile, bag_mask=bag_mask,
                              template_slot_ids=template_slot_ids, config=cfg)
@@ -164,11 +165,15 @@ def evaluate_baseline(
         return replace(profile, baseline_valid=False,
                        reasons=profile.reasons or ("baseline_unavailable",))
 
+    in_frame = np.isfinite(profile.b)
+    if not in_frame.any():
+        return replace(profile, b=None, baseline_valid=False, reasons=("slot_missing",))
+
     if template_slot_ids is not None and profile.slot_id not in set(template_slot_ids):
         reasons.append("slot_missing")
         return replace(profile, b=None, baseline_valid=False, reasons=tuple(reasons))
 
-    valid = profile.valid_columns.copy()
+    valid = profile.valid_columns & in_frame
     shift: float | None = None
     if bag_mask is not None:
         ys, has = _bag_top_y(np.asarray(bag_mask, bool), profile.columns)
@@ -177,11 +182,12 @@ def evaluate_baseline(
         if both.any():
             shift = float(np.median(np.abs(profile.b[both] - ys[both])))
 
-    interpolated = ~valid
-    coverage = float(valid.mean()) if len(valid) else 0.0
+    span = int(in_frame.sum())
+    interpolated = in_frame & ~valid
+    coverage = float(valid.sum() / span) if span else 0.0
     profile = replace(profile, valid_columns=valid, interpolated=interpolated,
                       coverage=coverage,
-                      interpolated_ratio=float(interpolated.mean()) if len(valid) else 0.0,
+                      interpolated_ratio=float(interpolated.sum() / span) if span else 0.0,
                       bag_shift_px=shift)
 
     if shift is not None and shift > cfg.bag_shift_max_px:

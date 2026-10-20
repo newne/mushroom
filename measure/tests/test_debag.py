@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from measure.debag import debag, measure_region, region_metrics
+from measure.debag import debag, envelope_region, measure_region, region_metrics
 
 
 def scene():
@@ -86,3 +86,29 @@ def test_empty_cluster_returns_none():
     bag = np.ones((20, 20), bool)
     assert region_metrics(cluster, mask_source="cluster_minus_bag") is None
     assert measure_region(cluster, [bag]).metrics is None
+
+
+def test_region_metrics_report_column_validity_and_roi_coverage():
+    cluster, bag = scene()
+    got = measure_region(cluster, [bag], roi_area_px=20_000).metrics
+    assert got.valid_column_count == 40
+    assert got.valid_column_ratio == pytest.approx(1.0)
+    assert got.visible_coverage_ratio == pytest.approx(1600 / 20_000)
+    assert got.removed_area_ratio is not None
+
+
+def test_direct_region_metrics_does_not_invent_removed_ratio():
+    cluster, _ = scene()
+    got = region_metrics(cluster, mask_source="cluster_raw")
+    assert got.removed_area_ratio is None
+
+
+def test_envelope_fallback_is_explicit():
+    cluster, _ = scene()
+    got = envelope_region(cluster)
+    assert got.mask_source == "envelope" and got.fallback == "envelope"
+    assert got.metrics is not None
+
+    missing = measure_region(cluster, [], fallback="envelope")
+    assert missing.metrics is None
+    assert missing.fallback == "envelope"

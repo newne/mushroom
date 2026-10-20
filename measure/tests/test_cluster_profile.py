@@ -17,7 +17,7 @@ def baseline(b, *, x0=0, valid=True, interp=None) -> BaselineProfile:
     )
 
 
-def mask_flat(h=120, w=100, top=40, x0=0, x1=None) -> np.ndarray:
+def mask_flat(h=120, w=80, top=40, x0=0, x1=None) -> np.ndarray:
     m = np.zeros((h, w), bool)
     m[top:, x0:x1] = True
     return m
@@ -125,8 +125,18 @@ def test_association_failure_kills_height_but_leaves_columns():
     out = profile_heights(mask_flat(), baseline(np.full(80, 100.0)),
                           association_valid=False)
     assert out.h_profile is None
-    assert out.status == "association_invalid"
+    assert out.status == "association_ambiguous"
     assert out.valid_column_count == 80  # 证据仍在，只是不出袋级高度
+
+
+def test_supported_denominator_is_the_mask_not_the_baseline_span():
+    """簇比基线槽位宽：槽位外的列进分母，比例不能虚高。"""
+    m = np.zeros((120, 100), bool)
+    m[40:, :] = True
+    out = profile_heights(m, baseline(np.full(40, 100.0)))
+    assert out.valid_column_count == 40
+    assert out.supported_column_count == 100
+    assert out.valid_column_ratio == pytest.approx(0.4)
 
 
 def test_invalid_columns_are_not_interpolated_into_the_statistic():

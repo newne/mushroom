@@ -76,10 +76,13 @@ uv run --no-project --offline --with pytest --with numpy --with pillow --with fa
 - 落点：`measure/src/measure/contract.py`（`LEGACY_FIELDS` / `AUXILIARY_FIELDS` / `ACTIVE_FIELDS` /
   `FIELD_TIERS` / `field_tier()` / `without_legacy_fields()`）；
   `measure/src/measure/record.py::from_box_stats` 新行恒 NULL + `estimated_fields` 过滤。
-- 单测：`measure/tests/test_legacy_fields.py` **5 passed**；与 `test_record.py`、`test_contract.py`
-  合计 **23 passed**（`PYTHONPATH=measure/src;analysis/src`）。
+- 单测：`measure/tests/test_legacy_fields.py` **6 passed**；与 `test_record.py`、`test_contract.py`
+  合计 **24 passed**（`PYTHONPATH=measure/src;analysis/src`）。
 - 已钉住：四个 legacy 字段分级、`estimated_fields` 剔 legacy、新行三列 NULL、辅助列仍照发、
   历史行直接构造仍保留旧值（读兼容）。
+- review 修复：`FIELD_TIERS` 的键统一为 snake_case（`h_profile`），spec 的 `H_profile`
+  经别名归一；像素辅助量与 mm 辅助量分开（`auxiliary_px`）；补两条可执行断言
+  `assert_no_legacy_field_in_active_output()` 与 `assert_not_region_height_as_cluster_height()`。
 - **消费侧未改**（`analysis/src/analysis/growth.py::GROWTH_METRICS`、
   `web/console/index.html::DELIVER_KEYS`）：这两处分别归环境官与前端，
   且 `analysis/tests` 有 20+ 条用例把 `mean_len_mm` 当长势量写死；改动会连带它们一起改。

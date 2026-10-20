@@ -30,9 +30,19 @@ class CurvePoint:
     panel_coverage: float
     segmentation_status: str
     segment_id: int
+    segment_key: tuple[str, ...]
     status: str
     usable: bool
     reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Segment:
+    segment_id: int
+    key: tuple[str, ...]
+    start_ts: str
+    end_ts: str
+    n_points: int
 
 
 @dataclass(frozen=True)
@@ -48,6 +58,7 @@ class RatePoint:
 @dataclass(frozen=True)
 class LayerPoint:
     ts: str
+    segment_id: int
     value: float | None
     n_anchors: int
 
@@ -61,17 +72,29 @@ def _segment_key(row) -> tuple:
 
 
 def _parse_ts(ts: str) -> datetime:
-    return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    """ISO 时间；统一成 naive UTC，避免带/不带时区的两行无法相减。"""
+    return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).replace(tzinfo=None)
+
+
+def _ts_key(row) -> datetime:
+    try:
+        return _parse_ts(str(_get(row, "ts", "")))
+    except ValueError:
+        return datetime.min
 
 
 def anchor_series(rows, *, metric: str = "h_anchor") -> list[CurvePoint]:
     """锚点级证据行 → 有序序列（含 `missing` 点）。"""
-    ordered = sorted(rows, key=lambda r: str(_get(r, "ts", "")))
-    seg_ids: dict[tuple, int] = {}
+    ordered = sorted(rows, key=_ts_key)
     out: list[CurvePoint] = []
+    prev_key: tuple | None = None
+    segment_id = -1
     for row in ordered:
         key = _segment_key(row)
-        seg = seg_ids.setdefault(key, len(seg_ids))
+        # 段号只在**相邻**行换键时递增：A→B→A 必须是三段，不能把 A 并回第一段。
+        if prev_key is None or key != prev_key:
+            segment_id += 1
+            prev_key = key
         value = _get(row, metric)
         value = None if value is None else float(value)
         reasons = tuple(_get(row, "reasons", ()) or ())
@@ -83,11 +106,25 @@ def anchor_series(rows, *, metric: str = "h_anchor") -> list[CurvePoint]:
             n_bags_total=int(_get(row, "n_bags_total", 0) or 0),
             panel_coverage=float(_get(row, "panel_coverage", 0.0) or 0.0),
             segmentation_status=str(_get(row, "segmentation_status", "by_version_and_batch")),
-            segment_id=seg,
+            segment_id=segment_id,
+            segment_key=key,
             status="ok" if value is not None else "missing",
             usable=bool(_get(row, "usable", value is not None)),
             reasons=reasons,
         ))
+    return out
+
+
+def segment(points) -> list[Segment]:
+    """连续同段点 → `Segment`；段不合并、不重排。"""
+    out: list[Segment] = []
+    for p in points:
+        if not out or out[-1].segment_id != p.segment_id:
+            out.append(Segment(p.segment_id, p.segment_key, p.ts, p.ts, 1))
+        else:
+            last = out[-1]
+            out[-1] = Segment(last.segment_id, last.key, last.start_ts, p.ts,
+                              last.n_points + 1)
     return out
 
 
@@ -100,6 +137,9 @@ def rates(points, *, min_span_h: float = 2.0, max_gap_h: float = 12.0) -> list[R
                                  cur.segment_id, "segment_changed"))
             continue
         dt_h = _dt_h(prev.ts, cur.ts)
+        if dt_h < 0:
+            out.append(RatePoint(cur.ts, prev.ts, dt_h, None, cur.segment_id, "out_of_order"))
+            continue
         if prev.value is None or cur.value is None:
             out.append(RatePoint(cur.ts, prev.ts, dt_h, None, cur.segment_id, "no_value"))
             continue
@@ -119,14 +159,19 @@ def _dt_h(a: str, b: str) -> float:
 
 
 def layer_median(points_by_anchor: dict[str, list[CurvePoint]]) -> list[LayerPoint]:
-    """每个时间点对**有值**的锚点取中位；没有点的锚点不进分母。"""
-    by_ts: dict[str, list[float]] = {}
+    """每个 (段, 时间点) 对**有值**的锚点取中位；没有点的锚点不进分母。
+
+    按 (段, 时间) 分组，避免把版本升级前后的点混进同一个中位。
+    """
+    by_key: dict[tuple[int, str], list[float]] = {}
     for points in points_by_anchor.values():
         for p in points:
             if p.value is not None:
-                by_ts.setdefault(p.ts, []).append(p.value)
-    return [LayerPoint(ts=ts, value=float(np.median(vals)), n_anchors=len(vals))
-            for ts, vals in sorted(by_ts.items())]
+                by_key.setdefault((p.segment_id, p.ts), []).append(p.value)
+    ordered = sorted(by_key.items(), key=lambda kv: (kv[0][0], _parse_ts(kv[0][1])))
+    return [LayerPoint(ts=ts, segment_id=seg, value=float(np.median(vals)),
+                       n_anchors=len(vals))
+            for (seg, ts), vals in ordered]
 
 
 def assert_no_delta_in_curve() -> None:

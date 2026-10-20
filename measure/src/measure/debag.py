@@ -29,11 +29,15 @@ class DebagedMask:
 class RegionMetrics:
     area_px: int
     bbox_px: tuple[int, int, int, int]   # x0, y0, x1, y1（半开）
-    cluster_width_px: int                # 最宽行跨度
+    cluster_width_px: int                # 最宽行跨度（只在有效列上）
     cluster_h_px: int                    # 上下跨度：**仅形态摘要**
     eq_diameter_px: float
     mask_source: str
-    removed_area_ratio: float
+    #: 直调 `region_metrics()` 时不知道原始面积，保持 `None`；`measure_region()` 才填。
+    removed_area_ratio: float | None = None
+    valid_column_count: int = 0
+    valid_column_ratio: float = 0.0
+    visible_coverage_ratio: float | None = None
 
 
 @dataclass(frozen=True)
@@ -41,6 +45,8 @@ class RegionResult:
     metrics: RegionMetrics | None
     mask_source: str
     reasons: tuple[str, ...] = ()
+    #: 无模型兜底时标 `envelope`；正常模型路径为 None（spec §6 L2）。
+    fallback: str | None = None
 
 
 def debag(cluster_mask, bag_masks) -> DebagedMask:
@@ -65,7 +71,24 @@ def debag(cluster_mask, bag_masks) -> DebagedMask:
     return DebagedMask(clean, "cluster_minus_bag", removed, reasons)
 
 
-def region_metrics(mask, *, mask_source: str) -> RegionMetrics | None:
+def _valid_columns(mask: np.ndarray, min_run_px: int) -> tuple[np.ndarray, int]:
+    """有至少一段连续前景 ≥ `min_run_px` 的列（与票 13 规则 1 同一口径）。"""
+    supported = int(mask.any(axis=0).sum())
+    valid = np.zeros(mask.shape[1], bool)
+    for x in range(mask.shape[1]):
+        rows = np.flatnonzero(mask[:, x])
+        if len(rows) == 0:
+            continue
+        breaks = np.flatnonzero(np.diff(rows) > 1)
+        starts = np.r_[0, breaks + 1]
+        ends = np.r_[breaks, len(rows) - 1]
+        if max(int(rows[e] - rows[s] + 1) for s, e in zip(starts, ends)) >= min_run_px:
+            valid[x] = True
+    return valid, supported
+
+
+def region_metrics(mask, *, mask_source: str, min_col_run_px: int = 3,
+                   roi_area_px: int | None = None) -> RegionMetrics | None:
     """去袋后（或显式标注来源的）掩码 → 区域指标；空掩码返回 None。"""
     if mask_source not in MASK_SOURCES:
         raise ValueError(f"mask_source 必须是 {MASK_SOURCES} 之一，实际 {mask_source!r}")
@@ -73,12 +96,15 @@ def region_metrics(mask, *, mask_source: str) -> RegionMetrics | None:
     if not m.any():
         return None
 
+    valid, supported = _valid_columns(m, min_col_run_px)
     ys, xs = np.nonzero(m)
     area = int(m.sum())
+
     widest = 0
     for y in np.unique(ys):
-        row = np.flatnonzero(m[y])
-        widest = max(widest, int(row[-1] - row[0] + 1))
+        row = np.flatnonzero(m[y] & valid)
+        if len(row):
+            widest = max(widest, int(row[-1] - row[0] + 1))
 
     return RegionMetrics(
         area_px=area,
@@ -87,11 +113,15 @@ def region_metrics(mask, *, mask_source: str) -> RegionMetrics | None:
         cluster_h_px=int(ys.max() - ys.min() + 1),
         eq_diameter_px=float(2.0 * np.sqrt(area / np.pi)),
         mask_source=mask_source,
-        removed_area_ratio=0.0,
+        valid_column_count=int(valid.sum()),
+        valid_column_ratio=float(valid.sum() / supported) if supported else 0.0,
+        visible_coverage_ratio=(float(area / roi_area_px) if roi_area_px else None),
     )
 
 
-def measure_region(cluster_mask, bag_masks) -> RegionResult:
+def measure_region(cluster_mask, bag_masks, *, min_col_run_px: int = 3,
+                   roi_area_px: int | None = None,
+                   fallback: str | None = None) -> RegionResult:
     """一袋一簇的合法区域指标入口。
 
     - 没有 bag 掩码 ⇒ **区域指标 NULL**（`bag_mask_missing`）；高度不受影响（那是票 13 的事）；
@@ -100,11 +130,21 @@ def measure_region(cluster_mask, bag_masks) -> RegionResult:
     """
     d = debag(cluster_mask, bag_masks)
     if d.mask_source != "cluster_minus_bag":
-        return RegionResult(None, d.mask_source, d.reasons)
+        return RegionResult(None, d.mask_source, d.reasons, fallback=fallback)
 
-    metrics = region_metrics(d.mask, mask_source=d.mask_source)
+    metrics = region_metrics(d.mask, mask_source=d.mask_source,
+                             min_col_run_px=min_col_run_px, roi_area_px=roi_area_px)
     if metrics is None:
-        return RegionResult(None, d.mask_source, d.reasons or ("no_region_after_debag",))
+        return RegionResult(None, d.mask_source,
+                            d.reasons or ("no_region_after_debag",), fallback=fallback)
     metrics = replace(metrics, removed_area_ratio=d.removed_area_ratio)
     reasons = tuple(r for r in d.reasons if r != "no_region_after_debag")
-    return RegionResult(metrics, d.mask_source, reasons)
+    return RegionResult(metrics, d.mask_source, reasons, fallback=fallback)
+
+
+def envelope_region(mask, *, min_col_run_px: int = 3,
+                    roi_area_px: int | None = None) -> RegionResult:
+    """无模型兜底的包络掩码：显式标 `mask_source=envelope` + `fallback=envelope`。"""
+    metrics = region_metrics(mask, mask_source="envelope",
+                             min_col_run_px=min_col_run_px, roi_area_px=roi_area_px)
+    return RegionResult(metrics, "envelope", (), fallback="envelope")

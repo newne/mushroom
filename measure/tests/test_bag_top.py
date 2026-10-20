@@ -116,6 +116,15 @@ def test_baseline_never_extrapolates_outside_slot_span():
     assert np.isfinite(p.b).all()
 
 
+def test_columns_outside_the_frame_have_no_baseline():
+    p = map_bag_top(line(-5, 15), alignment(w=300), slot_id="s")
+    assert p.x0 == -5
+    assert np.isnan(p.b[:5]).all()
+    assert np.isfinite(p.b[5:]).all()
+    assert int(p.valid_columns.sum()) == 15
+    assert p.coverage == pytest.approx(1.0)  # 分母只算帧内列
+
+
 def test_same_input_twice_is_bit_identical():
     a = map_bag_top(line(), alignment(dx=3.5, dy=-2), slot_id="s",
                     bag_mask=bag_mask(top=108))

@@ -1,6 +1,6 @@
 # 15. P3-3c Level 0/1/2、逐级降级与离线证据行
 
-Status: implemented（2026-10-20，算法；10 条单测；DDL 未动）
+Status: implemented（2026-10-20，算法；13 条单测；DDL 未动）
 归属：算法（契约形状需环境官会签）
 写域：`measure/**`（`measure/src/measure/**`、`measure/tests/**`）＋本票
 依据：`docs/patrol/growth-algo/spec.md` §4.7（层级与降级表）、§4.4（逐指标独立有效性）、
@@ -98,10 +98,13 @@ uv run --no-project --offline --with pytest --with numpy --with pillow \
 - 落点：`measure/src/measure/profile_result.py`（`ResultKeys` / `BagResult` / `AnchorResult` /
   `FrameResult` / `build_bag_result` / `aggregate_anchor` / `build_frame_result` / `write_jsonl` / `read_jsonl`）。
 - 契约：`measure/src/measure/contract.py` 新增 11 个 v6 理由码，**未加入 `NON_USABLE_FLAGS`**（指标级，不是行级）。
-- 单测：`measure/tests/test_profile_result.py` **10 passed**。
+- 单测：`measure/tests/test_profile_result.py` **13 passed**。
   命令：`uv run --no-project --offline --with pytest --with numpy --with pillow pytest measure/tests/test_profile_result.py -q`
 - 已钉住：基线不可用只杀 H、不杀区域指标；归属失败袋级全 NULL；检测失败 `no_detection` 且**不写 0**；
   缺袋掩码只杀区域指标；帽模型缺失不阻塞簇级；`confirmed_absent` 是写 0 的唯一入口；
   `rel_*` 缺 `ref_px` ⇒ NULL + 理由；锚点中位只对可用袋取、缺槽位进分母；
   JSONL 回读 `null` 仍是 `None`、五元版本键齐全。
+- review 修复：`CapInput` 在构造期就拒绝"未确认的 0"与"确认了却数到 >0"两种矛盾；
+  新增 `merged_multiple_bags` 路由；每袋行补 `mask_path` / `baseline_path` / `config_sha256`
+  证据指针；`ref_px<=0` 与 `None` 同等处理；锚点补 `confirmed_absent`（无袋时计数 0，高度仍 NULL）。
 - 未做：DDL（按 §8 离线优先）；`cap_*` 的真实帽模型输入。

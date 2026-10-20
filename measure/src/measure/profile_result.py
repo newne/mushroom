@@ -44,6 +44,12 @@ class CapInput:
     diameter_px: float | None = None
     confirmed_absent: bool = False
 
+    def __post_init__(self) -> None:
+        if self.confirmed_absent and self.count not in (None, 0):
+            raise ValueError("confirmed_absent=True 与实测 count>0 矛盾")
+        if not self.confirmed_absent and self.count == 0:
+            raise ValueError("0 只能由 confirmed_absent 表达（spec §4.4）")
+
 
 @dataclass(frozen=True)
 class BagResult:
@@ -75,6 +81,10 @@ class BagResult:
     cap_area_fraction: float | None = None
     cap_diameter_px: float | None = None
     cap_metrics_usable: bool = False
+    #: 证据指针（票 15 验收）：这一行用的是哪张掩码、哪份基线、哪版配置。
+    mask_path: str | None = None
+    baseline_path: str | None = None
+    config_sha256: str | None = None
     confirmed_absent: bool = False
     reasons: tuple[str, ...] = ()
 
@@ -88,10 +98,13 @@ class BagResult:
 
 def _null_bag(keys: ResultKeys, slot_id: str, *, status: str, reasons: tuple[str, ...],
               association_valid: bool, measurement_valid: bool,
-              confirmed_absent: bool = False) -> BagResult:
+              confirmed_absent: bool = False,
+              mask_path: str | None = None, baseline_path: str | None = None,
+              config_sha256: str | None = None) -> BagResult:
     return BagResult(
         keys=keys, slot_id=slot_id, status=status, reasons=reasons,
         association_valid=association_valid, measurement_valid=measurement_valid,
+        mask_path=mask_path, baseline_path=baseline_path, config_sha256=config_sha256,
         confirmed_absent=confirmed_absent,
     )
 
@@ -108,17 +121,27 @@ def build_bag_result(
     ref_px: float | None = None,
     ref_kind: str | None = None,
     cap: CapInput | None = None,
+    merged_multiple_bags: bool = False,
     confirmed_absent: bool = False,
+    mask_path: str | None = None,
+    baseline_path: str | None = None,
+    config_sha256: str | None = None,
 ) -> BagResult:
     """一袋一簇 → 一行；按 §4.7 逐级降级。"""
+    evidence = dict(mask_path=mask_path, baseline_path=baseline_path,
+                    config_sha256=config_sha256)
     if not measurement_valid:
         return _null_bag(keys, slot_id, status="no_detection",
                          reasons=("no_detection",), association_valid=association_valid,
-                         measurement_valid=False)
+                         measurement_valid=False, **evidence)
+    if merged_multiple_bags:
+        return _null_bag(keys, slot_id, status="degraded",
+                         reasons=("merged_multiple_bags",),
+                         association_valid=False, measurement_valid=True, **evidence)
     if not association_valid:
         return _null_bag(keys, slot_id, status="degraded",
                          reasons=("association_ambiguous",),
-                         association_valid=False, measurement_valid=True)
+                         association_valid=False, measurement_valid=True, **evidence)
 
     reasons: list[str] = []
     baseline_valid = bool(baseline is not None and baseline.baseline_valid)
@@ -142,24 +165,29 @@ def build_bag_result(
     h_p90 = height.h_p90 if height_usable else None
     raw_top = height.raw_top_height_px if height_usable else None
 
+    has_ref = ref_px is not None and ref_px > 0
     rel_profile = rel_top = rel_width = None
-    if height_usable and ref_px:
+    if height_usable and has_ref:
         rel_profile = h_profile / ref_px
         rel_top = h_p90 / ref_px
-    if region_usable and ref_px:
+    if region_usable and has_ref:
         rel_width = region.metrics.cluster_width_px / ref_px
-    if ref_px is None:
+    if not has_ref:
         reasons.append("no_ref_px")
 
     metrics = region.metrics if region_usable else None
-    cap_count = cap.count if cap else None
-    cap_usable = bool(cap is not None and (cap.count is not None or cap.confirmed_absent))
+    cap_count: int | None = None
+    cap_usable = False
     if cap is None:
         reasons.append("cap_model_unavailable")
-    elif not cap_usable:
-        reasons.append("no_cap")
-    if cap is not None and cap.confirmed_absent:
+    elif cap.confirmed_absent:
         cap_count = 0
+        cap_usable = True
+    elif cap.count is not None:
+        cap_count = int(cap.count)
+        cap_usable = True
+    else:
+        reasons.append("no_cap")
 
     status = "ok" if (height_usable or region_usable) else "degraded"
     return BagResult(
@@ -179,6 +207,7 @@ def build_bag_result(
         cap_area_fraction=cap.area_fraction if cap_usable else None,
         cap_diameter_px=cap.diameter_px if cap_usable else None,
         cap_metrics_usable=cap_usable,
+        mask_path=mask_path, baseline_path=baseline_path, config_sha256=config_sha256,
         confirmed_absent=confirmed_absent,
         reasons=tuple(dict.fromkeys(reasons)),
     )
@@ -200,6 +229,7 @@ class AnchorResult:
     anchor_mask_source: str | None = None
     segmentation_status: str = "by_version_and_batch"
     usable: bool = False
+    confirmed_absent: bool = False
     reasons: tuple[str, ...] = ()
 
     def to_row(self) -> dict:
@@ -218,6 +248,7 @@ def aggregate_anchor(
     n_slots: int | None = None,
     anchor_region: RegionResult | None = None,
     panel_coverage_min: float = 0.8,
+    confirmed_absent: bool = False,
 ) -> AnchorResult:
     """袋级 → 锚点级：`median` over 可用袋，缺袋进 `panel_coverage` 分母。"""
     valid = [b for b in bags if b.cluster_height_usable and b.h_profile is not None]
@@ -241,6 +272,7 @@ def aggregate_anchor(
         anchor_eq_diameter_px=metrics.eq_diameter_px if metrics else None,
         anchor_mask_source=metrics.mask_source if metrics else None,
         usable=bool(valid) and not low,
+        confirmed_absent=confirmed_absent,
         reasons=tuple(reasons),
     )
 

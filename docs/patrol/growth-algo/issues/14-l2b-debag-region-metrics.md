@@ -1,6 +1,6 @@
 # 14. L2/L2b 去袋与区域指标口径（`mask_source`）
 
-Status: implemented（2026-10-20，算法；8 条单测；真实掩码验收等 P2-1/票 19）
+Status: implemented（2026-10-20，算法；11 条单测；真实掩码验收等 P2-1/票 19）
 归属：算法
 写域：`measure/**`（`measure/src/measure/**`、`measure/tests/**`）＋本票
 依据：`docs/patrol/growth-algo/spec.md` §4.2（区域指标的硬前提）、§6 L2 与 L2b 行、
@@ -88,9 +88,12 @@ uv run --no-project --offline --with pytest --with numpy --with pillow \
 ### 实现证据（2026-10-20）
 
 - 落点：`measure/src/measure/debag.py`（`MASK_SOURCES` / `DebagedMask` / `RegionMetrics` / `debag` / `region_metrics` / `measure_region`）。
-- 单测：`measure/tests/test_debag.py` **8 passed**。
+- 单测：`measure/tests/test_debag.py` **11 passed**。
   命令：`uv run --no-project --offline --with pytest --with numpy --with pillow pytest measure/tests/test_debag.py -q`
 - 已钉住：原始掩码最宽行 = 袋宽 100、去袋后 = 簇宽 40；`removed_area_ratio` > 0.5；
   缺袋掩码 ⇒ 区域指标 `None` + `bag_mask_missing`；整簇落在袋内 ⇒ `no_region_after_debag`；
   多袋只取并集、**没有 per-bag 拆分**；`mask_source` 非法值直接 `ValueError`；形状不一致直接拒绝。
-- 未做：真实模型掩码（等票 19）；`envelope` 路径只登记了词表，尚未接 H1 包络实现。
+- review 修复：补 `valid_column_count` / `valid_column_ratio`（与票 13 规则 1 同一口径）、
+  `visible_coverage_ratio`（需传 `roi_area_px`）、`envelope_region()` 显式 `fallback=envelope`；
+  直调 `region_metrics()` 时 `removed_area_ratio` 保持 `None`，不伪造 0。
+- 未做：真实模型掩码（等票 19）；`envelope` 的真实 H1 包络输入。

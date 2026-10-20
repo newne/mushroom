@@ -101,6 +101,38 @@ def test_confirmed_absent_is_the_only_way_to_write_zero():
                                region=region(), cap=CapInput())
     assert unknown.cap_count is None
 
+    with pytest.raises(ValueError):
+        CapInput(count=0)  # 观测到 0 但没确认 ⇒ 不允许
+    with pytest.raises(ValueError):
+        CapInput(count=3, confirmed_absent=True)
+
+
+def test_merged_multiple_bags_degrades_bag_level_without_splitting():
+    r = build_bag_result(keys(), "s1", height=height(), baseline=baseline(),
+                         region=region(), ref_px=100.0, merged_multiple_bags=True)
+    assert r.h_profile is None and r.area_px is None
+    assert r.association_valid is False
+    assert r.reasons == ("merged_multiple_bags",)
+
+
+def test_rows_carry_evidence_pointers():
+    r = build_bag_result(keys(), "s1", height=height(), baseline=baseline(),
+                         region=region(), ref_px=100.0,
+                         mask_path="masks/1.png", baseline_path="baselines/1.json",
+                         config_sha256="abc123")
+    row = r.to_row()
+    assert row["mask_path"] == "masks/1.png"
+    assert row["baseline_path"] == "baselines/1.json"
+    assert row["config_sha256"] == "abc123"
+
+
+def test_anchor_confirmed_absent_is_zero_not_null():
+    a = aggregate_anchor(keys(), "S101", [], n_slots=0, confirmed_absent=True)
+    assert a.n_bags_valid == 0
+    assert a.n_bags_total == 0
+    assert a.h_anchor is None  # 没有高度就是 NULL；计数 0 才是 0
+    assert a.confirmed_absent is True
+
 
 def test_relative_metrics_need_ref_px_and_report_its_kind():
     r = build_bag_result(keys(), "s1", height=height(), baseline=baseline(),

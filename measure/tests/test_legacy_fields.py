@@ -12,9 +12,26 @@ def test_field_tiers_are_explicit():
     assert contract.field_tier("p10_len") == "legacy"
     assert contract.field_tier("p90_len") == "legacy"
     assert contract.field_tier("StipeEstimate") == "legacy"
-    assert contract.field_tier("H_profile") == "active"
+    assert contract.field_tier("H_profile") == "active"  # spec 记号
+    assert contract.field_tier("h_profile") == "active"  # 线格式
     assert contract.field_tier("mean_cluster_h_mm") == "auxiliary"
+    assert contract.field_tier("cluster_h_px") == "auxiliary_px"
     assert contract.field_tier("n") == "unknown"
+
+
+def test_active_output_assertion_rejects_legacy_values():
+    contract.assert_no_legacy_field_in_active_output(
+        {"mean_len_mm": None, "p10_len": None, "h_profile": 60.0})
+    with pytest.raises(AssertionError):
+        contract.assert_no_legacy_field_in_active_output({"mean_len_mm": 42.0})
+
+
+def test_region_height_cannot_be_used_as_cluster_height():
+    with pytest.raises(AssertionError):
+        contract.assert_not_region_height_as_cluster_height("cluster_h_px")
+    with pytest.raises(AssertionError):
+        contract.assert_not_region_height_as_cluster_height("mean_cluster_h_mm")
+    contract.assert_not_region_height_as_cluster_height("h_profile")
 
 
 def test_estimated_fields_drop_legacy_names():

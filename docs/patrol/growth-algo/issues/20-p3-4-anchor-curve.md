@@ -1,6 +1,6 @@
 # 20. P3-4 单锚点曲线：离线证据 → 锚点序列 + 序列子集验收
 
-Status: implemented（2026-10-20，算法；10 条单测；序列子集验收等票 17）
+Status: implemented（2026-10-20，算法；12 条单测；序列子集验收等票 17）
 归属：算法（曲线与聚合）+ 后端（只读消费，可选）
 写域：`measure/**`（`measure/src/measure/curve.py`、`measure/tools/**`、`measure/tests/**`）＋本票
 依据：`docs/patrol/growth-algo/spec.md` §7（曲线规则、分段、`panel_coverage`）、§4.7（逐级降级）、
@@ -83,11 +83,14 @@ uv run --no-project --offline --with numpy \
 - 落点：`measure/src/measure/curve.py`（`CurvePoint` / `RatePoint` / `LayerPoint` /
   `anchor_series` / `rates` / `layer_median` / `assert_no_delta_in_curve`）；
   工具 `measure/tools/build_anchor_curve.py`。
-- 单测：`measure/tests/test_curve.py` **10 passed**。
+- 单测：`measure/tests/test_curve.py` **12 passed**。
   命令：`uv run --no-project --offline --with pytest --with numpy --with pillow pytest measure/tests/test_curve.py -q`
 - 工具冒烟：两行 JSONL（一个有效点 + 一个缺测点）→ CSV 两行，缺测行 `value` 为空、
   `status=missing`、`usable=false`，未补 0。
 - 已钉住：缺测留点、输入排序、版本变化分段、`segment_changed` 不产速率、
   跨缺测点不产速率、`dt<min_span_h` 与 `dt>max_gap_h` 两档拒绝、层内中位分母只数有值锚点、
   `CurvePoint` 不携带 `delta`、`usable` 不被改名成 `verified`。
+- review 修复：段号按**相邻变化**递增（A→B→A 是 3 段，不并回第一段）；补 `Segment` 类型与
+  `segment()`；乱序点标 `out_of_order`、不出负速率；`layer_median` 按 (段, 时间) 分组；
+  排序按解析后的时间而非字符串；CSV 文件名做字符净化。
 - 未做：真实序列子集（票 17）；SVG（留给 P4-1，不引入 matplotlib）。

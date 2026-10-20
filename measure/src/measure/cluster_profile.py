@@ -124,7 +124,9 @@ def profile_heights(
             b_full[lo:hi] = baseline.b[lo - x0:hi - x0]
             interp_full[lo:hi] = baseline.interpolated[lo - x0:hi - x0]
 
-    supported = int(np.sum(mask.any(axis=0) & np.isfinite(b_full)))
+    #: 分母是**簇掩码自己的支撑列**（spec/票 13），不因基线槽位窄而变小——
+    #: 否则槽位外的簇列被剔出分母，`valid_column_ratio` 会虚高、`insufficient_contour` 变松。
+    supported = int(np.sum(mask.any(axis=0)))
     rejected: dict[str, int] = {}
 
     for x in range(w_img):
@@ -145,7 +147,7 @@ def profile_heights(
     if not baseline.baseline_valid:
         reasons.append("baseline_invalid")
     if not association_valid:
-        reasons.append("association_invalid")
+        reasons.append("association_ambiguous")
     if not measurement_valid:
         reasons.append("measurement_invalid")
     if count == 0:

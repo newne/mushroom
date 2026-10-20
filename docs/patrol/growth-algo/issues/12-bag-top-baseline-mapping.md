@@ -1,6 +1,6 @@
 # 12. L4 袋顶基线：模板折线经 `T` 映射 + 两级可用性
 
-Status: implemented（2026-10-20，算法；11 条单测；真实帧验收仍等票 08 的模板）
+Status: implemented（2026-10-20，算法；12 条单测；真实帧验收仍等票 08 的模板）
 归属：算法
 写域：`measure/**`（`measure/src/measure/**`、`measure/tests/**`）＋本票
 依据：`docs/patrol/growth-algo/spec.md` §4.1（`b(x)` 定义）、§4.3（两级可用性）、§4.5（初值表）、
@@ -93,9 +93,10 @@ uv run --no-project --offline --with pytest --with numpy --with pillow --with op
 ### 实现证据（2026-10-20）
 
 - 落点：`measure/src/measure/bag_top.py`（`BaselineConfig` / `BaselineProfile` / `map_bag_top` / `evaluate_baseline`）。
-- 单测：`measure/tests/test_bag_top.py` **11 passed**。
+- 单测：`measure/tests/test_bag_top.py` **12 passed**。
   命令：`uv run --no-project --offline --with pytest --with numpy --with pillow pytest measure/tests/test_bag_top.py -q`
 - 已钉住：映射方向（+7/−5 平移）、失败对齐透传、`slot_missing`、`bag_shift` 与票 11 的
   `max_shift_px` 互不替代、自遮挡不参与（簇掩码不是本模块输入）、可见 8 列/覆盖 0.2 的边界、
-  槽位外不外推、同输入逐位一致。
+  槽位外不外推、帧外列 `b=NaN` 且不进覆盖率分母、同输入逐位一致。
+- review 修复：`map_bag_top` 不再先声明 `baseline_valid=True`；帧外列显式 `NaN`。
 - 未做：真实帧（等票 08 的模板 v1）；真实袋口偏移的分布与 `bag_shift_max_px=40` 的标定。
