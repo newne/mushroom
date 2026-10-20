@@ -24,8 +24,8 @@ from pathlib import Path
 _HERE = Path(__file__).resolve()
 sys.path.insert(0, str(_HERE.parents[1] / "src"))  # measure/src
 
-from measure.curve import anchor_series  # noqa: E402
-from measure.profile_result import read_jsonl  # noqa: E402
+from measure.curve import anchor_series
+from measure.profile_result import read_jsonl
 
 COLUMNS = ("ts", "value", "n_bags_valid", "n_bags_total", "panel_coverage",
            "segment_id", "segmentation_status", "status", "usable", "reasons")

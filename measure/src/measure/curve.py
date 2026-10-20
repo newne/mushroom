@@ -11,8 +11,10 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, fields
 from datetime import datetime
+from itertools import pairwise
 
 import numpy as np
 
@@ -71,16 +73,19 @@ def _segment_key(row) -> tuple:
     return tuple(str(_get(row, name, "")) for name in SEGMENT_FIELDS)
 
 
+_OFFSET = re.compile(r"(?:Z|[+-]\d{2}:?\d{2})$")
+
+
 def _parse_ts(ts: str) -> datetime:
-    """ISO 时间；统一成 naive UTC，避免带/不带时区的两行无法相减。"""
-    return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).replace(tzinfo=None)
+    """ISO 时间 → naive（库房本地时间）；带时区的先去掉偏移，避免两行无法相减。"""
+    return datetime.fromisoformat(_OFFSET.sub("", str(ts).strip()))
 
 
-def _ts_key(row) -> datetime:
+def _ts_key(row) -> float:
     try:
-        return _parse_ts(str(_get(row, "ts", "")))
+        return _parse_ts(str(_get(row, "ts", ""))).timestamp()
     except ValueError:
-        return datetime.min
+        return float("-inf")
 
 
 def anchor_series(rows, *, metric: str = "h_anchor") -> list[CurvePoint]:
@@ -131,7 +136,7 @@ def segment(points) -> list[Segment]:
 def rates(points, *, min_span_h: float = 2.0, max_gap_h: float = 12.0) -> list[RatePoint]:
     """相邻点速率；只在同段、相邻、都有值、`dt` 合理时出数。"""
     out: list[RatePoint] = []
-    for prev, cur in zip(points, points[1:]):
+    for prev, cur in pairwise(points):
         if prev.segment_id != cur.segment_id:
             out.append(RatePoint(cur.ts, prev.ts, _dt_h(prev.ts, cur.ts), None,
                                  cur.segment_id, "segment_changed"))

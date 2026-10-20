@@ -107,7 +107,7 @@ def profile_heights(
     """`cluster_mask` + `b(x)` → 三个主指标 + 逐列证据。"""
     cfg = config or ProfileConfig()
     mask = np.asarray(cluster_mask, dtype=bool)
-    h_img, w_img = mask.shape
+    _, w_img = mask.shape
     mask = opening(mask, radius=1)
 
     top_env = np.full(w_img, np.nan, float)
@@ -155,11 +155,11 @@ def profile_heights(
     if ratio < cfg.min_valid_column_ratio:
         reasons.append("insufficient_contour")
 
-    base = dict(
-        top_envelope=top_env, column_heights=heights, valid_columns=valid,
-        valid_column_count=count, valid_column_ratio=ratio,
-        supported_column_count=supported, rejected=rejected,
-    )
+    base = {
+        "top_envelope": top_env, "column_heights": heights, "valid_columns": valid,
+        "valid_column_count": count, "valid_column_ratio": ratio,
+        "supported_column_count": supported, "rejected": rejected,
+    }
 
     if reasons:
         return HeightProfile(

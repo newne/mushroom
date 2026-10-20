@@ -4,7 +4,6 @@ import json
 
 import numpy as np
 import pytest
-
 from measure.bag_top import BaselineProfile
 from measure.cluster_profile import HeightProfile
 from measure.debag import measure_region

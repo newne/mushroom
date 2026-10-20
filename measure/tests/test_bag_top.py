@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-
 from measure.align import Alignment
 from measure.bag_top import BaselineConfig, map_bag_top
 

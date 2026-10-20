@@ -128,8 +128,8 @@ def build_bag_result(
     config_sha256: str | None = None,
 ) -> BagResult:
     """一袋一簇 → 一行；按 §4.7 逐级降级。"""
-    evidence = dict(mask_path=mask_path, baseline_path=baseline_path,
-                    config_sha256=config_sha256)
+    evidence = {"mask_path": mask_path, "baseline_path": baseline_path,
+                "config_sha256": config_sha256}
     if not measurement_valid:
         return _null_bag(keys, slot_id, status="no_detection",
                          reasons=("no_detection",), association_valid=association_valid,

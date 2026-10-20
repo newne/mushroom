@@ -1,10 +1,10 @@
 """spec v6 §4.7：单杆 legacy 字段退出活跃口径（产出侧）。"""
 
 import pytest
-
-from measure import contract
 from measure.pipeline import BoxStats
 from measure.record import MeasurementRecord
+
+from measure import contract
 
 
 def test_field_tiers_are_explicit():

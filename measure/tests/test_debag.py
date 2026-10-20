@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-
 from measure.debag import debag, envelope_region, measure_region, region_metrics
 
 

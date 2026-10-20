@@ -1,7 +1,6 @@
 """`measure.curve`：缺测留点、分段、不跨长缺测算速率。"""
 
 import pytest
-
 from measure.curve import (
     CurvePoint,
     anchor_series,
@@ -13,13 +12,14 @@ from measure.curve import (
 
 
 def row(ts, value, **kw):
-    base = dict(
-        ts=ts, anchor_id="S101", h_anchor=value, n_bags_valid=2 if value is not None else 0,
-        n_bags_total=3, panel_coverage=2 / 3 if value is not None else 0.0,
-        segmentation_status="by_version_and_batch", usable=value is not None,
-        pipeline_version="p1", model_version="m1", roi_version="r1",
-        calibration_version="c1", reasons=(),
-    )
+    base = {
+        "ts": ts, "anchor_id": "S101", "h_anchor": value,
+        "n_bags_valid": 2 if value is not None else 0,
+        "n_bags_total": 3, "panel_coverage": 2 / 3 if value is not None else 0.0,
+        "segmentation_status": "by_version_and_batch", "usable": value is not None,
+        "pipeline_version": "p1", "model_version": "m1", "roi_version": "r1",
+        "calibration_version": "c1", "reasons": (),
+    }
     base.update(kw)
     return base
 
