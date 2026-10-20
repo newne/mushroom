@@ -116,6 +116,9 @@ class MeasurementRecord:
         """BoxStats → 线路记录：唯一一次字段名翻译（*_mm → 线格式名）。
 
         证据列（票 20）由调用方（L1–L3 接线层）传入；没有就留 NULL。
+
+        **v6（spec §4.7）**：单杆四列是 legacy —— 列位保留（历史读兼容），但新行恒 NULL，
+        且 `estimated_fields` 里也不许再出现它们；否则下游会把"已退出"读成"还有值"。
         """
         return cls(
             ts=ts,
@@ -124,16 +127,16 @@ class MeasurementRecord:
             station_id=station_id,
             angle_profile=angle_profile,
             n=stats.n_total,
-            mean_len_mm=stats.mean_len_mm,
+            mean_len_mm=None,
             mean_cap_mm=stats.mean_cap_mm,
             mean_cluster_w_mm=stats.mean_cluster_w_mm,
             mean_cluster_h_mm=stats.mean_cluster_h_mm,
             mean_area_mm2=stats.mean_area_mm2,
             mean_projected_d_mm=stats.mean_projected_d_mm,
-            p10_len=stats.p10_len_mm,
-            p90_len=stats.p90_len_mm,
+            p10_len=None,
+            p90_len=None,
             quality=stats.quality_flags,
-            estimated_fields=estimated_fields,
+            estimated_fields=contract.without_legacy_fields(estimated_fields),
             scale_source=scale_source,
             mm_per_px=mm_per_px,
             scale_ref_mm=scale_ref_mm,

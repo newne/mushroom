@@ -23,6 +23,25 @@
 
 from __future__ import annotations
 
+#: 字段分级（spec §4.7）：`legacy` 退出活跃口径，`auxiliary` 仍产出但不作交付口径。
+LEGACY_FIELDS = ("mean_len_mm", "p10_len", "p90_len", "StipeEstimate")
+AUXILIARY_FIELDS = ("mean_cap_mm", "mean_cluster_w_mm", "mean_cluster_h_mm",
+                    "mean_area_mm2", "mean_projected_d_mm", "cluster_h_px")
+ACTIVE_FIELDS = ("H_profile", "H_p50", "H_p90", "rel_profile_height",
+                 "rel_top_height", "rel_width")
+
+FIELD_TIERS = {
+    **{name: "legacy" for name in LEGACY_FIELDS},
+    **{name: "auxiliary" for name in AUXILIARY_FIELDS},
+    **{name: "active" for name in ACTIVE_FIELDS},
+}
+
+
+def field_tier(name: str) -> str:
+    """`active` / `auxiliary` / `legacy` / `unknown`。页面与曲线按它决定要不要消费。"""
+    return FIELD_TIERS.get(name, "unknown")
+
+
 #: 票 11 §3 的枚举 + `no_angle_profile` + `level_view`。
 QUALITY_FLAGS = (
     "verified",              # 检出可信，可用于分析（当前无一行是它）
@@ -54,6 +73,17 @@ QUALITY_FLAGS = (
                              # ⇒ 213/218 帧明明出了有效的 mean_cluster_w_mm 却被下游整行丢掉，
                              # 那是"把有数据说成没数据"。本标记**不进 NON_USABLE_FLAGS**：
                              # 它只说明"哪个修正项缺"，字段级取舍交给 estimated_fields（票 20）。
+    "baseline_invalid",      # v6：袋顶基线不可用 ⇒ H 三兄弟 NULL，区域指标不受影响
+    "association_ambiguous", # v6：一袋一簇归属失败 ⇒ 袋级指标 NULL，锚点级仍出
+    "merged_multiple_bags",  # v6：多袋合并进一个 cluster ⇒ 不拆、不分摊
+    "insufficient_contour",  # v6：有效列不足 ⇒ 高度缺测
+    "bag_mask_missing",      # v6：有 cluster 无 bag ⇒ 区域指标 NULL（高度不受影响）
+    "no_region_after_debag", # v6：去袋后为空 ⇒ 区域指标 NULL
+    "baseline_or_mask_inconsistent",  # v6：delta 一致性检查超差（只作 QA）
+    "cap_model_unavailable", # v6：帽模型不可用 ⇒ 帽级 NULL，不阻塞簇级
+    "no_cap",                # v6：无合格帽 ⇒ 帽级 NULL
+    "panel_coverage_low",    # v6：固定集合覆盖不足 ⇒ 曲线点标不可比
+    "no_usable_bags",        # v6：该锚点该帧没有可用袋
     "height_uncorrected",    # **未做 cosθ 补偿的竖直投影跨度（mm）**——Chief 2026-10-14 裁定 (b)：
                              # 竖直列在 θ 未注入时不再恒 NULL，而是出"投影跨度"并挂本标记。
                              # 它**不是长度**：页面必须显示「估算（未做俯角补偿）」；
@@ -109,6 +139,14 @@ def format_estimated_fields(value) -> str | None:
         if text and text not in out:
             out.append(text)
     return JOINER.join(out) if out else None
+
+
+def without_legacy_fields(value) -> str | None:
+    """从 `estimated_fields` 里剔掉 legacy 列；全被剔光 ⇒ `None`（入库 NULL）。"""
+    if value is None or value == "":
+        return None
+    items = value.split(JOINER) if isinstance(value, str) else [str(v) for v in value]
+    return format_estimated_fields([i for i in items if i.strip() not in LEGACY_FIELDS])
 
 
 def parse_flags(quality: str | None) -> set[str]:
