@@ -3,7 +3,7 @@ from datetime import date, datetime
 
 import pytest
 from fmc_fakes import COMMISSIONED_SOFT_LIMITS, FakeFmcLib, commissioned_client
-from patrol.daemon import PatrolDaemon
+from patrol.daemon import JOURNAL_DISABLED, PatrolDaemon
 from patrol.fmc import Fmc4030, FmcError
 from patrol.room import RoomState
 from patrol.stations import Station
@@ -559,3 +559,51 @@ def test_daemon_measure_fn_rows_synced(tmp_path):
     assert kinds == ["measurement", "round"]
     row = next(r for r in flat if r["kind"] == "measurement")
     assert row["box_id"] == "B01" and row["mean_len_mm"] == 50.0
+
+
+def test_before_round_false_parks_home_without_any_round(tmp_path):
+    """连续两轮被蓝光/加湿拦住 ⇒ 回原点：**不拍一帧、不写 round 行**。
+
+    票 23 §5-A：首版把预算共用，于是"忍满"之后整轮照样在蓝光下拍完，避让形同虚设。
+    现在的口径是第二轮直接放弃这一轮——库里不该出现一条"跑了 0 站"的轮次记录。
+    """
+    lib = FakeFmcLib(soft_limits=COMMISSIONED_SOFT_LIMITS)
+    store = JsonlStore(str(tmp_path / "outbox.jsonl"))
+    logs: list[str] = []
+    daemon = PatrolDaemon(
+        room_state=ALLOWED_ROOM,
+        now=_allowed_now,
+        open_fmc=lambda: Fmc4030(lib),
+        stations=[Station(id="S01", box_id="B01", y=10.0, z=0.0)],
+        capture_client=SyncClientAndCaptureStub(),
+        store=store,
+        sync=SyncClient(transport=lambda url, body=None: None),
+        before_round=lambda: False,
+        journal_dir=JOURNAL_DISABLED,
+        log=logs.append,
+    )
+
+    assert daemon.run_cycle() == "skipped"
+    assert store.pending() == [], "这一轮什么都没拍，不该留下任何行"
+    assert lib.calls_of("line2"), "回原点必须真的下发运动，而不是只记一行日志"
+    assert any("回原点" in m for m in logs)
+
+
+def test_before_round_true_keeps_normal_round(tmp_path):
+    """反向确认：闸门放行时行为与从前一致（别把闸门做成永远关着）。"""
+    store = JsonlStore(str(tmp_path / "outbox.jsonl"))
+    sent: list = []
+    daemon = PatrolDaemon(
+        room_state=ALLOWED_ROOM,
+        now=_allowed_now,
+        open_fmc=lambda: commissioned_client(),
+        stations=[Station(id="S01", box_id="B01", y=10.0, z=0.0)],
+        capture_client=SyncClientAndCaptureStub(),
+        store=store,
+        sync=SyncClient(transport=lambda url, body=None: sent.append(body["rows"])),
+        before_round=lambda: True,
+        log=lambda _m: None,
+    )
+    assert daemon.run_cycle() == "ok"
+    assert any(r["kind"] == "round" for batch in sent for r in batch), \
+        "放行的那一轮必须照常产出记录"

@@ -30,7 +30,7 @@ class Clock:
         self.t += seconds
 
 
-def _gate(monkeypatch, *, blues, humid, budget=600, poll=60):
+def _gate(monkeypatch, *, blues, humid, budget=600, poll=60, max_blocked=2):
     clock = Clock()
     queue = list(blues)
     monkeypatch.setattr(patrol_gate, "blue_from_jpeg",
@@ -38,6 +38,7 @@ def _gate(monkeypatch, *, blues, humid, budget=600, poll=60):
     logs: list[str] = []
     gate = PatrolGate(probe_image=lambda: b"x", fetch_bytes=lambda url: b"x",
                       humid_probe=lambda: humid, budget_s=budget, poll_s=poll,
+                      max_blocked_rounds=max_blocked,
                       sleep=clock.sleep, clock=clock, log=logs.append)
     return gate, clock, logs
 
@@ -69,14 +70,54 @@ def test_unknown_signals_fail_open(monkeypatch):
     assert clock.t == 0.0
 
 
-def test_budget_is_shared_between_pre_round_and_stations(monkeypatch):
-    """起轮前忍满 30 min 后，轮中**不再重复等**（用户口径："最多等 30 min 总"）。"""
+def test_pre_round_and_mid_round_budgets_are_independent(monkeypatch):
+    """起轮前忍满后，轮中**还有自己的一份**（首版共用 ⇒ 整轮等于没避让，票 23 §5-A）。"""
     gate, clock, _logs = _gate(monkeypatch, blues=[True] * 10, humid=False,
                                budget=120.0, poll=60.0)
-    gate.wait_before_round()
+    assert gate.wait_before_round() is True
     assert clock.t == 120.0
     gate.before_station(1, 3, SimpleNamespace(id="S01"), None)
+    assert clock.t == 240.0          # 轮中又用掉一份独立的 120 s
+
+
+def test_second_blocked_round_goes_home_without_waiting(monkeypatch):
+    """连续 2 轮遇蓝光 ⇒ 第二轮**一秒都不等**，直接放弃本轮回原点。"""
+    gate, clock, logs = _gate(monkeypatch, blues=[True] * 10, humid=False,
+                              budget=120.0, poll=60.0)
+    assert gate.wait_before_round() is True
     assert clock.t == 120.0
+    assert gate.wait_before_round() is False
+    assert clock.t == 120.0
+    assert any("回原点" in line for line in logs)
+
+
+def test_blocked_counter_clears_when_signal_goes_away(monkeypatch):
+    gate, _clock, logs = _gate(monkeypatch, blues=[True] * 4 + [False], humid=False,
+                               budget=120.0, poll=60.0)
+    assert gate.wait_before_round() is True
+    assert gate.wait_before_round() is False
+    assert gate.blocked_rounds == 2
+    assert gate.wait_before_round() is True
+    assert gate.blocked_rounds == 0
+    assert any("计数清零" in line for line in logs)
+
+
+def test_mid_round_budget_exhausted_short_circuits(monkeypatch):
+    """轮中预算用完 ⇒ 余下各站不再取帧、不再记「原地暂停」（票 23 §5-B）。"""
+    gate, clock, logs = _gate(monkeypatch, blues=[True] * 6, humid=False,
+                              budget=60.0, poll=60.0)
+    gate.before_station(1, 3, SimpleNamespace(id="S01"), None)
+    assert clock.t == 60.0
+    settled = len(logs)
+    calls: list[int] = []
+    gate.probe_image = lambda: calls.append(1) or b"x"
+    gate.fetch_bytes = lambda url: calls.append(1) or b"x"
+    for i in (2, 3):
+        gate.before_station(i, 3, SimpleNamespace(id=f"S0{i}"),
+                            {"cloud_url": "http://x/1.jpg"})
+    assert clock.t == 60.0
+    assert calls == [], "预算用完后不该再抓拍/取帧"
+    assert len(logs) == settled, "预算用完后不该每站再记两行"
 
 
 def test_before_station_uses_previous_frame_and_pauses(monkeypatch):

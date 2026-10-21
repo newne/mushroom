@@ -1,11 +1,15 @@
 """巡检避让闸门：蓝光/加湿期**起轮前延后、轮中原地暂停**（票 14、票 22）。
 
-用户口径（2026-10-21）：
+用户口径（2026-10-21，2026-10-21 下午修订）：
 
 1. **补白光不影响**（巡检自己的白色补光），正常拍；
 2. **补蓝光**：还没起轮 ⇒ 延后最多 30 min 再起；已经起轮 ⇒ 原地暂停，最多等 30 min
    等蓝光关掉再继续；
-3. **加湿**：同上（未起轮等、已起轮原地停）。
+3. **加湿**：同上（未起轮等、已起轮原地停）；
+4. **两个预算独立**：起轮前 30 min 与轮中 30 min 各自计时（首版曾"共用一份"，
+   于是起轮前忍满后整轮等于没避让 —— 见票 23 §5-A）；
+5. **连续 2 轮被拦 ⇒ 回原点跳过该轮**：上一轮已经等满预算仍未解除，这一轮不再干等
+   30 min，直接把机构退回 (0,0)、本轮什么都不拍（票 23 §5-A）。
 
 两个信号从哪来：
 
@@ -33,6 +37,8 @@ MIN_MEAN_LUMA = 15.0
 DEFAULT_BUDGET_S = 1800.0
 #: 轮询间隔：灯是 30/10 min 级周期、加湿是 8–15 min 级，1 min 足够。
 DEFAULT_POLL_S = 60.0
+#: 连续几轮"等满预算仍未解除"就放弃该轮（回原点，不拍）。用户口径 2026-10-21：2 轮。
+DEFAULT_MAX_BLOCKED_ROUNDS = 2
 
 
 def blue_from_jpeg(blob: bytes, *, threshold: float = BLUE_RATIO_THRESHOLD,
@@ -74,10 +80,11 @@ def humid_from_api(api_base: str, room_id: str, *, timeout_s: float = 5.0,
 
 
 class PatrolGate:
-    """起轮前 / 逐站两个等待点，共用一套 30 min 预算（每次等待各自计时）。
+    """起轮前 / 逐站两个等待点，**各自**一套 30 min 预算（互不占用）。
 
     ``probe_image``：不动机构拍一张，返回 JPEG 字节（起轮前与暂停期间都用它）。
     ``fetch_bytes``：按 URL 取回已拍好的那一帧（轮中优先用它，省一次抓拍）。
+    ``max_blocked_rounds``：连续几轮"等满预算仍未解除"就放弃该轮并回原点，默认 2。
     """
 
     def __init__(self, *, probe_image: Callable[[], bytes | None],
@@ -85,6 +92,7 @@ class PatrolGate:
                  humid_probe: Callable[[], bool | None],
                  budget_s: float = DEFAULT_BUDGET_S,
                  poll_s: float = DEFAULT_POLL_S,
+                 max_blocked_rounds: int = DEFAULT_MAX_BLOCKED_ROUNDS,
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic,
                  abort: Callable[[], bool] | None = None,
@@ -94,11 +102,16 @@ class PatrolGate:
         self.humid_probe = humid_probe
         self.budget_s = float(budget_s)
         self.poll_s = float(poll_s)
+        self.max_blocked_rounds = max(1, int(max_blocked_rounds))
         self._sleep = sleep
         self._clock = clock
         self.abort = abort
         self.log = log
-        self._round_deadline: float | None = None
+        #: 连续"等满预算仍未解除"的轮数：到 ``max_blocked_rounds`` 就回原点跳过该轮。
+        self.blocked_rounds = 0
+        self._mid_deadline: float | None = None
+        #: 本轮轮中预算已用完 ⇒ 余下各站不再判、不再取帧（票 23 §5-B）。
+        self._mid_done = False
         self._humid_cache: bool | None = None
         self._humid_at: float | None = None
 
@@ -144,30 +157,48 @@ class PatrolGate:
 
     # ---- 两个等待点 ----
 
-    def wait_before_round(self) -> None:
-        """还没起轮：最多延后 30 min 再起（每 60 s 探一次）。
+    def wait_before_round(self) -> bool:
+        """还没起轮：最多延后 ``budget_s``（每 60 s 探一次，预算**不与轮中共享**）。
 
-        预算与轮中的 `before_station` **共用**（`_round_deadline`）：起轮前忍满了，
-        轮中就不再重复等——用户口径是"最多等 30 min 总"。
+        返回 ``True`` = 可以起轮；``False`` = 连续被拦的轮数到上限 ⇒ **别拍了，
+        回原点跳过这一轮**（上一轮已经忍满 30 min 仍没解除，再等一遍只是白等）。
         """
-        self._round_deadline = self._clock() + self.budget_s
+        start = self._clock()
         while True:
             if self._aborting():
-                return
+                return True                 # 急停链会收尾，这里不额外折腾机构
             reason = self.blocking_reason(None)
             if reason is None:
-                return
-            left = self._round_deadline - self._clock()
+                if self.blocked_rounds:
+                    self.log(f"避让：条件解除（连续 {self.blocked_rounds} 轮被拦的计数清零）")
+                self.blocked_rounds = 0
+                return True
+            # 上一轮已经等满预算仍未解除 ⇒ 这一轮直接放弃（"连续 2 轮"口径）
+            if self.blocked_rounds + 1 >= self.max_blocked_rounds:
+                self.blocked_rounds += 1
+                self.log(f"避让：连续 {self.blocked_rounds} 轮遇{reason}"
+                         f" —— 不再等，回原点、本轮不巡检")
+                return False
+            left = self.budget_s - (self._clock() - start)
             if left <= 0:
-                self.log(f"避让：起轮前遇{reason}，已延后 {self.budget_s / 60:.0f} min —— 按口径开始巡检")
-                return
+                self.blocked_rounds += 1
+                self.log(f"避让：起轮前遇{reason}，已延后 {self.budget_s / 60:.0f} min"
+                         f" —— 按口径开始巡检（连续被拦第 {self.blocked_rounds} 轮）")
+                return True
             self.log(f"避让：起轮前遇{reason}，延后（剩余 {left / 60:.1f} min）")
             self._sleep(min(self.poll_s, left))
 
     def before_station(self, index: int, total: int, station, meta: dict | None) -> None:
-        """已起轮：用**上一站刚拍的帧**判蓝光；要在就原地停（本轮总预算 30 min）。"""
-        if self._round_deadline is None:
-            self._round_deadline = self._clock() + self.budget_s
+        """已起轮：用**上一站刚拍的帧**判蓝光；要在就原地停（本轮预算 30 min，独立）。
+
+        预算一旦用完就**短路**：不再取帧、不再判、不再每站记两行——首版每站都记
+        「原地暂停」+「已暂停 30 min」，48 站 96 行，看着像一直在停，其实一秒没停
+        （票 23 §5-B）。
+        """
+        if self._mid_deadline is None:
+            self._mid_deadline = self._clock() + self.budget_s
+        if self._mid_done:
+            return
         blob = None
         url = (meta or {}).get("cloud_url")
         if url and self.fetch_bytes is not None:
@@ -181,11 +212,13 @@ class PatrolGate:
         while True:
             if self._aborting():
                 return
-            self.log(f"避让：[{index}/{total}] {station.id} 原地暂停（{reason}）")
-            left = self._round_deadline - self._clock()
+            left = self._mid_deadline - self._clock()
             if left <= 0:
-                self.log(f"避让：本轮已暂停 {self.budget_s / 60:.0f} min —— 继续（口径上限）")
+                self._mid_done = True
+                self.log(f"避让：轮中暂停预算已用完（{self.budget_s / 60:.0f} min，"
+                         f"仍在{reason}）—— 余下各站不再判，按口径拍完")
                 return
+            self.log(f"避让：[{index}/{total}] {station.id} 原地暂停（{reason}）")
             self._sleep(min(self.poll_s, left))
             blob = self.probe_image()
             reason = self.blocking_reason(blob)
@@ -239,10 +272,15 @@ def build_gate(args, *, capture, room_id: str, abort: Callable[[], bool] | None 
 
     budget = float(getattr(args, "gate_budget_s", DEFAULT_BUDGET_S) or DEFAULT_BUDGET_S)
     poll = float(getattr(args, "gate_poll_s", DEFAULT_POLL_S) or DEFAULT_POLL_S)
+    max_rounds = int(getattr(args, "gate_max_blocked_rounds",
+                            DEFAULT_MAX_BLOCKED_ROUNDS) or DEFAULT_MAX_BLOCKED_ROUNDS)
     gate = PatrolGate(
         probe_image=probe_image, fetch_bytes=fetch_bytes, humid_probe=humid_probe,
-        budget_s=budget, poll_s=poll, abort=abort, log=log,
+        budget_s=budget, poll_s=poll, max_blocked_rounds=max_rounds,
+        abort=abort, log=log,
     )
-    log(f"避让：开启（蓝光/加湿；起轮前延后 ≤{budget / 60:.0f} min，"
-        f"轮中原地暂停 ≤{budget / 60:.0f} min；信号 {api_base}/env/humid + 抓拍）")
+    log(f"避让：开启（蓝光/加湿；起轮前延后 ≤{budget / 60:.0f} min、"
+        f"轮中原地暂停 ≤{budget / 60:.0f} min（两个预算独立）；"
+        f"连续 {gate.max_blocked_rounds} 轮未解除 ⇒ 回原点跳过该轮；"
+        f"信号 {api_base}/env/humid + 抓拍）")
     return gate

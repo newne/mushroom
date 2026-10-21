@@ -88,6 +88,9 @@ class PatrolDaemon:
         #: 「原地暂停」：每站拍之前调一次，可以 sleep 等条件解除（蓝光/加湿避让），
         #: **不中止本轮**。判定在 deploy 侧（`deploy.patrol_gate.PatrolGate`）。
         before_station: Callable[[int, int, object, dict | None], None] | None = None,
+        #: 「起轮前避让」：准入通过后、连接控制器之前调一次；返回 False = 连续被拦
+        #: 到上限 ⇒ 本轮回原点、什么都不拍（判定同样在 deploy 侧）。
+        before_round: Callable[[], bool] | None = None,
         #: 帧内容复核（票 13）：给一个"索引行 → 内容指纹"的可调用对象，就在写索引之前
         #: 逐帧取指纹，把"同一份字节发给多个站位"标成 `frame_dup`（**留帧 + 标记，不丢**）。
         #: 默认 None = 不查（行为与从前一致）；取图/哈希实现由部署侧注入。
@@ -123,6 +126,7 @@ class PatrolDaemon:
         self.abort = abort
         self.should_stop = should_stop
         self.before_station = before_station
+        self.before_round = before_round
         self.content_hash = content_hash
         # 默认：outbox 旁边的 runs/；要关掉必须显式传 JOURNAL_DISABLED
         if journal_dir is JOURNAL_DISABLED:
@@ -157,6 +161,10 @@ class PatrolDaemon:
         if not allowed:
             self.log(f"本轮不巡检：{reason}")
             return "skipped"
+        # 起轮前避让（蓝光/加湿）：放在准入之后——准入没过本来就不动机构，没必要等。
+        # 返回 False = 连续被拦到上限 ⇒ 回原点、这一轮什么都不拍。
+        if self.before_round is not None and not self.before_round():
+            return self._park_home("连续被蓝光/加湿拦住")
 
         fmc = self._connect()
         if fmc is None:
@@ -475,6 +483,30 @@ class PatrolDaemon:
                 self.log(f"已同步 {n} 条记录到 prod")
         except Exception as e:  # noqa: BLE001 - 同步失败保留 outbox 待补传
             self.log(f"同步失败（数据保留本地 outbox，稍后补传）: {e}")
+
+    def _park_home(self, reason: str) -> str:
+        """放弃本轮：连接控制器，把机构退回原点 (0,0)。
+
+        与 `run_cycle` 的区别：**不拍任何一帧、不建取证文件、不写 round 行**——
+        这一轮什么都没发生，留一条"跑了 0 站"的记录只会污染轮次序列。
+        用在"连续两轮被蓝光/加湿拦住"的场合（票 23 §5-A）。
+        """
+        fmc = self._connect()
+        if fmc is None:
+            self.log(f"避让：{reason} —— 本轮回原点，但连接失败（机构未动）")
+            return "failed"
+        try:
+            fmc.goto(0.0, 0.0, abort=self.abort)
+            self.log(f"避让：{reason} —— 回原点，本轮不巡检（未拍摄）")
+            return "skipped"
+        except Exception as e:  # noqa: BLE001 - 回不去也不该把常驻进程打挂
+            self.log(f"避让：{reason} —— 回原点失败（{type(e).__name__}: {e}）")
+            return "failed"
+        finally:
+            try:
+                fmc.close()
+            except Exception as e:  # noqa: BLE001 - 关闭失败不阻断下轮
+                self.log(f"关闭连接异常: {e}")
 
     def _emergency_stop(self, fmc) -> str:
         """尽力停住两轴，返回一句可读结果。
