@@ -85,6 +85,9 @@ class PatrolDaemon:
         #: 「整轮避让」：返回非空字符串 = 本轮就此停下（加湿保持这类"现在不该拍"）。
         #: 判定在调用方（deploy 侧读 hold.json），这里只透给 PatrolRound。
         should_stop: Callable[[], str | None] | None = None,
+        #: 「原地暂停」：每站拍之前调一次，可以 sleep 等条件解除（蓝光/加湿避让），
+        #: **不中止本轮**。判定在 deploy 侧（`deploy.patrol_gate.PatrolGate`）。
+        before_station: Callable[[int, int, object, dict | None], None] | None = None,
         #: 帧内容复核（票 13）：给一个"索引行 → 内容指纹"的可调用对象，就在写索引之前
         #: 逐帧取指纹，把"同一份字节发给多个站位"标成 `frame_dup`（**留帧 + 标记，不丢**）。
         #: 默认 None = 不查（行为与从前一致）；取图/哈希实现由部署侧注入。
@@ -119,6 +122,7 @@ class PatrolDaemon:
         # patrol 不知道它从哪来（console 写下的标志文件？某个按钮？），只知道"该停了"。
         self.abort = abort
         self.should_stop = should_stop
+        self.before_station = before_station
         self.content_hash = content_hash
         # 默认：outbox 旁边的 runs/；要关掉必须显式传 JOURNAL_DISABLED
         if journal_dir is JOURNAL_DISABLED:
@@ -193,7 +197,7 @@ class PatrolDaemon:
             report = PatrolRound(
                 fmc, self.capture_client, self.stations, log=note, on_station=heartbeat,
                 framing=self.framing, abort=self.abort, on_park=on_park,
-                should_stop=self.should_stop,
+                should_stop=self.should_stop, before_station=self.before_station,
             ).run()
         except BaseException as e:  # noqa: BLE001 - 分类后转 failed，绝不静默
             stopped = self._emergency_stop(fmc)

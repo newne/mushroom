@@ -326,6 +326,27 @@ def create_app(
             ),
         }
 
+    @app.get("/env/humid")
+    def env_humid(room_id: str = "611") -> dict:
+        """加湿器启停的只读信号（票 14 / 票 22；消费者 = 巡检避让）。
+
+        **不落库、不猜**：直接读 TDengine 的 `SUP_*MDHUM01/02` 最近一条 `Running`
+        （0/1=运行、2/3=停止）。取不到或过期 ⇒ `humidifying: null`，由调用方决定
+        fail-open / fail-closed（巡检选 fail-open：传感器掉线不该停掉巡检）。
+        """
+        from analysis.env.humidity import humid_state
+
+        try:
+            return humid_state(
+                base_url=os.environ.get("TDENGINE_URL", DEFAULT_TDENGINE_URL),
+                room=room_id,
+                user=os.environ.get("TDENGINE_USER", "root"),
+                password=os.environ.get("TDENGINE_PASSWORD", "taosdata"),
+            )
+        except Exception as exc:  # noqa: BLE001 - 避让信号失败不许把巡检带停
+            return {"room_id": room_id, "humidifying": None, "source": "tdengine",
+                    "devices": [], "error": f"{type(exc).__name__}: {exc}"}
+
     @app.get("/environment/batches")
     def environment_batches(zone: str = "", limit: int = 3) -> dict:
         """按**生产台账的批次窗口**汇总环境参数，最新在前，供"当前 vs 前两批"对比。

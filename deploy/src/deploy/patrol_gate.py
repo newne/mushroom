@@ -1,0 +1,248 @@
+"""巡检避让闸门：蓝光/加湿期**起轮前延后、轮中原地暂停**（票 14、票 22）。
+
+用户口径（2026-10-21）：
+
+1. **补白光不影响**（巡检自己的白色补光），正常拍；
+2. **补蓝光**：还没起轮 ⇒ 延后最多 30 min 再起；已经起轮 ⇒ 原地暂停，最多等 30 min
+   等蓝光关掉再继续；
+3. **加湿**：同上（未起轮等、已起轮原地停）。
+
+两个信号从哪来：
+
+* **加湿**：TDengine 的 `Running`（analysis 的 `GET /env/humid`，0/1=运行、2/3=停止）。
+* **蓝光**：**台账里没有"灯现在亮没亮"的实测点**——`OnOff1..4` 是"启用/自动"使能位
+  （2026-10-21 实测 2 小时不变），`Choose1..4` 只是白/蓝选择，`Model`/`Running` 是模式。
+  所以蓝光只能用**图像本身**当传感器：蓝光下 `B/R` 实测 11–16，熄灯/白光下 ≈1.0
+  （证据见 `docs/patrol/imaging-quality/issues/01-camera-imaging-quality.md`）。
+  起轮前用一次**不动机构**的抓拍当探针，轮中用上一站刚拍的那张。
+
+未知（取不到/太黑）一律**不拦**：传感器坏掉不该把巡检永久停掉；每次跳过都留一行日志。
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable
+from io import BytesIO
+
+#: 蓝光判定：整幅 B/R 比值（720×404 抽样口径）。中性帧实测 0.94–1.00，蓝光帧 11–16。
+BLUE_RATIO_THRESHOLD = 3.0
+#: 太黑（熄灯且没有漫射光）时 B/R 没有意义 ⇒ 返回 None（未知，不拦）。
+MIN_MEAN_LUMA = 15.0
+#: 一轮/一次等待的总预算，用户口径 30 min。
+DEFAULT_BUDGET_S = 1800.0
+#: 轮询间隔：灯是 30/10 min 级周期、加湿是 8–15 min 级，1 min 足够。
+DEFAULT_POLL_S = 60.0
+
+
+def blue_from_jpeg(blob: bytes, *, threshold: float = BLUE_RATIO_THRESHOLD,
+                   min_mean_luma: float = MIN_MEAN_LUMA) -> bool | None:
+    """这一帧是不是**蓝光下**拍的：`True` 蓝、`False` 不蓝、`None` 判不了（太黑/解不开）。"""
+    try:
+        import numpy as np
+        from PIL import Image
+    except ImportError:  # pragma: no cover - 镜像里两者都有（measure 的运行时依赖）
+        return None
+    try:
+        img = Image.open(BytesIO(blob)).convert("RGB").resize((720, 404))
+    except Exception:  # noqa: BLE001 - 坏字节 = 判不了
+        return None
+    arr = np.asarray(img, dtype="float32")
+    mean = float(arr.mean())
+    if mean < min_mean_luma:
+        return None
+    red = float(arr[..., 0].mean())
+    blue = float(arr[..., 2].mean())
+    return (blue / max(red, 1.0)) >= threshold
+
+
+def humid_from_api(api_base: str, room_id: str, *, timeout_s: float = 5.0,
+                   client=None) -> bool | None:
+    """`GET /env/humid` → `True` 在加湿 / `False` 没加湿 / `None` 未知。"""
+    url = api_base.rstrip("/") + "/env/humid"
+    try:
+        if client is not None:
+            data = client(url, {"room_id": room_id})
+        else:
+            import httpx
+
+            data = httpx.get(url, params={"room_id": room_id}, timeout=timeout_s).json()
+    except Exception:  # noqa: BLE001 - 取不到就是未知，交给调用方 fail-open
+        return None
+    value = data.get("humidifying") if isinstance(data, dict) else None
+    return None if value is None else bool(value)
+
+
+class PatrolGate:
+    """起轮前 / 逐站两个等待点，共用一套 30 min 预算（每次等待各自计时）。
+
+    ``probe_image``：不动机构拍一张，返回 JPEG 字节（起轮前与暂停期间都用它）。
+    ``fetch_bytes``：按 URL 取回已拍好的那一帧（轮中优先用它，省一次抓拍）。
+    """
+
+    def __init__(self, *, probe_image: Callable[[], bytes | None],
+                 fetch_bytes: Callable[[str], bytes] | None,
+                 humid_probe: Callable[[], bool | None],
+                 budget_s: float = DEFAULT_BUDGET_S,
+                 poll_s: float = DEFAULT_POLL_S,
+                 sleep: Callable[[float], None] = time.sleep,
+                 clock: Callable[[], float] = time.monotonic,
+                 abort: Callable[[], bool] | None = None,
+                 log: Callable[[str], None] = print):
+        self.probe_image = probe_image
+        self.fetch_bytes = fetch_bytes
+        self.humid_probe = humid_probe
+        self.budget_s = float(budget_s)
+        self.poll_s = float(poll_s)
+        self._sleep = sleep
+        self._clock = clock
+        self.abort = abort
+        self.log = log
+        self._round_deadline: float | None = None
+        self._humid_cache: bool | None = None
+        self._humid_at: float | None = None
+
+    def _humid(self) -> bool | None:
+        """加湿信号按 `poll_s` 缓存：逐站调一次 analysis 会把 TDengine 打满。"""
+        now = self._clock()
+        if self._humid_at is not None and now - self._humid_at < max(self.poll_s - 5.0, 1.0):
+            return self._humid_cache
+        try:
+            value = self.humid_probe()
+        except Exception as exc:  # noqa: BLE001 - 信号坏了不拦巡检
+            self.log(f"避让：加湿信号取不到（{exc}）——按不拦处理")
+            value = None
+        self._humid_cache, self._humid_at = value, now
+        return value
+
+    def _aborting(self) -> bool:
+        if self.abort is not None and self.abort():
+            self.log("避让：收到急停请求，停止等待（本轮由急停链收尾）")
+            return True
+        return False
+
+    # ---- 判定 ----
+
+    def _blue(self, blob: bytes | None) -> bool | None:
+        if not blob:
+            return None
+        return blue_from_jpeg(blob)
+
+    def blocking_reason(self, blob: bytes | None) -> str | None:
+        """当前有没有要避让的：先加湿（便宜、直接），再蓝光（要一帧）。"""
+        if self._humid():
+            return "加湿中"
+        try:
+            sample = blob if blob is not None else self.probe_image()
+        except Exception as exc:  # noqa: BLE001 - 探针抓拍失败不许把巡检带停
+            self.log(f"避让：探针抓拍失败（{exc}）——按不拦处理")
+            return None
+        blue = self._blue(sample)
+        if blue is None:
+            return None
+        return "蓝光" if blue else None
+
+    # ---- 两个等待点 ----
+
+    def wait_before_round(self) -> None:
+        """还没起轮：最多延后 30 min 再起（每 60 s 探一次）。
+
+        预算与轮中的 `before_station` **共用**（`_round_deadline`）：起轮前忍满了，
+        轮中就不再重复等——用户口径是"最多等 30 min 总"。
+        """
+        self._round_deadline = self._clock() + self.budget_s
+        while True:
+            if self._aborting():
+                return
+            reason = self.blocking_reason(None)
+            if reason is None:
+                return
+            left = self._round_deadline - self._clock()
+            if left <= 0:
+                self.log(f"避让：起轮前遇{reason}，已延后 {self.budget_s / 60:.0f} min —— 按口径开始巡检")
+                return
+            self.log(f"避让：起轮前遇{reason}，延后（剩余 {left / 60:.1f} min）")
+            self._sleep(min(self.poll_s, left))
+
+    def before_station(self, index: int, total: int, station, meta: dict | None) -> None:
+        """已起轮：用**上一站刚拍的帧**判蓝光；要在就原地停（本轮总预算 30 min）。"""
+        if self._round_deadline is None:
+            self._round_deadline = self._clock() + self.budget_s
+        blob = None
+        url = (meta or {}).get("cloud_url")
+        if url and self.fetch_bytes is not None:
+            try:
+                blob = self.fetch_bytes(url)
+            except Exception:  # noqa: BLE001 - 取不回就现拍
+                blob = None
+        reason = self.blocking_reason(blob)
+        if reason is None:
+            return
+        while True:
+            if self._aborting():
+                return
+            self.log(f"避让：[{index}/{total}] {station.id} 原地暂停（{reason}）")
+            left = self._round_deadline - self._clock()
+            if left <= 0:
+                self.log(f"避让：本轮已暂停 {self.budget_s / 60:.0f} min —— 继续（口径上限）")
+                return
+            self._sleep(min(self.poll_s, left))
+            blob = self.probe_image()
+            reason = self.blocking_reason(blob)
+            if reason is None:
+                self.log("避让：条件解除，继续巡检")
+                return
+
+
+def _api_base(ingest: str) -> str:
+    """`http://host:8000/ingest` → `http://host:8000`（analysis 的根）。"""
+    text = (ingest or "").strip().rstrip("/")
+    return text.removesuffix("/ingest")
+
+
+def build_gate(args, *, capture, room_id: str, abort: Callable[[], bool] | None = None,
+               log: Callable[[str], None] = print,
+               fetch: Callable[[str], bytes] | None = None) -> PatrolGate | None:
+    """按命令行参数造闸门；`--gate off` / 缺前置 ⇒ None（行为与从前一致）。"""
+    if getattr(args, "gate", "off") != "on":
+        log("避让：关闭（--gate off）——蓝光/加湿期照常巡检")
+        return None
+    if not str(room_id or "").strip():
+        log("避让：开启但拿不到 room_id —— 关闭（不猜库房）")
+        return None
+    api_base = (getattr(args, "gate_api", "") or "").strip() or _api_base(
+        getattr(args, "ingest", ""))
+    if not api_base:
+        log("避让：开启但拿不到 analysis 端点（--gate-api / --ingest）—— 关闭")
+        return None
+    if capture is None:
+        log("避让：开启但拿不到采图客户端 —— 关闭")
+        return None
+
+    from datetime import datetime
+
+    from patrol.stations import CAMERA_IP
+
+    from deploy.framing_wire import _fetch
+
+    fetch_bytes = fetch or _fetch
+
+    def probe_image() -> bytes | None:
+        """**不动机构**拍一张当蓝光探针（相机在当前位置，灯由环境决定）。"""
+        now = datetime.now()
+        result = capture.capture(
+            ip=CAMERA_IP, pwd="", filename=f"{now:%Y%m%d}/PROBE_{now:%H%M%S}.jpg")
+        return fetch_bytes(result.cloud_url) if result.cloud_url else None
+
+    def humid_probe() -> bool | None:
+        return humid_from_api(api_base, str(room_id))
+
+    budget = float(getattr(args, "gate_budget_s", DEFAULT_BUDGET_S) or DEFAULT_BUDGET_S)
+    poll = float(getattr(args, "gate_poll_s", DEFAULT_POLL_S) or DEFAULT_POLL_S)
+    gate = PatrolGate(
+        probe_image=probe_image, fetch_bytes=fetch_bytes, humid_probe=humid_probe,
+        budget_s=budget, poll_s=poll, abort=abort, log=log,
+    )
+    log(f"避让：开启（蓝光/加湿；起轮前延后 ≤{budget / 60:.0f} min，"
+        f"轮中原地暂停 ≤{budget / 60:.0f} min；信号 {api_base}/env/humid + 抓拍）")
+    return gate

@@ -194,7 +194,12 @@ services:
     #   所以这一版**不传**标定值——传一个没测过的数会把估算档伪装成标定档。
     # - `--measure-emit-empty`：失败帧也留一行（n=0 + 原因），否则被质量门拒掉的帧在库里
     #   毫无痕迹，"这一轮到底测过没有"永远只能猜。
-    command: ["patrol-serve", "--measure", "on", "--measure-emit-empty"]
+    #
+    # 避让闸门（2026-10-21 用户口径）：白光不影响；**蓝光**起轮前延后 ≤30 min、
+    # 已起轮则原地暂停 ≤30 min；**加湿**同口径。加湿信号读 analysis `/env/humid`
+    # （TDengine 的 `Running`），蓝光用一次不动机构的抓拍判 `B/R`（台账没有亮灯实测点）。
+    command: ["patrol-serve", "--measure", "on", "--measure-emit-empty",
+              "--gate", "on"]
     environment:
       - PROD_INGEST=${PROD_INGEST:-http://172.17.0.1:8000/ingest}
       # 采图服务发布在宿主上：容器里 127.0.0.1 不是宿主，必须走网桥网关

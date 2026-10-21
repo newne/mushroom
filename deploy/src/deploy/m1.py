@@ -51,6 +51,7 @@ from deploy.framing_wire import make_apply_trim
 from deploy.manual import ManualChannel
 from deploy.measure_wire import build as build_measure
 from deploy.measure_wire import room_id_is_usable
+from deploy.patrol_gate import build_gate
 from deploy.transport import HttpxTransport, host_port, split_host_port
 
 DEFAULT_STATIONS_PATH = "/opt/mushroom-patrol/stations.yaml"
@@ -260,6 +261,16 @@ def build_parser() -> argparse.ArgumentParser:
                          "`measure/tools/calibrate_quality_thresholds.py` 重算")
     ap.add_argument("--measure-emit-empty", action="store_true",
                     help="失败帧也产一行 n=0 + no_detection（默认不产行）")
+    # 避让闸门（2026-10-21 用户口径）：白光不影响；蓝光/加湿期起轮前延后 ≤30 min，
+    # 已起轮则原地暂停 ≤30 min。加湿信号来自 analysis `/env/humid`，蓝光用图像探针。
+    ap.add_argument("--gate", choices=("on", "off"), default="off",
+                    help="避让闸门：on=蓝光/加湿期起轮前延后、轮中原地暂停（各 ≤--gate-budget-s）")
+    ap.add_argument("--gate-api", default="",
+                    help="analysis 根地址（默认从 --ingest 去掉 /ingest）")
+    ap.add_argument("--gate-budget-s", type=float, default=1800.0,
+                    help="一次等待的总预算（秒），默认 1800 = 30 min")
+    ap.add_argument("--gate-poll-s", type=float, default=60.0,
+                    help="等待时的轮询间隔（秒），默认 60")
     ap.add_argument("--verify-content", action="store_true",
                     help="帧内容复核（票 13）：每轮末逐帧取回 cloud_url 算 sha256，把"
                          "\"同一份字节发给多个站位\"标成 frame_dup（轮标 suspect_duplicate）。"
@@ -412,6 +423,12 @@ def main(argv: list[str] | None = None) -> int:
     store = JsonlStore(args.outbox)
     log(f"outbox {args.outbox}：{len(store.pending())} 条待同步")
 
+    # 避让闸门（蓝光/加湿）：`None` = 没开/缺前置，行为与从前一致。
+    estop = make_estop_check(args.cmd_dir, disabled=args.no_estop, log=log)
+    gate = build_gate(args, capture=capture,
+                      room_id=(room.room_id if room is not None else ""),
+                      abort=estop, log=log)
+
     if args.no_sync:
         sync: object = _NullSync()
         log("同步已禁用（outbox 只累积，待 prod 端点确定后用同一 store 补传）")
@@ -438,12 +455,18 @@ def main(argv: list[str] | None = None) -> int:
         content_hash=content_hash,
         apply_trim=apply_trim,
         # 急停：console 按下 → 标志文件 → 这里每等一步看一眼 → 正在跑的那一轮被打断。
-        abort=make_estop_check(args.cmd_dir, disabled=args.no_estop, log=log),
+        abort=estop,
+        # 原地暂停（蓝光/加湿）：None = 没开闸门，行为与从前一致。
+        before_station=(gate.before_station if gate is not None else None),
         log=log,
     )
 
     # ---------- 单轮 ----------
     if args.once:
+        # 起轮前避让（蓝光/加湿）：与轮中的 before_station **共用同一个 30 min 预算**
+        # （用户口径"最多等 30 min 总"）。准入没过就不等——那一轮本来也不动机构。
+        if gate is not None and allowed:
+            gate.wait_before_round()
         log("开始单轮巡检（--once）")
         t0 = time.monotonic()
         result = daemon.run_cycle()

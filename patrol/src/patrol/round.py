@@ -79,6 +79,11 @@ class PatrolRound:
         #: 返回 None = 继续。用于加湿保持这类"现在不该拍"——判断在调用方（deploy 侧读
         #: hold.json），这里只执行。已经拍到的帧留在报告里：它们是停止**之前**的事实。
         should_stop: Callable[[], str | None] | None = None,
+        #: 「原地暂停」钩子（与 should_stop 不同）：每站**拍之前**调一次，
+        #: 签名 ``(index, total, station, prev_meta)``；它可以 sleep 等条件解除，
+        #: **不中止本轮**。用于蓝光/加湿避让（deploy 侧的 `PatrolGate`）。
+        #: `prev_meta` 是上一站刚拍的元数据（含 `cloud_url`），第一站为 None。
+        before_station: Callable[[int, int, object, dict | None], None] | None = None,
         sleep=time.sleep,
         log: Callable[[str], None] | None = None,
         on_station: Callable[..., None] | None = None,  # 逐站心跳（结构化，供取证）
@@ -98,6 +103,7 @@ class PatrolRound:
         self.framing = framing
         self.abort = abort
         self.should_stop = should_stop
+        self.before_station = before_station
         self._sleep = sleep
         self._log_sink = log
         self._on_station = on_station
@@ -125,7 +131,13 @@ class PatrolRound:
         )
         consecutive = 0
         total = len(self.stations)
+        prev_meta: dict | None = None
         for i, st in enumerate(self.stations, 1):
+            # 「原地暂停」（蓝光/加湿避让）：判定在调用方（deploy 的 `PatrolGate`），
+            # 这里只给一个"拍之前可以 sleep"的缝。与 should_stop 的区别：它**不中止**
+            # 本轮，条件解除后从当前站继续。
+            if self.before_station is not None:
+                self.before_station(i, total, st, prev_meta)
             # 「整轮避让」（分工：判定在调用方、执行在这里）：保持生效时**不再动机构**——
             # 加湿期的帧过曝、对比度塌（§12），拍完整轮只是白动机架 8 分钟。
             # 已经拍到的帧留在报告里：它们是停止之前的事实，不是坏数据。
@@ -218,6 +230,7 @@ class PatrolRound:
                     break
                 continue
             report.results.append(meta)
+            prev_meta = meta
             consecutive = 0
             self._log(
                 f"[{i}/{total}] {st.id} 完成 "

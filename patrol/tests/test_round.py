@@ -244,3 +244,18 @@ def test_upsert_station_appends_new():
     stations = make_stations(2)
     upsert_station(stations, Station(id="S09", box_id="B09", y=1.0, z=-2.0))
     assert [s.id for s in stations] == ["S01", "S02", "S09"]
+
+
+def test_before_station_sees_previous_meta_and_does_not_abort():
+    """原地暂停钩子：每站拍之前调一次，带上一站的 meta；它不改本轮结论。"""
+    cap = FakeStationCapture()
+    seen: list[tuple] = []
+
+    def before_station(index, total, station, prev):
+        seen.append((index, total, station.id,
+                     None if prev is None else prev["station_id"]))
+
+    report = PatrolRound(FakeFmc(), None, make_stations(3), station_capture=cap,
+                         before_station=before_station).run()
+    assert report.ok and not report.aborted
+    assert seen == [(1, 3, "S01", None), (2, 3, "S02", "S01"), (3, 3, "S03", "S02")]
