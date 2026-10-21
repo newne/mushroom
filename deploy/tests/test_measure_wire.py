@@ -8,13 +8,13 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from deploy.measure_wire import MeasureWire, build, room_id_is_usable
 from deploy.m1 import build_parser
+from deploy.measure_wire import MeasureWire, build, room_id_is_usable
 
 
 def args(**kw) -> SimpleNamespace:
-    base = dict(measure="off", mm_per_px=None, measure_blur_threshold=None,
-                measure_emit_empty=False)
+    base = {"measure": "off", "mm_per_px": None, "measure_blur_threshold": None,
+            "measure_emit_empty": False}
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -35,11 +35,28 @@ def test_default_is_off():
     assert "关闭" in w.reason
 
 
-def test_missing_mm_per_px_refuses_with_the_reason():
-    """缺标定换算 ⇒ 拒绝开启，且**日志里说清缺的是什么**（不静默降级）。"""
-    w = build(args(measure="on"), room_id="611")
-    assert w.enabled is False
-    assert "mm-per-px" in w.reason
+def test_missing_mm_per_px_falls_back_to_bag_standard():
+    """**不给 `--mm-per-px` 不再拒绝开启**（v6 口径，票 15 §17.2 / 票 22 R6）。
+
+    一期主交付是像素/估算档：帧内标尺用菌包标准尺寸（`scale_source=bag_standard`）。
+    开启那一行必须写清"尺度是怎么来的"，否则半年后没人能判断这批 mm 能不能比。
+    """
+    w = build(args(measure="on", measure_emit_empty=True), room_id="611",
+              fetch=lambda _url: b"jpeg", decode=lambda _b: _gray())
+    assert w.enabled is True
+    assert "bag_standard" in w.reason and "标准尺寸" in w.reason
+    assert "mm/px" not in w.reason          # 没有标定值，就别打出"mm/px"
+    rows = [r.to_row() for r in w.fn(SimpleNamespace(results=[_frame()]))]
+    assert rows and rows[0]["kind"] == "measurement"
+    assert rows[0]["mm_per_px"] is None or rows[0]["mm_per_px"] == 0
+
+
+def test_given_mm_per_px_is_the_calibration_target():
+    """给了标定值 ⇒ 走 `calibration_target`（ADR-0024 的权威换算），日志打实际值。"""
+    w = build(args(measure="on", mm_per_px=0.25), room_id="611",
+              fetch=lambda _url: b"jpeg", decode=lambda _b: _gray())
+    assert w.enabled is True
+    assert "0.2500 mm/px" in w.reason and "calibration_target" in w.reason
 
 
 @pytest.mark.parametrize("room", ["", "   ", "unset", "UNSET"])
@@ -66,9 +83,23 @@ def test_enabled_wire_produces_measurement_rows():
               room_id="611", fetch=lambda _url: b"jpeg", decode=lambda _b: _gray())
     assert w.enabled is True and "611" in w.reason and "0.2500 mm/px" in w.reason
 
-    rows = w.fn(SimpleNamespace(results=[_frame()]))
+    rows = [r.to_row() for r in w.fn(SimpleNamespace(results=[_frame()]))]
     assert rows and rows[0]["kind"] == "measurement"
     assert rows[0]["room_id"] == "611" and rows[0]["box_id"] == "B101"
+
+
+def test_rows_satisfy_the_daemon_to_row_seam():
+    """装配出来的行必须能被 `patrol.daemon` 直接吃（它只调 `to_row()`）。
+
+    2026-10-20 接 prod 的现场事故：`measure.production` 吐 dict，而 daemon 的缝是
+    `ToRow` ⇒ 轮末抛 `'dict' object has no attribute 'to_row'`，整轮不落库也不 flush。
+    这条用例钉的是**装配处**的形状转换，不是任何一侧的实现细节。
+    """
+    w = build(args(measure="on", measure_emit_empty=True), room_id="611",
+              fetch=lambda _url: b"jpeg", decode=lambda _b: _gray())
+    rows = w.fn(SimpleNamespace(results=[_frame()]))
+    assert rows and all(hasattr(r, "to_row") for r in rows)
+    assert rows[0].to_row()["kind"] == "measurement"
 
 
 def test_blur_threshold_knob_reaches_the_quality_gate():
@@ -78,12 +109,12 @@ def test_blur_threshold_knob_reaches_the_quality_gate():
     strict = build(args(measure="on", mm_per_px=0.25, measure_emit_empty=True,
                         measure_blur_threshold=1e9),
                    room_id="611", fetch=lambda _url: b"jpeg", decode=lambda _b: _gray())
-    assert "blurry" in strict.fn(report)[0]["quality"]
+    assert "blurry" in strict.fn(report)[0].to_row()["quality"]
 
     loose = build(args(measure="on", mm_per_px=0.25, measure_emit_empty=True,
                        measure_blur_threshold=0.0),
                   room_id="611", fetch=lambda _url: b"jpeg", decode=lambda _b: _gray())
-    assert "blurry" not in loose.fn(report)[0]["quality"]
+    assert "blurry" not in loose.fn(report)[0].to_row()["quality"]
 
 
 def test_real_decoder_path_with_a_real_jpeg():
@@ -100,7 +131,7 @@ def test_real_decoder_path_with_a_real_jpeg():
     w = build(args(measure="on", mm_per_px=0.25, measure_emit_empty=True),
               room_id="611", fetch=lambda _url: buf.getvalue())
     assert w.enabled is True
-    rows = w.fn(SimpleNamespace(results=[_frame()]))
+    rows = [r.to_row() for r in w.fn(SimpleNamespace(results=[_frame()]))]
     assert rows and rows[0]["kind"] == "measurement" and rows[0]["room_id"] == "611"
 
 
@@ -110,7 +141,7 @@ def test_blur_threshold_defaults_to_the_calibrated_one_in_measure_quality():
     `deploy` 侧曾自带常数 100.0（未标定时的临时值）；2026-10-13 用 218 张线上 ok 帧标定
     出中位 71.3、下限 45.0（误杀 0/218），旧常数会拒 78.4% 的正常帧。
     """
-    from measure.quality import DEFAULT_ABS_LAPVAR_FLOOR, frame_quality
+    from measure.quality import DEFAULT_ABS_LAPVAR_FLOOR
 
     w = build(args(measure="on", mm_per_px=0.25, measure_emit_empty=True),
               room_id="611", fetch=lambda _url: b"jpeg", decode=lambda _b: _gray())

@@ -9,7 +9,8 @@ ADR-0024（标定与四量口径）
 **Blocked by:** 无（测量师侧已可被调用）；建议在环境官 `measurements` 加列迁移之后上线，
 否则 `room_id`/`station_id`/`angle_profile` 会在 `/ingest` 被静默丢。
 
-**Status:** ready-for-agent
+**Status:** implemented（2026-10-20：prod 巡检已开 `--measure on`，`GET /measurements` 48 行/轮；
+值仍为 `n=0/no_detection`，见 Comments 末条与票 15 §17.2）
 
 **What to build:** 生产装配里传 `measure_fn`。今天 `deploy/src/deploy/m1.py:359-374`
 构造 `PatrolDaemon(...)` 时**没传** `measure_fn`，而 `patrol/src/patrol/daemon.py:78`
@@ -91,7 +92,7 @@ Chief 2026-10-13 裁：代码默认保持**保守**（`--measure off`、`--measu
 | 参数 | 缺省行为 | 开启时必须 |
 | --- | --- | --- |
 | `--measure` | `off`（不产任何测量行） | 显式 `on` |
-| `--mm-per-px` | `None` ⇒ 按"缺标定换算"**拒绝开启测量**（fail-closed） | 显式给现场标定值 |
+| `--mm-per-px` | `None` ⇒ **不拒绝**：用菌包标准尺寸当帧内标尺（`bag_standard`，像素/估算档） | 一期**不传**（2026-10-20 改，票 15 §17.2）；有站位标定值再传 |
 | `--room` | `DEFAULT_ROOM_PATH`（room.yaml 路径） | 确认指向本库房；`room_id` 由它**派生** |
 | `--measure-emit-empty` | 关（失败帧不产行） | **显式带上**，否则被拒帧在库里毫无痕迹 |
 | `--measure-blur-threshold` | `None` ⇒ 走 `measure/quality.py` 的标定默认 | 一般不传；要覆盖才传 |
@@ -151,3 +152,27 @@ Chief 2026-10-13 裁：代码默认保持**保守**（`--measure off`、`--measu
   裁定：**不改代码默认**（保守），留痕由**装配侧显式传参**实现；开启那次装配必须整组给出
   `--measure on` / `--mm-per-px` / `--room` / `--measure-emit-empty`，并由发版官**从镜像/运行态核 argv**。
   同条记下：票里常见写法 `--room-id` 在 `m1.py` **不存在**（实际是 `--room` 指向 room.yaml，`room_id` 派生）。
+
+- 2026-10-20 巡检手：**prod 巡检已开测量**（本轮任务：measure 接入 prod）。
+  - 运行态 argv（`/proc/1/cmdline` 实读）：
+    `python3 -m deploy.patrol_serve … --measure on --measure-emit-empty`
+    （镜像 `mushroom_patrol:0.1.0-20261020194913-measurewire`，`room_id=611`）。
+  - 一轮证据（20:01:29）：`测量：48 帧 共 26.32 s（均 0.55 s/帧）`；outbox 同步 **146 条**
+    （含 19:35 失败轮遗留 49 条 + 本轮 97 条）；`analysis.measurements` **48 行**，
+    ts `19:53:25–20:00:40`，`GET /measurements?room_id=611` 非零。
+  - **阻塞项 1（镜像）**：`pillow` 只在 workspace 的 dev 组，`uv sync --no-dev` 的巡检镜像里没有 PIL
+    ⇒ 容器里 `--measure on` 只会以"解不了图"拒绝开启。已把 `pillow>=12.2` 落进
+    `deploy` 的运行时依赖（解码实现 `deploy.framing_wire._imread` 本就在 deploy 侧），
+    `uv.lock` 只多两行。
+  - **阻塞项 2（缝形状）**：`measure.production.make_measure_fn` 吐**dict**，而
+    `patrol.daemon` 的缝是 `ToRow`（只调 `to_row()`）⇒ 第一次开启时轮末抛
+    `AttributeError: 'dict' object has no attribute 'to_row'`，整轮不落库、不 flush
+    （19:35 那轮）。已在装配处加 `WireRow` 包装做形状转换（不改任何一侧契约），
+    并加 `test_rows_satisfy_the_daemon_to_row_seam` 钉住；19:53 轮起正常。
+  - `--mm-per-px` 改为**可选**（不给走 `bag_standard`），开启日志打清标尺来源，见票 15 §17.2。
+  - ⚠️ **行有、值没有**：48/48 行 `n=0`、`scale_source=none`、菌簇四列 NULL，
+    quality 全为 `no_detection+no_scale+no_theta+height_uncorrected+…`。
+    本地用两帧真机图跑 `L3Detector` 复核（10-11 样本 / 10-20 帧）：袋 27/2、果体候选 51/35、
+    `filter_above_bag_top` **kept=0**（51/51 判为 `inside_bag_body`）⇒ 不是接线丢行，
+    是 L3 的袋顶过滤/当前取景下没有"袋面以上的簇"。归算法侧（票 15 §17、票 18 真机对照），
+    修好后无需再动装配。

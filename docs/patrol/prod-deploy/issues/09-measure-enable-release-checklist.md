@@ -1,8 +1,8 @@
 # 09 — 生产开启 `--measure` 的发布前置与动作清单（等测量师）
 
 **归属：** 发布动作 = 发版官；参数清单 = 测量师；裁决 = Chief
-**状态：** **挂起 —— 待 Plan P6（标定与生产适配），未执行任何一步**
-（2026-10-14 15:0x 用户给定算法 Plan `docs/patrol/growth-algo/plan-2026-10-14.md`，Chief 据此裁定：本期主交付改为**离线像素级簇趋势**，`--measure` 生产开启与 mm 列写入**暂停**；本票由"准备中"转为"待 P6"记账）
+**状态：** **已开启（2026-10-20）—— `--measure on` 落 prod 巡检，执行记录见 §6**
+（2026-10-14 15:0x 用户给定算法 Plan `docs/patrol/growth-algo/plan-2026-10-14.md`，Chief 据此裁定：本期主交付改为**离线像素级簇趋势**，`--measure` 生产开启与 mm 列写入**暂停**；本票由"准备中"转为"待 P6"记账。2026-10-20 用户直接要求"measure 接入 prod 巡检"，本票据此恢复并执行，见 §6）
 
 ## 0. 一句话
 
@@ -89,7 +89,68 @@
     ⇒ **记为"未取得"**（不重试、不构造），随本票挂起。
 - 结论（"灯到底进没进画面"）**留给 Chief/成像侧判定**；本票只记原始字节与时间。
 
+---
+
+## 6. 2026-10-20 执行记录（已开启）
+
+**触发**：用户当日要求"measure 尚未接进巡检，查看待办并接入 prod 巡检"。
+
+### 6.1 前置（§1）逐条
+
+| # | 前置 | 结果 |
+| --- | --- | --- |
+| 1 | 整组显式参数 | ✅ 运行态 argv：`--measure on --measure-emit-empty`（`--room /app/configs/room.yaml` 沿用）；**`--mm-per-px` 本期不传**（v6 口径：菌包标准尺寸当标尺，`bag_standard`，票 15 §17.2） |
+| 2 | 门禁全绿 | ✅ 本地：`deploy` 348 passed、`patrol` 439 passed / 2 skipped、`measure` 234 passed；`ruff` 对改动文件全绿 |
+| 3 | 本地 `/measurements` 非零行证据 | ✅ 19:35 轮本机路径已产出行（48 帧），只是轮末因形状不匹配未落库（见 6.3） |
+
+### 6.2 开前 / 开后
+
+| 项 | 开前（19:29） | 开后（20:01） |
+| --- | --- | --- |
+| patrol argv | `patrol-serve`（无测量） | `patrol-serve --measure on --measure-emit-empty` |
+| 镜像 | `0.1.0-…`（`89e4a54` 系） | `0.1.0-20261020194913-measurewire` |
+| `analysis.measurements` | 0 行 | **48 行**（`room_id=611`，ts `19:53:25–20:00:40`） |
+| `/measurements?room_id=611` | `[]` | 非零（每帧一行，含 `quality`/证据列） |
+| 轮次同步 | 49 条（18:20 轮） | **146 条**（19:35 轮遗留 49 + 20:00 轮 97） |
+| 页面 | `growth`/`ranges` 200 | 200（状态 `no_measurements` / `no_prev`，见 6.4） |
+
+动作：备份 `mushroom_solution.yml` 与 `.env`（时间戳 `20261020-193347`；第二次换镜像前又备份了
+`.env.bak-20261020-195142`）→
+compose 的 patrol `command` 加两个参数 → `.env` 换 `PATROL_IMAGE` → **只重建 `mushroom_patrol`**
+（`--force-recreate --no-deps`）；console / analysis / preview / console_web / solution 未动。
+
+### 6.3 开启时踩到的两个阻塞项（都已修，属装配侧）
+
+1. **镜像里没有 Pillow**：`pillow` 只在 workspace 的 dev 组，`uv sync --no-dev` 的巡检镜像里
+   `import PIL` 失败 ⇒ `--measure on` 只会以"解不了图"拒绝开启。修复：把 `pillow>=12.2`
+   落进 `deploy` 的运行时依赖（`uv.lock` +2 行）。
+2. **行形状不匹配**：`measure.production.make_measure_fn` 返回 dict，`patrol.daemon` 的缝只调
+   `to_row()` ⇒ 19:35 轮末抛 `AttributeError`，整轮不落库、不 flush（49 条留在 outbox，
+   下一轮补同步，数据未丢）。修复：`deploy/measure_wire.py` 加 `WireRow` 包装，
+   装配处做形状转换；新增 `test_rows_satisfy_the_daemon_to_row_seam`。
+
+### 6.4 开启后的真实状态（必须说清）
+
+- **行有、值没有**：48/48 行 `n=0`、`scale_source=none`、菌簇四列 NULL，
+  quality = `no_detection+no_scale+no_theta+height_uncorrected+no_angle_profile+level_view+estimate`。
+- 本地两帧真机图复核（10-11 样本、10-20 帧）：`find_bags` 27/2、果体候选 51/35，
+  但 `filter_above_bag_top` **kept=0**（全部判为 `inside_bag_body`）⇒ **接线没丢行，是 L3 在当前取景下没有"袋面以上的簇"**。
+- 归算法侧（票 15 §17、票 18 真机对照）；修好后**不需要再动装配**。
+- `--measure-emit-empty` 是这次能看见"48 行全空"的原因；不开它这轮在库里会毫无痕迹。
+
+### 6.5 回滚（一条命令，对称）
+
+恢复 `mushroom_solution.yml.bak-20261020-193347` + `.env.bak-20261020-193347`（或把
+`PATROL_IMAGE` 指回上一版）→ `docker compose -f mushroom_solution.yml --profile patrol up -d
+--force-recreate --no-deps mushroom_patrol`。测量行已入 `analysis.measurements`，回滚**不删**它们；
+若要停写，只回滚 argv 即可。
+
+---
+
 ## Comments
 
 - 2026-10-14 发版官写票。依据 Chief 当日裁定（单主线、动作排在测量师之后、只做准备）。
 - 2026-10-14 15:0x 发版官转为"待 P6"，并记挂起范围与 `batches_state` stale 副作用（§5）。
+- 2026-10-20 发版官按用户当日指令恢复并执行：`--measure on` 落 prod 巡检；
+  §1 三条前置当时的状态与动作证据见 §6。**行已入 `measurements`，值为空**（L3 检出问题，
+  归算法侧，不在本票范围）。

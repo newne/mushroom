@@ -1857,7 +1857,76 @@ docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate 
 
 1. `measure` 仍未接进巡检：`PatrolDaemon(measure_fn=None)`（`deploy/README.md` §7），本次只交付
    代码与契约；真指标落库仍归 P6，`/growth` 继续返回空/`no_prev` 是诚实结果。
+   **→ 2026-10-20 晚已补做，见 §24。**
 2. `console_web` 仍是 `20260917`、`solution` 仍是 `20261006`、`preview` 仍是 calibration tag——按范围不动。
 3. 分支 `feat/growth-v6` **未合并 main、未开 PR**；prod 跑的是分支构建，后续需补合并。
 4. 票 18（对照框架）等票 17 的人标数据；票 19（模型）仍 `needs-info`；静态重复对必须在 **10-25** 前抓。
+
+---
+
+## §24 测量接线开进 prod 巡检（2026-10-20 19:33 / 19:51，两次只动 patrol）
+
+**范围**：把 `--measure` 从 off 开到 on（票 12 / 15 §17 / 发版票 09 §6）。console / analysis /
+preview / console_web / solution **一律不动**；采集链路参数（取景、`--framing`、`--verify-content`）不动。
+
+### 24.1 改动（构建点 = 工作区，未提交）
+
+| 文件 | 改动 | 为什么 |
+| --- | --- | --- |
+| `deploy/pyproject.toml` + `patrol-workspace/uv.lock` | `pillow>=12.2` 进 **运行时**依赖（lock +2 行） | 解码实现在 `deploy.framing_wire._imread`，但 pillow 只在 dev 组 ⇒ `--no-dev` 镜像里 `import PIL` 失败，测量只能以"解不了图"拒绝开启 |
+| `deploy/src/deploy/measure_wire.py` | `--mm-per-px` 改**可选**（不传走 `bag_standard`）；新增 `WireRow` 包装（dict → `to_row()`） | ① v6 口径是菌包标准尺寸当标尺；② `measure` 吐 dict 而 `patrol.daemon` 只调 `to_row()`，19:35 轮因此整轮未落库 |
+| `deploy/src/deploy/m1.py` | `--measure` / `--mm-per-px` 的 `--help` 文案 | 参数语义变了，帮助文本必须同口径 |
+| `deploy/src/deploy/patrol_serve.py` | `--dry-run` 增加"测量接线"一行；`--measure on` 且无可用 `room_id` 时返回 2（与 m1 fail-closed 同结论） | 开启日复核不能靠猜 argv |
+| `deploy/tests/*` | 新增/改写 5 项（bag_standard 回落、calibration_target、`to_row` 缝、预检两例） | 把这次的坑钉住 |
+| `docker/mushroom_solution.yml` | patrol `command: ["patrol-serve", "--measure", "on", "--measure-emit-empty"]` | 装配侧显式给参数，不改代码默认 |
+
+门禁（本机，uv 0.12 + Python 3.14）：`deploy` 348 passed、`patrol` 439 passed / 2 skipped、
+`measure` 234 passed（align 用例需 cv2，本机临时装 `opencv-python-headless` 后全绿）；`ruff`
+对改动文件全绿。
+
+### 24.2 发布动作
+
+1. 构建：`docker build -f docker/Dockerfile.patrol -t …:0.1.0-20261020192934-measurewire .`
+   （第一次，**有形状 bug**，19:33 上线）；
+2. 修 `WireRow` 后重建：`…:0.1.0-20261020194913-measurewire`（19:51 上线，最终版）；
+3. prod：备份 `mushroom_solution.yml` + `.env`（`.bak-20261020-193347`；第二次换镜像前再备份
+   `.env.bak-20261020-195142`）→ compose 的 patrol `command` 加两个参数 → `.env` 换
+   `PATROL_IMAGE` → 只 `up -d --force-recreate --no-deps mushroom_patrol`；
+4. 触发两轮定点验收（`POST /api/patrol/run?by=release`，19:35 / 19:53）。
+
+### 24.3 验收（2026-10-20 20:01，逐条实测）
+
+| 检查 | 结果 |
+| --- | --- |
+| 运行态 argv（`/proc/1/cmdline`） | `python3 -m deploy.patrol_serve … --measure on --measure-emit-empty` ✅ |
+| 镜像内前置 | `PIL 12.3.0`、`numpy`、`measure.l3.L3Detector` 均可导入（第一次镜像 `PIL: MISSING` 已修） |
+| 轮次 | 19:53 轮 48/48 拿到图、`ok=1`；20:01:30 同步 **146 条**（19:35 失败轮遗留 49 + 本轮 97） |
+| 测量耗时 | 48 帧 **26.32 s**（均 0.55 s/帧，中位 0.54 s），轮增量 26 s vs 门 ≤180 s ✅ |
+| `analysis.measurements` | **48 行**，`room_id=611`，`ts 19:53:25–20:00:40`，`PUT /ingest` 无拒收 |
+| `/measurements?room_id=611` | 非零行，字段含 `quality` / 证据列（票 11 §7） |
+| outbox | 同步后 **0 条待同步** |
+| 页面 | `/growth`、`/growth/room`、`/ranges` 均 200 |
+| 未触碰 | console / analysis / preview / console_web / solution 未重建（`mushroom_patrol` 单独重建） |
+
+### 24.4 ⚠️ 真实状态：行有、值没有
+
+48/48 行 `n=0`、`scale_source=none`、菌簇四列 NULL，
+quality = `no_detection+no_scale+no_theta+height_uncorrected+no_angle_profile+level_view+estimate`。
+
+本机用两帧真机图复核（10-11 样本 / 10-20 帧）：`find_bags` 27/2、果体候选 51/35，
+但 `measure.estimate.filter_above_bag_top` **kept=0**（全部判为 `inside_bag_body`）。
+⇒ **接线没丢行**，是 L3 在当前取景/生长阶段下没有"袋面以上的簇"。
+归算法侧（票 15 §17、票 18 真机对照）；修好后不需要再动装配。
+`--measure-emit-empty` 是这次能看见"48 行全空"的原因——不开它，这轮在库里毫无痕迹。
+
+### 24.5 回滚
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_service
+cp mushroom_solution.yml.bak-20261020-193347 mushroom_solution.yml
+cp .env.bak-20261020-193347 .env            # 或把 PATROL_IMAGE 指回 0.1.0-20261020173701-97ea66c
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_patrol
+```
+
+回滚**不删**已写入的 48 行 `measurements`；要停写只需回滚 argv。
 

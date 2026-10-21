@@ -48,9 +48,9 @@ from patrol.sync import PROD_INGEST_URL, SyncClient
 from deploy.content_verify import make_content_hash
 from deploy.framing_wire import build as build_framing
 from deploy.framing_wire import make_apply_trim
+from deploy.manual import ManualChannel
 from deploy.measure_wire import build as build_measure
 from deploy.measure_wire import room_id_is_usable
-from deploy.manual import ManualChannel
 from deploy.transport import HttpxTransport, host_port, split_host_port
 
 DEFAULT_STATIONS_PATH = "/opt/mushroom-patrol/stations.yaml"
@@ -237,7 +237,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="图像微调：off=只走到推导坐标；once=只微调还没学过的站位；"
                          "always=每站每轮都闭环（48 站各多拍一张 ≈ 每轮多约 4 分钟）")
     ap.add_argument("--mm-per-px", type=float, default=None,
-                    help="图像像素 → mm 的标定换算（横向/Y）；给了才可能开启微调")
+                    help="图像像素 → mm 的标定换算（横向/Y）：**微调**给了才可能开启；"
+                         "**测量**给了走 calibration_target，不给则用菌包标准尺寸当帧内标尺"
+                         "（bag_standard，像素/估算档）")
     ap.add_argument("--mm-per-px-z", type=float, default=None,
                     help="纵向/Z 的换算；省略则与 --mm-per-px 相同")
     ap.add_argument("--framing-sign-y", type=float, default=1.0, choices=(1.0, -1.0),
@@ -249,7 +251,8 @@ def build_parser() -> argparse.ArgumentParser:
     # 测量接线（票 12）：默认 off——这是改生产行为。开了之后每轮对每帧跑 baseline 检出，
     # 产 `kind=measurement` 行（线格式与质量口径见 `measure/**` 与票 11/12）。
     ap.add_argument("--measure", choices=("on", "off"), default="off",
-                    help="测量接线：on=每轮对每帧跑 baseline 检出并写 measurements 行")
+                    help="测量接线：on=每轮末对每帧跑 L1–L3 簇级量测并写 measurements 行"
+                         "（像素/估算档；缺 --mm-per-px 时用菌包标准尺寸当标尺）")
     ap.add_argument("--measure-blur-threshold", type=float, default=None,
                     help="模糊门阈值：**不给就用 measure.quality 的标定默认**（2026-10-13 用 218 张"
                          "线上 ok 帧标定：中位 lapvar 71.3、绝对下限 45.0、误杀 0/218；旧的 100.0 "
@@ -377,7 +380,7 @@ def main(argv: list[str] | None = None) -> int:
 
         hold_store = TriggerStore(dir_path=args.trigger_dir)
 
-        def should_stop() -> str | None:      # noqa: F811 - 有意遮蔽：下面按可调用对象用
+        def should_stop() -> str | None:      # 有意遮蔽：下面按可调用对象用
             hold = hold_store.hold()
             if not hold:
                 return None

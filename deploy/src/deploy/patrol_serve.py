@@ -203,6 +203,23 @@ def preflight(args, *, store: TriggerStore, manual=None, log=print,
     log(f"控制器     {m1.ip}:{m1.port}（device={m1.device}，本轮不连）")
     log(f"图像微调   {m1.framing}")
 
+    # 测量接线（票 12）：走的是 m1 装配时**同一个**判定函数——`--dry-run` 看到的那一行
+    # 就是真跑时打的那一行。测量起不来只记一行、不拦巡检；唯一例外是 `--measure on`
+    # 却拿不到 room_id（m1 会 fail-closed 返回 2，这里提前把同一结论说出来）。
+    from deploy.measure_wire import build as build_measure
+
+    room_id = resolve_room_id("", m1.room)
+    measure = build_measure(m1, room_id=room_id, log=log)
+    log(f"测量接线   {measure.reason}")
+    measure_blocked = False
+    if m1.measure == "on" and not measure.enabled:
+        from deploy.measure_wire import room_id_is_usable
+
+        if not room_id_is_usable(room_id):
+            log("!! 测量：--measure on 但 room.yaml 里没有可用的 room_id"
+                " —— 真启动会拒绝（fail-closed），本轮不接测量")
+            measure_blocked = True
+
     if load_sdk is None:                       # 真正 load 一次厂商库（不连接）
         from patrol.fmc.loader import load_library
         load_sdk = lambda: load_library(m1.lib)
@@ -216,6 +233,9 @@ def preflight(args, *, store: TriggerStore, manual=None, log=print,
         return 2
     log(f"厂商库     {m1.lib or '(环境变量 FMC4030_LIB_PATH)'} —— 已加载 ✅")
 
+    if measure_blocked:
+        log("预检结论：**不能按当前参数启动**（测量 fail-closed，见上）")
+        return 2
     log("预检结束：**没有连接控制器，也没有进循环**")
     return 0
 

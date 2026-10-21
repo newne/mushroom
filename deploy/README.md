@@ -449,12 +449,17 @@ python3 -m deploy.preview --stations /app/configs/stations.yaml   # 容器里的
   省略该列 → 装载时取 `--camera-ip`（默认 `192.168.1.238`）；写成空串 → 运行时补默认值；
   显式写了 IP → 一律保留（将来分机位仍然由站位表说了算）。要把它固化进文件，
   用 `patrol-teach` 打开后 `save` 一次。
-- **测量值还没接上**：`PatrolDaemon(measure_fn=None)` ⇒ 只落 round 行与图像元数据，
-  `measurements` 为空。接法是从 `round` 报告取帧 → `measure` 的 Detector → 按框聚合
-  → `MeasurementRecord.from_box_stats`；真模型（票 05）到位后一次接完。
-  **影响**：`/growth` 与 `/growth/room` 现在返回空 / 全部 `no_prev`——这是诚实结果不是故障；
-  生长判断的逻辑、判词与接口都已就绪（`analysis.growth`，UI 规格见
-  `docs/patrol/console-ui/spec.md` §12）。
+- **测量已接线，但默认关**（2026-10-20 起，票 12/15 §17）：`patrol-m1 --measure on`
+  （prod 由 compose 的 `patrol-serve` 参数打开）⇒ 每轮末对 48 帧跑 `measure.l3` 的 L1–L3
+  簇级量测，`kind="measurement"` 行随 outbox 进 `analysis.measurements`。
+  - **尺度**：`--mm-per-px` **可选**。给了是站位标定（`scale_source=calibration_target`）；
+    不给用**菌包标准尺寸**当帧内标尺（`bag_standard`，像素/估算档，不进 `verified`）。
+  - **前置**：镜像必须带 Pillow 与 numpy（`deploy` 的运行时依赖已含，`uv sync --no-dev` 即可）；
+    缺解码器时只拒绝**测量**，巡检照常跑完。
+  - **`--measure-emit-empty`**：失败帧也产一行（`n=0` + 原因）；不给则被拒帧不产行。
+  - **影响**：`/growth` 与 `/growth/room` 在 `measurements` 有行后才会出判词；空表时返回
+    空 / 全部 `no_prev`——这是诚实结果不是故障，逻辑与接口见 `analysis.growth`、
+    UI 规格见 `docs/patrol/console-ui/spec.md` §12。
 - **图像索引已落库**（ADR-0005/0011）：`run_cycle` 每帧落一条 `kind:"image_index"`
   （成功/失败各一行，失败带 `ok:false` + `error`），随 outbox → `/ingest` 进 `analysis`
   的 `images` 表，`/images?station_id=&box_id=&room_id=` 可按站位/框/库房回溯，

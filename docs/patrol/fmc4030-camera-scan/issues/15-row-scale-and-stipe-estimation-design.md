@@ -736,22 +736,25 @@ mm_per_px=1.0924   scale_ref_mm=240.0   scale_ref_px=220.0
 | # | 参数 | 值 | 为什么必须显式 |
 | --- | --- | --- | --- |
 | 1 | `--measure` | **`on`** | 默认 `off`（改生产行为，票 12） |
-| 2 | `--mm-per-px` | **见 §17.2 的阻塞项** | 现役 `measure_wire.build()` **缺它就拒绝开启**；但一期口径是"菌包标准尺寸当标尺"⇒ **这一项需要改 `deploy/**`**（不是测量侧能改的） |
+| 2 | `--mm-per-px` | **不传**（2026-10-20 起可选，见 §17.2） | 一期口径是"菌包标准尺寸当标尺"（`bag_standard`）；站位标定值将来测出来再传（换成 `calibration_target`） |
 | 3 | `--room` | room.yaml 路径（默认即可） | `room_id` 是幂等键的一部分，`unset`/空串会被拒 |
 | 4 | `--measure-emit-empty` | **显式传** | 失败帧也留痕；不传则失败帧不产行（默认关） |
 | 5 | `--measure-blur-threshold` | **不传**（走标定默认 45.0） | 传了就是覆盖标定结论；不传时日志会打"实际生效值" |
 | 6 | 发布动作 | **重建 `patrol` 镜像** | `measure/**` 打进 patrol 镜像；只重建 analysis 不够 |
 
-### 17.2 ⚠️ 阻塞项：`--mm-per-px` 现为必填，与一期口径冲突（跨域，需 `deploy/**` 改）
+### 17.2 ✅ 已解（2026-10-20）：`--mm-per-px` 改为可选，与一期口径对齐
 
-- **现状**（`deploy/src/deploy/measure_wire.py:52-54`）：`--measure on` 且缺 `--mm-per-px` ⇒
-  **直接拒绝开启**（`MeasureWire(None, "…缺 --mm-per-px 标定换算，拒绝开启…")`），
-  且该值被传进 `make_measure_fn(mm_per_px=…)` ⇒ 接线层走 **`scale_source=calibration_target`**；
+- **原现状**（`deploy/src/deploy/measure_wire.py`）：`--measure on` 且缺 `--mm-per-px` ⇒
+  **直接拒绝开启**，且该值被传进 `make_measure_fn(mm_per_px=…)` ⇒
+  接线层走 **`scale_source=calibration_target`**；
 - **一期口径**（用户 2026-10-14）：**菌包标准尺寸（袋长 240 mm）当帧内标尺** ⇒ 应走 `bag_standard`；
-- **建议改法**（ADR-0024 语义不变）：`--mm-per-px` 改为**可选**；
-  - 给了 ⇒ 站位标定**优先**（`calibration_target`），现状行为；
-  - 不给 ⇒ 传 `None`，接线层用**菌包标准尺寸**（`bag_standard`），**这是本期要开的路**；
-  - 日志必须打清"本次用的是哪种标尺"（现日志只打 mm/px 数值）。
+- **改法**（ADR-0024 语义不变，已落 `deploy/**`）：
+  - 给了 `--mm-per-px` ⇒ 站位标定**优先**（`calibration_target`），行为不变；
+  - 不给 ⇒ 传 `None`，接线层用**菌包标准尺寸**（`bag_standard`），**这是本期开的路**；
+  - 开启那一行日志打清"本次用的是哪种标尺"（`bag_standard` / `calibration_target`）。
+- **同时解掉的第二个 prod 阻塞项**：巡检镜像 `uv sync --no-dev` 不带 Pillow
+  （它只在 workspace 的 dev 组）⇒ 容器里 `--measure on` 会以"解不了图"拒绝开启。
+  2026-10-20 把 `pillow>=12.2` 落进 `deploy` 的运行时依赖（解码代码在 `deploy.framing_wire._imread`）。
 - **归属**：`deploy/**`（巡检手/发版官）；测量侧接口已就绪（`make_measure_fn(mm_per_px=None)` 走标准尺寸，
   离线 218 帧实测 `scale_source=bag_standard`）。
 
@@ -767,7 +770,8 @@ mm_per_px=1.0924   scale_ref_mm=240.0   scale_ref_px=220.0
 
 **开启后（生产，发版官执行）**：
 
-1. **镜像内字节**自查（`measure/**` 的 sha256）+ 容器 argv 实读（确认 6 个参数真的传了）；
+1. **镜像内字节**自查（`measure/**` 的 sha256）+ 容器 argv 实读（确认开启清单逐项真的传了：
+   `--measure on` / `--measure-emit-empty` / `--room`；`--mm-per-px` 可选，不传即 `bag_standard`）；
 2. 跑一轮 → 查 `rounds` 行 `ok=1`、`measurements` **非零行**、`quality` 里能看到 `estimate`/
    `no_theta`/`height_uncorrected`、`scale_source` 与开启口径一致；
 3. 轮日志里能看到**耗时摘要**与"**未补偿**"那条口径提示；
@@ -779,3 +783,13 @@ mm_per_px=1.0924   scale_ref_mm=240.0   scale_ref_px=220.0
 实测：生产路径批量（**含 JPEG 解码**）均 **3.4 s/帧**；纯分割（L1 全帧 + L3 袋肩 ROI，不含解码）
 中位 **1.74 s/帧**。48 站 ⇒ 约 **+85~165 s/轮**，在门内（若按含解码的 3.4 s/帧算约 +163 s）。
 轮末必打耗时摘要、单帧超 3.75 s 单独喊；**不做能力裁剪**（裁了会动近排质量）。
+
+### 17.5 2026-10-20 prod 开启实测（接线 ✅ / 值 ❌，归算法侧）
+
+- 接线：`--measure on --measure-emit-empty` 已落 prod，48/48 帧产行、每轮 **26–27 s**
+  （0.55 s/帧，远快于 §17.4 的预估），`measurements` 48 行/轮，`quality`/证据列齐全。
+- **值**：48/48 行 `n=0`、`scale_source=none`、菌簇四列 NULL。
+  本机真机图复核：`find_bags` 27（10-11 样本）/ 2（10-20 帧）、果体候选 51/35，
+  但 `filter_above_bag_top` **kept=0**（全部 `inside_bag_body`）。
+- 结论：**不是接线、不是尺度**，是 L3 在当前取景/生长阶段没有"袋面以上的簇"。
+  下一步归算法侧（§13 的人工复核 + 票 18 对照框架），修好后不需要再动 `deploy/**`。

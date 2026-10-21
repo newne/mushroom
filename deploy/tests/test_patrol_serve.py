@@ -289,6 +289,44 @@ def test_dry_run_preflight_touches_nothing_and_reports_paths(tmp_path, capsys):
     assert "已加载" in joined
     assert "没有连接控制器" in joined
     assert "手动通道已关闭" in joined
+    assert "测量接线" in joined
+    assert "测量：关闭" in joined
+
+
+def test_preflight_surfaces_the_measure_wire_when_enabled(tmp_path):
+    """`--measure on` 的结论必须能从 `--dry-run` 看出来（票 12：不靠猜 argv）。"""
+    from deploy.patrol_serve import parse_args, preflight
+
+    room = tmp_path / "r.yaml"
+    room.write_text("room_id: 611\nentry_date: 2026-09-30\n", encoding="utf-8")
+    args = parse_args(["--dry-run", "--measure", "on", "--measure-emit-empty",
+                       "--stations", str(tmp_path / "s.yaml"), "--room", str(room),
+                       "--outbox", str(tmp_path / "o.jsonl"), "--log", ""])
+    logs: list[str] = []
+    rc = preflight(args, store=make_store(tmp_path), manual=None, log=logs.append,
+                   load_sdk=lambda: object())
+
+    joined = "\n".join(logs)
+    assert rc == 0
+    assert "测量：开启" in joined and "bag_standard" in joined and "失败帧也产行" in joined
+
+
+def test_preflight_fails_closed_when_measure_has_no_room_id(tmp_path):
+    """`--measure on` + room.yaml 里没有可用 room_id ⇒ 真启动会返回 2；预检要提前说出同一结论。"""
+    from deploy.patrol_serve import parse_args, preflight
+
+    room = tmp_path / "r.yaml"
+    room.write_text("room_id: unset\nentry_date: 2026-09-30\n", encoding="utf-8")
+    args = parse_args(["--dry-run", "--measure", "on", "--stations", str(tmp_path / "s.yaml"),
+                       "--room", str(room), "--outbox", str(tmp_path / "o.jsonl"), "--log", ""])
+    logs: list[str] = []
+    rc = preflight(args, store=make_store(tmp_path), manual=None, log=logs.append,
+                   load_sdk=lambda: object())
+
+    joined = "\n".join(logs)
+    assert rc == 2
+    assert "room_id" in joined and "fail-closed" in joined
+    assert "不能按当前参数启动" in joined
 
 
 def test_preflight_fails_loudly_when_the_vendor_library_cannot_load(tmp_path):

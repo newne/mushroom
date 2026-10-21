@@ -6,6 +6,10 @@ requires-python = ">=3.11"
 dependencies = [
     "patrol",
     "httpx>=0.27",
+    # 测量/微调都要把 MinIO 里的 JPEG 解码成数组（`framing_wire._imread`）。
+    # 它以前只在 workspace 的 dev 组里 ⇒ `uv sync --no-dev` 的巡检镜像里没有 PIL，
+    # `--measure on` 会以"解不了图"拒绝开启（票 12 的 prod 阻塞项）。
+    "pillow>=12.2",
 ]
 
 [project.scripts]

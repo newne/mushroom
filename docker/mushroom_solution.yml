@@ -186,7 +186,15 @@ services:
     container_name: mushroom_patrol
     # 一轮约 11 分钟、每 3 小时由算法侧的调度器触发一次（ADR-0012 §6）。
     # 这里给的是"被触发时怎么跑"，不是自己的时刻表——自己排时刻表会让两边各有一套节奏。
-    command: ["patrol-serve"]
+    #
+    # 测量接线（票 12 / 15 §17.1）：
+    # - `--measure on`：每轮末对 48 帧跑 L1–L3 簇级量测，行随 outbox 进 analysis.measurements；
+    # - 不给 `--mm-per-px`：一期主交付是像素/估算档，帧内标尺用**菌包标准尺寸**
+    #   （`scale_source=bag_standard`；站位的 mm/px 标定值将来给了再换成 calibration_target）。
+    #   所以这一版**不传**标定值——传一个没测过的数会把估算档伪装成标定档。
+    # - `--measure-emit-empty`：失败帧也留一行（n=0 + 原因），否则被质量门拒掉的帧在库里
+    #   毫无痕迹，"这一轮到底测过没有"永远只能猜。
+    command: ["patrol-serve", "--measure", "on", "--measure-emit-empty"]
     environment:
       - PROD_INGEST=${PROD_INGEST:-http://172.17.0.1:8000/ingest}
       # 采图服务发布在宿主上：容器里 127.0.0.1 不是宿主，必须走网桥网关
