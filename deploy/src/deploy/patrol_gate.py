@@ -25,9 +25,11 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 from io import BytesIO
+from pathlib import Path
 
 #: 蓝光判定：整幅 B/R 比值（720×404 抽样口径）。中性帧实测 0.94–1.00，蓝光帧 11–16。
 BLUE_RATIO_THRESHOLD = 3.0
@@ -39,6 +41,47 @@ DEFAULT_BUDGET_S = 1800.0
 DEFAULT_POLL_S = 60.0
 #: 连续几轮"等满预算仍未解除"就放弃该轮（回原点，不拍）。用户口径 2026-10-21：2 轮。
 DEFAULT_MAX_BLOCKED_ROUNDS = 2
+
+
+def default_state_path(outbox: str | None) -> str:
+    """连续被拦轮数的落盘点：`/app/data/outbox.jsonl` → `/app/data/outbox.gate.json`。
+
+    必须落盘：`patrol-serve` 每轮都是**新的一次** `m1.main()`（还可能是独立进程），
+    计数留在内存里等于每轮都从 0 开始，"连续 2 轮"永远攒不满。
+    """
+    if not outbox:
+        return ""
+    return str(Path(outbox).with_suffix(".gate.json"))
+
+
+def load_blocked_rounds(path: str | Path | None) -> int:
+    if not path:
+        return 0
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        return max(0, int(data.get("blocked_rounds", 0)))
+    except Exception:  # noqa: BLE001 - 状态文件坏了按 0 处理（宁可按 0 重新计数）
+        return 0
+
+
+def save_blocked_rounds(path: str | Path | None, value: int) -> str | None:
+    """原子写；返回一句错误描述（None = 写成功或无需写）。"""
+    if not path:
+        return None
+    target = Path(path)
+    try:
+        from datetime import datetime
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(json.dumps({
+            "blocked_rounds": int(value),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(target)
+        return None
+    except Exception as exc:  # noqa: BLE001 - 落盘失败不该影响巡检
+        return f"{type(exc).__name__}: {exc}"
 
 
 def blue_from_jpeg(blob: bytes, *, threshold: float = BLUE_RATIO_THRESHOLD,
@@ -93,6 +136,7 @@ class PatrolGate:
                  budget_s: float = DEFAULT_BUDGET_S,
                  poll_s: float = DEFAULT_POLL_S,
                  max_blocked_rounds: int = DEFAULT_MAX_BLOCKED_ROUNDS,
+                 state_path: str | None = None,
                  sleep: Callable[[float], None] = time.sleep,
                  clock: Callable[[], float] = time.monotonic,
                  abort: Callable[[], bool] | None = None,
@@ -103,12 +147,14 @@ class PatrolGate:
         self.budget_s = float(budget_s)
         self.poll_s = float(poll_s)
         self.max_blocked_rounds = max(1, int(max_blocked_rounds))
+        self.state_path = state_path or ""
         self._sleep = sleep
         self._clock = clock
         self.abort = abort
         self.log = log
         #: 连续"等满预算仍未解除"的轮数：到 ``max_blocked_rounds`` 就回原点跳过该轮。
-        self.blocked_rounds = 0
+        #: 跨轮/跨进程要靠 ``state_path`` 落盘，否则每轮都从 0 起（票 23 §5-A）。
+        self.blocked_rounds = load_blocked_rounds(self.state_path)
         self._mid_deadline: float | None = None
         #: 本轮轮中预算已用完 ⇒ 余下各站不再判、不再取帧（票 23 §5-B）。
         self._mid_done = False
@@ -133,6 +179,12 @@ class PatrolGate:
             self.log("避让：收到急停请求，停止等待（本轮由急停链收尾）")
             return True
         return False
+
+    def _persist(self) -> None:
+        """把 `blocked_rounds` 落盘（每轮是新的 `m1.main()`，内存里的计数活不过一轮）。"""
+        error = save_blocked_rounds(self.state_path, self.blocked_rounds)
+        if error:
+            self.log(f"避让：连续被拦计数落盘失败（{error}）——本轮计数只在内存里")
 
     # ---- 判定 ----
 
@@ -172,18 +224,21 @@ class PatrolGate:
                 if self.blocked_rounds:
                     self.log(f"避让：条件解除（连续 {self.blocked_rounds} 轮被拦的计数清零）")
                 self.blocked_rounds = 0
+                self._persist()
                 return True
             # 上一轮已经等满预算仍未解除 ⇒ 这一轮直接放弃（"连续 2 轮"口径）
             if self.blocked_rounds + 1 >= self.max_blocked_rounds:
                 self.blocked_rounds += 1
                 self.log(f"避让：连续 {self.blocked_rounds} 轮遇{reason}"
                          f" —— 不再等，回原点、本轮不巡检")
+                self._persist()
                 return False
             left = self.budget_s - (self._clock() - start)
             if left <= 0:
                 self.blocked_rounds += 1
                 self.log(f"避让：起轮前遇{reason}，已延后 {self.budget_s / 60:.0f} min"
                          f" —— 按口径开始巡检（连续被拦第 {self.blocked_rounds} 轮）")
+                self._persist()
                 return True
             self.log(f"避让：起轮前遇{reason}，延后（剩余 {left / 60:.1f} min）")
             self._sleep(min(self.poll_s, left))
@@ -274,13 +329,16 @@ def build_gate(args, *, capture, room_id: str, abort: Callable[[], bool] | None 
     poll = float(getattr(args, "gate_poll_s", DEFAULT_POLL_S) or DEFAULT_POLL_S)
     max_rounds = int(getattr(args, "gate_max_blocked_rounds",
                             DEFAULT_MAX_BLOCKED_ROUNDS) or DEFAULT_MAX_BLOCKED_ROUNDS)
+    state_path = ((getattr(args, "gate_state", "") or "").strip()
+                  or default_state_path(getattr(args, "outbox", "")))
     gate = PatrolGate(
         probe_image=probe_image, fetch_bytes=fetch_bytes, humid_probe=humid_probe,
         budget_s=budget, poll_s=poll, max_blocked_rounds=max_rounds,
-        abort=abort, log=log,
+        state_path=state_path, abort=abort, log=log,
     )
     log(f"避让：开启（蓝光/加湿；起轮前延后 ≤{budget / 60:.0f} min、"
         f"轮中原地暂停 ≤{budget / 60:.0f} min（两个预算独立）；"
         f"连续 {gate.max_blocked_rounds} 轮未解除 ⇒ 回原点跳过该轮；"
-        f"信号 {api_base}/env/humid + 抓拍）")
+        f"信号 {api_base}/env/humid + 抓拍；已拦 {gate.blocked_rounds} 轮"
+        + (f"，计数 {state_path}" if state_path else "，计数不落盘") + "）")
     return gate

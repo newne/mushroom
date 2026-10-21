@@ -1,4 +1,6 @@
+import json
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 from deploy import patrol_gate
@@ -30,7 +32,8 @@ class Clock:
         self.t += seconds
 
 
-def _gate(monkeypatch, *, blues, humid, budget=600, poll=60, max_blocked=2):
+def _gate(monkeypatch, *, blues, humid, budget=600, poll=60, max_blocked=2,
+          state_path=None):
     clock = Clock()
     queue = list(blues)
     monkeypatch.setattr(patrol_gate, "blue_from_jpeg",
@@ -38,7 +41,7 @@ def _gate(monkeypatch, *, blues, humid, budget=600, poll=60, max_blocked=2):
     logs: list[str] = []
     gate = PatrolGate(probe_image=lambda: b"x", fetch_bytes=lambda url: b"x",
                       humid_probe=lambda: humid, budget_s=budget, poll_s=poll,
-                      max_blocked_rounds=max_blocked,
+                      max_blocked_rounds=max_blocked, state_path=state_path,
                       sleep=clock.sleep, clock=clock, log=logs.append)
     return gate, clock, logs
 
@@ -102,6 +105,32 @@ def test_blocked_counter_clears_when_signal_goes_away(monkeypatch):
     assert any("计数清零" in line for line in logs)
 
 
+def test_blocked_counter_survives_a_new_gate_instance(monkeypatch, tmp_path):
+    """每轮都是**新的** `m1.main()`（`patrol-serve` 领一次请求跑一遍）⇒ 计数必须落盘。
+
+    内存计数在每轮开头都是 0，"连续 2 轮"永远攒不满——首版没落盘就是这个问题。
+    """
+    state = str(tmp_path / "outbox.gate.json")
+
+    first, _c1, _l1 = _gate(monkeypatch, blues=[True] * 10, humid=False,
+                            budget=120.0, poll=60.0, state_path=state)
+    assert first.wait_before_round() is True        # 第 1 轮：忍满预算后放行
+    assert first.blocked_rounds == 1
+
+    second, clock2, logs2 = _gate(monkeypatch, blues=[True] * 10, humid=False,
+                                  budget=120.0, poll=60.0, state_path=state)
+    assert second.blocked_rounds == 1, "新实例要读回上一轮落盘的计数"
+    assert second.wait_before_round() is False
+    assert clock2.t == 0.0, "第二轮一秒都不该等"
+    assert any("回原点" in line for line in logs2)
+
+    third, _c3, _l3 = _gate(monkeypatch, blues=[False], humid=False,
+                            budget=120.0, poll=60.0, state_path=state)
+    assert third.wait_before_round() is True
+    assert third.blocked_rounds == 0
+    assert json.loads(Path(state).read_text(encoding="utf-8"))["blocked_rounds"] == 0
+
+
 def test_mid_round_budget_exhausted_short_circuits(monkeypatch):
     """轮中预算用完 ⇒ 余下各站不再取帧、不再记「原地暂停」（票 23 §5-B）。"""
     gate, clock, logs = _gate(monkeypatch, blues=[True] * 6, humid=False,
@@ -133,6 +162,14 @@ def test_build_gate_off_is_none():
     args = SimpleNamespace(gate="off")
     logs: list[str] = []
     assert build_gate(args, capture=None, room_id="611", log=logs.append) is None
+
+
+def test_default_state_path_sits_next_to_outbox():
+    """与 outbox 同目录、同名前缀（容器里就是 /app/data/outbox.gate.json）。"""
+    derived = Path(patrol_gate.default_state_path("/app/data/outbox.jsonl"))
+    assert derived.name == "outbox.gate.json"
+    assert derived.parent == Path("/app/data")
+    assert patrol_gate.default_state_path("") == ""
 
 
 def test_build_gate_on_wires_capture_and_api():

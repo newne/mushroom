@@ -273,6 +273,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="等待时的轮询间隔（秒），默认 60")
     ap.add_argument("--gate-max-blocked-rounds", type=int, default=2,
                     help="连续多少轮被拦（各轮等满预算仍未解除）就回原点跳过该轮，默认 2")
+    ap.add_argument("--gate-state", default="",
+                    help="连续被拦轮数的落盘文件（默认 <outbox>.gate.json；"
+                         "每轮是新的 m1.main()，不落盘则每轮从 0 起）")
     ap.add_argument("--verify-content", action="store_true",
                     help="帧内容复核（票 13）：每轮末逐帧取回 cloud_url 算 sha256，把"
                          "\"同一份字节发给多个站位\"标成 frame_dup（轮标 suspect_duplicate）。"
