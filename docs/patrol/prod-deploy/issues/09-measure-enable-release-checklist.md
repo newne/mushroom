@@ -135,6 +135,10 @@ compose 的 patrol `command` 加两个参数 → `.env` 换 `PATROL_IMAGE` → *
   quality = `no_detection+no_scale+no_theta+height_uncorrected+no_angle_profile+level_view+estimate`。
 - 本地两帧真机图复核（10-11 样本、10-20 帧）：`find_bags` 27/2、果体候选 51/35，
   但 `filter_above_bag_top` **kept=0**（全部判为 `inside_bag_body`）⇒ **接线没丢行，是 L3 在当前取景下没有"袋面以上的簇"**。
+- 2026-10-21 复核（22 轮）：近 3 天所有轮次都落在"蓝光段"或"加湿雾"两种坏工况之一
+  （`B/R` 12–16 / p5 44–62），288 行 `quality` 全 `no_detection`；证据见
+  `imaging-quality/issues/01-camera-imaging-quality.md` 2026-10-21 条。
+  ⇒ 值出不来**同时**有输入侧原因，不只是 L3。
 - 归算法侧（票 15 §17、票 18 真机对照）；修好后**不需要再动装配**。
 - `--measure-emit-empty` 是这次能看见"48 行全空"的原因；不开它这轮在库里会毫无痕迹。
 
