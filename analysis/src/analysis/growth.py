@@ -39,6 +39,11 @@ from datetime import datetime
 STALL_MM_PER_H = 0.1      # 判"停滞"的速率带宽（mm/h）
 MIN_SPAN_H = 0.5          # 两个点至少隔这么久才敢下"停滞"结论
 MIN_N = 2                 # 每次测量的最少检出朵数
+#: 检出朵数比的"同一群体"区间（当前 / 上一次）。菌簇量是**按检出朵数求的均值**，
+#: 朵数一变就不是同一群体：2026-10-22 生产 B206 菌簇直径 92.9 → 46.1 mm，
+#: 同时 n 从 31 掉到 12——那不是"菇缩水"，是这一帧只认出了一小撮。
+N_RATIO_MIN = 0.6
+N_RATIO_MAX = 1.6
 VERDICTS = ("growing", "stalled", "shrinking", "no_prev",
             "not_comparable", "interval_too_short")
 
@@ -151,6 +156,12 @@ class GrowthDelta:
     rate_per_h: float | None = None
     band: float | None = None
     band_source: str | None = None
+    #: 这个点为什么不能当"长势"读（`unverified` / `few_clusters` / `n_shift` /
+    #: `backwards` / `short_interval` / `no_common_metric`）。**只标注，不改数、不删点**。
+    flags: tuple[str, ...] = ()
+    #: 检出朵数比（当前 / 上一次）；两边都 > 0 时才给。菌簇均值依赖朵数，朵数变了
+    #: 就不是同一群体——2026-10-22 生产 B206：n 31→12、菌簇直径 92.9→46.1 mm。
+    n_ratio: float | None = None
 
     @property
     def verdict_text(self) -> str:
@@ -177,6 +188,8 @@ class GrowthDelta:
             "note": self.note,
             "n_now": self.n_now,
             "n_prev": self.n_prev,
+            "flags": list(self.flags),
+            "n_ratio": _round(self.n_ratio, 3),
         }
 
 
@@ -237,19 +250,35 @@ def compare(prev: GrowthPoint, now: GrowthPoint, *,
         base["dt_h"] = dt
 
     why: list[str] = []
+    flags: list[str] = []
     if require_verified:
         if not prev.verified:
             why.append(f"上一个点质量标记不可用（{prev.quality or '无标记'}）")
+            flags.append("unverified")
         if not now.verified:
             why.append(f"当前点质量标记不可用（{now.quality or '无标记'}）")
+            flags.append("unverified")
     if (prev.n or 0) < min_n or (now.n or 0) < min_n:
         why.append(f"检出朵数不足 {min_n}（{prev.n} → {now.n}）")
+        flags.append("few_clusters")
+    # 朵数变了 ⇒ 均值不是同一群体（菇不会缩水，是这一帧认出的朵数变了）
+    n_ratio: float | None = None
+    if prev.n and now.n:
+        n_ratio = float(now.n) / float(prev.n)
+        if n_ratio < N_RATIO_MIN or n_ratio > N_RATIO_MAX:
+            why.append(
+                f"检出朵数 {prev.n} → {now.n}（{n_ratio:.2f} 倍）："
+                "菌簇均值不是同一群体，不能当长势读"
+            )
+            flags.append("n_shift")
     common = _common_metric(prev, now)
     if common is None:
         why.append("两次没有同一个可用的长势量"
                    f"（上一个：{_present_metrics(prev)}；这一个：{_present_metrics(now)}）")
+        flags.append("no_common_metric")
     if why:
-        return GrowthDelta(**base, verdict="not_comparable", note="；".join(why))
+        return GrowthDelta(**base, verdict="not_comparable", note="；".join(why),
+                           flags=tuple(dict.fromkeys(flags)), n_ratio=n_ratio)
 
     metric, unit = common                                      # type: ignore[misc]
     prev_value = prev.value(metric)
@@ -266,14 +295,18 @@ def compare(prev: GrowthPoint, now: GrowthPoint, *,
 
     if dt is None:
         return GrowthDelta(**base, verdict="not_comparable",
-                           note="时间戳解析不了，算不出速率")
+                           note="时间戳解析不了，算不出速率",
+                           flags=tuple(dict.fromkeys(flags)), n_ratio=n_ratio)
     if dt <= 0:
         return GrowthDelta(**base, verdict="not_comparable",
-                           note=f"时间没有前进（{prev.ts} → {now.ts}）")
+                           note=f"时间没有前进（{prev.ts} → {now.ts}）",
+                           flags=tuple(dict.fromkeys(flags)), n_ratio=n_ratio)
     if dt < min_span_h:
         return GrowthDelta(**base, verdict="interval_too_short",
                            note=f"只隔了 {dt * 60:.0f} 分钟（< {min_span_h * 60:.0f} 分钟），"
-                                "差分被噪声主导")
+                                "差分被噪声主导",
+                           flags=tuple(dict.fromkeys([*flags, "short_interval"])),
+                           n_ratio=n_ratio)
 
     rate = delta / dt
     base["rate_per_h"] = rate
@@ -298,9 +331,13 @@ def compare(prev: GrowthPoint, now: GrowthPoint, *,
             )
     else:
         verdict, note = "stalled", f"平均 {how}，落在 ±{band:.3g} {unit}/h 内（{band_source}）"
+    if verdict == "shrinking":
+        # 菇不会变短：负增长不是"长势"，是这一帧的测量不可比（遮挡 / 换档 / 认错群）
+        flags.append("backwards")
     if now.quality or prev.quality:
         note += f"（有质量标记：{prev.quality or '-'} → {now.quality or '-'}）"
-    return GrowthDelta(**base, verdict=verdict, note=note)
+    return GrowthDelta(**base, verdict=verdict, note=note,
+                       flags=tuple(dict.fromkeys(flags)), n_ratio=n_ratio)
 
 
 def series(rows: list[dict], box_id: str, *, limit: int | None = None, **kw) -> list[GrowthDelta]:

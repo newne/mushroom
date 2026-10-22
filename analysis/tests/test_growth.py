@@ -220,3 +220,40 @@ def test_row_is_serialisable_for_the_api():
     assert r["verdict_text"] == "在长"
     assert r["dt_h"] == 12.0
     assert r["rate_len_mm_per_h"] == 0.5
+
+
+# ---------- 序列可信度：菇只增不减、前后连续（2026-10-22 用户口径） ----------
+
+
+def test_cluster_count_shift_makes_points_incomparable():
+    """检出朵数骤变 ⇒ 均值不是同一群体，绝不当长势读。
+
+    2026-10-22 生产实例（B206）：菌簇直径 92.9 → 46.1 mm，同一时刻 n 从 31 掉到 12。
+    那不是"菇缩水"，是这一帧只认出了一小撮。
+    """
+    d = compare(flat_point("2026-10-21T15:58:48", n=31, projected=37.585),
+                flat_point("2026-10-21T19:23:19", n=12, projected=30.195))
+
+    assert d.verdict == "not_comparable"
+    assert "n_shift" in d.flags
+    assert d.n_ratio == pytest.approx(12 / 31)
+    assert "31 → 12" in d.note
+
+
+def test_backwards_growth_is_flagged():
+    """菇不会变短：负增长单独挂 `backwards`，页面据此断线、不参与纵轴。"""
+    d = compare(flat_point("2026-10-21T00:00:00", n=10, projected=40.0),
+                flat_point("2026-10-21T12:00:00", n=10, projected=30.0))
+
+    assert d.verdict == "shrinking"
+    assert "backwards" in d.flags
+
+
+def test_clean_growth_carries_no_flags():
+    """正常的长势不该被标成可疑——不然"可疑"很快就没人看了。"""
+    d = compare(flat_point("2026-10-21T00:00:00", n=10, projected=30.0),
+                flat_point("2026-10-21T12:00:00", n=10, projected=40.0))
+
+    assert d.verdict == "growing"
+    assert d.flags == ()
+    assert d.n_ratio == pytest.approx(1.0)

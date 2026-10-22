@@ -4378,8 +4378,18 @@ function drawCurve(){
   }
   const pts = rows.filter(r => rowHasValue(r, metric.key));
   const deltas = growthDeltaByTs();
+  /* 疑似不可比的点（口径：菇只增不减、前后连续）：检出朵数骤变（`n_shift`）或负增长
+     （`backwards`）。**只标注、不改数、不删点**——空心点、不参与纵轴范围、连线断开，
+     免得一个坏点把整条曲线压扁，或者画出一段"菇缩了一半"的假下跌。
+     2026-10-22 生产实例：B206 菌簇直径 92.9 → 46.1 mm，同一时刻 n 从 31 掉到 12。 */
+  const suspect = new Set();
+  for(const [ts, d] of deltas){
+    const f = (d && d.flags) || [];
+    if(f.includes('n_shift') || f.includes('backwards')) suspect.add(ts);
+  }
   const W = 640, H = 170, padL = 46, padR = 12, padT = 12, padB = 24;
-  const vals = pts.map(r => r[metric.key]);
+  const solid = pts.filter(r => !suspect.has(String(r.ts)));
+  const vals = (solid.length ? solid : pts).map(r => r[metric.key]);
   const lo = Math.min(...vals), hi = Math.max(...vals);
   const span = (hi - lo) || 1;
   /* x 由**真实时间戳**定位（spec 硬规则 1）：窗口 = 这只框自己的测量窗口（首行 → 末行），
@@ -4398,7 +4408,18 @@ function drawCurve(){
   const Y = v => padT + (1 - (v - lo) / span) * (H - padT - padB);
   /* 缺口断开（spec 硬规则 2）：**一段一条 path**，段与段之间不连线——不插值、不补零。
      单点成不了一段线，交给下面的圆点表示（孤立的一个测量点，拉出一条"线"反而是假的）。 */
-  const segs = curveSegments(rows, metric.key).filter(seg => seg.length > 1);
+  /* 段内再按"疑似不可比"断开：坏点两侧不是同一条增长线，连起来等于替它圆谎。 */
+  const segs = curveSegments(rows, metric.key)
+    .flatMap(seg => {
+      const out = []; let cur = [];
+      for(const r of seg){
+        if(suspect.has(String(r.ts))){ if(cur.length) out.push(cur); cur = []; }
+        else cur.push(r);
+      }
+      if(cur.length) out.push(cur);
+      return out;
+    })
+    .filter(seg => seg.length > 1);
   const lineD = seg => seg.map((r, i) =>
     `${i ? 'L' : 'M'}${X(r.ts).toFixed(1)},${Y(r[metric.key]).toFixed(1)}`).join(' ');
   box.className = '';
@@ -4415,7 +4436,9 @@ function drawCurve(){
     ${segs.map(seg => `<path d="${lineD(seg)}" fill="none" stroke="#1f6feb" stroke-width="2"/>`).join('')}
     ${pts.map(r => {
       const d = deltas.get(String(r.ts));
-      return `<circle cx="${X(r.ts).toFixed(1)}" cy="${Y(r[metric.key]).toFixed(1)}" r="3" fill="#1f6feb"><title>${esc(String(r.ts).replace('T',' '))} · ${esc(metric.label)} ${esc(String(r[metric.key]))} ${esc(metric.unit)} · 判词 ${esc((d && (d.verdict_text || d.verdict)) || '—')}</title></circle>`;
+      const bad = suspect.has(String(r.ts));
+      const why = bad && d && d.note ? ' · ⚠ ' + d.note : '';
+      return `<circle cx="${X(r.ts).toFixed(1)}" cy="${Y(r[metric.key]).toFixed(1)}" r="3" fill="${bad ? '#ffffff' : '#1f6feb'}" stroke="${bad ? '#d1495b' : 'none'}" stroke-width="${bad ? 1.6 : 0}"><title>${esc(String(r.ts).replace('T',' '))} · ${esc(metric.label)} ${esc(String(r[metric.key]))} ${esc(metric.unit)} · 判词 ${esc((d && (d.verdict_text || d.verdict)) || '—')}${esc(why)}</title></circle>`;
     }).join('')}
   </svg>
   <div class="legend"><span><i style="background:#1f6feb"></i>${esc(metric.label)} ${esc(metric.unit)}（绝对量）</span>
@@ -4436,7 +4459,8 @@ function drawCurve(){
       const weak = bandWeakHint(last);
       if(weak) bits.push(weak);
       return bits.map(t => `<span>${esc(t)}</span>`).join('');
-    })()}</div>
+    })()}
+    ${suspect.size ? `<span><i style="background:#fff;border:1.5px solid #d1495b"></i>空心点＝疑似不可比（检出朵数骤变 / 负增长）：不参与纵轴范围，连线在此断开</span>` : ''}</div>
   <div class="empty" style="padding:4px 0 0">判词与速率来自 <code>/api/growth</code>（派生量）；
     ${esc(metric.label)}等绝对量来自 <code>/api/measurements</code>（测量行）。
     ${hist.growth && !hist.growth.ok
