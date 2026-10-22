@@ -35,6 +35,7 @@ from datetime import datetime
 # 两边不许漂，抄一份出来就是给"写进去是列表、读出来是字符串"留门。
 from analysis.schema import (
     BATCH_FIELDS,
+    ENVIRONMENT_DAILY_FIELDS,
     ENVIRONMENT_FIELDS,
     IMAGE_FIELDS,
     MEASUREMENT_FIELDS,
@@ -67,6 +68,7 @@ __all__ = [
     "PgConnection", "StoreConfigError",
     "connect", "ensure_schema", "schema_name",
     "upsert_environment", "fetch_environment",
+    "has_environment", "replace_environment_daily", "fetch_environment_daily",
     "upsert_operations", "fetch_operations", "fetch_latest_operations_before",
     "upsert_batches", "replace_batches", "fetch_batches", "fetch_batches_state",
     "insert_measurements", "fetch_measurements",
@@ -76,6 +78,29 @@ __all__ = [
     "replace_ranges", "fetch_ranges", "fetch_advice_ranges",
     "write_ranges_state", "fetch_ranges_state",
 ]
+
+def _environment_daily_ddl() -> str:
+    """`environment_daily` 的建表语句：列由 `ENVIRONMENT_DAILY_FIELDS` 派生。
+
+    这张表的列数随参数个数变（3 参数 × 7 数 + 元信息），手抄 30 列必然与
+    `schema.py` 漂移；其它表列少、手写更直观，所以只有这一张生成。
+    """
+    text_cols = {"zone", "day", "entry_date", "batch_no", "computed_at"}
+    not_null = {"zone", "day", "hours", "samples", "computed_at"}
+    cols: list[str] = []
+    for field in ENVIRONMENT_DAILY_FIELDS:
+        # 计数类的三种：批次内第几天、当天小时点数、当天采样点数，以及每参数的有值点数。
+        is_count = field in {"growth_day", "hours", "samples"} or field.endswith("_n")
+        kind = "text" if field in text_cols else ("integer" if is_count else "double precision")
+        cols.append(f"{field} {kind}" + (" NOT NULL" if field in not_null else ""))
+    body = ",\n      ".join(cols)
+    return (
+        "CREATE TABLE IF NOT EXISTS {s}.environment_daily (\n"
+        "      " + body + ",\n"
+        "      PRIMARY KEY (zone, day)\n"
+        "    )"
+    )
+
 
 #: 建表 DDL（列名与顺序跟 `analysis.schema` 的 `*_FIELDS` 一一对应，有测试逐列比对）。
 #: 时间戳与 JSON 文本都是 `text`：口径与生产历史行一致，也让 SELECT 出来的形状稳定。
@@ -95,6 +120,7 @@ _TABLE_DDL: tuple[str, ...] = (
       PRIMARY KEY (ts, zone)
     )
     """,
+    _environment_daily_ddl(),
     """
     CREATE TABLE IF NOT EXISTS {s}.measurements (
       ts                 text NOT NULL,
@@ -463,6 +489,82 @@ def fetch_environment(
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY ts"
+    return _fetch_dicts(conn, sql, params)
+
+
+# ---------- environment_daily（日分布派生表，ADR-0027） ----------
+
+
+def has_environment(
+    conn: PgConnection, *, zone: str | None = None,
+    start: str | None = None, end: str | None = None,
+) -> bool:
+    """窗口里**有没有任何小时行**：用来把「日分布没算过」与「压根没有环境数据」分开。
+
+    只探一行（`LIMIT 1`）——每次打开环境模式都会问一次，不该把几百行读进内存。
+    """
+    sql = f"SELECT 1 FROM {_table(conn, 'environment')}"
+    where: list[str] = []
+    params: list = []
+    for field, value, op in (("zone", zone, "="), ("ts", start, ">="), ("ts", end, "<=")):
+        if value:
+            where.append(f"{field} {op} %s")
+            params.append(value)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " LIMIT 1"
+    with conn.raw.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchone() is not None
+
+
+def replace_environment_daily(
+    conn: PgConnection, rows: list[dict], computed_at: str, *, zone: str | None = None
+) -> None:
+    """整体替换**某个库房**的日分布行。
+
+    按 `zone` 删而不是清表：多库房各自重算，清表会把别人刚算好的行删掉。
+    给 `zone` 是为了处理"这次一天都没算出来"——那时 `rows` 是空的，不传 `zone`
+    就没法把该库房的旧行清掉（旧值会继续冒充最新结果）。
+    """
+    zones = sorted({z for z in ({str(r.get("zone") or "") for r in rows} | {zone or ""}) if z})
+    payload = [
+        _payload(conn, "environment_daily", ENVIRONMENT_DAILY_FIELDS,
+                 {**r, "computed_at": computed_at})
+        for r in rows
+    ]
+    cols = ", ".join(ENVIRONMENT_DAILY_FIELDS)
+    marks = ", ".join(f"%({f})s" for f in ENVIRONMENT_DAILY_FIELDS)
+    updates = ", ".join(f"{f} = EXCLUDED.{f}" for f in ENVIRONMENT_DAILY_FIELDS
+                        if f not in ("zone", "day"))
+    with conn.transaction(), conn.raw.cursor() as cur:
+        for one in zones:
+            cur.execute(
+                f"DELETE FROM {_table(conn, 'environment_daily')} WHERE zone = %s", (one,)
+            )
+        if payload:
+            cur.executemany(
+                f"INSERT INTO {_table(conn, 'environment_daily')} ({cols}) VALUES ({marks}) "
+                f"ON CONFLICT (zone, day) DO UPDATE SET {updates}",
+                payload,
+            )
+
+
+def fetch_environment_daily(
+    conn: PgConnection, *, zone: str | None = None, start: str | None = None,
+    end: str | None = None,
+) -> list[dict]:
+    """按库房与日期窗取日分布行（升序）。`start`/`end` 是 `YYYY-MM-DD` 前缀比较。"""
+    sql = f"SELECT {', '.join(ENVIRONMENT_DAILY_FIELDS)} FROM {_table(conn, 'environment_daily')}"
+    where: list[str] = []
+    params: list = []
+    for field, value, op in (("zone", zone, "="), ("day", start, ">="), ("day", end, "<=")):
+        if value:
+            where.append(f"{field} {op} %s")
+            params.append(value)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY day"
     return _fetch_dicts(conn, sql, params)
 
 

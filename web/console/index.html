@@ -301,12 +301,53 @@
   table.meas th{color:var(--dim);font-weight:600;background:var(--soft)}
   #curve svg{width:100%;height:170px;display:block}
   #coverage svg{width:100%;height:170px;display:block}
-  /* 环境模式：四道泳道（温/湿/CO₂/补光）各自一根纵轴——两个单位共用一根轴是在骗人 */
-  .envbars{display:flex;gap:var(--sp-3);align-items:center;margin:var(--sp-3) 0}
+  /* 环境模式：**日分布为主视图**（ADR-0027）。
+     温/湿/CO₂ 各一张图，每张**只有一根纵轴**——同一参数不画第二根轴（同量纲双轴会自己骗人）。
+     图上四层共用一个纵轴：日箱线（小时口径）、中位数折线、小时均值曲线、采样点级极值带。 */
+  .envbars{display:flex;gap:var(--sp-3);align-items:center;margin:var(--sp-3) 0;flex-wrap:wrap}
   .envbars select{flex:0 1 190px}
-  #envchart svg{width:100%;height:auto;display:block}
-  /* 环境模式：站位表与右栏都让位，只留一列——看的是数据分析结果，不是选站 */
-  main.envmode{grid-template-columns:minmax(0,1fr)}
+  #envdaily svg{width:100%;height:auto;display:block}
+  #envdaily .envpane{border-top:1px solid var(--line);padding-top:var(--sp-2)}
+  #envdaily .envpane:first-of-type{border-top:0;padding-top:0}
+  .envlegend{display:flex;gap:var(--sp-4);flex-wrap:wrap;font-size:11.5px;color:var(--dim);
+    padding:var(--sp-2) 0 0;font-variant-numeric:tabular-nums}
+  .envlegend i{display:inline-block;width:10px;height:10px;border-radius:2px;
+    margin-right:var(--sp-1);vertical-align:-1px}
+  /* 操作 × 长势：左列会话时间线，右列三联对照。1366 宽下两栏仍在同一屏，
+     窄屏（<1180）堆成一栏，免得三联被压成邮票。 */
+  #envsessions{display:grid;grid-template-columns:minmax(230px,1fr) minmax(0,2fr);
+    gap:var(--sp-4);align-items:start}
+  @media (max-width:1180px){ #envsessions{grid-template-columns:minmax(0,1fr)} }
+  .opslist{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:var(--r-md)}
+  .opsitem{display:block;width:100%;text-align:left;border:0;border-bottom:1px solid var(--line);
+    background:var(--panel);padding:var(--sp-2) var(--sp-3);cursor:pointer;color:var(--fg)}
+  .opsitem:last-child{border-bottom:0}
+  .opsitem.sel{background:var(--soft);box-shadow:inset 3px 0 0 var(--accent)}
+  .opsitem .t{font-size:12.5px;font-weight:650;font-variant-numeric:tabular-nums}
+  .opsitem .d{font-size:11.5px;color:var(--dim);line-height:1.5}
+  .triptych{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--sp-2)}
+  .trip{display:flex;flex-direction:column;gap:var(--sp-1);min-width:0}
+  .trip img{width:100%;aspect-ratio:4/3;object-fit:cover;border-radius:var(--r-xs);
+    border:1px solid var(--line);background:#16212b;display:block}
+  .trip .cap{font-size:11px;color:var(--dim);line-height:1.45;font-variant-numeric:tabular-nums}
+  .tripside{font-size:11px;font-weight:700;letter-spacing:.03em}
+  .tripside.before{color:#8a5a00}
+  .tripside.after{color:var(--accent)}
+  .tripmiss{display:flex;align-items:center;justify-content:center;min-height:96px;
+    border:1px dashed var(--line);border-radius:var(--r-xs);font-size:11.5px;color:var(--dim);
+    text-align:center;padding:var(--sp-2)}
+  /* 环境模式：站位表与右栏都让位，只留一列——看的是数据分析结果，不是选站。
+     **整页一条竖滚动条**，不再把内容关进半屏高的格子里：1366×768 实测（2026-10-21）
+     main 高 680px、两行各分到 ~340px，而日分布图渲染出来 810px 高 ⇒ 只看得见温度
+     一个面板，湿度与 CO₂ 还得在大卡片里再滚一次。行高给 auto、由 main 自己滚，
+     读的顺序就是页面的顺序。 */
+  main.envmode{grid-template-columns:minmax(0,1fr);
+    /* ⚠️ 必须是 max-content：`auto` 行在"容器高度确定"的网格里仍会被拉满整屏
+       （实测 1366×768：两行各分到 345/335px，图表 871px 高就压到下一行头上去了），
+       写成 max-content + align-content:start 才是真的按内容高。 */
+    grid-template-rows:max-content max-content;
+    align-content:start;align-items:start;overflow-y:auto;scrollbar-gutter:stable}
+  main.envmode>section{overflow:visible;min-height:0}
   main.envmode>section:first-child,
   main.envmode #rtcol, main.envmode #hcol{display:none}
   /* 卡片落在同一列里铺开：窗口统计 / 补光 / 断档 / 操作记录 / 批次对比 */
@@ -354,8 +395,10 @@
   .qrow .qbar{position:relative;height:6px;border-radius:3px;background:var(--soft);
               border:1px solid var(--line);overflow:hidden}
   .qrow .qbar i{position:absolute;top:0;bottom:0;background:var(--accent);opacity:.75;border-radius:3px}
-  #envchart .lanelbl{font-size:10.5px;fill:#6b7785}
-  #envchart .laneval{font-size:10.5px;fill:#24292f;font-weight:600}
+  /* 日分布图的刻度字：10.5px 是这一栏的既有字号；两行文字基线差小于 14px 会叠（票 18 的教训） */
+  #envdaily .envtick{font-size:10.5px;fill:#6b7785}
+  #envdaily .envval{font-size:10.5px;fill:#24292f;font-weight:600}
+  #envdaily .envlbl{font-size:11.5px;fill:#24292f;font-weight:650}
   .dot{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:var(--sp-2);vertical-align:middle}
   .legend{font-size:12px;color:var(--dim);display:flex;gap:14px;margin-top:var(--sp-2);align-items:center}
   .legend i{display:inline-block;width:12px;height:3px;vertical-align:middle;margin-right:var(--sp-1);border-radius:2px}
@@ -898,22 +941,28 @@
 
   <section id="envmain" style="display:none">
     <div class="card">
-      <h2>实测环境 <span id="envtitle" style="color:var(--dim);font-weight:400"></span></h2>
-      <!-- 粒度固定按小时：原始表是每分钟一条，一天 1440 个点画不进 1920 宽的屏幕，
-           而现场的判断本来就在"这一段时间怎么样"这个尺度上。 -->
+      <h2>实测环境 · 按生长天数 <span id="envtitle" style="color:var(--dim);font-weight:400"></span></h2>
+      <!-- 主视图 = 日分布（ADR-0027）：横轴是生长天数，每天一个箱线、中位数折线相连；
+           小时均值曲线**叠在同一张图里共用一根纵轴**，不另起一张卡，也不画双纵轴。
+           范围默认「本批次」——这一栏要回答的是"这一批到了第几天、散不散"，
+           不是"最近三小时怎么走的"（那件事看历史模式的节点放大）。 -->
       <div class="envbars">
         <label class="sr-only" for="envRange">时间范围</label>
         <select id="envRange">
           <option value="24">最近 24 小时</option>
-          <option value="72" selected>最近 3 天</option>
+          <option value="72">最近 3 天</option>
           <option value="168">最近 7 天</option>
-          <option value="batch">本批次</option>
+          <option value="batch" selected>本批次</option>
+        </select>
+        <label class="sr-only" for="envBox">观察框</label>
+        <select id="envBox" title="操作×长势的三联用哪个框：同框才比得了长势">
+          <option value="B206">观察框 B206（第 2 层第 6 框）</option>
         </select>
         <button type="button" id="envReload">重新读取</button>
         <span id="envrange" style="color:var(--dim);font-size:11.5px"></span>
       </div>
       <div id="envkpi" class="kpis"></div>
-      <div id="envchart" class="empty">读取环境数据…</div>
+      <div id="envdaily" class="empty">读取日分布…</div>
       <div id="envnote" class="empty"></div>
     </div>
   </section>
@@ -1048,6 +1097,14 @@
            实测曲线说明"环境怎么走的"，这张表说明"人为什么这么动它"。 -->
       <div id="envops" class="empty">—</div>
       <div id="opsstat" class="empty"></div>
+    </div>
+    <div class="card" style="grid-column:1/-1">
+      <h2>操作 × 长势 <span id="opsessrange" style="color:var(--dim);font-weight:400"></span></h2>
+      <!-- 一次调节（±10 分钟内的多条审计合并成一个会话）↔ 同一观察框的相邻 3 轮巡检。
+           三联**强制跨越**调节时刻：调前 1 张 + 调后 2 张，才能说"调完之后长势怎么变"。
+           凑不齐就如实标缺，不拿另一侧的帧顶替（ADR-0028）。 -->
+      <div id="envsessions" class="empty">—</div>
+      <div id="opsessnote" class="empty"></div>
     </div>
   </section>
 </main>
@@ -6392,12 +6449,21 @@ async function loadGrowth(){
   drawCurve();
 }
 
-/* ---------- 环境模式：实测参数（小时曲线）＋窗口统计 ----------
-   口径见 docs/patrol/env-analysis/spec.md：主体是**实际参数**（小时级温/湿/CO₂/补光），
-   不是设定值。补光的 lamp_state 是**设备状态**（0=自动 1=手动 2=停止 3=关闭），
-   分类量，画成状态色带而不是折线——对它求平均没有意义（ADR-0021）。 */
-const env = { range: '72', data: null, summary: null, ops: null, batches: null,
-              ranges: null, error: '' };   // ranges = 区间表信封（票 05 §5）；null = 还没取到
+/* ---------- 环境模式：日分布（主视图）＋窗口统计 ----------
+   口径见 docs/patrol/env-analysis/spec.md §3 与 ADR-0027：
+
+   · 主体是**实际参数**（温/湿/CO₂/补光），不是设定值；
+   · 主图横轴 = **生长天数**，每天一个箱线，中位数折线相连；
+   · **小时均值曲线叠在同一张图里共用一根纵轴**——箱体里的样本就是这些小时点；
+   · 同一参数**不画第二根纵轴**（同量纲双轴会自己骗人，见上面 .envbars 的注释）；
+   · 光照**不做箱线**：主口径是「补光循环制度」，画成按设定变化点切段的制度带。
+
+   补光的 lamp_state 是**设备状态**（0=自动 1=手动 2=停止 3=关闭），分类量，
+   对它求平均没有意义（ADR-0021）。 */
+const env = { range: 'batch', data: null, daily: null, summary: null, ops: null,
+              batches: null, ranges: null, sessions: null, box: 'B206',
+              pick: '', error: '', dailyError: '', sessionError: '' };
+              // ranges / sessions = 信封；null = 还没取到（与"取到了但是空的"分得开）
 let envRequestSeq = 0;
 
 const ENV_PARAMS = [
@@ -6405,23 +6471,15 @@ const ENV_PARAMS = [
   { key: 'rh_pct',  label: '湿度', unit: '%',   color: '#18794e' },
   { key: 'co2_ppm', label: 'CO₂',  unit: 'ppm', color: '#9a6700' }
 ];
-/* 车道内的纵向落点**全部从 laneH 派生**（票 18，2026-10-15）：车道 76 → 54 之后，
-   写死的偏移让"上限值 / 下限值"两个标签的基线只差 4px ⇒ 必叠字。这里把车道名、绘图区顶、
-   上下限标签的位置都算成车道高度的函数 —— 车道高度再变，间距跟着变，不复发。
-   行距有下限 14px：10.5px 字号的两行文字，基线差小于它就会碰上（与 #envchart .lanelbl 同源）。 */
-const ENV_LANE_MIN_ROW = 14;
-function envLaneRows(laneH){
-  const row = Math.max(ENV_LANE_MIN_ROW, laneH * 0.26);   // 相邻文本行的基线间距
-  const nameY = laneH * 0.18;                             // 车道名基线
-  return { row: row, nameY: nameY,
-           plotY: nameY + row * 0.5,                      // 绘图区顶（曲线/色带的上沿）
-           hiY:   nameY + row,                            // 上限值（右侧最近值同一行）
-           baseY: nameY + row * 2 };                      // 基线（横轴 + 下限值）
-}
 
 const ENV_LABEL = { temp_c: '温度', rh_pct: '湿度', co2_ppm: 'CO₂' };
 const LAMP_TEXT = { 0: '自动', 1: '手动', 2: '停止', 3: '关闭' };
-const LAMP_COLOR = { 0: '#18794e', 1: '#1f6feb', 2: '#9a6700', 3: '#8c959f' };
+// 补光的**状态色带**随小时曲线一起下线（ADR-0027）：状态是分类量，
+// 而"开几秒、停两小时"这种制度在色带上什么也看不出来，改为下面的制度带。
+
+/** 样本不足的门槛：**少于 3 个点不画箱体**（画出来是骗人的），只留一个空心点和说明。
+ *  与后端 `analysis.environment.five_numbers` 无关——它照实给数，页面负责"不画"。 */
+const ENV_MIN_BOX_N = 3;
 
 function localStamp(d){
   const p = n => String(n).padStart(2, '0');
@@ -6436,15 +6494,46 @@ function envZone(){
   return room.room_id ? String(room.room_id) : '';
 }
 
+/** 当前窗口的起止（ISO8601）。`batch` = 入库日 00:00 起、右端开放。
+ *  菜单里的 24h/72h/168h 只影响"看哪一段"，默认是本批全量（用户口径 2026-10-21）。 */
+function envWindow(){
+  const room = envRoom();
+  if(env.range === 'batch'){
+    return { start: room.entry_date ? String(room.entry_date) + 'T00:00:00' : '', end: '' };
+  }
+  return { start: localStamp(new Date(Date.now() - (Number(env.range) || 72) * 3600000)),
+           end: '' };
+}
+
 function envQuery(){
   const q = new URLSearchParams({ granularity: 'hour' });
   const room = envRoom();
   if(room.room_id) q.set('zone', String(room.room_id));
-  if(env.range === 'batch'){
-    if(room.entry_date) q.set('start', String(room.entry_date) + 'T00:00:00');
-  }else{
-    q.set('start', localStamp(new Date(Date.now() - (Number(env.range) || 72) * 3600000)));
-  }
+  const w = envWindow();
+  if(w.start) q.set('start', w.start);
+  if(w.end) q.set('end', w.end);
+  return q;
+}
+
+/** 日分布按**日期**筛（`YYYY-MM-DD`），与小时查询是两套前缀比较，别混用。 */
+function envDayQuery(){
+  const q = new URLSearchParams();
+  const room = envRoom();
+  if(room.room_id) q.set('zone', String(room.room_id));
+  const start = envWindow().start;
+  if(start) q.set('start', start.slice(0, 10));
+  return q;
+}
+
+/** 操作会话：时间窗与上面一致，另带观察框与批次入库日（算生长天数用）。 */
+function envSessionQuery(){
+  const q = new URLSearchParams({ box_id: env.box, frames: '3', limit: '50' });
+  const room = envRoom();
+  if(room.room_id) q.set('zone', String(room.room_id));
+  if(room.entry_date) q.set('entry_date', String(room.entry_date).slice(0, 10));
+  const w = envWindow();
+  if(w.start) q.set('start', w.start);
+  if(w.end) q.set('end', w.end);
   return q;
 }
 
@@ -6452,15 +6541,29 @@ function envTime(v){ return Date.parse(String(v).replace(' ', 'T')); }
 
 async function loadEnv(){
   const requestId = ++envRequestSeq;
-  const box = $('#envchart'), note = $('#envnote');
+  const box = $('#envdaily'), note = $('#envnote');
+  // 观察框下拉按 /api/grid 派生（网格可能比第一次进环境模式更晚才到，所以每轮都刷）
+  fillEnvBoxes();
   const q = envQuery();
   const zone = envZone();
-  box.className = 'empty'; box.textContent = '读取环境数据…'; note.textContent = '';
+  if(box){ box.className = 'empty'; box.textContent = '读取环境数据…'; }
+  if(note) note.textContent = '';
   try{
     const data = await jget('/api/environment?' + q.toString());
     if(requestId !== envRequestSeq) return;
     env.data = data;
     env.error = data.ok === false ? (data.error || '未知原因') : '';
+    // 日分布（派生表）：与小时序列**分开记失败**——一张图画不出来不该让另一张也空着
+    try{
+      const d = await jget('/api/environment/daily?' + envDayQuery().toString());
+      if(requestId !== envRequestSeq) return;
+      env.daily = d;
+      env.dailyError = d && d.ok === false ? (d.error || '未知原因') : '';
+    }catch(e){
+      if(requestId !== envRequestSeq) return;
+      env.daily = null;
+      env.dailyError = requestErrorText(e, '日分布');
+    }
     let sum = null;
     try{
       const s = await jget('/api/environment/summary?' + q.toString());
@@ -6476,6 +6579,17 @@ async function loadEnv(){
     }catch(e){
       if(requestId !== envRequestSeq) return;
       env.ops = { ok: false, error: requestErrorText(e, '操作记录') };
+    }
+    // 操作会话 × 相邻轮次三联（票 29）：与"操作记录"是两份——一份原始、一份成组带图
+    try{
+      const s = await jget('/api/operations/sessions?' + envSessionQuery().toString());
+      if(requestId !== envRequestSeq) return;
+      env.sessions = (s && s.ok === false) ? { ok: false, error: s.error || '未知原因' } : s;
+      env.sessionError = s && s.ok === false ? (s.error || '未知原因') : '';
+    }catch(e){
+      if(requestId !== envRequestSeq) return;
+      env.sessions = { ok: false, error: requestErrorText(e, '操作会话') };
+      env.sessionError = env.sessions.error;
     }
     // 批次对比：取整段历史按断档切段，不受上面时间范围限制
     const bq = new URLSearchParams({ limit: '3' });
@@ -6498,119 +6612,287 @@ async function loadEnv(){
       if(requestId !== envRequestSeq) return;
       env.ranges = { ok: false, error: requestErrorText(e, '区间表') };
     }
-    if(env.error){
-      box.className = 'empty'; box.textContent = '查不到环境数据';
-      note.textContent = '⚠ ' + env.error;
-    }else{
-      drawEnvChart();
+    drawEnvDaily();
+    // 两条告警**都留着**：日分布陈旧与小时序列取不到是两件事，互相不该覆盖
+    if(env.error && note){
+      note.textContent = (note.textContent ? note.textContent + ' · ' : '')
+        + '⚠ 小时序列取不到：' + env.error;
     }
     drawEnvKpi();
     drawEnvPanels();
     drawOps();
+    drawOpsSessions();
     drawBatches();
   }catch(e){
     if(requestId !== envRequestSeq) return;
-    env.data = null; env.summary = null;
+    env.data = null; env.summary = null; env.daily = null;
     env.error = requestErrorText(e, '环境');
     env.ops = { ok: false, error: env.error };
-    box.className = 'empty'; box.textContent = '查不到环境数据';
-    note.textContent = '⚠ ' + env.error + '（页面→console→prod 这条链断在哪一段，看 console 日志）';
+    env.sessions = { ok: false, error: env.error };
+    if(box){ box.className = 'empty'; box.textContent = '查不到环境数据'; }
+    if(note) note.textContent = '⚠ ' + env.error + '（页面→console→prod 这条链断在哪一段，看 console 日志）';
     if($('#envkpi')) $('#envkpi').innerHTML = '';
     drawEnvKpi();
     drawEnvPanels();
     drawOps();
+    drawOpsSessions();
     drawBatches();
   }
 }
 
-function lampPresent(rows){
-  const seen = [];
-  for(const r of rows){
-    const st = r.lamp_state;
-    if(st === null || st === undefined) continue;
-    if(!seen.includes(st)) seen.push(st);
-  }
-  return seen.sort((a,b) => a - b);
+/* ---------- 日分布图：日箱线（小时口径）+ 中位数折线 + 小时均值曲线 + 采样点级极值带 ----------
+   一张图**一根纵轴**，四层各占一个视觉通道（ADR-0027）。不许给同一个量配第二根轴：
+   同量纲双轴会自己骗人，而"箱体被压扁"是留白的问题、不是轴的问题。 */
+
+/** 五数 → 箱线几何。**纯函数**（同一组五数恒得同一组坐标）；`n` 不足时 `enough=false`。
+ *  不在这里判断"要不要画"——画不画是调用方的事，这里只负责算。 */
+function envBoxGeom(five, toY, cx, w){
+  if(!five) return null;
+  const num = k => (typeof five[k] === 'number' && isFinite(five[k])) ? five[k] : null;
+  const q1 = num('q1'), q3 = num('q3'), med = num('median');
+  if(q1 === null || q3 === null || med === null) return null;
+  const lo = num('min'), hi = num('max');
+  return {
+    cx: cx, w: w,
+    yQ1: toY(q1), yQ3: toY(q3), yMed: toY(med),
+    yLo: lo === null ? null : toY(lo),
+    yHi: hi === null ? null : toY(hi),
+    enough: (five.n || 0) >= ENV_MIN_BOX_N,
+    n: five.n || 0
+  };
 }
 
-function drawEnvChart(){
-  const box = $('#envchart'), note = $('#envnote');
-  const rows = (env.data && env.data.rows) || [];
-  $('#envrange').textContent = rows.length
-    ? rows[0].ts.replace('T',' ') + ' → ' + rows[rows.length-1].ts.replace('T',' ')
-      + ' · ' + rows.length + ' 个小时点'
+/** 补光制度切段：**连续若干天用同一套循环设定**并成一段（ADR-0021 修订）。
+ *  切的是"设定变化点"而不是逐天一根——制度没变的日子本来就该是同一段。 */
+function lampSegments(days){
+  const segs = [];
+  for(const d of days){
+    const l = d.lamp || {};
+    const key = [l.lamp_on_s, l.lamp_off_s, l.lamp_on_m, l.lamp_off_m]
+      .map(v => (v === null || v === undefined) ? '-' : String(v)).join('/');
+    const label = fmtLampCycle(l);
+    const last = segs[segs.length - 1];
+    if(last && last.key === key) last.to = d.day;
+    else segs.push({ key: key, label: label, from: d.day, to: d.day });
+  }
+  return segs;
+}
+
+function drawEnvDaily(){
+  const boxEl = $('#envdaily'), note = $('#envnote');
+  const payload = env.daily;
+  const days = (payload && payload.rows) || [];
+  const hourly = (env.data && env.data.rows) || [];
+  $('#envrange').textContent = days.length
+    ? days[0].day + ' → ' + days[days.length - 1].day + ' · ' + days.length + ' 天'
+      + (hourly.length ? ' · ' + hourly.length + ' 个小时点' : '')
     : '';
-  if(!rows.length){
-    box.className = 'empty';
-    box.textContent = '这段时间没有环境数据';
-    note.textContent = '入库是每分钟一条、这里按小时汇总；若长期为空，先确认 ingest 有没有在跑';
+
+  if(env.dailyError){
+    boxEl.className = 'empty'; boxEl.textContent = '日分布取不到';
+    note.textContent = '⚠ ' + env.dailyError;
     return;
   }
-  // 2026-10-13 用户："图太大"。车道 76 → 54、上下留白收紧，同样的信息少占约 1/4 高度；
-  // 三个量的量级仍各占一根轴（不共用纵轴），所以缩的是高度不是信息。
-  const W = 920, laneH = 54, padT = 20, padB = 22, padL = 46, padR = 104;
-  // 车道内的纵向位置走 envLaneRows(laneH)：以后只改 laneH 这一个数，标签间距自动跟（票 18）。
-  // 补光的**设备状态色带**已去掉（2026-10-12 用户：开几秒、停约两小时，色带基本看不出东西）。
-  // 补光的四个实际参数放在「补光」卡里按原值显示。band 分支保留给将来真需要色带的量。
-  const lanes = ENV_PARAMS;
-  const H = padT + laneH * lanes.length + padB;
-  const t0 = envTime(rows[0].ts), t1 = envTime(rows[rows.length-1].ts);
-  const spanT = (t1 - t0) || 1;
-  const X = t => padL + ((t - t0) / spanT) * (W - padL - padR);
-  const barW = Math.max(1.5, (W - padL - padR) / Math.max(rows.length, 1));
+  if(!payload){ boxEl.className = 'empty'; boxEl.textContent = '读取日分布…'; return; }
+  if(payload.state === 'never_computed' || payload.state === 'no_environment'){
+    // 两个空态**必须分开说**：一个缺的是每日任务（接线），一个缺的是数据源（入库）
+    boxEl.className = 'empty';
+    boxEl.textContent = payload.state_text || '日分布没有数据';
+    note.textContent = payload.state === 'never_computed'
+      ? '接口通了、库里也有小时行，缺的是每日重算：把 DAILY_AT 配上（analysis.jobs）'
+      : '这段时间没有小时行：先确认 ingest 作业有没有在跑';
+    return;
+  }
+  if(!days.length){
+    boxEl.className = 'empty';
+    boxEl.textContent = '这段时间没有日分布行';
+    note.textContent = '';
+    return;
+  }
+  note.textContent = (payload.flags || []).includes('stale')
+    ? (payload.state_text || '日分布不是最新的') : '';
+  // 数据止于哪天：**不猜"停采"**（那是批次卡的 D 天与面板 InDayNum 的事），
+  // 只把"最后一天有数据的日子"说清楚；落后两天以上才提示，免得每天重算之前都报一次假警。
+  const lastDay = days[days.length - 1].day;
+  const today = localStamp(new Date()).slice(0, 10);
+  if(envTime(today + 'T00:00:00') - envTime(lastDay + 'T00:00:00') >= 2 * 86400000){
+    note.textContent = (note.textContent ? note.textContent + ' · ' : '')
+      + '数据止于 ' + lastDay + '（今天 ' + today + ' 还没有日分布行）';
+  }
 
-  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="环境参数小时曲线：温度、湿度、CO₂ 各占一根轴">';
-  lanes.forEach((lane, i) => {
-    const yTop = padT + i * laneH, L = envLaneRows(laneH);
-    const yBase = yTop + L.baseY, yPlot = yTop + L.plotY;
-    svg += '<line x1="' + padL + '" y1="' + yBase + '" x2="' + (W-padR) + '" y2="' + yBase + '" stroke="#d8e0e8"/>';
-    svg += '<text class="lanelbl" x="6" y="' + (yTop + L.nameY) + '">' + esc(lane.label) + (lane.unit ? ' ' + lane.unit : '') + '</text>';
-    if(lane.band){
-      for(const r of rows){
-        const st = r.lamp_state;
-        if(st === null || st === undefined) continue;   // 缺数据的小时不画，不拿"停止"去填
-        const x = X(envTime(r.ts));
-        svg += '<rect x="' + x.toFixed(1) + '" y="' + yPlot + '" width="' + barW.toFixed(1)
-             + '" height="' + (yBase - yPlot).toFixed(1) + '" fill="' + (LAMP_COLOR[st] || '#8c959f')
-             + '"><title>' + esc(r.ts) + ' · ' + esc(LAMP_TEXT[st] || ('状态 ' + st)) + '</title></rect>';
+  // 横轴 = **连续时间**：首日 00:00 → 末日 24:00。缺天自然留白（不插值、不补箱）。
+  const t0 = envTime(days[0].day + 'T00:00:00');
+  const t1 = envTime(days[days.length - 1].day + 'T00:00:00') + 86400000;
+  const W = 920, padL = 56, padR = 96, padT = 10, padB = 14;
+  // 面板高度按**现场屏**定（1366×768，实测 2026-10-21）：这一栏约 1310px 宽，
+  // viewBox 920 会被放大 ~1.42 倍，所以 1 个 viewBox 单位 ≈ 1.42px。
+  // 三块面板 + 刻度 + 制度带共 370 单位（≈529px），加上卡片头与 KPI 磁贴恰好落在
+  // 768 的折叠线内——**x 轴和补光制度带必须看得见**，看不见的轴等于没有轴。
+  // （早先 150/面板总高 810px：只看得见温度一块，轴和制度带全在屏外。）
+  const paneH = 96, gap = 8, lampH = 20, tickH = 14;
+  const H = padT + ENV_PARAMS.length * (paneH + gap) + tickH + lampH + padB;
+  const spanT = Math.max(t1 - t0, 86400000);
+  const X = t => padL + ((t - t0) / spanT) * (W - padL - padR);
+  const dayW = (W - padL - padR) * 86400000 / spanT;
+  const boxW = Math.max(6, Math.min(dayW * 0.46, 44));
+  // 天太密时隔几天标一次：10.5px 字号约 26px 才放得下，否则 D1 D2 D3 叠成一团
+  const labelEvery = Math.max(1, Math.ceil(26 / Math.max(dayW, 1)));
+  const midOf = day => envTime(day + 'T12:00:00');
+
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="按生长天数的日分布：日箱线、中位数折线、小时均值曲线与采样点级极值，共用一根纵轴">';
+
+  ENV_PARAMS.forEach((param, idx) => {
+    const yTop = padT + idx * (paneH + gap);
+    const yBase = yTop + paneH - padB;
+    const yPlot = yTop + padT;
+    // 纵轴把**采样点级极值**也算进来，否则极值带会跑出画面
+    const vals = [];
+    for(const d of days){
+      const p = (d.params || {})[param.key] || {};
+      for(const k of ['min','q1','median','q3','max','sample_min','sample_max']){
+        if(typeof p[k] === 'number' && isFinite(p[k])) vals.push(p[k]);
       }
-      // 最近一小时的**折算**点亮分钟：色带说的是"灯处于什么状态"，这个数字说的是
-      // "按循环参数（OnSSet/OffSSet）它这一小时该亮多久"——两者不是一回事。
-      const lastLamp = rows.slice().reverse().find(r => typeof r.lamp_on_min === 'number');
-      if(lastLamp){
-        svg += '<text class="laneval" x="' + (W-padR+8) + '" y="' + (yTop + L.hiY) + '">'
-             + lastLamp.lamp_on_min + ' 分/时</text>';
+    }
+    let lo = 0, hi = 1;
+    if(vals.length){ lo = Math.min.apply(null, vals); hi = Math.max.apply(null, vals); }
+    const padv = ((hi - lo) * 0.08) || 1;
+    lo -= padv; hi += padv;
+    const Y = v => yBase - ((v - lo) / (hi - lo)) * (yBase - yPlot);
+
+    svg += '<line x1="' + padL + '" y1="' + yBase.toFixed(1) + '" x2="' + (W - padR) +
+           '" y2="' + yBase.toFixed(1) + '" stroke="#d8e0e8"/>';
+    svg += '<text class="envlbl" x="6" y="' + (yTop + 12) + '">' + esc(param.label) +
+           (param.unit ? ' ' + param.unit : '') + '</text>';
+    svg += '<text class="envval" x="' + (W - padR + 8) + '" y="' + (yTop + 12) + '">' +
+           hi.toFixed(1) + '</text>';
+    svg += '<text class="envtick" x="' + (W - padR + 8) + '" y="' + yBase.toFixed(1) + '">' +
+           lo.toFixed(1) + '</text>';
+
+    // ① 采样点级极值带（最底层，淡）：说的是"那一整天里真正到过哪"，与箱体不是同一粒度
+    for(const d of days){
+      const p = (d.params || {})[param.key] || {};
+      if(typeof p.sample_min !== 'number' || typeof p.sample_max !== 'number') continue;
+      const cx = X(midOf(d.day));
+      const half = Math.min(dayW * 0.38, 26);
+      svg += '<rect x="' + (cx - half).toFixed(1) + '" y="' + Y(p.sample_max).toFixed(1) +
+             '" width="' + (half * 2).toFixed(1) + '" height="' +
+             Math.max(1, Y(p.sample_min) - Y(p.sample_max)).toFixed(1) + '" fill="' + param.color +
+             '" fill-opacity="0.1"><title>' + esc(d.day) + ' · 采样点级 ' +
+             p.sample_min + ' – ' + p.sample_max + '</title></rect>';
+    }
+
+    // ② 小时均值曲线（与箱线**同轴**）：箱体里的样本就是这些点
+    let dPath = '', pen = false, prevT = null;
+    for(const r of hourly){
+      const v = (typeof r[param.key] === 'number') ? r[param.key] : null;
+      const t = envTime(r.ts);
+      // 落在横轴之外的小时点直接丢掉：窗口是 24h 时日分布只覆盖今天，
+      // 昨天的点会把折线画到左边距外面去
+      if(v === null || !isFinite(t) || t < t0 || t > t1){ pen = false; prevT = null; continue; }
+      // 跨过 >1.5 小时的缺口就断开：缺的小时**不连成直线**（连起来就是编出来的走势）
+      if(prevT !== null && t - prevT > 5400000) pen = false;
+      dPath += (pen ? 'L' : 'M') + X(t).toFixed(1) + ',' + Y(v).toFixed(1) + ' ';
+      pen = true; prevT = t;
+    }
+    if(dPath){
+      svg += '<path d="' + dPath + '" fill="none" stroke="' + param.color +
+             '" stroke-width="1.2" stroke-opacity="0.55"/>';
+    }
+
+    // ③ 日箱线 ④ 中位数折线
+    const medians = [];
+    for(const d of days){
+      const p = (d.params || {})[param.key] || {};
+      const cx = X(midOf(d.day));
+      const g = envBoxGeom(p, Y, cx, boxW);
+      // 两套口径**并列**（spec §2.6）：内部 D0 = 入库当天，生产面板叫 01
+      const gd = (d.growth_day === null || d.growth_day === undefined)
+        ? '' : ' · D' + d.growth_day + '（生产 ' +
+          String(d.growth_day_prod === null || d.growth_day_prod === undefined
+            ? d.growth_day + 1 : d.growth_day_prod).padStart(2, '0') + '）';
+      const title = d.day + gd + ' · n=' +
+        (p.n === null || p.n === undefined ? '—' : p.n) + ' / ' + (d.hours || 0) + ' 小时';
+      if(!g || !g.enough){
+        // 样本不足：**不画箱体**，只留一个空心点——空箱会被读成"这天没波动"
+        const yv = g ? g.yMed : (typeof p.median === 'number' ? Y(p.median) : null);
+        if(yv !== null && isFinite(yv)){
+          svg += '<circle cx="' + cx.toFixed(1) + '" cy="' + yv.toFixed(1) +
+                 '" r="3" fill="#fff" stroke="' + param.color + '" stroke-width="1.4"><title>' +
+                 esc(title) + ' · 样本不足（n<' + ENV_MIN_BOX_N + '），不画箱体</title></circle>';
+        }
+        continue;
       }
-    }else{
-      const nums = rows.map(r => (typeof r[lane.key] === 'number' ? r[lane.key] : null)).filter(v => v !== null);
-      const lo = Math.min.apply(null, nums), hi = Math.max.apply(null, nums);
-      const padv = ((hi - lo) * 0.12) || 1;
-      const Y = v => yBase - ((v - (lo - padv)) / ((hi + padv) - (lo - padv))) * (yBase - yPlot);
-      svg += '<text class="lanelbl" x="6" y="' + (yTop + L.hiY) + '">' + hi.toFixed(1) + '</text>';
-      svg += '<text class="lanelbl" x="6" y="' + yBase + '">' + lo.toFixed(1) + '</text>';
-      let d = '', pen = false;
-      for(const r of rows){
-        const v = (typeof r[lane.key] === 'number') ? r[lane.key] : null;
-        if(v === null){ pen = false; continue; }        // 断点就断开：不插值、不连线
-        d += (pen ? 'L' : 'M') + X(envTime(r.ts)).toFixed(1) + ',' + Y(v).toFixed(1) + ' ';
-        pen = true;
+      if(g.yHi !== null && g.yLo !== null){
+        svg += '<line x1="' + cx.toFixed(1) + '" y1="' + g.yLo.toFixed(1) + '" x2="' +
+               cx.toFixed(1) + '" y2="' + g.yHi.toFixed(1) + '" stroke="' + param.color +
+               '" stroke-width="1"/>';
+        for(const yy of [g.yLo, g.yHi]){
+          svg += '<line x1="' + (cx - boxW * 0.3).toFixed(1) + '" y1="' + yy.toFixed(1) +
+                 '" x2="' + (cx + boxW * 0.3).toFixed(1) + '" y2="' + yy.toFixed(1) +
+                 '" stroke="' + param.color + '" stroke-width="1"/>';
+        }
       }
-      svg += '<path d="' + d + '" fill="none" stroke="' + lane.color + '" stroke-width="1.8"/>';
-      const last = rows.slice().reverse().find(r => typeof r[lane.key] === 'number');
-      if(last) svg += '<text class="laneval" x="' + (W-padR+8) + '" y="' + (yTop + L.hiY) + '">' + last[lane.key] + '</text>';
+      svg += '<rect x="' + (cx - boxW / 2).toFixed(1) + '" y="' + g.yQ3.toFixed(1) +
+             '" width="' + boxW.toFixed(1) + '" height="' +
+             Math.max(1, g.yQ1 - g.yQ3).toFixed(1) + '" fill="' + param.color +
+             '" fill-opacity="0.16" stroke="' + param.color + '" stroke-width="1.1"><title>' +
+             esc(title) + '</title></rect>';
+      svg += '<line x1="' + (cx - boxW / 2).toFixed(1) + '" y1="' + g.yMed.toFixed(1) +
+             '" x2="' + (cx + boxW / 2).toFixed(1) + '" y2="' + g.yMed.toFixed(1) +
+             '" stroke="' + param.color + '" stroke-width="2"/>';
+      medians.push({ t: midOf(d.day), y: g.yMed });
+    }
+    if(medians.length > 1){
+      let mp = '', pen2 = false, prev = null;
+      for(const m of medians){
+        // 中间整天没有数据就断开：不连一条穿过空档的线
+        if(prev !== null && m.t - prev > 86400000 * 1.5) pen2 = false;
+        mp += (pen2 ? 'L' : 'M') + X(m.t).toFixed(1) + ',' + m.y.toFixed(1) + ' ';
+        pen2 = true; prev = m.t;
+      }
+      svg += '<path d="' + mp + '" fill="none" stroke="' + param.color +
+             '" stroke-width="2" stroke-opacity="0.9"/>';
     }
   });
-  svg += '<text class="lanelbl" x="' + padL + '" y="' + (H-8) + '">' + esc(String(rows[0].ts).replace('T',' ').slice(5,16)) + '</text>';
-  svg += '<text class="lanelbl" x="' + (W-padR) + '" y="' + (H-8) + '" text-anchor="end">' + esc(String(rows[rows.length-1].ts).replace('T',' ').slice(5,16)) + '</text>';
+
+  // x 刻度（只画一次，落在三张图下方）：生长天数为主，无批次的日子退回日期
+  const yTick = padT + ENV_PARAMS.length * (paneH + gap) + tickH - 4;
+  days.forEach((d, i) => {
+    if(i % labelEvery !== 0) return;
+    const cx = X(midOf(d.day));
+    const label = (d.growth_day === null || d.growth_day === undefined)
+      ? d.day.slice(5) : 'D' + d.growth_day;
+    svg += '<text class="envtick" x="' + cx.toFixed(1) + '" y="' + yTick +
+           '" text-anchor="middle">' + esc(label) + '</text>';
+  });
+
+  // 光照制度带：**不做箱线**，按设定变化点切段（ADR-0021 修订 / D13）
+  const yLamp = yTick + 8;
+  svg += '<text class="envlbl" x="6" y="' + (yLamp + 17) + '">补光制度</text>';
+  for(const seg of lampSegments(days)){
+    const x0 = X(envTime(seg.from + 'T00:00:00'));
+    const x1 = X(envTime(seg.to + 'T00:00:00') + 86400000);
+    const w = Math.max(1, x1 - x0);
+    svg += '<rect x="' + x0.toFixed(1) + '" y="' + yLamp + '" width="' + w.toFixed(1) +
+           '" height="' + lampH + '" fill="#9a6700" fill-opacity="0.12" stroke="#9a6700"' +
+           ' stroke-opacity="0.45"><title>' + esc(seg.from + ' → ' + seg.to + ' · ' + seg.label) +
+           '</title></rect>';
+    if(w > 62){
+      svg += '<text class="envtick" x="' + (x0 + 5).toFixed(1) + '" y="' + (yLamp + 17) +
+             '">' + esc(seg.label) + '</text>';
+    }
+  }
   svg += '</svg>';
 
-  const present = lampPresent(rows);
-  const legend = present.length
-    ? '<div class="legend">' + present.map(st => '<span><i style="background:' + (LAMP_COLOR[st] || '#8c959f') + '"></i>补光 · ' + esc(LAMP_TEXT[st] || st) + '</span>').join('') + '</div>'
-    : '<div class="legend"><span>补光状态整列为空（该点位今天没有上报）</span></div>';
-  box.className = '';
-  box.innerHTML = svg + legend;
-  note.textContent = '每小时一个均值点；补光是设备状态色带，缺数据的小时不画。';
+  const legend = '<div class="envlegend">'
+    + '<span><i style="background:#1f6feb;opacity:.35"></i>箱体 = 当天小时均值的 Q25–Q75 · 横线 = 中位数</span>'
+    + '<span><i style="background:#1f6feb;opacity:.12"></i>淡带 = 采样点级极值（与箱体不同粒度）</span>'
+    + '<span><i style="background:#1f6feb;height:2px"></i>细线 = 小时均值曲线（与箱线共用同一根轴）</span>'
+    + '<span>空心点 = 样本不足（n&lt;' + ENV_MIN_BOX_N + '），不画箱体</span>'
+    + '<span>生长天数 D0 = 入库当天（生产面板口径为 01）</span>'
+    + '</div>';
+  boxEl.className = '';
+  boxEl.innerHTML = svg + legend;
 }
 
 /** 结论先行：这一段"怎么样"，用磁贴给出来；明细在下面的卡里。 */
@@ -6821,11 +7103,145 @@ function drawOps(){
     + '<div class="empty" style="padding:4px 0 0">运行经验的原始记录：谁把哪个点改成了什么</div>';
 }
 
+/* ---------- 操作 × 长势（票 29 / ADR-0028） ----------
+   一次调节 = **±10 分钟内的一组审计**（不是一条）。三联固定同一个观察框，
+   并且**强制跨越**调节时刻：调前 1 张 + 调后 2 张。凑不齐就说缺，不顶替。 */
+
+function pickOpsSession(tsStart){
+  env.pick = tsStart || '';
+  drawOpsSessions();
+}
+
+/** 观察框下拉：从 `/api/grid` 的 cols × layers 派生（**不写死 12×4**），默认 B206。 */
+function fillEnvBoxes(){
+  const sel = $('#envBox');
+  if(!sel || !grid) return;
+  const want = [];
+  for(let L = 1; L <= (grid.layers || 4); L++){
+    for(let C = 1; C <= (grid.cols || 12); C++){
+      want.push('B' + L + String(C).padStart(2, '0'));
+    }
+  }
+  if(!want.includes(env.box)) want.unshift(env.box);
+  sel.innerHTML = want.map(b => '<option value="' + esc(b) + '"' +
+    (b === env.box ? ' selected' : '') + '>观察框 ' + esc(b) + '（第 ' + esc(b[1]) +
+    ' 层第 ' + esc(Number(b.slice(2))) + ' 框）</option>').join('');
+}
+
+function drawOpsSessions(){
+  const box = $('#envsessions'), noteEl = $('#opsessnote'), rangeEl = $('#opsessrange');
+  if(!box) return;
+  const payload = env.sessions;
+  if(!payload || payload.ok === false){
+    box.className = 'empty';
+    box.textContent = payload && payload.error ? '操作会话取不到：' + payload.error : '读取操作会话…';
+    if(noteEl) noteEl.textContent = '';
+    if(rangeEl) rangeEl.textContent = '';
+    return;
+  }
+  const list = payload.sessions || [];
+  if(rangeEl){
+    rangeEl.textContent = list.length
+      ? list.length + ' 次调节 · ' + (payload.box_id || '') + ' · 间隔 ≤'
+        + (payload.window_min || 10) + ' 分钟合并'
+      : '';
+  }
+  if(payload.state === 'no_operations'){
+    box.className = 'empty';
+    box.textContent = payload.state_text || '这段时间没有操作记录';
+    if(noteEl) noteEl.textContent = '没人动过设定也是一种状态，别读成"取不到数据"';
+    return;
+  }
+  if(!list.length){
+    box.className = 'empty'; box.textContent = '这段时间没有可分析的调节';
+    if(noteEl) noteEl.textContent = payload.state_text || '';
+    return;
+  }
+  if(!env.pick || !list.some(s => s.ts_start === env.pick)) env.pick = list[0].ts_start;
+  const sel = list.find(s => s.ts_start === env.pick) || list[0];
+
+  const item = s => {
+    const t = String(s.ts_start || '').slice(5, 16).replace('T', ' ');
+    const tail = (s.ts_end && s.ts_end !== s.ts_start)
+      ? ' → ' + String(s.ts_end).slice(11, 16) : '';
+    const gd = (s.growth_day === null || s.growth_day === undefined)
+      ? '天数未知' : 'D' + s.growth_day;
+    return '<button type="button" class="opsitem' + (s.ts_start === sel.ts_start ? ' sel' : '') +
+      '" data-ops="' + esc(s.ts_start) + '"><div class="t">' + esc(t + tail) + ' · ' +
+      esc(gd) + '</div><div class="d">' + esc(String(s.n_changes || 0)) + ' 项 · ' +
+      esc((s.devices || []).join('、') || '设备未标注') + '</div>' +
+      (s.crossed ? '' : '<div class="d">⚠ ' + esc(s.note || '三联不完整') + '</div>') +
+      '</button>';
+  };
+
+  const trip = f => {
+    const side = f.side === 'before' ? '调节前' : '调节后';
+    const gap = (typeof f.gap_h === 'number')
+      ? (f.gap_h < 0 ? Math.abs(f.gap_h) + ' 小时前' : f.gap_h + ' 小时后') : '';
+    const cap = '<div class="cap"><span class="tripside ' + esc(f.side) + '">' + esc(side) +
+      '</span> · ' + esc(String(f.ts || '').slice(5, 16).replace('T', ' ')) +
+      (gap ? '（' + esc(gap) + '）' : '') + '</div>';
+    if(!f.has_frame || !f.image){
+      return '<div class="trip">' + cap + '<div class="tripmiss">这一轮该框没有可用帧</div></div>';
+    }
+    const url = imageUrlFor(f.image);
+    return '<div class="trip">' + cap + (url
+      ? '<a href="' + esc(url) + '" target="_blank" rel="noopener"><img loading="lazy" src="' +
+        esc(url) + '" alt="' + esc(String(f.image.object_name || '')) + '"></a>'
+      : '<div class="tripmiss">图取不到</div>') + '</div>';
+  };
+
+  const changes = (sel.changes || []).map(c =>
+    '<tr><td>' + esc(String(c.ts || '').slice(11, 16)) + '</td>'
+    + '<td>' + esc(c.device_name || c.device_code || '') + '</td>'
+    + '<td>' + esc(c.point_name || c.point_code || '') + '</td>'
+    + '<td>' + esc(c.value === null || c.value === undefined ? '' : c.value) + '</td>'
+    + '<td>' + esc(c.operator || '') + '</td></tr>').join('');
+
+  const head = String(sel.ts_start || '').slice(5, 16).replace('T', ' ')
+    + (sel.operator ? ' · ' + sel.operator : '')
+    // 两套口径并列（spec §2.6）：内部 D0 = 入库当天，生产口径 01
+    + (sel.growth_day === null || sel.growth_day === undefined
+        ? '' : ' · D' + sel.growth_day + '（生产 ' +
+          String(sel.growth_day_prod === null || sel.growth_day_prod === undefined
+            ? sel.growth_day + 1 : sel.growth_day_prod).padStart(2, '0') + '）');
+
+  const detail = '<div><div class="lbl">' + esc(head) + '</div>'
+    + '<table class="meas"><tr><th>时刻</th><th>设备</th><th>点位</th><th>值</th><th>操作人</th></tr>'
+    + (changes || '<tr><td colspan="5">这次会话没有点位明细</td></tr>')
+    + '</table>'
+    + '<div class="triptych">'
+    + ((sel.frames || []).length
+        ? sel.frames.map(trip).join('')
+        : '<div class="tripmiss" style="grid-column:1/-1">没有可对照的巡检轮次</div>')
+    + '</div>'
+    + (sel.note ? '<div class="empty" style="padding:6px 0 0">⚠ ' + esc(sel.note) + '</div>' : '')
+    + '</div>';
+
+  box.className = '';
+  box.innerHTML = '<div class="opslist">' + list.map(item).join('') + '</div>' + detail;
+  if(noteEl){
+    noteEl.innerHTML = '<div class="empty" style="padding:4px 0 0">三联 = 同一观察框 × 相邻 3 轮巡检，'
+      + '且<b>强制跨越</b>调节时刻（调前 1 张 + 调后 2 张）。本期<b>只给图不给数值</b>：'
+      + '<code>measurements</code> 还没有 round_id，时间窗近邻 join 会把"没测"说成"没长"。</div>'
+      + (payload.state === 'no_rounds'
+          ? '<div class="empty">该库房没有巡检轮次：三联无从对照</div>' : '');
+  }
+}
+
 function wireEnv(){
   const sel = $('#envRange');
   if(sel) sel.onchange = () => { env.range = sel.value; loadEnv(); };
+  const boxSel = $('#envBox');
+  if(boxSel) boxSel.onchange = () => { env.box = boxSel.value; env.pick = ''; loadEnv(); };
   const btn = $('#envReload');
   if(btn) btn.onclick = () => loadEnv();
+  // 会话列表是每次重画的，用事件委托：不给每个按钮挂闭包，也不怕重画后丢绑定
+  const sess = $('#envsessions');
+  if(sess) sess.addEventListener('click', ev => {
+    const hit = ev.target && ev.target.closest ? ev.target.closest('[data-ops]') : null;
+    if(hit) pickOpsSession(hit.getAttribute('data-ops'));
+  });
 }
 
 function wireHistory(){

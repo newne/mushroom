@@ -114,13 +114,34 @@
 
 页面没有路由层，模式是 `#modeSeg` 的按钮加 `setMode()` 里的分支。环境模式与「实时 / 历史」同级，三栏沿用现有栅格。
 
-**中栏**
+**中栏（2026-10-21 改：日分布为主视图，ADR-0027）**
 
-- **小时级实际参数曲线**：温度、湿度、CO₂、补光时长四条，手写内联 SVG，沿用增长曲线的做法，不引入前端依赖
+- **日分布视图**：横轴 = 生长天数（本批全量、缺天不补、停采后轴截断），温 / 湿 / CO₂ **各一张图**，
+  每张图里三层共用一个纵轴：
+  1. **日箱线**（小时口径）：一天 24 个小时均值的 q1 / 中位 / q3 + 须；
+  2. **中位数折线**：跨天相连，看清趋势；
+  3. **小时均值曲线**：与箱线同图同轴，箱体里的样本就是这些点；
+  4. **采样点级极值带**：淡色 min–max 范围带（来自 `*_min`/`*_max` 列），图注标明它与箱线不是同一粒度。
+  **不画双纵轴**（同量纲双轴会自己骗人）。
+- **光照制度带**：光照**不做箱线**，按补光循环制度的设定变化点切段，画一条横跨同一横轴的色带。
+- **操作 × 长势卡**（见 §3.1）：左列操作会话时间线，右列选中会话的三联对照图。
 - **变更标记**：设定变更在时间轴上的竖线或点，悬停显示"点位 从 → 到"；密集时段折叠成计数
-- 日汇总带：median 折线 + q25–q75 带（字段定义复用 `mushroom_env_daily_stats`）
-- 最佳实际参数区间参考带（来自区间表）
 - **阶段切片**：按 D 分档或图像 4 阶段切换时间窗
+- 区间参考带（来自区间表）：**本期不叠在箱线上**——`/ranges` 常态为 `no_measurements`，叠上去只会多一块"因为算法没跑所以什么都没有"的空白。区间表仍在批次对比卡里按其七态各自具名显示。
+
+**72 小时小时曲线**：不再是独立视图。日分布图里的小时均值曲线承载小时级信息；需要看夜间短时细节时走历史模式的节点放大（那里另有一条环境带）。
+
+### 3.1 操作 × 长势（ADR-0028）
+
+目的：把「人在什么长势下做了什么调节、调完之后长势怎么变」摆在同一屏。
+
+- **分析单元 = 操作会话**：同库房内相邻审计记录间隔 ≤ 10 分钟并入一次调节（`n=1` 也成立）。
+  会话内保留逐条点位明细（设备 / 点位 / 值 / 操作人 / 动作来源）。
+- **相邻巡检 = 相邻的巡检轮次**（约 3 小时一轮），不是 ±10 分钟窗口。
+- **三联 = 同一观察框 × 最近 3 轮，且强制跨越会话时刻**（≥1 帧在会话前、≥1 帧在会话后）。
+  凑不齐跨越 ⇒ 如实标"无后续巡检 / 无前置巡检"，不拿调节前的帧充数。
+- **只给图、不给数值**：`measurements` 尚无 `round_id`，时间窗近邻 join 会把"没测"说成"没长"。
+- 观察框默认 `B206`（第 2 层第 6 框），可换。
 
 **右栏**
 
@@ -145,8 +166,12 @@ analysis 侧新增（`analysis/src/analysis/api.py` 的 `create_app` 内加闭�
 | GET | `/operations?zone=&start=&end=&limit=` | 操作日志（逐条）+ 按天/设备/点位/操作人的计数 |
 | GET | `/setpoints/changes?zone=&start=&end=` | 旧路径：差分检出的变更事件流（交叉验证用） |
 | GET | `/setpoints/daily?zone=&start=&end=` | 每日设定末态 |
+| GET | `/environment/daily?zone=&start=&end=` | **日分布五数**（2026-10-21 加，ADR-0027）。`start`/`end` 只取日期部分（`YYYY-MM-DD`）。只读 `environment_daily` 派生表；`state` 三态：`ok` / `never_computed` / `no_environment`，另带 `stale` 标注 |
+| GET | `/operations/sessions?zone=&start=&end=&entry_date=&window_min=10&box_id=B206&frames=3&limit=` | **操作会话 + 三联图像**（2026-10-21 加，ADR-0028）。只读 `operations`/`rounds`/`images`，不建表。`entry_date` 用于算 `growth_day`，不传则天数留 `null` |
 
-console 侧反代（照 `/api/growth` 的写法，保持单一 origin）：`/api/environment`、`/api/environment/summary`、`/api/setpoints/changes`、`/api/setpoints/daily`。
+落库：`environment_daily` 由 `analysis.env_daily.refresh(conn)` 重算，挂在每日任务上（`DAILY_AT` 环境变量装配到 `analysis.jobs`，与 `RANGES_AT`/`BATCH_AT` 同一套方式）。**没有封版**：每晚全量重算、按库房整删整写，迟到的小时行会改写旧批次的日行。
+
+console 侧反代（照 `/api/growth` 的写法，保持单一 origin）：`/api/environment`、`/api/environment/summary`、`/api/environment/daily`、`/api/operations`、`/api/operations/sessions`、`/api/setpoints/daily`。
 
 整列无源时返回 `null` 并在响应里标 `sources_missing`；空窗口返回空数组，不返回伪造的 0。
 

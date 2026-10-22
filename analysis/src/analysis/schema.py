@@ -26,6 +26,30 @@ ENVIRONMENT_FIELDS = (
     "lamp_on_min", "n",
 )
 
+#: 日分布视图的参数（ADR-0027）。光照**不在里面**：它的主口径是「补光循环制度」，
+#: 做箱线没有意义（开几秒、停两小时，任何"日均值分布"都被制度本身抹平）。
+DAILY_DISTRIBUTION_PARAMS = ("temp_c", "rh_pct", "co2_ppm")
+
+#: 一天的**五数**：**小时口径**（一天最多 24 个小时均值的分位数）。
+DAILY_FIVE_SUFFIXES = ("min", "q1", "median", "q3", "max")
+
+#: 每个参数一天的 7 个数：前五个是五数，后两个是**采样点级**极值
+#: （来自小时行的 `*_min` / `*_max` 列）。两档粒度**不许混读**
+#: （`env-analysis/spec.md` §2.3），所以分两列存、分开画。
+DAILY_STAT_SUFFIXES = (*DAILY_FIVE_SUFFIXES, "sample_min", "sample_max")
+
+#: 日分布表（`environment_daily`）的列。**派生表**：唯一生产者是
+#: `analysis.env_daily.refresh`，页面只读（ADR-0027 §7）。
+#: 每个参数另带一个 `_n`（当天**有值**的小时点数）：不足 3 点页面不画箱体，
+#: 用 `hours` 代 `n` 会把"那一列整天没上报"说成"样本充足"。
+ENVIRONMENT_DAILY_FIELDS = (
+    "zone", "day", "entry_date", "batch_no", "growth_day", "hours", "samples",
+    *(f"{p}_{s}" for p in DAILY_DISTRIBUTION_PARAMS for s in DAILY_STAT_SUFFIXES),
+    *(f"{p}_n" for p in DAILY_DISTRIBUTION_PARAMS),
+    "lamp_on_min_total", "lamp_on_s", "lamp_off_s", "lamp_on_m", "lamp_off_m",
+    "computed_at",
+)
+
 #: 操作日志的列（票 05）。`lamp_state` 那类"设备状态"在 environment，这里是**人对设备的操作**。
 OPERATION_FIELDS = (
     "ts", "zone", "device_code", "device_name", "point_code", "point_name",
@@ -132,3 +156,10 @@ def as_list(value):
 #: "区间表从来没人算过"—— **不要把"没算过"说成"样本不足"**：
 #: 前者是接线问题（票 05 的 `refresh_ranges` 没排期），后者是数据问题。
 RANGES_STATE_NEVER_COMPUTED = "never_computed"
+
+#: 日分布接口的三态（票 24 / ADR-0027）。同样不许合并：
+#: `never_computed` 是**接线问题**（每日任务没跑过），`no_environment` 是**数据问题**
+#: （这段窗口里库里就没有小时行）。两者都空，但处置完全不同。
+DAILY_STATE_OK = "ok"
+DAILY_STATE_NEVER_COMPUTED = "never_computed"
+DAILY_STATE_NO_ENVIRONMENT = "no_environment"

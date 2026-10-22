@@ -30,7 +30,8 @@ import pg_harness
 #: 常驻作业的开关也一并清掉（票 12）：测试不该被开发机上顺手设的变量带跑（那会去连
 #: TDengine / 环控平台）。`ANALYSIS_PG_SCHEMA` 也清：schema 由夹具显式给，不靠环境。
 INGEST_ENV = (
-    "ENV_INGEST_INTERVAL", "AUDIT_INTERVAL", "BATCH_AT", "RANGES_AT", "ANALYSIS_PG_SCHEMA",
+    "ENV_INGEST_INTERVAL", "AUDIT_INTERVAL", "BATCH_AT", "RANGES_AT", "DAILY_AT",
+    "ANALYSIS_PG_SCHEMA",
 )
 
 

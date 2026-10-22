@@ -91,6 +91,7 @@ def default_jobs(conn) -> list[IngestJob]:
     | `AUDIT_INTERVAL` | 操作日志入库 | 不跑 |
     | `BATCH_AT` | 批次台账同步 | 不跑（迁移过渡期暂停，见票 13） |
     | `RANGES_AT` | 区间表重算（票 05） | 不跑 |
+    | `DAILY_AT` | 日分布派生表重算（票 24 / ADR-0027） | 不跑 |
     """
     jobs: list[IngestJob] = []
 
@@ -159,5 +160,17 @@ def default_jobs(conn) -> list[IngestJob]:
             print(f"[ranges] 重算完成，{n} 行区间")
 
         jobs.append(IngestJob("ranges", run_ranges, daily_at=ranges_at))
+
+    # 日分布派生表（票 24 / ADR-0027）。**排在区间表之后**是排期约定而非代码依赖：
+    # 两个作业各自独立成功/失败，一个跑挂不该拖住另一个。
+    daily_at = (os.environ.get("DAILY_AT") or "").strip()
+    if daily_at:
+        from analysis.env_daily import refresh as refresh_daily
+
+        def run_env_daily() -> None:
+            n = refresh_daily(conn)
+            print(f"[env_daily] 重算完成，{n} 个日分布行")
+
+        jobs.append(IngestJob("env_daily", run_env_daily, daily_at=daily_at))
 
     return jobs

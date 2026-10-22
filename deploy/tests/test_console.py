@@ -625,6 +625,43 @@ def test_environment_summary_is_proxied_to_prod(tmp_path):
     assert seen["url"].endswith("/environment/summary?zone=611")
 
 
+def test_environment_daily_is_proxied_with_its_state_envelope(tmp_path):
+    """日分布：`state` 等信封字段**原样透传**。
+
+    console 若在这里重拼信封，`never_computed`（每日任务没跑）与 `no_environment`
+    （库里就没有小时行）会重新混成一个沉默的空白——处置方向正好相反（票 24 / ADR-0027）。
+    """
+    seen = {}
+
+    def transport(url, *, params=None, body=None):
+        seen["url"] = url
+        return {"state": "never_computed", "state_text": "日分布还没有重算过", "flags": [],
+                "params": ["temp_c", "rh_pct", "co2_ppm"], "rows": [], "count": 0}
+
+    with make_client(tmp_path, transport=transport) as c:
+        got = c.get("/api/environment/daily?zone=611&start=2026-09-30").json()
+    assert got["ok"] is True
+    assert got["state"] == "never_computed"
+    assert got["rows"] == []
+    assert "zone=611" in seen["url"] and "start=2026-09-30" in seen["url"]
+
+
+def test_operations_sessions_proxy_keeps_the_chosen_box(tmp_path):
+    """观察框要一路传到 prod：参数丢了会静默退回 B206，三联换框等于没换。"""
+    seen = {}
+
+    def transport(url, *, params=None, body=None):
+        seen["url"] = url
+        return {"state": "ok", "box_id": "B305", "window_min": 10,
+                "sessions": [{"ts_start": "2026-10-01T10:00:00", "frames": []}]}
+
+    with make_client(tmp_path, transport=transport) as c:
+        got = c.get("/api/operations/sessions?zone=611&box_id=B305&frames=2&limit=10").json()
+    assert got["ok"] is True and len(got["sessions"]) == 1
+    assert got["box_id"] == "B305"
+    assert "box_id=B305" in seen["url"] and "frames=2" in seen["url"]
+
+
 def test_environment_reports_prod_failure_instead_of_an_empty_curve(tmp_path):
     """「这段时间没有数据」与「问不到 prod」必须分得开——页面据此决定是等待还是排障。"""
     def bad_transport(url, *, params=None, body=None):

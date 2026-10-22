@@ -688,6 +688,68 @@ class Console:
         rows = got.get("rows", []) if isinstance(got, dict) else []
         return {"ok": True, "granularity": granularity, "rows": rows}
 
+    def environment_daily(
+        self, *, zone: str | None = None, start: str | None = None, end: str | None = None
+    ) -> dict:
+        """按生长天数的日分布——代理 prod 的 `/environment/daily`（票 24 / ADR-0027）。
+
+        **信封原样透传**：`state` / `state_text` / `flags` 是接口契约的一部分，
+        这里重拼会把"没算过"与"没有环境"这两件事重新混成一个沉默的空白。
+        """
+        if self.deps.transport is None:
+            return {"ok": False, "error": "未接入 prod 分析服务（transport 未配置）",
+                    "state": "unavailable", "rows": []}
+        params: dict = {}
+        for key, value in (("zone", zone), ("start", start), ("end", end)):
+            if value:
+                params[key] = value
+        q = f"/environment/daily?{urlencode(params)}" if params else "/environment/daily"
+        try:
+            got = self.deps.transport(f"{self.deps.analysis_url}{q}")
+        except Exception as e:  # noqa: BLE001 - prod 不通不该让环境页整页报错
+            return {"ok": False, "error": f"prod 查询失败：{e}",
+                    "state": "unavailable", "rows": []}
+        out = dict(got) if isinstance(got, dict) else {}
+        out["ok"] = True
+        return out
+
+    def operations_sessions(
+        self,
+        *,
+        zone: str | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        entry_date: str | None = None,
+        window_min: float = 10.0,
+        box_id: str = "B206",
+        frames: int = 3,
+        limit: int = 50,
+    ) -> dict:
+        """操作会话 + 相邻轮次三联——代理 prod 的 `/operations/sessions`（票 29 / ADR-0028）。
+
+        `state` / `note` 原样透传：`no_operations`（没人动过）与 `no_rounds`
+        （没有巡检可对照）在页面上是两句完全不同的话。
+        """
+        if self.deps.transport is None:
+            return {"ok": False, "error": "未接入 prod 分析服务（transport 未配置）",
+                    "state": "unavailable", "sessions": []}
+        params: dict = {"window_min": window_min, "box_id": box_id,
+                        "frames": frames, "limit": limit}
+        for key, value in (("zone", zone), ("start", start), ("end", end),
+                           ("entry_date", entry_date)):
+            if value:
+                params[key] = value
+        try:
+            got = self.deps.transport(
+                f"{self.deps.analysis_url}/operations/sessions?{urlencode(params)}"
+            )
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": f"prod 查询失败：{e}",
+                    "state": "unavailable", "sessions": []}
+        out = dict(got) if isinstance(got, dict) else {}
+        out["ok"] = True
+        return out
+
     def environment_summary(
         self, *, zone: str | None = None, start: str | None = None, end: str | None = None
     ) -> dict:
@@ -1211,6 +1273,36 @@ def create_app(deps: ConsoleDeps | None = None) -> FastAPI:
     def api_environment_summary(zone: str = "", start: str = "", end: str = "") -> dict:
         return console.environment_summary(
             zone=zone or None, start=start or None, end=end or None
+        )
+
+    @app.get("/api/environment/daily")
+    def api_environment_daily(zone: str = "", start: str = "", end: str = "") -> dict:
+        """日分布五数（console 代理 prod 的 `/environment/daily`，票 24 / ADR-0027）。"""
+        return console.environment_daily(
+            zone=zone or None, start=start or None, end=end or None
+        )
+
+    @app.get("/api/operations/sessions")
+    def api_operations_sessions(
+        zone: str = "",
+        start: str = "",
+        end: str = "",
+        entry_date: str = "",
+        window_min: float = Query(10.0, ge=1.0, le=120.0),
+        box_id: str = "B206",
+        frames: int = Query(3, ge=1, le=6),
+        limit: int = Query(50, ge=1, le=200),
+    ) -> dict:
+        """操作会话 + 相邻轮次三联（console 代理 prod 的 `/operations/sessions`）。"""
+        return console.operations_sessions(
+            zone=zone or None,
+            start=start or None,
+            end=end or None,
+            entry_date=entry_date or None,
+            window_min=window_min,
+            box_id=box_id or "B206",
+            frames=frames,
+            limit=limit,
         )
 
     # ---------- 实时预览：从 console 反代到预览容器（ADR-0017） ----------

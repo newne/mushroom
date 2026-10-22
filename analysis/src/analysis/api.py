@@ -11,18 +11,23 @@ from __future__ import annotations
 import asyncio
 import os
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timedelta
+from datetime import date, datetime
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from analysis import store
+from analysis import env_daily, ops_session, store
 from analysis.audit import summarize_operations
 from analysis.batches import dedupe_by_identity, window_of
 from analysis.jobs import default_jobs, run_job
 # 字段清单是**契约常量**（单一实现处是 `analysis.schema`），不是数据访问：
 # 数据访问一律经 `analysis.store`。
-from analysis.schema import IMAGE_FIELDS, MEASUREMENT_FIELDS, ROUND_FIELDS
+from analysis.schema import (
+    DAILY_DISTRIBUTION_PARAMS,
+    IMAGE_FIELDS,
+    MEASUREMENT_FIELDS,
+    ROUND_FIELDS,
+)
 from analysis.environment import (
     batches as env_batches,
     series as env_series,
@@ -35,6 +40,48 @@ from analysis.timeline import axis_of, coverage_points, legacy_round_count, matr
 
 #: 台账物化缓存的陈旧阈值（小时）。刷一次是每天 05:20（票 12 的 `BATCH_AT`）⇒ 26h 留 2h 余量。
 DEFAULT_LEDGER_STALE_AFTER_H = 26.0
+
+
+def _end_of_day(value: str) -> str | None:
+    """把 `2026-10-21` 补成 `2026-10-21T23:59:59`。
+
+    `ts <= '2026-10-21'` 在字符串前缀比较下会把**当天所有小时行**排除掉
+    （`'2026-10-21T08:00:00' > '2026-10-21'`），那是"跨过最后一天"而不是"含最后一天"。
+    日分布接口的 `start`/`end` 是日期，而它要用同一个窗口去探小时行，所以必须补齐。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    return f"{text}T23:59:59" if len(text) == 10 else text
+
+
+def _growth_day(entry_date: str, ts: str) -> int | None:
+    """内部口径的生长天数（**入库当天 = 0**）。缺入库日或解不出日期 ⇒ `None`，不猜。"""
+    entry = str(entry_date or "").strip()
+    stamp = str(ts or "").strip()
+    if not entry or not stamp:
+        return None
+    try:
+        return (date.fromisoformat(stamp[:10]) - date.fromisoformat(entry[:10])).days
+    except ValueError:
+        return None
+
+
+def _session_note(choice: dict, triptych: list[dict]) -> str | None:
+    """一次操作会话的人话说明：缺哪一侧、还是这几轮该框都没帧。
+
+    **宁可说缺，不拿另一侧的帧顶替**——三联的全部意义就是"调前 vs 调后"。
+    """
+    if not triptych:
+        return "没有可用的巡检轮次"
+    if not choice["crossed"]:
+        side = "后续" if choice["missing"] == "after" else "前置"
+        return f"无{side}巡检：跨不过调节时刻，三联凑不齐（不拿另一侧的帧顶替）"
+    if not any(item["has_frame"] for item in triptych):
+        return "这几轮该框都没有可用帧（采图失败或没拍到）"
+    if any(not item["has_frame"] for item in triptych):
+        return "有一部分轮次该框没有可用帧"
+    return None
 
 
 def _stale_after_h() -> float:
@@ -324,6 +371,51 @@ def create_app(
                 start=start or None,
                 end=end or None,
             ),
+        }
+
+    @app.get("/environment/daily")
+    def environment_daily(zone: str = "", start: str = "", end: str = "") -> dict:
+        """按**生长天数的日分布**（票 24 / ADR-0027）。
+
+        读的是**派生表** `environment_daily`（生产者 `analysis.env_daily.refresh`，
+        挂每日任务 `DAILY_AT`），页面不现算五数——一份口径只算一次。
+
+        每行给三件事，粒度各自标清（**不许混读**，`env-analysis/spec.md` §2.3）：
+
+        - `params[col]`：五数 `min/q1/median/q3/max`（**小时口径**，当天最多 24 个点）
+          + `sample_min`/`sample_max`（**采样点级**极值，画成淡色范围带）+ `n`（有值的小时点数）；
+        - `hours` / `samples`：当天有采样的小时点数与采样点合计（`hours < 24` 就是有缺口，不补）；
+        - `lamp`：该日末态制度与点亮分钟合计（**不做箱线**，ADR-0021 修订）。
+
+        `state` 三态 + `stale` 标注（见 `analysis.env_daily.state_of`）：
+        `ok` / `never_computed`（有小时行但没重算过）/ `no_environment`（连小时行都没有）。
+        """
+        want = (zone or "").strip()
+        # 日分布的键是**日期**：调用方万一传了带时刻的起点（`2026-10-20T14:30:00`），
+        # 字符串比较下 `'2026-10-20' < '2026-10-20T…'`，首日整天会被静默裁掉。
+        day_from = (start or "").strip()[:10] or None
+        day_to = (end or "").strip()[:10] or None
+        rows = store.fetch_environment_daily(
+            conn, zone=want or None, start=day_from, end=day_to
+        )
+        meta = env_daily.state_of(
+            rows,
+            has_environment=store.has_environment(
+                conn, zone=want or None, start=start or None, end=_end_of_day(end)
+            ),
+        )
+        return {
+            "ok": True,
+            "zone": want or None,
+            "start": start or None,
+            "end": end or None,
+            "state": meta["state"],
+            "state_text": meta["state_text"],
+            "flags": meta["flags"],
+            "params": list(DAILY_DISTRIBUTION_PARAMS),
+            "rows": env_daily.api_rows(rows),
+            "count": len(rows),
+            "computed_at": meta["computed_at"],
         }
 
     @app.get("/env/humid")
@@ -680,6 +772,107 @@ def create_app(
             "zone": zone or None,
             "rows": rows,
             "summary": summarize_operations(list(reversed(rows))),
+        }
+
+    @app.get("/operations/sessions")
+    def operations_sessions(
+        zone: str = "",
+        start: str = "",
+        end: str = "",
+        entry_date: str = "",
+        window_min: float = 10.0,
+        box_id: str = "B206",
+        frames: int = 3,
+        limit: int = 50,
+    ) -> dict:
+        """操作会话 + 「相邻巡检轮次三联」（票 29 / ADR-0028）。
+
+        **只读**：不建表，`rounds` / `images` / `operations` 都已在库里。
+
+        口径（详见 `analysis.ops_session`）：
+
+        - 相邻审计记录间隔 ≤ `window_min`（默认 10 分钟）**并入同一次调节**，`n=1` 也成立；
+        - 相邻巡检 = **相邻的巡检轮次**（约 3 小时一轮），不是 ±10 分钟窗口；
+        - 三联 = **同一 `box_id`** × 最近 `frames` 轮，且**强制跨越**会话时刻
+          （至少 1 帧在会话前、至少 1 帧在会话后）；凑不齐就如实标缺，**不拿调节前的帧充数**；
+        - 只取 `ok` 且有 `object_name` 的帧：失败帧不是"长势不变"，是"这次没拍到"。
+
+        **只给图、不给数值**：`measurements` 尚无 `round_id`，时间窗近邻 join 会把
+        "没测"说成"没长"。数值等票 11 的 `round_id` 落了再补。
+
+        `state`：`ok` / `no_operations`（这段时间没人动过设定）/ `no_rounds`（该库房没有巡检轮次）。
+        "没人动过"与"取不到"必须分得开。
+        """
+        want = (zone or "").strip()
+        if not want:
+            raise HTTPException(status_code=400, detail="操作会话要指定 zone（按库房算）")
+        window = max(1.0, min(float(window_min), 120.0))
+        want_frames = max(1, min(int(frames), 6))
+        want_limit = max(1, min(int(limit), 200))
+        box = (box_id or "B206").strip().upper()
+
+        ops = store.fetch_operations(
+            conn, zone=want, start=start or None, end=end or None, limit=2000
+        )
+        grouped = ops_session.sessions(ops, window_min=window)
+        if not grouped:
+            return {
+                "ok": True, "zone": want, "box_id": box, "window_min": window,
+                "start": start or None, "end": end or None, "entry_date": entry_date or None,
+                "state": "no_operations",
+                "state_text": "这段时间没有操作记录（没人动过设定，不等于取不到数据）",
+                "flags": [], "sessions": [], "count": 0,
+            }
+
+        rounds = sorted(
+            store.fetch_rounds(conn, room_id=want), key=lambda r: str(r.get("ts") or "")
+        )
+        by_round: dict[str, list[dict]] = {}
+        for frame in store.fetch_images(conn, room_id=want, box_id=box):
+            by_round.setdefault(str(frame.get("round_id") or ""), []).append(frame)
+
+        picked = grouped[-want_limit:]
+        picked.reverse()                       # 最新在前（与操作记录表同一读法）
+        out: list[dict] = []
+        for session in picked:
+            # 分界用**会话结束**：窗口内拍到的那一轮既不是调前也不是调后
+            choice = ops_session.pick_rounds(
+                session["ts_start"], rounds, frames=want_frames, end_ts=session["ts_end"]
+            )
+            triptych = ops_session.attach_frames(
+                choice["picked"], by_round, target_ts=session["ts_start"]
+            )
+            day_index = _growth_day(entry_date, session["ts_start"])
+            out.append({
+                **session,
+                "growth_day": day_index,
+                # 生产面板口径 = 内部口径 + 1（入库当天叫 01）；两套并列给，不合并
+                "growth_day_prod": None if day_index is None else day_index + 1,
+                "crossed": choice["crossed"],
+                "missing_side": choice["missing"],
+                "during_rounds": choice["during"],
+                "frames": triptych,
+                "note": _session_note(choice, triptych),
+            })
+
+        no_frames = all(not s["frames"] for s in out)
+        return {
+            "ok": True,
+            "zone": want,
+            "box_id": box,
+            "window_min": window,
+            "start": start or None,
+            "end": end or None,
+            "entry_date": entry_date or None,
+            "state": "ok" if rounds else "no_rounds",
+            "state_text": (
+                f"按 {window:g} 分钟合并操作，三联取 {box} 的相邻 {want_frames} 轮巡检"
+                if rounds else
+                "该库房没有巡检轮次：三联无从对照（不是「没人调过」）"
+            ),
+            "flags": ["empty_frames"] if (rounds and no_frames) else [],
+            "sessions": out,
+            "count": len(out),
         }
 
     @app.get("/setpoints/daily")

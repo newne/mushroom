@@ -17,6 +17,8 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timedelta
 
+from analysis.schema import DAILY_DISTRIBUTION_PARAMS, DAILY_FIVE_SUFFIXES
+
 #: 库里存的是小时聚合；`raw` 不在这条链上——原始分钟序列按窗口现取 TDengine。
 GRANULARITIES = ("hour", "day")
 MEASURED_COLS = ("temp_c", "rh_pct", "co2_ppm")
@@ -394,3 +396,82 @@ def summary(
         for r in kept if int(r["n"] or 0) < 60
     ][:48]
     return result
+
+
+def five_numbers(values) -> dict | None:
+    """一组值的五数（min / q1 / median / q3 / max / n）。
+
+    **口径**：调用方传进来的必须是**小时均值**（一天最多 24 个点），所以这是
+    "每小时一个点"的分位数，不是"每分钟一个点"的。采样点级的极值在
+    `daily_distribution` 里单独取（来自 `*_min`/`*_max` 列），两者**不得混读**
+    （`env-analysis/spec.md` §2.3）。空输入返回 `None`——"没有值"不是"值等于 0"。
+    """
+    vals = sorted(v for v in (_num(x) for x in values or ()) if v is not None)
+    if not vals:
+        return None
+    return {
+        "n": len(vals),
+        "min": round(vals[0], 2),
+        "q1": round(_quantile(vals, 0.25), 2),
+        "median": round(_quantile(vals, 0.5), 2),
+        "q3": round(_quantile(vals, 0.75), 2),
+        "max": round(vals[-1], 2),
+    }
+
+
+def daily_distribution(
+    rows: list[dict],
+    *,
+    zone: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+) -> list[dict]:
+    """小时行 → **按天的日分布行**（日分布视图的取数，ADR-0027）。
+
+    一天给三件事，粒度各标各的：
+
+    * 三参数的**五数**（小时口径，一天最多 24 个点）——箱体与须用的是它；
+    * 三参数的**采样点级极值**（`*_min` / `*_max` 两列）——图上的淡色范围带；
+    * 采样点数 `samples`（Σn）与小时点数 `hours`：`hours` 少于 24 就是那天有缺口，
+      **不补、不插值**，让缺口在数字上看得见。
+
+    光照**不在此列**：它只带该日末态制度（`lamp_*` 四个设定）与点亮分钟合计，
+    箱线对它没有意义（ADR-0021 修订 / ADR-0027）。
+
+    批次身份（`entry_date` / `batch_no` / `growth_day`）**不在这里算**——那是台账的事，
+    由 `analysis.env_daily.refresh` 回填（本模块保持"只做纯计算、不碰存储"）。
+    """
+    kept = filter_rows(rows, zone=zone, start=start, end=end)
+    days: dict[tuple[str, str], list[dict]] = {}
+    for r in kept:
+        days.setdefault((r["ts"][:10], r["zone"] or ""), []).append(r)
+
+    out: list[dict] = []
+    for (day, z) in sorted(days):
+        group = days[(day, z)]
+        item: dict = {
+            "day": day,
+            "zone": z,
+            "hours": len(group),
+            "samples": sum(int(g["n"] or 0) for g in group),
+        }
+        for col in DAILY_DISTRIBUTION_PARAMS:
+            lo_key, hi_key = AGG_COLUMNS[col]
+            five = five_numbers(g.get(col) for g in group) or {}
+            for suffix in DAILY_FIVE_SUFFIXES:
+                item[f"{col}_{suffix}"] = five.get(suffix)
+            item[f"{col}_n"] = five.get("n")
+            los = [v for v in (_num(g.get(lo_key)) for g in group) if v is not None]
+            his = [v for v in (_num(g.get(hi_key)) for g in group) if v is not None]
+            item[f"{col}_sample_min"] = round(min(los), 2) if los else None
+            item[f"{col}_sample_max"] = round(max(his), 2) if his else None
+        # 点亮分钟是**时长**，跨小时相加（与 `series(granularity='day')` 同一口径）
+        minutes = [v for v in (_num(g.get("lamp_on_min")) for g in group) if v is not None]
+        item["lamp_on_min_total"] = round(sum(minutes), 2) if minutes else None
+        keys = ("lamp_on_s", "lamp_off_s", "lamp_on_m", "lamp_off_m")
+        last = next((g for g in reversed(group)
+                     if any(_num(g.get(k)) is not None for k in keys)), None)
+        for key in keys:
+            item[key] = _num(last.get(key)) if last else None
+        out.append(item)
+    return out
