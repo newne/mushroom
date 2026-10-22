@@ -42,6 +42,12 @@ DEFAULT_POLL_S = 5.0
 #: 没有触发请求时，多久照看一次手动通道。人点了"点动"等 5 秒才动是不可接受的，
 #: 而 0.5 秒一次 stat() 的开销可以忽略。
 DEFAULT_MANUAL_POLL_S = 0.5
+#: 条件不具备时多久探一次。用户口径（2026-10-22）：**每分钟看一次**——灯与加湿都是
+#: 分钟级周期，等 3 小时的下一次触发等于白丢一轮。
+DEFAULT_PROBE_POLL_S = 60.0
+#: 条件一直不解除时最多守多久（分钟）。默认 180 min ≈ 一个调度周期：守到下一次触发
+#: 就该让位，而不是把一轮挂一整天。设 0 = 不设上限。
+DEFAULT_PROBE_WINDOW_MIN = 180.0
 
 
 def serve_forever(
@@ -52,6 +58,9 @@ def serve_forever(
     poll_s: float = DEFAULT_POLL_S,
     manual_poll_s: float = DEFAULT_MANUAL_POLL_S,
     max_rounds: int | None = None,
+    gate_ready: Callable[[], tuple[bool, str | None]] | None = None,
+    probe_poll_s: float = DEFAULT_PROBE_POLL_S,
+    probe_window_s: float = DEFAULT_PROBE_WINDOW_MIN * 60.0,
     log: Callable[[str], None] = print,
     sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
@@ -60,6 +69,11 @@ def serve_forever(
 
     ``manual`` 给的是 `deploy.manual_exec.ManualExecutor`（构造签名见那里）。不给它
     时行为与从前**完全一致**：只轮询触发目录、每次睡满 ``poll_s``。
+
+    ``gate_ready`` 给的是"此刻能不能拍"的探针（`PatrolGate.ready_now`）。给了它时，
+    领到请求**先探条件**：不具备就每分钟再看一次，确认具备才真正起轮。这样"到点遇上
+    蓝光/加湿"不再等于丢掉这一轮（轮里那套 30 min 预算耗尽就会回原点跳过），而等待
+    期间手动通道照常服务、机构不动一格。
     """
     stop = {"flag": False}
 
@@ -102,6 +116,41 @@ def serve_forever(
             continue
         log(f"领到巡检请求 {req.id}（来自 {req.created_by}"
             f"{'：' + req.reason if req.reason else ''}），开始跑一轮")
+        if gate_ready is not None:
+            # 条件不具备 ⇒ **先别起轮**：每分钟探一次（不动机构、不连控制器），
+            # 条件一好立刻跑。老做法是照跑、在轮里等满 30 min 再"回原点跳过"，
+            # 一次蓝光/加湿就等于永久丢一轮数据（2026-10-22 用户口径）。
+            waiting_from = clock()
+            give_up = False
+            while not stop["flag"]:
+                ready, reason = gate_ready()
+                waited = clock() - waiting_from
+                if ready:
+                    if waited >= probe_poll_s / 2:
+                        log(f"  条件已具备（等了 {waited / 60:.1f} min），起轮")
+                    break
+                if probe_window_s > 0 and waited >= probe_window_s:
+                    log(f"避让：{reason}，已守 {waited / 60:.0f} min 仍未解除"
+                        f"（上限 {probe_window_s / 60:.0f} min）—— 本轮放弃")
+                    give_up = True
+                    break
+                log(f"避让：{reason}，{probe_poll_s:.0f} s 后再探（本轮不消耗）")
+                deadline = clock() + probe_poll_s
+                while not stop["flag"] and clock() < deadline:
+                    if manual is None:
+                        sleep(min(probe_poll_s, max(0.0, deadline - clock())))
+                        continue
+                    if _service_manual():
+                        break           # 刚给操作者做完一件事，顺手再看一眼条件
+                    sleep(min(manual_poll_s, max(0.0, deadline - clock())))
+                newer = store.consume()
+                if newer is not None:
+                    # 守了一轮多，下一班的请求已经来了：以最新为准，旧的不再补跑。
+                    log(f"  避让期间来了新请求 {newer.id}（{req.id} 作废，按最新这条跑）")
+                    req = newer
+                    waiting_from = clock()
+            if give_up:
+                continue
         if req.not_before:
             # 偏置过的请求要留痕：现场问"这轮为什么晚了两分钟"时，答案在这里，
             # 而不是去翻 console 的内存（它早重启过了）。
@@ -152,6 +201,15 @@ def parse_args(argv: list[str] | None = None):
     ap.add_argument("--manual-poll", type=float,
                     default=float(os.environ.get("PATROL_MANUAL_POLL_S",
                                                  DEFAULT_MANUAL_POLL_S)))
+    ap.add_argument("--probe-poll", type=float,
+                    default=float(os.environ.get("PATROL_PROBE_POLL_S",
+                                                 DEFAULT_PROBE_POLL_S)),
+                    help="条件不具备时多久探一次（秒）。探针只抓一帧判蓝光 + 查加湿，"
+                         "不动机构、不连控制器、不消耗触发请求")
+    ap.add_argument("--probe-window-min", type=float,
+                    default=float(os.environ.get("PATROL_PROBE_WINDOW_MIN",
+                                                 DEFAULT_PROBE_WINDOW_MIN)),
+                    help="条件一直不解除时最多守多久（分钟）；0 = 不设上限")
     ap.add_argument("--no-manual", action="store_true",
                     help="不接手动通道（只跑巡检；排障时用来排除干扰）")
     ap.add_argument("--max-rounds", type=int, default=None, help="跑够几轮就退出（调试用）")
@@ -313,6 +371,27 @@ def make_run_once(*, m1_main, m1_args: list[str], room_id: str, room_path: str,
     return run_once
 
 
+def build_gate_probe(m1_parsed, *, room_id: str, log=print):
+    """造"此刻能不能拍"的探针；装不上就返回 None（退回老行为：到点就跑）。
+
+    **复用 `deploy.patrol_gate` 的同一套判定**（加湿走 `/env/humid`、蓝光走一帧的
+    B/R），不另写一份：两份判定迟早漂移成"外层说能拍、轮里说不能拍"，现场只会更难查。
+    探针只建采图客户端——不加载厂商库、不连控制器。
+    """
+    try:
+        from deploy.m1 import make_capture
+        from deploy.patrol_gate import build_gate
+
+        capture = make_capture(m1_parsed)
+        gate = build_gate(m1_parsed, capture=capture, room_id=room_id, log=log)
+        if gate is None:
+            return None
+        return gate.ready_now
+    except Exception as e:  # noqa: BLE001 - 探针装不上不该把执行方带停
+        log(f"! 条件探针装配失败（{type(e).__name__}: {e}）——退回'到点就跑'")
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     """命令行入口（容器里的 `patrol-serve` 角色）。
 
@@ -351,6 +430,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.no_room_refresh:
         log("！room-refresh 已关闭（--no-room-refresh）：本轮沿用现有 room.yaml")
+        gate_ready = None                         # 排障旁路不接探针（与老行为一致）
 
         def run_once() -> int:                    # 排障旁路：不刷新，直接起轮
             return m1_main([*m1_args, "--once"])
@@ -360,6 +440,10 @@ def main(argv: list[str] | None = None) -> int:
         room_id = resolve_room_id(args.room_id, m1_parsed.room)
         log(f"room-refresh：库房 {room_id or '(未拿到)'}，文件 {m1_parsed.room}，"
             f"端点 {analysis_base_url()}")
+        gate_ready = build_gate_probe(m1_parsed, room_id=room_id, log=log)
+        if gate_ready is not None:
+            log(f"条件探针就位：起轮前每 {args.probe_poll:.0f} s 看一眼（最多守 "
+                f"{args.probe_window_min:.0f} min；不动机构、不连控制器）")
         run_once = make_run_once(m1_main=m1_main, m1_args=[*m1_args, "--once"],
                                  room_id=room_id, room_path=m1_parsed.room,
                                  stats=stats, log=log)
@@ -371,6 +455,9 @@ def main(argv: list[str] | None = None) -> int:
         poll_s=args.poll,
         manual_poll_s=args.manual_poll,
         max_rounds=args.max_rounds,
+        gate_ready=gate_ready,
+        probe_poll_s=args.probe_poll,
+        probe_window_s=args.probe_window_min * 60.0,
     )
     return 0 if rounds >= 0 else 1
 

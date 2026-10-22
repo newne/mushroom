@@ -45,6 +45,75 @@ def test_idle_loop_does_not_run_anything(tmp_path):
     assert slept == [5.0, 5.0, 5.0]
 
 
+class FakeClock:
+    """只随 `sleep` 前进的假钟：让"每分钟探一次"这类等待在测试里瞬时跑完。"""
+
+    def __init__(self):
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def sleep(self, seconds: float) -> None:
+        self.t += max(0.0, seconds)
+
+
+def test_blocked_request_waits_then_runs_as_soon_as_ready(tmp_path):
+    """条件不具备时**先别起轮**：每分钟探一次，一具备就跑。
+
+    2026-10-22 用户口径：照老做法在轮里等满 30 min 就"回原点跳过"，一次蓝光/加湿
+    等于永久丢掉这一轮的数据。
+    """
+    store = make_store(tmp_path)
+    store.request(by="scheduler")
+    clock = FakeClock()
+    probes = {"n": 0}
+    logs: list[str] = []
+    runs: list[int] = []
+
+    def gate_ready():
+        probes["n"] += 1
+        return (probes["n"] >= 3, None if probes["n"] >= 3 else "蓝光")
+
+    rounds = serve_forever(
+        store=store, run_once=lambda: runs.append(1) or 0, max_rounds=1,
+        gate_ready=gate_ready, probe_poll_s=60.0,
+        clock=clock, sleep=clock.sleep, log=logs.append,
+    )
+
+    assert rounds == 1 and runs == [1], "条件具备后必须把这一轮跑掉"
+    assert probes["n"] == 3, "被拦两次就该探三次"
+    assert any("蓝光" in m for m in logs), "被拦时要说明原因，否则现场只看到'没跑'"
+
+
+def test_probe_window_expiry_gives_up_without_running(tmp_path):
+    """守到上限仍不放行 ⇒ 本轮放弃并说明，而不是把执行方挂死或硬起轮。"""
+    store = make_store(tmp_path)
+    store.request(by="scheduler")
+    clock = FakeClock()
+    logs: list[str] = []
+    runs: list[int] = []
+
+    def stop_after_awhile(seconds: float) -> None:
+        clock.sleep(seconds)
+        if clock.t > 600:                      # 放弃之后还回到空闲循环 ⇒ 手动结束
+            raise KeyboardInterrupt
+
+    try:
+        rounds = serve_forever(
+            store=store, run_once=lambda: runs.append(1) or 0,
+            gate_ready=lambda: (False, "加湿中"),
+            probe_poll_s=60.0, probe_window_s=120.0,
+            clock=clock, sleep=stop_after_awhile, log=logs.append,
+        )
+    except KeyboardInterrupt:
+        rounds = 0
+
+    assert runs == [], "条件没解除就绝不能起轮"
+    assert rounds == 0
+    assert any("放弃" in m for m in logs), "放弃这一轮必须留一句人话"
+
+
 def test_consumes_the_request_and_runs_exactly_one_round(tmp_path):
     store = make_store(tmp_path)
     store.request(by="scheduler", reason="每 3 小时")
