@@ -25,10 +25,18 @@ class EnvRow:
     lamp_state: float | None = None
     #: 循环补光参数：**四个原值都要**，因为现场口径是"开几秒 / 停约两小时"，
     #: 秒档（OnSSet/OffSSet）与分档（OnMSet/OffMSet）同时在用（2026-10-12 用户口径）。
+    #: 2026-10-22 起：现场 `OnSSet`/`OffSSet` 取不到值，两者仍保留字段（NULL），
+    #: 页面**只看设定**（OnMSet/OffMSet），不再折算点亮分钟。
     lamp_on_s: float | None = None
     lamp_off_s: float | None = None
     lamp_on_m: float | None = None
     lamp_off_m: float | None = None
+    #: 光源构成（2026-10-22 用户口径）：**补蓝光与补白光要分开**。库房一盏补光设备带
+    #: 4 组灯，`Choose1..4` 各自选白/蓝，所以这里存**组号清单**（如 `"2,4"` / `"1,3"`），
+    #: 而不是一个混在一起的"有补光"标记。`OnOff*=0`（关闭）的组不计入。
+    #: `None` = 没上报过光源选择；`""` = 上报了但这一档没有组（如四组全选白光）。
+    lamp_blue_groups: str | None = None
+    lamp_white_groups: str | None = None
 
 
 class EnvSource(Protocol):

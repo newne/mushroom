@@ -115,6 +115,34 @@ def test_lamp_minutes_are_unknown_when_cycle_is_unset():
     assert rows[0]["lamp_on_min"] is None
 
 
+def test_light_groups_are_settings_not_averages():
+    """蓝光/白光组号是**设定**：一小时里改过就按最后一次，跨小时取最后一次。"""
+    rows = aggregate_hourly([
+        {"ts": "2026-10-12T15:00:00", "zone": "611", "temp_c": 19.0,
+         "lamp_blue_groups": "1,2", "lamp_white_groups": "3,4"},
+        {"ts": "2026-10-12T15:40:00", "zone": "611", "temp_c": 19.2,
+         "lamp_blue_groups": "2,4", "lamp_white_groups": "1,3"},
+    ])
+    assert rows[0]["lamp_blue_groups"] == "2,4"
+    assert rows[0]["lamp_white_groups"] == "1,3"
+
+    day = series([
+        {"ts": "2026-10-12T15:00:00", "zone": "611", "n": 60,
+         "lamp_blue_groups": "1,2", "lamp_white_groups": "3,4"},
+        {"ts": "2026-10-12T16:00:00", "zone": "611", "n": 60,
+         "lamp_blue_groups": "2,4", "lamp_white_groups": "1,3"},
+    ], granularity="day")
+    assert day[0]["lamp_blue_groups"] == "2,4"
+    assert day[0]["lamp_white_groups"] == "1,3"
+
+    got = summary([
+        {"ts": "2026-10-12T16:00:00", "zone": "611", "n": 60,
+         "lamp_blue_groups": "2,4", "lamp_white_groups": "1,3"},
+    ])
+    assert got["lamp"]["blue_groups"] == "2,4"
+    assert got["lamp"]["white_groups"] == "1,3"
+
+
 def test_day_lamp_minutes_are_summed_not_averaged():
     rows = series([
         {"ts": "2026-10-12T10:00:00", "zone": "611", "n": 60, "lamp_on_min": 20.0},

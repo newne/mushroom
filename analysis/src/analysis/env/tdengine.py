@@ -17,6 +17,10 @@
 所以它落到 `environment.lamp_state`，是个分类量。**不要拿它当 0/1 的点亮信号去积分**：
 "点亮分钟"只能由设定周期（`OnMSet`/`OffMSet`）推导，那是设定值不是实测值。
 今天 611 库的实测就是 `Running=2/3` 且 `OnMSet=0`、`OffMSet=120`——这批菇当前不补光。
+
+2026-10-22 用户口径：`OnSSet`/`OffSSet` 现场取不到值，**补光只看设定**、不折算启停时间；
+同时要**区分补蓝光与补白光**——`Choose1..4`（0 白光 / 1 蓝光）与 `OnOff1..4`
+（1 自动 / 0 关闭）一起取回来，折成"哪几组在补蓝光、哪几组在补白光"。
 """
 
 from __future__ import annotations
@@ -41,8 +45,23 @@ ROOM_DEVICE_CODES: dict[str, str] = {
 LOCAL_TZ = timezone(timedelta(hours=8))
 
 ENV_COLUMNS = ("Tatmosp", "Hatmosp", "Co2")
-#: 补光灯：状态 + 循环参数（开 `OnSSet` 秒 / 停 `OffSSet` 秒）
-LIGHT_COLUMNS = ("Running", "OnSSet", "OffSSet", "OnMSet", "OffMSet")
+#: 补光灯：状态 + 循环设定 + 四路的开关/光源选择。
+#:
+#: 2026-10-22 起**不再查 `OnSSet`/`OffSSet`**：现场这两列取不到值，而"点亮分钟"本来
+#: 就只是设定量的折算（用户口径：补光只看设定，不折算启停时间）。少查两列也顺带让
+#: 入库不受这两列缺失的影响。
+#:
+#: `OnOff1..4` = 1 自动 / 0 关闭；`Choose1..4` = 0 白光 / 1 蓝光。**补蓝光与补白光
+#: 要分开看**，所以四组的选择必须一起取回来（只取 `Running` 只能知道"补光设备在什么档"）。
+LIGHT_COLUMNS = (
+    "Running", "OnMSet", "OffMSet",
+    "OnOff1", "OnOff2", "OnOff3", "OnOff4",
+    "Choose1", "Choose2", "Choose3", "Choose4",
+)
+
+#: 光源选择：`Choose*` 的枚举（`设备监控点参考.md` §7.5）。**0=白光、1=蓝光**，
+#: 不是"开关"。
+LIGHT_WHITE, LIGHT_BLUE = 0.0, 1.0
 
 
 def _quote(name: str) -> str:
@@ -155,10 +174,48 @@ class TdengineEnvSource:
         return rows
 
 
+def light_groups(onoff: list, choose: list) -> tuple[str | None, str | None]:
+    """四路开关 + 四路光源选择 → （蓝光组号清单, 白光组号清单）。
+
+    口径（2026-10-22 用户要求"补蓝光与补白光要分开"）：
+
+    * `Choose*` = 0 白光 / 1 蓝光 —— 这是**光源类型**，不是开关；
+    * `OnOff*` = 1 自动 / 0 关闭 —— 关闭的组不参与补光，**不计入**；
+    * `OnOff*` 为空（那一行没有该列）时**不猜**：光源选择既然是设定，就照它记账，
+      免得整列缺失时把四组全判成"关闭"。
+
+    返回值是组号字符串（`"2,4"` / `"1,3"`）而不是计数：页面上要能说清"哪几组是蓝光"，
+    计数说不出来。三种情况要分得开：
+
+    * 整行没有光源列 ⇒ `(None, None)`：**没上报**（数据缺失）；
+    * 有列但这一档没有组（例如四组全选白光）⇒ 该档为 `""`；
+    * 有列且四组都关闭 ⇒ `("", "")`（现场确实没在补光）。
+    """
+    blue: list[str] = []
+    white: list[str] = []
+    seen = False
+    for i in range(4):
+        off = _num(onoff[i]) if len(onoff) > i else None
+        kind = _num(choose[i]) if len(choose) > i else None
+        if kind is None:
+            continue
+        seen = True
+        if off is not None and off == 0:
+            continue                      # 这一组是"关闭"，不补光
+        if kind == LIGHT_BLUE:
+            blue.append(str(i + 1))
+        elif kind == LIGHT_WHITE:
+            white.append(str(i + 1))
+    if not seen:
+        return None, None
+    return (",".join(blue) or "", ",".join(white) or "")
+
+
 def merge_room(room: str, env_rows: list[tuple], light_rows: list[tuple]) -> list[EnvRow]:
     """把补光状态按**分钟**对齐到环境采样点上。
 
-    `env_rows` 每行 `(ts, Tatmosp, Hatmosp, Co2)`，`light_rows` 每行 `(ts, Running)`。
+    `env_rows` 每行 `(ts, Tatmosp, Hatmosp, Co2)`；`light_rows` 每行
+    `(ts, Running, OnMSet, OffMSet, OnOff1..4, Choose1..4)`（与 `LIGHT_COLUMNS` 同序）。
 
     两表都是每分钟一条，但上报时刻相差一秒上下（实测环境 `:54.266`、补光 `:55.536`），
     按秒比较会把同一分钟的两条数据判成"补光还没有数据"。所以按分钟取齐：每个环境采样点
@@ -167,19 +224,19 @@ def merge_room(room: str, env_rows: list[tuple], light_rows: list[tuple]) -> lis
     """
     light_by_minute: dict[str, tuple] = {}
     for raw in light_rows:
-        # raw[0] 是时间戳，五个值从 raw[1] 起：Running, OnSSet, OffSSet, OnMSet, OffMSet
         light_by_minute[to_local(str(raw[0]))[:16]] = tuple(
-            _num(raw[i]) if len(raw) > i else None for i in range(1, 6)
+            _num(raw[i]) if len(raw) > i else None for i in range(1, len(LIGHT_COLUMNS) + 1)
         )
     minutes = sorted(light_by_minute)
+    blank = (None,) * len(LIGHT_COLUMNS)
 
     out: list[EnvRow] = []
     for raw in env_rows:
         ts = to_local(str(raw[0]))
         idx = bisect_right(minutes, ts[:16]) - 1
-        state, on_s, off_s, on_m, off_m = (
-            light_by_minute[minutes[idx]] if idx >= 0 else (None,) * 5
-        )
+        state, on_m, off_m, *rest = light_by_minute[minutes[idx]] if idx >= 0 else blank
+        onoff, choose = rest[:4], rest[4:8]
+        blue, white = light_groups(onoff, choose)
         out.append(
             EnvRow(
                 ts=ts,
@@ -188,10 +245,10 @@ def merge_room(room: str, env_rows: list[tuple], light_rows: list[tuple]) -> lis
                 rh_pct=_num(raw[2]),
                 co2_ppm=_num(raw[3]),
                 lamp_state=state,
-                lamp_on_s=on_s,
-                lamp_off_s=off_s,
                 lamp_on_m=on_m,
                 lamp_off_m=off_m,
+                lamp_blue_groups=blue,
+                lamp_white_groups=white,
             )
         )
     return out

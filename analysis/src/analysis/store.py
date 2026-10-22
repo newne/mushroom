@@ -85,7 +85,8 @@ def _environment_daily_ddl() -> str:
     这张表的列数随参数个数变（3 参数 × 7 数 + 元信息），手抄 30 列必然与
     `schema.py` 漂移；其它表列少、手写更直观，所以只有这一张生成。
     """
-    text_cols = {"zone", "day", "entry_date", "batch_no", "computed_at"}
+    text_cols = {"zone", "day", "entry_date", "batch_no", "computed_at",
+                 "lamp_blue_groups", "lamp_white_groups"}
     not_null = {"zone", "day", "hours", "samples", "computed_at"}
     cols: list[str] = []
     for field in ENVIRONMENT_DAILY_FIELDS:
@@ -102,6 +103,17 @@ def _environment_daily_ddl() -> str:
     )
 
 
+#: 建表之后才加的列（现场的表早已建好，`CREATE TABLE IF NOT EXISTS` 不会补）。
+#:
+#: 2026-10-22：补光要区分**蓝光 / 白光**（`Choose1..4` 的四组光源选择），所以两张表各加
+#: 一列组号清单。`IF NOT EXISTS` 让它在新建的库上也是空操作。
+_ADDED_COLUMN_DDL: tuple[str, ...] = (
+    "ALTER TABLE {s}.environment ADD COLUMN IF NOT EXISTS lamp_blue_groups text",
+    "ALTER TABLE {s}.environment ADD COLUMN IF NOT EXISTS lamp_white_groups text",
+    "ALTER TABLE {s}.environment_daily ADD COLUMN IF NOT EXISTS lamp_blue_groups text",
+    "ALTER TABLE {s}.environment_daily ADD COLUMN IF NOT EXISTS lamp_white_groups text",
+)
+
 #: 建表 DDL（列名与顺序跟 `analysis.schema` 的 `*_FIELDS` 一一对应，有测试逐列比对）。
 #: 时间戳与 JSON 文本都是 `text`：口径与生产历史行一致，也让 SELECT 出来的形状稳定。
 _TABLE_DDL: tuple[str, ...] = (
@@ -115,6 +127,7 @@ _TABLE_DDL: tuple[str, ...] = (
       lamp_state double precision,
       lamp_on_s  double precision, lamp_off_s  double precision,
       lamp_on_m  double precision, lamp_off_m  double precision,
+      lamp_blue_groups text, lamp_white_groups text,
       lamp_on_min double precision,
       n          integer,
       PRIMARY KEY (ts, zone)
@@ -374,6 +387,9 @@ def ensure_schema(conn: PgConnection) -> list[str]:
     加列要显式写一句 `ALTER TABLE … ADD COLUMN` 并补一条用例，别指望建表语句兜住。
     （SQLite 时代那套"老库补列"历史 `ADDED_COLUMNS` 随 SQLite 一起删了：PG 的表由本函数
     按当前形状建，生产的 `analysis` schema 也是搬迁脚本第一次建出来的。）
+
+    已知的加列都在 `_ADDED_COLUMN_DDL` 里，**幂等**（`ADD COLUMN IF NOT EXISTS`）：
+    现场的表是早先建的，不补这几列，入库会在 INSERT 上直接失败。
     """
     created: list[str] = []
     with conn.raw.cursor() as cur:
@@ -383,7 +399,7 @@ def ensure_schema(conn: PgConnection) -> list[str]:
         if cur.fetchone() is None:
             created.append(conn.schema)
         cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{conn.schema}"')
-        for ddl in (*_TABLE_DDL, *_INDEX_DDL):
+        for ddl in (*_TABLE_DDL, *_ADDED_COLUMN_DDL, *_INDEX_DDL):
             cur.execute(ddl.format(s=conn.schema))
     conn.column_types = _load_column_types(conn)
     return created

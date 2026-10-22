@@ -122,8 +122,15 @@ def refresh(
     return total
 
 
-#: 光照一维在日分布行上只带这五个数（制度末态 + 点亮分钟合计），不做箱线。
-_LAMP_KEYS = ("lamp_on_min_total", "lamp_on_s", "lamp_off_s", "lamp_on_m", "lamp_off_m")
+#: 光照一维在日分布行上只带这几个**设定**值，不做箱线（ADR-0021 修订）。
+#:
+#: 2026-10-22：页面口径改为"补光只看设定"——`lamp_on_min_total` 仍带出来给下游（区间表），
+#: 但页面不再展示折算；真正要分的是 `lamp_blue_groups` / `lamp_white_groups`（四组灯的
+#: 光源选择，`Choose1..4` → 组号清单）。
+_LAMP_KEYS = (
+    "lamp_on_min_total", "lamp_on_s", "lamp_off_s", "lamp_on_m", "lamp_off_m",
+    "lamp_blue_groups", "lamp_white_groups",
+)
 
 #: 日分布陈旧阈值（小时）。每日任务 24h 跑一次 ⇒ 26h 留 2h 余量（与 `batches_state` 同口径）。
 STALE_AFTER_H = 26.0

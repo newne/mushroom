@@ -4,6 +4,7 @@ import pytest
 
 from analysis.env.tdengine import (
     TdengineEnvSource,
+    light_groups,
     merge_room,
     parse_rest,
     to_local,
@@ -36,6 +37,31 @@ def test_merge_room_forward_fills_light_state():
     assert [r.lamp_state for r in rows] == [2.0, 2.0]
     assert rows[0].zone == "611"
     assert rows[0].co2_ppm == 1639.0
+
+
+def test_light_groups_split_blue_and_white():
+    """四组灯各自选白/蓝（`Choose1..4`），`OnOff*=0` 的组不参与补光。"""
+    blue, white = light_groups(
+        onoff=[1, 1, 0, 1],
+        choose=[0, 1, 1, 0],     # 1 白 · 2 蓝 · 3 蓝但关闭 · 4 白
+    )
+    assert blue == "2"
+    assert white == "1,4"
+
+
+def test_light_groups_unknown_is_not_zero():
+    """整行没有光源列 ⇒ (None, None)：**没配**不等于"一组都没亮"。"""
+    assert light_groups([], []) == (None, None)
+    # 有列但四组全是关闭 ⇒ 空清单（现场确实没补光），与上面那条要分得开
+    assert light_groups([0, 0, 0, 0], [0, 1, 0, 1]) == ("", "")
+
+
+def test_merge_room_carries_light_groups():
+    light = [("2026-10-12T08:19:55.536Z", 2, 60, 120, 1, 1, 0, 1, 0, 1, 1, 0)]
+    rows = merge_room("611", [("2026-10-12T08:19:54.266Z", 19.9, 92.0, 1600)], light)
+    assert rows[0].lamp_on_m == 60.0 and rows[0].lamp_off_m == 120.0
+    assert rows[0].lamp_blue_groups == "2"      # 3# 那组是关闭的，不参与补光
+    assert rows[0].lamp_white_groups == "1,4"
 
 
 def test_merge_room_leaves_state_unknown_before_first_light_sample():

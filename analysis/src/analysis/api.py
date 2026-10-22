@@ -351,6 +351,10 @@ def create_app(
         `hour`/`day` 读库里的小时聚合；**`raw` 不落库**，按窗口现取 TDengine
         （最长 `RAW_WINDOW_MAX_HOURS` 小时）。补光的 `lamp_state` 是设备状态
         （0=自动 1=手动 2=停止 3=关闭），分类量，聚合取众数（ADR-0021）。
+
+        补光的两组**设定**：`lamp_on_m`/`lamp_off_m`（循环周期）与
+        `lamp_blue_groups`/`lamp_white_groups`（哪几组在补蓝光/白光，组号清单）。
+        `lamp_on_s`/`lamp_off_s` 现场取不到值，恒为 `null`——**不折算启停时间**。
         """
         if granularity == "raw":
             return {
@@ -385,7 +389,9 @@ def create_app(
         - `params[col]`：五数 `min/q1/median/q3/max`（**小时口径**，当天最多 24 个点）
           + `sample_min`/`sample_max`（**采样点级**极值，画成淡色范围带）+ `n`（有值的小时点数）；
         - `hours` / `samples`：当天有采样的小时点数与采样点合计（`hours < 24` 就是有缺口，不补）；
-        - `lamp`：该日末态制度与点亮分钟合计（**不做箱线**，ADR-0021 修订）。
+        - `lamp`：该日末态设定（`lamp_on_m`/`lamp_off_m`）与**光源构成**
+          （`lamp_blue_groups`/`lamp_white_groups`：蓝光/白光各是哪几组）。
+          2026-10-22 起页面只看设定，不再展示折算点亮分钟（**不做箱线**，ADR-0021 修订）。
 
         `state` 三态 + `stale` 标注（见 `analysis.env_daily.state_of`）：
         `ok` / `never_computed`（有小时行但没重算过）/ `no_environment`（连小时行都没有）。

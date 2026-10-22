@@ -10,6 +10,10 @@
 补光的 `lamp_state` 是分类量（0=自动 1=手动 2=停止 3=关闭），聚合时取**众数**
 （并列取较晚出现的那个）——它不是可以求平均的物理量。想要"点亮分钟"得由设定周期
 推导，那是设定值，不要混进这张表。
+
+补光还要分**蓝光 / 白光**（2026-10-22 用户口径）：`lamp_blue_groups` /
+`lamp_white_groups` 是四组灯的光源选择（`Choose1..4`）折出来的**组号清单**，
+是设定量，聚合时取该窗口最后一次配置，不做平均、也不做箱线。
 """
 
 from __future__ import annotations
@@ -31,7 +35,12 @@ FIELDS = ("ts", "zone", "temp_c", "temp_min", "temp_max",
           "rh_pct", "rh_min", "rh_max",
           "co2_ppm", "co2_min", "co2_max",
           "lamp_state", "lamp_on_s", "lamp_off_s", "lamp_on_m", "lamp_off_m",
+          "lamp_blue_groups", "lamp_white_groups",
           "lamp_on_min", "n")
+
+#: 光照里**文本型**的两列：光源组号清单（`"2,4"`）。求均值/众数都没有意义，
+#: 聚合时取"该小时/该天最后一次配置"（设定量，同一小时内改了按改完的算）。
+LAMP_TEXT_FIELDS = ("lamp_blue_groups", "lamp_white_groups")
 
 #: 循环补光折算：lamp_on_min = 该小时采样点数 × OnSSet/(OnSSet+OffSSet)。
 #: 用采样点数而不是固定 60 分钟——断档的小时不该按满一小时虚报点亮时长。
@@ -123,6 +132,9 @@ def aggregate_hourly(rows: list[dict]) -> list[dict]:
         row["lamp_on_s"], row["lamp_off_s"] = _num(on_s), _num(off_s)
         row["lamp_on_m"], row["lamp_off_m"] = _num(on_m), _num(off_m)
         row["lamp_on_min"] = lamp_minutes(len(group), on_s, off_s, on_m, off_m)
+        # 光源组号：同一小时内取**最后一次**配置（与循环参数同一口径）
+        for key in LAMP_TEXT_FIELDS:
+            row[key] = _last_text(group, key)
         for col, (lo_key, hi_key) in AGG_COLUMNS.items():
             values = [v for v in (_num(g.get(col)) for g in group) if v is not None]
             row[col] = _mean(values)
@@ -134,6 +146,19 @@ def aggregate_hourly(rows: list[dict]) -> list[dict]:
 
 def _mean(values: list[float]):
     return round(sum(values) / len(values), 2) if values else None
+
+
+def _last_text(rows: list[dict], key: str):
+    """文本型设定列的"最后一次"。
+
+    `None` = 这一窗口从没上报过（数据缺失）；`""` = 上报了，但**这一档没有组**
+    （比如四组全选白光 ⇒ 蓝光组为空）。两者必须分得开：前者是没数，后者是**有数且为零**。
+    """
+    for row in reversed(rows):
+        value = row.get(key)
+        if value is not None:
+            return str(value)
+    return None
 
 
 def _mode_weighted(pairs):
@@ -224,6 +249,8 @@ def series(
                      if any(_num(g.get(k)) is not None for k in keys)), None)
         for key in keys:
             row[key] = _num(last.get(key)) if last else None
+        for key in LAMP_TEXT_FIELDS:
+            row[key] = _last_text(group, key)
         out.append(row)
     return out
 
@@ -236,6 +263,9 @@ def _clean_row(r: dict) -> dict:
                 "lamp_state", "lamp_on_s", "lamp_off_s", "lamp_on_m", "lamp_off_m",
                 "lamp_on_min"):
         out[key] = _num(r.get(key))
+    for key in LAMP_TEXT_FIELDS:
+        value = r.get(key)
+        out[key] = None if value is None else str(value)
     return out
 
 
@@ -292,6 +322,9 @@ def batches(rows: list[dict], windows: list[dict], *, zone: str | None = None) -
                      if any(_num(r.get(k)) is not None for k in keys)), None)
         stats["lamp"] = {k: (_num(last.get(k)) if last else None) for k in keys}
         stats["lamp"]["on_min_total"] = round(sum(minutes), 2) if minutes else None
+        # 光源构成：批次对比也要能看出这一批是补蓝光还是补白光（2026-10-22）
+        stats["lamp"]["blue_groups"] = _last_text(seg, "lamp_blue_groups")
+        stats["lamp"]["white_groups"] = _last_text(seg, "lamp_white_groups")
         out.append(stats)
     return out
 
@@ -370,13 +403,19 @@ def summary(
                 tally[v] += max(weight, 1)
         result["lamp_states"] = {str(int(s)): c for s, c in tally.most_common()}
 
-    # 循环补光：总点亮分钟 + 折算占空比。都是**设定量**（由 OnSSet/OffSSet 推出），
-    # 不是照度；面板上要和设备状态一起看。
+    # 循环补光：总点亮分钟 + 折算占空比。都是**设定量**（由设定周期推出），不是照度。
+    #
+    # 2026-10-22 用户口径：现场 `OnSSet`/`OffSSet` 取不到值 ⇒ **补光只看设定**
+    # （`OnMSet`/`OffMSet` 与四组的光源选择），折算出来的"点亮分钟"不再作为页面读数。
+    # 这两个派生量保留在响应里给区间表等下游用，页面不展示。
     totals = [v for v in (_num(r.get("lamp_on_min")) for r in kept) if v is not None]
     keys = ("lamp_on_s", "lamp_off_s", "lamp_on_m", "lamp_off_m")
     last = next((r for r in reversed(kept)
                  if any(_num(r.get(k)) is not None for k in keys)), None)
     lamp = {k: (_num(last.get(k)) if last else None) for k in keys}
+    # 光源构成：蓝光/白光各自是哪几组（组号清单，最后一次配置）
+    lamp["blue_groups"] = _last_text(kept, "lamp_blue_groups")
+    lamp["white_groups"] = _last_text(kept, "lamp_white_groups")
     on_s, off_s = lamp["lamp_on_s"], lamp["lamp_off_s"]
     on_m, off_m = lamp["lamp_on_m"], lamp["lamp_off_m"]
     on_eff = on_s if (on_s or 0) > 0 else ((on_m or 0) * 60 if on_m is not None else None)
@@ -435,8 +474,9 @@ def daily_distribution(
     * 采样点数 `samples`（Σn）与小时点数 `hours`：`hours` 少于 24 就是那天有缺口，
       **不补、不插值**，让缺口在数字上看得见。
 
-    光照**不在此列**：它只带该日末态制度（`lamp_*` 四个设定）与点亮分钟合计，
-    箱线对它没有意义（ADR-0021 修订 / ADR-0027）。
+    光照**不在此列**：它只带该日末态制度（`lamp_on_m` / `lamp_off_m` 设定）、
+    **光源构成**（`lamp_blue_groups` / `lamp_white_groups`：蓝光/白光各是哪几组）
+    与点亮分钟合计；箱线对它没有意义（ADR-0021 修订 / ADR-0027）。
 
     批次身份（`entry_date` / `batch_no` / `growth_day`）**不在这里算**——那是台账的事，
     由 `analysis.env_daily.refresh` 回填（本模块保持"只做纯计算、不碰存储"）。
@@ -473,5 +513,7 @@ def daily_distribution(
                      if any(_num(g.get(k)) is not None for k in keys)), None)
         for key in keys:
             item[key] = _num(last.get(key)) if last else None
+        for key in LAMP_TEXT_FIELDS:
+            item[key] = _last_text(group, key)
         out.append(item)
     return out

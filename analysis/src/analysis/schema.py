@@ -17,12 +17,17 @@ from __future__ import annotations
 import json
 
 #: 环境表的列（顺序即写入顺序）。**存小时聚合**，不是原始分钟序列（2026-10-12 定）。
+#:
+#: `lamp_blue_groups` / `lamp_white_groups`（2026-10-22 加）：补光要**区分蓝光与白光**。
+#: 一个库房一盏补光设备带 4 组灯，`Choose1..4` 各自选白/蓝，所以这两列存**组号清单**
+#: 文本（如 `"2,4"` / `"1,3"`），不是计数——页面上要能说清"哪几组是蓝光"。
 ENVIRONMENT_FIELDS = (
     "ts", "zone",
     "temp_c", "temp_min", "temp_max",
     "rh_pct", "rh_min", "rh_max",
     "co2_ppm", "co2_min", "co2_max",
     "lamp_state", "lamp_on_s", "lamp_off_s", "lamp_on_m", "lamp_off_m",
+    "lamp_blue_groups", "lamp_white_groups",
     "lamp_on_min", "n",
 )
 
@@ -47,6 +52,7 @@ ENVIRONMENT_DAILY_FIELDS = (
     *(f"{p}_{s}" for p in DAILY_DISTRIBUTION_PARAMS for s in DAILY_STAT_SUFFIXES),
     *(f"{p}_n" for p in DAILY_DISTRIBUTION_PARAMS),
     "lamp_on_min_total", "lamp_on_s", "lamp_off_s", "lamp_on_m", "lamp_off_m",
+    "lamp_blue_groups", "lamp_white_groups",
     "computed_at",
 )
 

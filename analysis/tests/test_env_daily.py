@@ -118,8 +118,24 @@ def test_state_ok_and_light_has_no_box(client, pg):
     assert set(row["params"]) == {"temp_c", "rh_pct", "co2_ppm"}
     assert set(row["lamp"]) == {
         "lamp_on_min_total", "lamp_on_s", "lamp_off_s", "lamp_on_m", "lamp_off_m",
+        "lamp_blue_groups", "lamp_white_groups",
     }
     assert "lamp_on_min" not in row["params"]
+
+
+def test_daily_light_groups_come_from_hours(pg):
+    """补光要**分蓝光/白光**：日分布带的是当天最后一次光源配置（组号清单，不求平均）。"""
+    upsert_environment(pg, [
+        {"ts": f"2026-08-01T{h:02d}:00:00", "zone": "611", "temp_c": 20.0, "n": 60,
+         "lamp_on_m": 60.0, "lamp_off_m": 120.0,
+         "lamp_blue_groups": "1,2" if h < 2 else "2,4",
+         "lamp_white_groups": "3,4" if h < 2 else "1,3"}
+        for h in range(3)
+    ])
+    env_daily.refresh(pg, computed_at="2026-08-02T00:00:00")
+    row = fetch_environment_daily(pg, zone="611")[0]
+    assert row["lamp_blue_groups"] == "2,4"
+    assert row["lamp_white_groups"] == "1,3"
 
 
 def test_growth_day_comes_from_ledger(pg):
