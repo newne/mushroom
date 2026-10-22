@@ -261,6 +261,9 @@ services:
       # 一个字节都改不了——这比"整棵 data 放开"更接近我们想要的那条线。
       - ../mushroom_patrol/data/trigger:/app/data/trigger:rw
       - ../mushroom_patrol/data/cmd:/app/data/cmd:rw
+      # data/hold = 保持期/偏置的运行态（`console._append_hold_log`）。生产 2026-10-13 就
+      # 加了这条，仓库直到 2026-10-22 才补上——缺它的表现是"设了保持、重启后记录没了"。
+      - ../mushroom_patrol/data/hold:/app/data/hold:rw
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/healthz"]
       interval: 30s
@@ -375,11 +378,14 @@ services:
       - ANALYSIS_PG_SCHEMA=analysis
       # 容器里的 127.0.0.1 不是宿主
       - TDENGINE_URL=http://172.17.0.1:6041
-      # 作业开关：**不设就不跑**（`analysis/jobs.py` 的 default_jobs）。分批接管的阶段标记：
-      #   Step 1（2026-10-13 16:43）只开 audit；
-      #   Step 2（2026-10-13 17:0x）加上 env，batch 仍不设（票 13 直连落地后才设 BATCH_AT）。
+      # 作业开关：**不设就不跑**（`analysis/jobs.py` 的 default_jobs）。线上实际在跑五个：
+      #   env（每 5 分钟）/ audit（每 10 分钟）/ ranges 05:10 / batch 05:20 / daily 03:10。
       - ENV_INGEST_INTERVAL=300
       - AUDIT_INTERVAL=600
+      # 每日重算巡检范围（票 05）：05:10 刻意避开 05:20 的 batch 窗口。
+      - RANGES_AT=05:10
+      # 批次台账同步（票 13 已直连 pgsql，不再走 `docker exec tools_mysql`）。
+      - BATCH_AT=05:20
       # 日分布派生表重算（票 24 / ADR-0027）。03:10 的理由：环境入库每 5 分钟一轮、回溯 120
       # 分钟 ⇒ 前一天 23:00 那个小时行这时必然已入库；又与巡检触发（整点 :20）和老系统采图
       # （每小时 :01:30）错开，不去抢 TDengine 与相机。
