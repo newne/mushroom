@@ -1,5 +1,10 @@
 # 部署指南（Ubuntu + systemd）
 
+> ⚠️ **2026-10-22：本仓库的 systemd 单元已删除**（部署红线：所有服务只走 docker compose）。
+> 下文 systemd 段落只作历史说明；现场采图跑的是容器 —— 离线包目录里的
+> `docker-compose.yml` + `docker-compose.override.yml`（`image: xcloudsdk-py:0.1.0`），
+> 起停与排障都用 `docker compose`，见 `docs/DOCKER.md`。
+
 > 如果你不想使用 systemd，可直接用 Docker 运行：`docs/DOCKER.md`
 
 ## 1. 准备目录
@@ -35,19 +40,14 @@ chmod +x scripts/install_service.sh
 SERVICE_NAME=xcloud-capture PORT=7003 PROD_DIR=/home/sysadmin/algorithm/image_capture_tt ./scripts/install_service.sh
 ```
 
-### 3.2 手动安装（可选）
-1) 把 `systemd/xcloud-capture-py.service` 拷贝到 `/etc/systemd/system/` 并按你的路径修改：
-```bash
-sudo cp systemd/xcloud-capture-py.service /etc/systemd/system/xcloud-capture-py.service
-sudo systemctl daemon-reload
-sudo systemctl enable xcloud-capture-py
-sudo systemctl start xcloud-capture-py
-```
+### 3.2 手动安装（已废止，2026-10-22）
+`systemd/xcloud-capture-py.service` 已从仓库删除（部署红线：所有服务只走 docker compose）。
+现场采图跑的是容器，起停与排障都用 `docker compose`：
 
-2) 查看状态与日志：
 ```bash
-sudo systemctl status xcloud-capture-py --no-pager
-sudo journalctl -u xcloud-capture-py -f
+docker compose up -d
+docker compose ps                                       # 期望 Up (healthy)
+docker logs --tail 50 $(docker compose ps -q)
 ```
 
 ## 4. 定时触发（可选）

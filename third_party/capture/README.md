@@ -41,7 +41,8 @@ curl -X GET "http://localhost:7003/pool_capture?ip=192.168.1.231&user=admin&stor
 
 ## 文档
 - 架构说明：`docs/ARCHITECTURE.md`
-- systemd 示例：`systemd/xcloud-capture-py.service`
+- 容器编排：`docker-compose.yml`（开发）/ `docker-compose.offline.yml`（离线机，钉 `image`）——
+  本仓库**不再提供 systemd 单元**（2026-10-22 删除，部署只走 docker compose）
 - 生产部署：`docs/DEPLOYMENT.md`
 - Docker 运行：`docs/DOCKER.md`
 

@@ -45,7 +45,6 @@ COPY src /app/src
 COPY docs /app/docs
 COPY examples /app/examples
 COPY scripts /app/scripts
-COPY systemd /app/systemd
 COPY minio_config.example.json /app/minio_config.example.json
 COPY docker/entrypoint.sh /entrypoint.sh
 
