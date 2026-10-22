@@ -1929,3 +1929,148 @@ docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate 
 
 回滚**不删**已写入的 48 行 `measurements`；要停写只需回滚 argv。
 
+---
+
+## 25. 2026-10-22 发版：环境页两窗口 + 补光只看设定/分蓝白光（`0.2.0-20261022164342-envlampui`）
+
+**范围**（按改动落点拆，只有两个部署单元）：
+
+| 改动 | 落在哪 | 发版动作 |
+| --- | --- | --- |
+| `web/console/index.html`（两个窗口、跳过入库首日、逐天明细表、补光蓝/白组、操作维度经验表） | 宿主 bind-mount | **只换文件** |
+| `analysis/src/analysis/{env/*,environment,env_daily,schema,store,api}.py`（`lamp_blue_groups`/`lamp_white_groups` 落库 + 接口下发；查询只留补光设定） | `mushroom_patrol` 镜像的 `api` 角色 | **重建镜像 + 只重建 `mushroom_analysis`** |
+| `deploy/`（console 后端） | `mushroom_console` 镜像 | **本次没改，不动** |
+
+### 25.1 发版前核查（2026-10-22 16:13 现场只读）
+
+| 项 | 实测 |
+| --- | --- |
+| 容器 | `mushroom_patrol` / `mushroom_analysis` = `0.2.0-20261022151850-88d724e`（Up 52 min）；`mushroom_console` = `0.2.0-20261022141500-d7b637a`；preview / capture / console_web / solution 各自钉旧 tag |
+| 页面 | 423,506 B / `e2aacc2c…`（**没有** `envViewSeg`）⇒ 环境页改版确实还没上机 |
+| 镜像内代码 | `grep -c lamp_blue_groups /srv/analysis/src/analysis/schema.py` = **0**；summary 的 `lamp` 仍是 `on_effective_s`/`duty` 那套 |
+| 门禁 / 批次 | `allowed:true`、`day:22`、`entry_date 2026-09-30`（mogu-107） |
+| 上一轮 | 15:20:07 起的那轮**没有 end 事件**（15:21 容器被重建打断），`data/runs/` 里就三个历史文件 |
+
+> 补光表的真实列**已核对**（`describe data1.TD1_Q1MDLIGHT01`）：`OnOff1..4` / `Choose1..4` 都在，
+> 且 `OnOff1` 现场取值是 **60** 而不是文档写的 0/1 ⇒ 口径按"**只有 0 是关闭**"处理，
+> 非 0 一律算"这一组参与"。所以新查询不会因为列不存在把入库打挂（这是本次最大的单点风险）。
+
+### 25.2 产物
+
+```
+registry.cn-beijing.aliyuncs.com/ncgnewne/mushroom_patrol:0.2.0-20261022164342-99b35a6
+digest sha256:af5c73b8370970b856c3be6ee20641b8d2622e8bdeb5d0b1539b1f436e75ad24
+image  sha256:8e1ed417b045a555ce3ebd2b3eda6f6011ff84c5c2ab003cfde1381f1702d8a2（790 MB）
+代码   feat/growth-v6 @ 99b35a6「feat(env): 环境页拆成两个窗口，补光只看设定并区分蓝光/白光」
+```
+
+**tag 的来路要说清楚**：16:43 那次构建的 tag 是 `…-envlampui`（工作区状态，`.env` 先钉的它）。
+18:05 把这批改动提交成 `99b35a6`、推上 GitHub 后，用 `docker tag` 把同一镜像改钉成
+`…-99b35a6` 再推一次（**digest 一模一样**，说明推上去的确实是同一份层），prod 的
+`PATROL_IMAGE` 跟着改钉并只重建了 `mushroom_analysis`（18:09，backup `.env.bak-20261022-180941`）。
+从此 tag 尾部就是 git 提交号，与前几次发版一致。**没有重建镜像**：源码逐文件比对过
+（去 CR 后 `env/{tdengine,adapters}.py`、`env_daily.py`、`environment.py`、`schema.py`、
+`store.py`、`api.py` 全部与 `99b35a6` 一致，运行时走的是
+`/srv/patrol-workspace/.venv/.../site-packages/analysis`，比的是那个目录）。
+
+> 顺带记两个字节坑：
+> 1. `git show <sha>:web/console/index.html > x` 在 **PowerShell 管道**里会把行尾改回 CRLF
+>    （逐行重排），sha 立刻对不上；要用 bash/cmd 的重定向取原始字节。
+> 2. 工作区 `.py` 里有几个文件是 CRLF、提交里是 LF，直接比 sha 会误报"镜像与提交不一致"，
+>    去 CR 后再比才是内容一致。
+
+镜像自检（起容器验，不是看日志）：`LIGHT_COLUMNS` 含 `OnOff1..4`+`Choose1..4`、
+`light_groups([60,1,1,1],[1,1,1,0]) == ('1,2,3','4')`、`LAMP_TEXT_FIELDS` 两列在位。
+
+### 25.3 发布前门禁（开发机）
+
+| 门禁 | 结果 |
+| --- | --- |
+| `analysis` 环境三件套（`test_env_tdengine` / `test_env_api` / `test_env_daily`） | **55 passed**（WSL 里对着临时 PG `pgvector/pgvector:pg18` 跑，`ANALYSIS_TEST_DSN` 指它） |
+| 页面（jsdom 无头，假后端） | 两个窗口切换、补光蓝/白组、D1 起算与"取消勾选回到首日"、经验表排除首日，**全部通过，运行期零报错** |
+
+> 坑记一条：Windows 侧连不到 WSL 里 `-p 55432:5432` 发布的端口（防火墙/NAT），而 pg 套件
+> 没有 DSN 会整组 skip（看着像"全绿"）。**要么在 WSL 里跑，要么就用证据说"没跑"**。
+> 另外这套 pg 用例每个都开连接，上一次跑挂了不重启 pg 会撞上"too many clients"而看着像大面积
+> 失败（这次就踩了一次）。
+
+**既有红灯（不是本次引入，先记着）**：`test_store_postgres.py` 3 条失败——
+`test_tables_are_created_in_the_given_schema` / `test_writes_stay_inside_the_given_schema` /
+`test_unique_index_keeps_nullable_key_columns_nulls_not_distinct`。它们的期望是
+`catalog == list(TABLES)`，而 `environment_daily` 是 2026-10-21（ADR-0027）单独建的表、
+不在 `TABLES` 里，这三条从那天起就是红的（测试文件最后改动 10-16）。同一次运行里
+`test_store_postgres.py` 其余 15 条通过。**本次没顺手改它**（改测试不在发版范围），
+留作下一张票。
+
+### 25.4 现场动作（16:49–16:52）
+
+```bash
+# 1) 页面：先校验 sha 再原子替换，最后重启 nginx（不重建镜像）
+#    待发字节 = 工作区去 CRLF 后的 439,757 B / sha256 3a3dc278…（core.autocrlf=true，别直接 scp 工作区）
+cp -p index.html index.html.bak-20261022-164920     # 423,506 B / e2aacc2c…
+mv index.html.new index.html && docker restart mushroom_console_web
+
+# 2) analysis：钉 tag + 只重建它（patrol/console 的 uptime 不动）
+cp -p .env .env.bak-20261022-165010
+sed -i 's#^PATROL_IMAGE=.*#PATROL_IMAGE=…:0.2.0-20261022164342-envlampui#' .env
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_analysis
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_analysis
+
+# 2b) 18:05 提交 99b35a6 后改钉同一个镜像的"提交号 tag"（digest 未变），再重建一次
+docker tag …:0.2.0-20261022164342-envlampui …:0.2.0-20261022164342-99b35a6 && docker push …-99b35a6
+cp -p .env .env.bak-20261022-180941
+sed -i 's#^PATROL_IMAGE=.*#PATROL_IMAGE=…:0.2.0-20261022164342-99b35a6#' .env
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_analysis
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_analysis
+
+# 3) 补数：611 自入库日起按"本地自然日"切窗口重算小时行，再重算日分布
+docker cp backfill_env.py mushroom_analysis:/tmp/ && docker exec mushroom_analysis python3 /tmp/backfill_env.py
+docker compose -f mushroom_solution.yml --profile patrol run --rm --no-deps mushroom_analysis daily-refresh
+```
+
+为什么必须补数：两个新列是这次才加的，**历史小时行里是 NULL**，不补的话日分布上 09-30…10-21
+会一律显示"未上报"。补数按整日切窗（`ts >= 当天 00:00 且 < 次日 00:00`），保证一小时只被
+聚合一次；只写 611，其他库房一个字节没动。结果：**32,690 条采样 → 545 个小时行**，随后
+`[env_daily] 重算完成，144 个日分布行`。
+
+### 25.5 验收（2026-10-22 16:52 首次；18:10 改钉提交号 tag 后复验，逐条实测）
+
+| 检查 | 结果 |
+| --- | --- |
+| 页面 | `:8002/` → **200 / 439,757 B / `3a3dc278…`**，与待发字节**逐字节一致**；`envViewSeg` 3 处、"本批次时序" 6 处 |
+| analysis 容器 | 首轮 `…-envlampui`，18:09 起 **`0.2.0-20261022164342-99b35a6`**、**Up (healthy)**、`/healthz` 200、`RepoDigests` = `sha256:af5c73b8…`；启动日志 `[env_ingest] 完成，游标 18:00`、`[env_daily] 重算完成，144 行` |
+| `patrol` / `console` / `preview` / `console_web` | **未被重建**（Up 2 h / 3 h / 13 d / 25 min），`patrol` 的 `StartedAt` 与 `RestartCount=0` 未变，`data/runs/` 没有新文件 |
+| `/environment/summary?zone=611` | `lamp` 里出现 `blue_groups:"1,2"` / `white_groups:"3,4"`（同时保留了旧的 `duty` 等字段，页面不读它们） |
+| `/environment/daily?zone=611` | 23 行都带 `lamp_blue_groups`/`lamp_white_groups`，且**读出了这段历史**：D0–D7 蓝 1,2/白 3,4 → **D8–D16 全白且 `on=0`（这段没补光）** → D17–D22 蓝 1,2/白 3,4，开灯分钟 2→10→20→30 逐步加 |
+| `/environment?granularity=hour` | 行里带 `lamp_blue_groups`/`lamp_white_groups`（16:00 那行 `1,2` / `3,4`） |
+| 机构 | 一次没动：`patrol` 未重建，`data/runs/` 仍是 10-21/10-22 三个历史文件 |
+
+### 25.6 回滚
+
+```bash
+# 后端（回到 88d724e 那一版 analysis）
+cd /home/sysadmin/algorithm/mushroom_service
+cp .env.bak-20261022-165010 .env
+docker compose -f mushroom_solution.yml --profile patrol pull mushroom_analysis
+docker compose -f mushroom_solution.yml --profile patrol up -d --force-recreate --no-deps mushroom_analysis
+
+# 页面（与镜像无关，一步）
+cd /home/sysadmin/algorithm/mushroom_patrol/web
+cp -a index.html.bak-20261022-164920 index.html && docker restart mushroom_console_web
+```
+
+⚠️ 回滚**不回滚数据**：补数已经把 611 的 545 个小时行与 144 个日分布行按新口径重写了一遍
+（数值本身与旧口径一致，只是多了两列光源组）。旧版本读这些行不受影响——多出来的列它不读。
+
+### 25.7 这次**没做**的（欠账）
+
+1. **`mushroom_patrol` / `mushroom_console` 仍在旧 tag**（`88d724e` / `d7b637a`），`.env` 的
+   `PATROL_IMAGE` 已指向新 tag：下次任何人重建这两个容器就会一并换版本。本次它们不含改动，
+   重建只会多一次"启动预检可能碰机构"的机会，所以刻意不重建。
+2. ~~工作区未提交~~ → **已提交并推送**：`99b35a6`（`feat/growth-v6`，含 13 个文件、812 行新增），
+   镜像改钉成 `…-99b35a6`；提交里的页面 blob（`git show 99b35a6:web/console/index.html`，
+   439,757 B / `3a3dc278…`）与现场逐字节相同，**这次发版可复现**。
+3. `docs/patrol/console-ui/verify-page.js` 的环境段仍指向 2026-10-21 之前的 `#envchart`，
+   本次没改它（页面 harness 用的是另写的 jsdom 用例）。
+4. `test_store_postgres.py` 那 3 条既有红灯没修（见 25.3），下一张票。
+
