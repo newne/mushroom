@@ -29,15 +29,18 @@ def test_jobs_are_assembled_from_env(monkeypatch, pg):
     monkeypatch.setenv("EMS_PASSWORD_MD5", "md5")
     monkeypatch.setenv("BATCH_AT", "05:20")
     monkeypatch.setenv("RANGES_AT", "05:40")
+    monkeypatch.setenv("DAILY_AT", "03:10")
 
     jobs = {job.name: job for job in default_jobs(pg)}
-    assert set(jobs) == {"env", "audit", "batch", "ranges"}
+    assert set(jobs) == {"env", "audit", "batch", "ranges", "env_daily"}
     assert jobs["env"].interval_s == 300
     assert jobs["audit"].interval_s == 600
     assert jobs["batch"].daily_at == "05:20"
     assert jobs["batch"].base_delay_s() > 0, "daily_at 要换算成到下一个 05:20 的秒数"
     # 票 05：区间表重算接进同一套每日任务链（不再是"全仓库只有测试调用"）
     assert jobs["ranges"].daily_at == "05:40"
+    # 票 24 / ADR-0027：日分布派生表重算，与上面几个同一套装配
+    assert jobs["env_daily"].daily_at == "03:10"
 
 
 def test_failures_back_off_with_a_cap():
@@ -125,3 +128,41 @@ def test_broken_jobs_factory_still_serves_the_api(pg_dsn, pg_schema):
     app = create_app(store_dsn=pg_dsn, store_schema=pg_schema, jobs_factory=factory)
     with TestClient(app) as c:
         assert c.get("/healthz").json() == {"ok": True}
+
+
+def test_jobs_never_run_concurrently(pg_dsn, pg_schema):
+    """五个作业共用**一份**连接 ⇒ 跑的时候必须串行。
+
+    2026-10-22 生产实测的失败长相：新容器启动时五个作业同时开跑，两个线程同时进
+    `with conn.transaction()`，ranges 与 batch 双双
+    `transaction commit at the wrong nesting level`（daily 恰好抢到了才没炸）。
+    串行之后同一个连接上永远只有一个事务块。
+    """
+    guard = threading.Lock()
+    state = {"active": 0}
+    overlaps: list[int] = []
+    runs = {"n": 0}
+    all_done = threading.Event()
+
+    def make_run():
+        def run() -> None:
+            with guard:
+                state["active"] += 1
+                if state["active"] > 1:
+                    overlaps.append(state["active"])
+            time.sleep(0.05)
+            with guard:
+                state["active"] -= 1
+                runs["n"] += 1
+                if runs["n"] >= 4:
+                    all_done.set()
+
+        return run
+
+    def factory(conn):
+        return [IngestJob(f"job{i}", make_run(), interval_s=3600) for i in range(4)]
+
+    app = create_app(store_dsn=pg_dsn, store_schema=pg_schema, jobs_factory=factory)
+    with TestClient(app):
+        assert all_done.wait(5.0), "四个作业都该跑完一轮"
+    assert overlaps == [], "同一份连接上的作业不许并发（overlap 次数记在 overlaps 里）"

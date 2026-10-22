@@ -31,6 +31,14 @@ from analysis.batch_ingest import seconds_until
 #: 与 `analysis.api.DEFAULT_TDENGINE_URL` 同一个值；放这里避免 jobs ↔ api 互相 import。
 DEFAULT_TDENGINE_URL = "http://127.0.0.1:6041"
 
+#: 五个作业**共用 API 那一份连接**（票 12/28），所以作业之间必须串行。
+#: psycopg 的连接本身线程安全，但**事务块不是**：两个线程同时进 `with conn.transaction()`
+#: 会以 `transaction commit at the wrong nesting level` 炸掉——2026-10-22 生产实测，
+#: 新容器启动时五个作业同时开跑，ranges 与 batch 双双失败（daily 恰好抢到了）。
+#: 用 asyncio.Lock 而不是 threading.Lock：作业都是同一个事件循环里的任务，持锁期间
+#: `await to_thread(...)` 把活交给线程，别的作业连线程都进不去。
+_job_lock = asyncio.Lock()
+
 
 @dataclass
 class IngestJob:
@@ -68,11 +76,16 @@ class IngestJob:
 
 
 async def run_job(job: IngestJob) -> None:
-    """先跑一轮，再按周期睡。任何异常都只打印 —— **运行在独立线程里，API 不会跟着崩**。"""
+    """先跑一轮，再按周期睡。任何异常都只打印 —— **运行在独立线程里，API 不会跟着崩**。
+
+    "跑"这一段**独占连接**（`_job_lock`）：五个作业排队，不并发访问同一份连接。
+    只锁跑、不锁睡——各自按自己的周期睡，一个慢作业不会把别人的节奏推后。
+    """
     failures = 0
     while True:
         try:
-            await asyncio.to_thread(job.run)
+            async with _job_lock:
+                await asyncio.to_thread(job.run)
             if failures:
                 print(f"[{job.name}] 恢复正常（此前连续失败 {failures} 次）")
             failures = 0
