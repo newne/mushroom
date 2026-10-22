@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import argparse
 from datetime import date, datetime
 
 from analysis import store
@@ -197,3 +198,30 @@ def api_rows(rows: list[dict]) -> list[dict]:
             "computed_at": row.get("computed_at"),
         })
     return out
+
+
+def main(argv: list[str] | None = None) -> None:
+    """一次性补数入口（容器的 `daily-refresh` 角色）：重算一遍就退出。
+
+    派生表从没算过时（`state=never_computed`）用它，不必等隔天的每日任务。
+    写的是**派生表**：按库房整删整写，反复跑结果一致。缺省重算环境表里出现的
+    **全部**库房（补本批次时也就顺带把 611 补了）；`--zone` 是**额外**强制清空
+    重算的库房（哪怕它这会儿一天数据都没有），语义与 `refresh(zones=…)` 一致。
+    """
+    ap = argparse.ArgumentParser(description="日分布派生表重算（票 24 / ADR-0027）")
+    ap.add_argument("--dsn", help=store.CLI_DSN_HELP)
+    ap.add_argument("--schema", help=store.CLI_SCHEMA_HELP)
+    ap.add_argument(
+        "--zone", action="append", dest="zones",
+        help="额外强制清空重算的库房（可重复）；缺省按环境表里出现的库房",
+    )
+    ap.add_argument("--computed-at", help="钉住写入的 computed_at（补历史数据时对齐时间用）")
+    args = ap.parse_args(argv)
+
+    conn = store.connect(dsn=args.dsn, schema=args.schema)
+    n = refresh(conn, computed_at=args.computed_at, zones=args.zones)
+    print(f"[env_daily] 重算完成，{n} 个日分布行（schema {conn.schema}）")
+
+
+if __name__ == "__main__":
+    main()

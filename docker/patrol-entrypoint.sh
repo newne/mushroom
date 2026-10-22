@@ -65,6 +65,14 @@ case "${role}" in
       --fps "${PREVIEW_FPS:-5}" \
       "$@"
     ;;
+  daily-refresh)
+    # 一次性补数：重算日分布派生表（票 24 / ADR-0027）。派生表从没算过（页面报
+    # `never_computed`）时用它，不必等隔天的每日任务：
+    #   docker compose -f mushroom_solution.yml --profile patrol \
+    #     run --rm --no-deps mushroom_analysis daily-refresh
+    # **不常驻**：跑完即退；退出码非 0 = 这一轮没写成（DSN 缺失 / PG 不通），别当成功。
+    exec python3 -m analysis.env_daily "$@"
+    ;;
   shell)
     exec bash
     ;;

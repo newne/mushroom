@@ -345,11 +345,15 @@ services:
 
   # ---------- analysis 侧（2026-10-13 从宿主 6 个 systemd 单元迁入；票 01 / 12）----------
   #
-  # 为什么是**一个** service 而不是四个：四个作业共享同一个 SQLite、同一套凭据、同一条 import
-  # 链；拆开只增加挂载面与失败面（用户红线：非必要不加 compose service）。
+  # 为什么是**一个** service 而不是四个：四个作业共享同一个 PG schema、同一套凭据、同一条
+  # import 链；拆开只增加挂载面与失败面（用户红线：非必要不加 compose service）。
   # 定时落在 `analysis.api` 的 lifespan 里（`analysis/jobs.py`）：**不设对应的环境变量就不跑**，
   # 于是同一个 service 可以分步接管（过渡期只设 AUDIT_INTERVAL）。
-  # 单 worker 是硬约束：create_app 在工厂里建一个 SQLite 连接，多 worker 各持一份写不进对方。
+  # 单 worker 是硬约束：create_app 在工厂里建一份 PG 连接，多 worker 各持一份写不进对方。
+  #
+  # 一次性补数（不在 `up` 里跑，用完即走）：派生表从没算过时用这个，别等隔天的每日任务：
+  #   docker compose -f mushroom_solution.yml --profile patrol \
+  #     run --rm --no-deps mushroom_analysis daily-refresh
   mushroom_analysis:
     <<: *base
     profiles: ["patrol"]
@@ -358,16 +362,17 @@ services:
     command: ["api"]
     ports:
       # 与迁移前同址同端口（宿主 uvicorn :8000）⇒ patrol/console 的 .env 三处零改动。
-      # ⚠️ 独占资源：宿主 `mushroom-analysis.service` 必须**先停**再起本容器，否则抢端口。
+      # 宿主上已经没有 analysis 的 systemd 单元（2026-10-22 从仓库删除），不再抢端口。
       - "${ANALYSIS_PORT:-8000}:8000"
     env_file:
       # 凭据（EMS_URL / EMS_ACCOUNT / EMS_PASSWORD_MD5）走宿主上那份 0600 文件，**不进仓库、
       # 不进 compose 明文**（票 12 §2 把 env_file 列为等价物）。代价是 `docker inspect` 的
-      # Config.Env 里能读到——能读它的前提是宿主 root，与 systemd 时代 EnvironmentFile 同级。
+      # Config.Env 里能读到——能读它的前提是宿主 root。
       - /etc/mushroom/ems.env
     environment:
-      # 三个写者 + API 共用同一个库文件：**显式路径 + 挂载卷**，不能靠工作目录。
-      - ANALYSIS_DB=/opt/mushroom-analysis/mushrooms.db
+      # 存储只有 PG 一条路（票 28）：连接串走**文件**，值不进 compose 明文、不进 docker inspect。
+      - PGSQL_DSN_FILE=/etc/mushroom/pgsql.dsn
+      - ANALYSIS_PG_SCHEMA=analysis
       # 容器里的 127.0.0.1 不是宿主
       - TDENGINE_URL=http://172.17.0.1:6041
       # 作业开关：**不设就不跑**（`analysis/jobs.py` 的 default_jobs）。分批接管的阶段标记：
@@ -375,10 +380,13 @@ services:
       #   Step 2（2026-10-13 17:0x）加上 env，batch 仍不设（票 13 直连落地后才设 BATCH_AT）。
       - ENV_INGEST_INTERVAL=300
       - AUDIT_INTERVAL=600
+      # 日分布派生表重算（票 24 / ADR-0027）。03:10 的理由：环境入库每 5 分钟一轮、回溯 120
+      # 分钟 ⇒ 前一天 23:00 那个小时行这时必然已入库；又与巡检触发（整点 :20）和老系统采图
+      # （每小时 :01:30）错开，不去抢 TDengine 与相机。
+      - DAILY_AT=03:10
     volumes:
-      # 挂宿主原目录：DB 路径不变 ⇒ 回滚不用搬数据。⚠️ 不要设 PYTHONPATH 指到这里面的 src，
-      # 代码走镜像自带的 site-packages，宿主目录只当数据盘。
-      - /opt/mushroom-analysis:/opt/mushroom-analysis:rw
+      # 只剩 DSN 这一个文件（票 28 §5）：SQLite 时代那份 `/opt/mushroom-analysis` rw 挂载已摘除。
+      - /etc/mushroom/pgsql.dsn:/etc/mushroom/pgsql.dsn:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:8000/healthz"]
       interval: 30s

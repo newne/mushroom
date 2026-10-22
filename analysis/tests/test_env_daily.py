@@ -161,3 +161,35 @@ def test_stale_flag_when_last_refresh_is_old(pg):
     meta = env_daily.state_of(rows, has_environment=True, now=datetime(2026, 8, 10, 0, 0))
     assert "stale" in meta["flags"]
     assert meta["state"] == DAILY_STATE_OK
+
+
+def test_cli_backfills_every_zone_and_pins_the_stamp(pg, monkeypatch, capsys):
+    """`daily-refresh`（一次性补数）走的是**同一个** `refresh`，不是另写一条 SQL。
+
+    补数场景要的是"把库里所有库房都补齐"，所以缺省不给 `--zone`；`--computed-at`
+    能把重算戳钉住，便于与同一天的其它派生表对齐核对。
+    """
+    _hourly(pg, zone="611", hours=4)
+    _hourly(pg, zone="612", hours=4)
+    monkeypatch.setattr(env_daily.store, "connect", lambda **_: pg)
+
+    env_daily.main(["--computed-at", "2026-08-02T03:10:00"])
+
+    for zone in ("611", "612"):
+        rows = fetch_environment_daily(pg, zone=zone)
+        assert len(rows) == 1, zone
+        assert rows[0]["computed_at"] == "2026-08-02T03:10:00"
+    out = capsys.readouterr().out
+    assert "2 个日分布行" in out
+    assert pg.schema in out
+
+
+def test_cli_zone_flag_does_not_invent_rows(pg, monkeypatch):
+    """`--zone` 是"额外清空重算"，**不是**"只算这个库房"：给一个没数据的库房不该凭空出行。"""
+    _hourly(pg, zone="611", hours=2)
+    monkeypatch.setattr(env_daily.store, "connect", lambda **_: pg)
+
+    env_daily.main(["--zone", "699", "--computed-at", "2026-08-02T03:10:00"])
+
+    assert len(fetch_environment_daily(pg, zone="611")) == 1
+    assert fetch_environment_daily(pg, zone="699") == []
