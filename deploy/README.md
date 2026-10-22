@@ -53,18 +53,19 @@ export PYTHONPATH=/opt/mushroom-patrol/src
 装成命令则用 `patrol-m1` / `patrol-teach` / `deploy-fetch-room` / `deploy-flush-outbox`
 （`pyproject.toml` 的 `[project.scripts]`）。
 
-**prod 接收 API**（`/ingest`，图像索引入库）是另一个服务，装在 `/opt/mushroom-analysis`：
+**prod 接收 API**（`/ingest`，图像索引入库）是 compose 里的 `mushroom_analysis` 服务——
+同一个巡检镜像的 `api` 角色，**不装、也不在宿主上跑**：
 
 ```bash
-/usr/bin/python3 -m venv /opt/mushroom-analysis/.venv
-/opt/mushroom-analysis/.venv/bin/pip install fastapi uvicorn
-cp deploy/systemd/mushroom-analysis.service /etc/systemd/system/
-systemctl enable --now mushroom-analysis && curl -s localhost:8000/healthz
+cd /home/sysadmin/algorithm/mushroom_service
+docker compose -f mushroom_solution.yml --profile patrol up -d mushroom_analysis
+curl -s localhost:8000/healthz
 ```
 
-它的 SQLite 落在 `WorkingDirectory` 下（`create_app` 的 `db_path` 是相对路径）：
-`/opt/mushroom-analysis/mushrooms.db`。**必须单 worker**——连接是在工厂里建的，
-多 worker 会各持一份、互相看不见（见 `analysis/api.py` 顶部注释）。
+它的 SQLite 由 `ANALYSIS_DB` **显式给路径**并挂宿主目录：`/opt/mushroom-analysis/mushrooms.db`
+（不靠工作目录，回滚不用搬数据）。**必须单 worker**——连接是在工厂里建的，
+多 worker 会各持一份、互相看不见（见 `analysis/api.py` 顶部注释；`patrol-entrypoint.sh`
+的 `api` 角色不带 `--workers`）。
 
 ---
 
@@ -301,30 +302,35 @@ OUT0 补光 → `:7003/pool_capture` → 灭灯」→ 回原位 → 落 outbox �
 
 ### 取证：`runs/` 与 outbox 的分工
 
-### systemd（常驻）
+### 常驻（docker compose，唯一路径）
 
-单元文件就在仓库里，直接拷：
+**不装 systemd 单元**（用户红线；`deploy/systemd/` 已于 2026-10-22 从仓库删除）。
+常驻就是 compose 里的 `mushroom_patrol`（`patrol-serve` 角色）：
 
 ```bash
-cp deploy/systemd/patrol-m1.service /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now patrol-m1
+cd /home/sysadmin/algorithm/mushroom_service
+docker compose -f mushroom_solution.yml --profile patrol up -d mushroom_patrol
+docker compose -f mushroom_solution.yml --profile patrol ps mushroom_patrol   # Up (healthy)
 ```
 
-与早先贴在文档里的版本比，`patrol-m1.service` 有两处**必须**的差别：
+与老单元比，三处**必须**的差别：
 
 | 差别 | 原因 |
 | --- | --- |
-| `ExecStart` 用 `/opt/mushroom-patrol/.venv/bin/python3` | 系统 python3 没有 httpx，`import deploy.m1` 直接崩 |
-| `ExecStart` 不带 `--no-sync` | `/ingest` 端点已就位（见 §7），跑完就同步 |
+| 跑镜像自带 venv 里的 `deploy.patrol_serve`（构建时 `uv sync --frozen --no-dev --no-editable`） | 系统 python3 没有 httpx，`import deploy.m1` 直接崩 |
+| 命令不带 `--no-sync` | `/ingest` 端点已就位（见 §7），跑完就同步 |
+| 路径与参数走 compose 的 `command`/`environment`/卷，不再有 `ExecStart`/`WorkingDirectory` | 同一份变量既管 patrol，也管 console/preview/analysis |
 
-> ⚠️ **不要** `enable` 采图那两份遗留单元（`xcloud-capture.service` 等）——它们指向
-> 另一套安装且抢同一个 `:99` 与 `:7003`，见 ADR-0009。
+> ⚠️ **不要** enable 采图那两份遗留单元（`xcloud-capture.service` 等）——它们指向
+> 另一套安装且抢同一个 `:99` 与 `:7003`，见 ADR-0009。采图侧同样走 compose
+> （`third_party/capture/docker-compose.yml`）。
 
 **门禁关着的时候进程会不会退出**：不会。第 0–1 天 / 第 26 天起 / 读不到入库日期时，
 常驻进程只把那一轮记成 `skipped` 并**继续等下一个调度时刻**（每轮现读 `room.yaml`
 重新判定）。所以库里空着的时候服务是"活着但不干活"，新批次入库后**不用人工重启**。
-（早先的实现是 `if not allowed: return 0`：systemd 认为"正常退出"就不会再拉起，
-于是新批次来了机器上根本没有进程在等。）
+（早先的实现是 `if not allowed: return 0`：老 systemd 单元视作"正常退出"就不再拉起，
+于是新批次来了机器上根本没有进程在等。换成 compose 也一样——`restart: unless-stopped`
+不会拉起一个退出码 0 的容器，所以"不退出"这条约束与编排方式无关。）
 
 ### 补传累积的 outbox
 
@@ -361,7 +367,8 @@ deploy-flush-outbox --outbox /opt/mushroom-patrol/outbox.jsonl             # 真
    ⚠️ **别用 stdout 当证据**：`--once | tee` 只保当前会话。跑之前先确认 `--log` 落到了盘上。
 5. 补做**丢步验证**（`docs/patrol/prod-deploy/travel-speed-check.py`，限位基准法，阈值 0.2 mm）：
    巡检档 150 mm/s 的现场验收**不含**"无丢步"，静默丢步只认这个判据。
-6. 常驻：systemd 起 `patrol-m1`，观察 ≥1 个调度周期。
+6. 常驻：`docker compose -f mushroom_solution.yml --profile patrol up -d mushroom_patrol`，
+   观察 ≥1 个调度周期（`docker compose ... logs -f mushroom_patrol`）。
 
 > 2026-09-13 的教训：当时一轮跑到第 14 站被中断，而 **outbox 里零记录**（daemon 只在
 > 整轮返回后才写第一行），stdout 又只活在会话管道里 —— 现场剩下的唯一信息是"它死了"。
@@ -443,8 +450,9 @@ python3 -m deploy.preview --stations /app/configs/stations.yaml   # 容器里的
 ## 7. 已知边界
 
 - **`--ingest` 端点已就位**（2026-09-13 关掉 gap-list G1）：`http://10.77.77.39:8000/ingest`，
-  由 `mushroom-analysis.service` 提供（`analysis.api`，落在 `/opt/mushroom-analysis/mushrooms.db`）。
-  历史遗留的 outbox 用 `deploy-flush-outbox` 补传，见 §4。
+  由 compose 的 `mushroom_analysis` 服务提供（镜像里的 `api` 角色 = `analysis.api`，
+  库落在宿主 `/opt/mushroom-analysis/mushrooms.db`）。历史遗留的 outbox 用
+  `deploy-flush-outbox` 补传，见 §4。
 - **站位表的 `camera_ip` 是全局配置**：本机只有一台相机（装在滑块上，48 站共用）。
   省略该列 → 装载时取 `--camera-ip`（默认 `192.168.1.238`）；写成空串 → 运行时补默认值；
   显式写了 IP → 一律保留（将来分机位仍然由站位表说了算）。要把它固化进文件，
@@ -465,5 +473,8 @@ python3 -m deploy.preview --stations /app/configs/stations.yaml   # 容器里的
   的 `images` 表，`/images?station_id=&box_id=&room_id=` 可按站位/框/库房回溯，
   每行带 `room_id/entry_date/batch_no`（2026-09-13 修：这三列原先缺失，写入时被**静默丢弃**）。
 - **M2（`.elo` 脱机脚本）已决策暂缓**：厂商格式是二进制且无文档（gap-list G4）。
-- **systemd 单元已落盘**：`deploy/systemd/{patrol-m1,mushroom-analysis}.service`。
-  投产前 `systemctl enable patrol-m1` 并观察 ≥1 个调度周期（gap-list J5 已关）。
+- **部署只有一条路径：docker compose**（用户红线，2026-10-13）。原来的两份 systemd 单元
+  （`patrol-m1`、`mushroom-analysis`）已于 2026-10-22 从 `deploy/systemd/` 删除，
+  启动语义留在 `docs/patrol/prod-deploy/issues/01-analysis-compose-migration.md` §6 与
+  `docs/patrol/env-analysis/issues/12-analysis-service-startup-contract.md`。
+  运行入口是同一个巡检镜像的两个角色：`mushroom_patrol` 与 `mushroom_analysis`。

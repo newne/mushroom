@@ -17,13 +17,13 @@
 | 算法（原测量师） | `measure/**`、`src/**`、`models/**`、`notebooks/**` 及其测试 | 分割 / 实例分割、像素→毫米标定、四个生长量的计算与评估、测量结果生产 |
 | 后端（原环境官） | `analysis/**` | 环境数据入库（小时聚合）、批次台账、操作日志、区间表 `ranges`、"调控指令"建议层 |
 | 前端（原界面师） | `web/console/**`、`deploy/src/deploy/console.py` | 巡检台三模式（实时 / 历史 / 环境）页面与 console 反代接口 |
-| 运维（原发版官） | `docker/**`、部署编排与 `.env` 镜像 tag、systemd 单元、生产运行态 | 镜像构建与推送、compose 重建、systemd 单元、发布后复验、事故回执 |
+| 运维（原发版官） | `docker/**`、部署编排与 `.env` 镜像 tag、生产运行态 | 镜像构建与推送、compose 重建、发布后复验、事故回执 |
 
 `deploy/src/deploy/console.py` 与 `web/console/index.html` 是历史上冲突最热的两个文件（曾出现拦写，以及把他人未提交改动一起带上生产）。**opencode 若要改这两个文件，先在群里 @Chief**，由 Chief 协调，不得并发写。
 
-**`deploy/**` 的两处 carve-out**（2026-10-13 裁定）：`deploy/src/deploy/console.py` 归前端；`deploy/systemd/**` 与生产上的安装/运行态归运维独占；`deploy/**` 其余仍归测试。
+**`deploy/**` 的 carve-out**（2026-10-13 裁定）：`deploy/src/deploy/console.py` 归前端；生产上的安装/运行态归运维独占；`deploy/**` 其余仍归测试。
 
-**但 systemd 已废**（用户红线，见下「部署红线」）：`deploy/systemd/**` 不再作部署路径，只保留语义记录。"服务怎么启动"改由后端出**容器化启动语义**票（票 12：ExecStart 等价物、WorkingDirectory、venv、`EnvironmentFile=/etc/mushroom/ems.env`、游标与「整点重算当前小时」），运维按票出 compose 定义，不自行发明启动参数；依据只取线上实测与 `docs/patrol/env-analysis/issues/01:22`、`09:23`，缺的写「未知」不许猜。
+**systemd 已废**（用户红线，见下「部署红线」）：`deploy/systemd/` 的两份单元已于 2026-10-22 删除（内容留在 `docs/patrol/prod-deploy/issues/01-analysis-compose-migration.md` §6 与票 12，仅作语义记录）。"服务怎么启动"一律由 compose 定义（`docker/mushroom_solution.yml` + `docker/patrol-entrypoint.sh` 的角色），不自行发明启动参数；依据只取线上实测与 `docs/patrol/env-analysis/issues/01:22`、`09:23`，缺的写「未知」不许猜。
 
 ## 外部协作者 step code（2026-10-13 用户指定）
 

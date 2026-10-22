@@ -170,11 +170,10 @@ docker compose -f mushroom_solution.yml --profile patrol stop mushroom_patrol mu
 docker compose -f mushroom_solution.yml --profile patrol down
 ```
 
-容器停掉后控制器就空出来了；要让宿主上的 systemd 版本重新接管：
-
-```bash
-sudo systemctl enable --now patrol-m1
-```
+容器停掉后控制器就空出来了。**没有"回到 systemd"这条回滚路**（用户红线，2026-10-13；
+`deploy/systemd/` 的两份单元已于 2026-10-22 删除）：回滚 = 在 `.env` 里把
+`PATROL_IMAGE`/`PATROL_PREVIEW_IMAGE` 换回上一版 tag，再 `up -d` 对应服务。数据都在宿主目录
+（`mushroom_patrol/data`、`/opt/mushroom-analysis`），不用搬。
 
 ## 6. 切换后仍欠的账
 

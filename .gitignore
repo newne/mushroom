@@ -168,6 +168,12 @@ docker/mlflow_data/
 # 本地状态与工具目录
 .mimosa/
 .workbuddy/
+# IDE/工具的本地产物（逐文件版本快照、浏览器自动化取证、代码图数据库、会话审计）
+# 都是"每台机器自己生成"的东西：进库只会让 `git status` 永远不干净，发版前无法核对工作区。
+.history/
+.playwright-cli/
+.codegraph/
+.audit/
 docs/patrol/_ref/
 # 本地 SQLite（analysis 的接收库、试跑产物）
 *.db
