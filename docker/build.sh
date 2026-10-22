@@ -8,19 +8,65 @@ echo "Building mushroom_solution with unified Docker strategy..."
 # 配置变量
 # ============================================================================
 : "${DOCKER_REGISTRY:=registry.cn-beijing.aliyuncs.com/ncgnewne}"
-: "${ENCRYPT:=true}"  # 默认使用加密，可通过环境变量控制
+: "${TARGET:=solution}"  # solution（老 solution 镜像）或 patrol（巡检/算法镜像，生产在用）
+: "${ENCRYPT:=true}"  # 默认使用加密，可通过环境变量控制（patrol 恒为 false，ADR-0012）
 : "${BUILD_IMAGE:=true}"
 : "${PUSH_IMAGE:=true}"
 : "${USE_CACHE:=true}"
 : "${CACHE_FROM:=}"  # 可选的缓存源镜像
 : "${EXPIRATION_DATE:=}"  # CodeEnigma过期日期
 : "${OBFUSCATION_TOOL:=codeenigma}"  # 混淆工具: codeenigma 或 pyarmor
+: "${BUMP:=patch}"  # 版本基线往哪走: patch | minor | major | none
+: "${VERSION_OVERRIDE:=}"  # 直接钉版本（如 0.3.0-rc1），不再 bump
+: "${VERSION_ONLY:=false}"  # 只算版本号不构建（发版前确认用）
 
 REGISTRY="${DOCKER_REGISTRY}"
-PROJECT_NAME="mushroom_solution"
+if [ "${TARGET}" = "patrol" ]; then
+    PROJECT_NAME="mushroom_patrol"
+else
+    PROJECT_NAME="mushroom_solution"
+fi
 GIT_HASH=$(git rev-parse --short HEAD 2>/dev/null || echo "no-git")
 BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
 VERSION=$(date +%Y%m%d%H%M%S)
+
+# ============================================================================
+# 版本号：以 git 标签为基线，默认自动 +1 patch —— 小版本顺着走，不用手改文件
+# ============================================================================
+# 基线 = 最近一个 vX.Y.Z 标签（没有标签时回退到 pyproject 的 version）
+# BUMP = patch（默认）| minor | major | none
+#   最新标签 v0.2.1 + patch ⇒ 本次构建 0.2.2-<时间>-<提交号>
+#   打完 v0.2.2 之后下一次自动 0.2.3；重建当前版本用 BUMP=none
+bump_version() {  # $1=版本号 $2=patch|minor|major|none
+    local major minor patch kind
+    major="${1%%.*}"
+    minor="${1#*.}"; minor="${minor%%.*}"
+    patch="${1##*.}"; patch="${patch%%[!0-9]*}"
+    kind="${2:-patch}"
+    case "${kind}" in
+        none)  echo "$1" ;;
+        major) echo "$((major + 1)).0.0" ;;
+        minor) echo "${major}.$((minor + 1)).0" ;;
+        *)     echo "${major}.${minor}.$((patch + 1))" ;;
+    esac
+}
+
+LATEST_TAG=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
+TAG_VERSION="${LATEST_TAG#v}"
+
+if [ -n "${VERSION_OVERRIDE}" ]; then
+    BASE_VERSION="${VERSION_OVERRIDE}"
+elif [ -n "${TAG_VERSION}" ]; then
+    BASE_VERSION=$(bump_version "${TAG_VERSION}" "${BUMP}")
+else
+    BASE_VERSION=$(uv version --short 2>/dev/null || echo "1.0.0")
+fi
+FULL_VERSION="${BASE_VERSION}-${VERSION}-${GIT_HASH}"
+
+if [ "${VERSION_ONLY}" = "true" ]; then
+    echo "${FULL_VERSION}"
+    exit 0
+fi
 
 # 清理旧的构建信息
 [ -f build_info.json ] && rm build_info.json
@@ -32,8 +78,11 @@ if [ ! -f "pyproject.toml" ] && [ -f "pyproject.toml.backup" ]; then
 fi
 
 # ============================================================================
-# 代码准备阶段
+# 代码准备阶段（只对 solution 有意义；patrol 直接烤工作区，ADR-0012 不混淆）
 # ============================================================================
+if [ "${TARGET}" = "patrol" ]; then
+    echo "patrol 目标：跳过混淆/代码准备，构建上下文就是仓库根目录"
+else
 echo "Preparing source code..."
 
 if [ "${ENCRYPT}" = "true" ]; then
@@ -230,15 +279,19 @@ if [ "${ENCRYPT}" = "false" ]; then
     cp -r examples dist/ 2>/dev/null || echo "Warning: examples directory not found"
     echo "Source code copied to dist/"
 fi
+fi  # TARGET != patrol
 
 # ============================================================================
 # Docker构建阶段
 # ============================================================================
 if [ "${BUILD_IMAGE}" = "true" ]; then
-    # 构建完整版本号
-    BASE_VERSION=$(uv version --short --dry-run 2>/dev/null || echo "1.0.0")
-    FULL_VERSION="${BASE_VERSION}-${VERSION}-${GIT_HASH}"
-    
+    if [ "${TARGET}" = "patrol" ]; then
+        DOCKERFILE="docker/Dockerfile.patrol"
+        ENCRYPT="false"  # patrol 不进混淆（ADR-0012），这里只用于日志口径
+    else
+        DOCKERFILE="docker/Dockerfile"
+    fi
+
     # 显示构建信息（不再在版本号中添加加密标识）
     if [ "${ENCRYPT}" = "true" ]; then
         echo "Building encrypted version"
@@ -276,7 +329,7 @@ if [ "${BUILD_IMAGE}" = "true" ]; then
         echo "BuildKit disabled (buildx missing); falling back to legacy builder"
     fi
     
-    # 构建参数
+    # 构建参数（patrol 不滚 latest：生产只钉版本号 tag，别让 latest 把线上带跑偏）
     BUILD_ARGS=(
         --network host
         --build-arg BUILD_DATE="${BUILD_DATE}"
@@ -285,9 +338,11 @@ if [ "${BUILD_IMAGE}" = "true" ]; then
         --build-arg BASE_VERSION="${BASE_VERSION}"
         --build-arg ENCRYPTED="${ENCRYPT}"
         --tag "${REGISTRY}/${PROJECT_NAME}:${FULL_VERSION}"
-        --tag "${REGISTRY}/${PROJECT_NAME}:latest"
-        --file docker/Dockerfile
+        --file "${DOCKERFILE}"
     )
+    if [ "${TARGET}" != "patrol" ]; then
+        BUILD_ARGS+=(--tag "${REGISTRY}/${PROJECT_NAME}:latest")
+    fi
 
     # BuildKit 才支持 --progress
     if [ "${DOCKER_BUILDKIT}" = "1" ]; then
@@ -302,13 +357,17 @@ if [ "${BUILD_IMAGE}" = "true" ]; then
         if [ -n "${CACHE_FROM}" ]; then
             BUILD_ARGS+=(--cache-from "${CACHE_FROM}")
         fi
-        
-        # 尝试使用最新镜像作为缓存源
-        BUILD_ARGS+=(--cache-from "${REGISTRY}/${PROJECT_NAME}:latest")
-        
-        # 尝试拉取最新镜像用于缓存（忽略错误）
-        echo "Attempting to pull latest image for cache..."
-        docker pull "${REGISTRY}/${PROJECT_NAME}:latest" 2>/dev/null || echo "Could not pull latest image, proceeding without image cache"
+
+        # solution 才有 latest 可当缓存源；patrol 用上一次的版本号 tag 当缓存源
+        if [ -n "${CACHE_TAG:-}" ]; then
+            BUILD_ARGS+=(--cache-from "${CACHE_TAG}")
+            echo "Attempting to pull cache image ${CACHE_TAG}..."
+            docker pull "${CACHE_TAG}" 2>/dev/null || echo "Could not pull cache image, proceeding without image cache"
+        elif [ "${TARGET}" != "patrol" ]; then
+            BUILD_ARGS+=(--cache-from "${REGISTRY}/${PROJECT_NAME}:latest")
+            echo "Attempting to pull latest image for cache..."
+            docker pull "${REGISTRY}/${PROJECT_NAME}:latest" 2>/dev/null || echo "Could not pull latest image, proceeding without image cache"
+        fi
     fi
     
     # 执行构建
@@ -348,17 +407,19 @@ if [ "${BUILD_IMAGE}" = "true" ]; then
             echo "Error: Failed to push versioned image" >&2
             exit 1
         fi
-        
-        echo "Pushing ${REGISTRY}/${PROJECT_NAME}:latest..."
-        if ! docker push "${REGISTRY}/${PROJECT_NAME}:latest"; then
-            echo "Error: Failed to push latest image" >&2
-            exit 1
+
+        if [ "${TARGET}" != "patrol" ]; then
+            echo "Pushing ${REGISTRY}/${PROJECT_NAME}:latest..."
+            if ! docker push "${REGISTRY}/${PROJECT_NAME}:latest"; then
+                echo "Error: Failed to push latest image" >&2
+                exit 1
+            fi
         fi
 
         echo "Successfully pushed images to registry"
-        
-        # 推送缓存镜像（可选）
-        if [ "${USE_CACHE}" = "true" ]; then
+
+        # 推送缓存镜像（可选；patrol 不滚 latest，就不额外推 cache 标签）
+        if [ "${USE_CACHE}" = "true" ] && [ "${TARGET}" != "patrol" ]; then
             CACHE_TAG="${REGISTRY}/${PROJECT_NAME}:cache"
             docker tag "${REGISTRY}/${PROJECT_NAME}:latest" "${CACHE_TAG}"
             docker push "${CACHE_TAG}" || echo "Warning: Failed to push cache image"
@@ -372,7 +433,11 @@ fi
 cat > build_info.json << EOF
 {
     "project": "${PROJECT_NAME}",
+    "target": "${TARGET}",
     "version": "${FULL_VERSION}",
+    "base_version": "${BASE_VERSION}",
+    "version_from_tag": "${LATEST_TAG}",
+    "bump": "${BUMP}",
     "git_hash": "${GIT_HASH}",
     "build_date": "${BUILD_DATE}",
     "encrypted": ${ENCRYPT},
@@ -387,7 +452,17 @@ EOF
 
 echo "============================================================================"
 echo "Build completed successfully"
+echo "Image: ${REGISTRY}/${PROJECT_NAME}:${FULL_VERSION}"
 echo "Build info saved to build_info.json"
+# 版本是"下一个"小版本：发完版就把 tag 打上，下次构建才会继续往上加
+case "${BASE_VERSION}" in
+    [0-9]*.[0-9]*.[0-9]*)
+        echo "下一步（封版）："
+        echo "  git tag -a v${BASE_VERSION} -m 'release v${BASE_VERSION} — <一句话>'"
+        echo "  git push origin v${BASE_VERSION}"
+        echo "prod：改 .env 的 ${PROJECT_NAME} 镜像 tag → ${FULL_VERSION}，只重建受影响的服务"
+        ;;
+esac
 echo "============================================================================"
 
 # 清理临时文件

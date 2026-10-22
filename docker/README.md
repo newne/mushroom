@@ -44,12 +44,16 @@ USE_CACHE=false ./docker/build.sh
 | 变量名 | 默认值 | 说明 |
 |--------|--------|------|
 | `DOCKER_REGISTRY` | `registry.cn-beijing.aliyuncs.com/ncgnewne` | Docker 镜像仓库地址 |
-| `ENCRYPT` | `false` | 是否启用代码加密 |
+| `TARGET` | `solution` | 构建目标：`solution`（`docker/Dockerfile`）或 `patrol`（`docker/Dockerfile.patrol`，生产在用） |
+| `ENCRYPT` | `false` | 是否启用代码加密（`TARGET=patrol` 时恒不加密） |
 | `OBFUSCATION_TOOL` | `codeenigma` | 混淆工具选择 (codeenigma/pyarmor) |
 | `BUILD_IMAGE` | `true` | 是否构建镜像 |
 | `PUSH_IMAGE` | `true` | 是否推送镜像 |
 | `USE_CACHE` | `true` | 是否使用构建缓存 |
 | `EXPIRATION_DATE` | - | CodeEnigma 过期日期 (YYYY-MM-DD) |
+| `BUMP` | `patch` | 版本基线怎么走：`patch` / `minor` / `major` / `none` |
+| `VERSION_OVERRIDE` | - | 直接钉版本号（如 `0.3.0-rc1`），跳过 bump |
+| `VERSION_ONLY` | `false` | `true` 时只打印版本号并退出（发版前确认） |
 
 ## 构建优化
 
@@ -92,6 +96,46 @@ USE_CACHE=false ./docker/build.sh
 镜像版本格式：`{base_version}-{timestamp}-{git_hash}`
 
 例如：`0.1.0-20260126112355-a515252`
+
+### 版本号从 git 标签推导（小版本自动往前推）
+
+`base_version` **不再**取 pyproject、也不用手改文件，规则是"**最近一个 `vX.Y.Z` 标签 + BUMP**"：
+
+| 最近标签 | `BUMP`（默认 patch） | 本次构建的 `base_version` |
+| --- | --- | --- |
+| `v0.2.1` | `patch` | `0.2.2` |
+| `v0.2.1` | `minor` | `0.3.0` |
+| `v0.2.1` | `major` | `1.0.0` |
+| `v0.2.1` | `none` | `0.2.1`（重建当前版本） |
+
+所以发版循环是：**构建 → 在构建点打 `v{base_version}` → 推标签**，下一次构建自然就 +1。
+脚本收尾会直接把这两条命令打出来；忘了打标签的话，下次会重复同一个版本号。
+
+```bash
+# 先看这次会打成什么版本（不构建、不改任何文件）
+VERSION_ONLY=true ./docker/build.sh
+
+# 小版本（默认）：v0.2.1 的仓库构建出 0.2.2-<时间>-<提交号>
+TARGET=patrol ./docker/build.sh
+
+# 大改：v0.2.1 → 0.3.0
+TARGET=patrol BUMP=minor ./docker/build.sh
+
+# 特殊版本（预发/带后缀），直接钉，不再 bump
+TARGET=patrol VERSION_OVERRIDE=0.3.0-rc1 ./docker/build.sh
+```
+
+### `TARGET=patrol`（生产在用的那个镜像）
+
+```bash
+TARGET=patrol ./docker/build.sh              # -f docker/Dockerfile.patrol，构建 + 推送
+TARGET=patrol PUSH_IMAGE=false ./docker/build.sh   # 只本地构建（自检用）
+```
+
+patrol 与老 solution 的区别，脚本里已经写死：
+
+- **不混淆、不复制 `dist/`**：构建上下文就是仓库根目录（ADR-0012）。
+- **不滚 `latest`**：生产只钉 `版本号-时间-提交号`，避免 `latest` 把线上带走样。
 
 ## 构建信息
 

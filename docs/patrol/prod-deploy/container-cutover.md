@@ -2074,3 +2074,37 @@ cp -a index.html.bak-20261022-164920 index.html && docker restart mushroom_conso
    本次没改它（页面 harness 用的是另写的 jsdom 用例）。
 4. `test_store_postgres.py` 那 3 条既有红灯没修（见 25.3），下一张票。
 
+### 25.8 版本号：从这一版起由 git 标签推导（`v0.2.1`）
+
+补了注释标签 **`v0.2.1`**（`8f4b64b`，已推 origin）。它和镜像号对不上是必然的——
+镜像 `0.2.0-20261022164342-99b35a6` 是在标签存在之前构建的，tag message 里已写明。
+**从 0.2.2 起两者对齐**：
+
+`docker/build.sh` 的 `base_version` 改为"最近一个 `vX.Y.Z` 标签 + BUMP（默认 patch）"：
+
+| 最近标签 | `BUMP` | 构建出的 base | 说明 |
+| --- | --- | --- | --- |
+| `v0.2.1` | `patch`（默认） | `0.2.2` | 小版本顺推，不改任何文件 |
+| `v0.2.1` | `minor` / `major` | `0.3.0` / `1.0.0` | 改结构时用 |
+| `v0.2.1` | `none` | `0.2.1` | 重建当前版本 |
+
+发版循环固定成三步：`VERSION_ONLY=true ./docker/build.sh` 看版本 → 构建 → 在构建点
+`git tag -a v{base_version}` 并推。**打了标签，下次才 +1；不打就重复同一版本号**（脚本收尾会把
+命令原样打出来）。
+
+同时把 `build.sh` 扩成能直接发生产在用的镜像：
+
+```bash
+TARGET=patrol ./docker/build.sh                  # -f docker/Dockerfile.patrol，构建 + 推送
+TARGET=patrol PUSH_IMAGE=false ./docker/build.sh # 只本地构建
+```
+
+- `TARGET=patrol` **不走混淆、不复制 `dist/`**（ADR-0012），构建上下文就是仓库根；
+- patrol **不滚 `latest`、不推 `cache` 标签**：生产只钉 `版本号-时间-提交号`。
+
+自测（2026-10-22 18:26）：`BUMP=none|patch|minor|major` 分别得到
+`0.2.0 / 0.2.1 / 0.3.0 / 1.0.0`；打完 `v0.2.1` 后 `VERSION_ONLY` 立刻变 `0.2.2`；
+`TARGET=patrol PUSH_IMAGE=false` 实际构建出 `0.2.1-20261022182655-8f4b64b`，
+`dist/` 未生成、无 `latest`、`build_info.json` 里 `target/base_version/version_from_tag/bump` 齐全
+（测试镜像与 build_info 已删）。
+
