@@ -68,6 +68,15 @@ RUN cd /srv/patrol-workspace \
  && uv sync --frozen --no-dev --no-editable \
  && chmod +x /usr/local/bin/patrol-entrypoint
 
+# 数据文件（库房别名表 / 批次号映射）**不在 wheel 里**：`--no-editable` 把它们留在源码目录，
+# 而代码按 `<包>/../../data/*.json` 找（`rooms.DEFAULT_ALIAS_PATH`、`batches.DEFAULT_MAP_PATH`），
+# 装完之后那个目录是 `<venv>/lib/python3.12/data/`，空的。2026-10-22 生产实测：启动日志
+# 每轮都在打"没有别名表"，`batch_ingest` 把 27 个批次全报成"缺映射"。
+# 按同一个落点补进去，比在 compose 里给每个容器加两个环境变量更不容易漏。
+RUN mkdir -p /srv/patrol-workspace/.venv/lib/python3.12/data \
+ && cp /srv/analysis/data/*.json /srv/patrol-workspace/.venv/lib/python3.12/data/ \
+ && ls -l /srv/patrol-workspace/.venv/lib/python3.12/data/
+
 ENV PATH=/srv/patrol-workspace/.venv/bin:$PATH \
     FMC4030_LIB_PATH=/opt/fmc-lib/libFMC4030_2009_1.so \
     PATROL_ROOM=/app/configs/room.yaml \
