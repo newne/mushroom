@@ -354,12 +354,6 @@
   main.envmode #envcol{background:var(--bg);border-left:0;padding-top:0;
     display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:var(--sp-4);align-items:start}
   main.envmode #envcol>.card{margin-bottom:0}
-  /* 环境模式的两个窗口（2026-10-22 用户口径）：
-     ① 本批次时序（逐天）——环境怎么走的；
-     ② 操作维度——人在那个环境里做了什么调节、调完之后长势与环境怎么变。
-     卡片按 `data-envview` 归属，切视图只改 hidden，不重建 DOM（取数逻辑与 ID 都不动）。 */
-  main.envmode #envmain .card[hidden],
-  main.envmode #envcol .card[hidden]{display:none}
   .envchk{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);
     font-variant-numeric:tabular-nums}
   .envchk input{width:15px;height:15px;margin:0}
@@ -953,19 +947,12 @@
   </section>
 
   <section id="envmain" style="display:none">
-    <!-- 两个窗口（2026-10-22 用户口径）：
-         ① 本批次时序（逐天）：环境怎么走的——日分布 + 补光设定；
-         ② 操作维度：人为什么这么动它——每次调节 × 当时的蘑菇图像 × 环境参数。
-         两个窗口共用一次取数（loadEnv），切视图只改显隐，不重发请求。 -->
-    <div class="viewbar">
-      <div class="seg" id="envViewSeg" role="group" aria-label="环境视图">
-        <button type="button" data-envview="timeline" class="on" aria-pressed="true">本批次时序</button>
-        <button type="button" data-envview="ops" aria-pressed="false">操作维度</button>
-      </div>
-      <span id="envviewhint" class="navinfo">逐天：日分布 + 补光设定</span>
-    </div>
-
-    <div class="card" data-envview="timeline">
+    <!-- 环境页 = 一份取数、两条读法（2026-10-23 用户口径）：
+         ① 环境怎么走的——日分布 + 补光设定；
+         ② 人为什么这么动它——每次调节 × 当时的蘑菇图像 × 环境参数。
+         两块同页可见，不再用子窗口藏着（"上一版已有功能"要回到一屏里）。
+         逐天明细表已删：日分布图已经把每一天的形状画出来了，表只重复一遍。 -->
+    <div class="card">
       <h2>本批次时序环境参数 · 按生长天数 <span id="envtitle" style="color:var(--dim);font-weight:400"></span></h2>
       <!-- 主视图 = 日分布（ADR-0027）：横轴是生长天数，每天一个箱线、中位数折线相连；
            小时均值曲线**叠在同一张图里共用一根纵轴**，不另起一张卡，也不画双纵轴。
@@ -992,8 +979,8 @@
       <div id="envnote" class="empty"></div>
     </div>
 
-    <div class="card" data-envview="ops" hidden>
-      <h2>操作 × 环境 × 长势 <span id="opsessrange" style="color:var(--dim);font-weight:400"></span></h2>
+    <div class="card">
+      <h2>操作维度 · 操作 × 环境 × 长势 <span id="opsessrange" style="color:var(--dim);font-weight:400"></span></h2>
       <!-- 一次调节（±10 分钟内的多条审计合并成一个会话）↔ 同一观察框的相邻 3 轮巡检
            ↔ 调节前后的环境参数。三联**强制跨越**调节时刻：调前 1 张 + 调后 2 张，
            才能说"调完之后长势怎么变"。凑不齐就如实标缺，不拿另一侧的帧顶替（ADR-0028）。 -->
@@ -1113,43 +1100,37 @@
   </section>
 
   <section id="envcol" style="display:none">
-    <!-- 时序窗口的旁证：窗口统计 / 补光设定 / 批次对比 / 断档 -->
-    <div class="card" data-envview="timeline">
+    <!-- 环境侧的旁证：窗口统计 / 补光设定 / 批次对比 / 断档 -->
+    <div class="card">
       <h2>窗口统计 <span id="envstatrange" style="color:var(--dim);font-weight:400"></span></h2>
       <div id="envsummary" class="empty">—</div>
     </div>
-    <div class="card" data-envview="timeline">
+    <div class="card">
       <h2>补光设定</h2>
       <!-- 只看设定（2026-10-22 用户口径）：现场 OnSSet/OffSSet 取不到值，
            所以不折算启停时间、不算占空比。要区分的是**蓝光组 / 白光组**。 -->
       <div id="envlight" class="empty">—</div>
     </div>
-    <div class="card" data-envview="timeline">
+    <div class="card">
       <h2>批次对比 <span id="batchrange" style="color:var(--dim);font-weight:400"></span></h2>
       <!-- 当前批次 vs 前两个批次：换批在数据上就是"一段连续数据结束"（断档 ≥12 小时），
            所以按断档切段就够，不用去够生产台账。 -->
       <div id="envbatches" class="empty">—</div>
       <div id="batchnote" class="empty"></div>
     </div>
-    <div class="card" data-envview="timeline">
+    <div class="card">
       <h2>断档</h2>
       <div id="envgaps" class="empty">—</div>
     </div>
-    <div class="card" data-envview="timeline" style="grid-column:1/-1">
-      <h2>逐天明细 <span id="envdayrange" style="color:var(--dim);font-weight:400"></span></h2>
-      <!-- 图看形状，表看数：一行一天，中位值是重点，括号里是当天的窗口极值。
-           入库首日那一行**留着但标灰**（数据是真的，只是不参与统计）。 -->
-      <div id="envdays" class="empty">—</div>
-    </div>
-    <!-- 操作窗口的旁证：原始操作记录 + 操作员调控经验汇总 -->
-    <div class="card" data-envview="ops" hidden>
+    <!-- 操作侧的旁证：原始操作记录 + 操作员调控经验汇总 -->
+    <div class="card">
       <h2>操作记录 <span id="opsrange" style="color:var(--dim);font-weight:400"></span></h2>
       <!-- 运行经验就在这里：谁在什么时候把哪个设备的哪个点改成了什么。
            实测曲线说明"环境怎么走的"，这张表说明"人为什么这么动它"。 -->
       <div id="envops" class="empty">—</div>
       <div id="opsstat" class="empty"></div>
     </div>
-    <div class="card" data-envview="ops" hidden>
+    <div class="card">
       <h2>操作员调控经验</h2>
       <!-- 按操作人汇总：调了几次、常动哪些点、调完之后环境往哪边走。
            **只描述发生了什么**（调节前/后 3 小时的小时行均值之差），不推断因果。 -->
@@ -4427,9 +4408,12 @@ function drawCurve(){
   }
   const pts = rows.filter(r => rowHasValue(r, metric.key));
   const deltas = growthDeltaByTs();
-  /* 疑似不可比的点（口径：菇只增不减、前后连续）：检出朵数骤变（`n_shift`）或负增长
-     （`backwards`）。**只标注、不改数、不删点**——空心点、不参与纵轴范围、连线断开，
-     免得一个坏点把整条曲线压扁，或者画出一段"菇缩了一半"的假下跌。
+  /* 生长曲线**只增不减**（2026-10-23 用户口径：蘑菇不会变短）。
+     单次测得值低于既有峰值，是测量波动（遮挡 / 检出朵数变化 / 视角），不是"负增长"：
+     曲线按**累计峰值**（running max）画，这些点不上曲线——原始值仍在下方表里可查，
+     不改数、不删行，只是不拿一次低读数把生长曲线拽下去。
+     检出朵数骤变（`n_shift`）或判成负增长（`backwards`）的点**不参与峰值**：
+     一个坏读数不该把整条曲线抬上去。
      2026-10-22 生产实例：B206 菌簇直径 92.9 → 46.1 mm，同一时刻 n 从 31 掉到 12。 */
   const suspect = new Set();
   for(const [ts, d] of deltas){
@@ -4437,8 +4421,27 @@ function drawCurve(){
     if(f.includes('n_shift') || f.includes('backwards')) suspect.add(ts);
   }
   const W = 640, H = 170, padL = 46, padR = 12, padT = 12, padB = 24;
-  const solid = pts.filter(r => !suspect.has(String(r.ts)));
-  const vals = (solid.length ? solid : pts).map(r => r[metric.key]);
+  // 累计峰值：ts → 到这一刻为止的最高测得值。曲线顶点只落在"刷新峰值"的那几个点上。
+  const peakAt = new Map();
+  const dips = [];                    // 测得低于既有峰值：按测量波动处理，不画点
+  let runPeak = null;
+  for(const r of pts){
+    const key = String(r.ts), v = r[metric.key];
+    if(suspect.has(key)){
+      if(runPeak === null) runPeak = v;   // 第一个点就不可比：仍给一个基线，不把整条曲线吞掉
+    }else if(runPeak === null || v > runPeak){
+      runPeak = v;
+    }else if(v < runPeak){
+      dips.push(r);
+    }
+    peakAt.set(key, runPeak);
+  }
+  const peakOf = r => {
+    const got = peakAt.get(String(r.ts));
+    return (typeof got === 'number' && isFinite(got)) ? got : r[metric.key];
+  };
+  const vertices = pts.filter(r => !suspect.has(String(r.ts)) && peakOf(r) === r[metric.key]);
+  const vals = pts.map(peakOf).filter(v => typeof v === 'number' && isFinite(v));
   const lo = Math.min(...vals), hi = Math.max(...vals);
   const span = (hi - lo) || 1;
   /* x 由**真实时间戳**定位（spec 硬规则 1）：窗口 = 这只框自己的测量窗口（首行 → 末行），
@@ -4470,7 +4473,7 @@ function drawCurve(){
     })
     .filter(seg => seg.length > 1);
   const lineD = seg => seg.map((r, i) =>
-    `${i ? 'L' : 'M'}${X(r.ts).toFixed(1)},${Y(r[metric.key]).toFixed(1)}`).join(' ');
+    `${i ? 'L' : 'M'}${X(r.ts).toFixed(1)},${Y(peakOf(r)).toFixed(1)}`).join(' ');
   box.className = '';
   /* P0-1：曲线图整体改用浅色主题色（原来是暗色主题遗留的硬编码：深灰轴 #2a3340、
      中灰刻度 #8b98a5、蓝 #58a6ff / 浅绿 #7ee2a8——贴在白卡片上像一块补丁，
@@ -4483,14 +4486,13 @@ function drawCurve(){
     <text x="${padL}" y="${H-6}" fill="#6b7785" font-size="10">${esc(String(rows[0].ts).slice(0,16))}</text>
     <text x="${W-padR}" y="${H-6}" text-anchor="end" fill="#6b7785" font-size="10">${esc(String(rows[rows.length-1].ts).slice(0,16))}</text>
     ${segs.map(seg => `<path d="${lineD(seg)}" fill="none" stroke="#1f6feb" stroke-width="2"/>`).join('')}
-    ${pts.map(r => {
+    ${vertices.map(r => {
       const d = deltas.get(String(r.ts));
-      const bad = suspect.has(String(r.ts));
-      const why = bad && d && d.note ? ' · ⚠ ' + d.note : '';
-      return `<circle cx="${X(r.ts).toFixed(1)}" cy="${Y(r[metric.key]).toFixed(1)}" r="3" fill="${bad ? '#ffffff' : '#1f6feb'}" stroke="${bad ? '#d1495b' : 'none'}" stroke-width="${bad ? 1.6 : 0}"><title>${esc(String(r.ts).replace('T',' '))} · ${esc(metric.label)} ${esc(String(r[metric.key]))} ${esc(metric.unit)} · 判词 ${esc((d && (d.verdict_text || d.verdict)) || '—')}${esc(why)}</title></circle>`;
+      const why = d && d.note ? ' · ' + d.note : '';
+      return `<circle cx="${X(r.ts).toFixed(1)}" cy="${Y(peakOf(r)).toFixed(1)}" r="3" fill="#1f6feb"><title>${esc(String(r.ts).replace('T',' '))} · ${esc(metric.label)} ${esc(String(r[metric.key]))} ${esc(metric.unit)}（累计峰值）· 判词 ${esc((d && (d.verdict_text || d.verdict)) || '—')}${esc(why)}</title></circle>`;
     }).join('')}
   </svg>
-  <div class="legend"><span><i style="background:#1f6feb"></i>${esc(metric.label)} ${esc(metric.unit)}（绝对量）</span>
+  <div class="legend"><span><i style="background:#1f6feb"></i>${esc(metric.label)} ${esc(metric.unit)}（累计峰值，绝对量）</span>
     ${(() => {
       if(hist.growth && !hist.growth.ok){
         return '<span>判词/速率取不到（/api/growth 查询失败）</span>';
@@ -4509,9 +4511,11 @@ function drawCurve(){
       if(weak) bits.push(weak);
       return bits.map(t => `<span>${esc(t)}</span>`).join('');
     })()}
-    ${suspect.size ? `<span><i style="background:#fff;border:1.5px solid #d1495b"></i>空心点＝疑似不可比（检出朵数骤变 / 负增长）：不参与纵轴范围，连线在此断开</span>` : ''}</div>
+    ${dips.length ? `<span>${dips.length} 次测得低于既有峰值：按测量波动处理，不上曲线（菇只增不减）</span>` : ''}
+    ${suspect.size ? `<span>${suspect.size} 个点判定不可比（检出朵数骤变 / 负增长）：不参与曲线</span>` : ''}</div>
   <div class="empty" style="padding:4px 0 0">判词与速率来自 <code>/api/growth</code>（派生量）；
     ${esc(metric.label)}等绝对量来自 <code>/api/measurements</code>（测量行）。
+    曲线按<b>累计峰值</b>绘制：菇只增不减，单次低读数不改数、不删行，原始值见下表。
     ${hist.growth && !hist.growth.ok
       ? '<br><b>⚠ 判词/速率这一路取不到：' + esc(hist.growth.error || '未知原因')
         + '</b>——绝对量照常显示，但不要把它当成"长势判定正常"。'
@@ -6533,12 +6537,12 @@ async function loadGrowth(){
 
    补光的 lamp_state 是**设备状态**（0=自动 1=手动 2=停止 3=关闭），分类量，
    对它求平均没有意义（ADR-0021）。 */
-const env = { range: 'batch', view: 'timeline', skipFirst: true,
+const env = { range: 'batch', skipFirst: true,
               data: null, daily: null, summary: null, ops: null,
               batches: null, ranges: null, sessions: null, box: 'B206',
               pick: '', error: '', dailyError: '', sessionError: '' };
               // ranges / sessions = 信封；null = 还没取到（与"取到了但是空的"分得开）
-              // view = 两个窗口（本批次时序 / 操作维度）；skipFirst = 统计是否跳过入库首日
+              // skipFirst = 统计是否跳过入库首日
 let envRequestSeq = 0;
 
 const ENV_PARAMS = [
@@ -6732,7 +6736,6 @@ async function loadEnv(){
     }
     drawEnvKpi();
     drawEnvPanels();
-    drawEnvDaysTable();
     drawOps();
     drawOpsSessions();
     drawOpsExperience();
@@ -6748,7 +6751,6 @@ async function loadEnv(){
     if($('#envkpi')) $('#envkpi').innerHTML = '';
     drawEnvKpi();
     drawEnvPanels();
-    drawEnvDaysTable();
     drawOps();
     drawOpsSessions();
     drawOpsExperience();
@@ -7040,62 +7042,6 @@ function drawEnvDaily(){
     + '</div>';
   boxEl.className = '';
   boxEl.innerHTML = svg + legend;
-}
-
-/** 逐天明细表：图看形状，表看数。一行一天，中位值在前、窗口极值在括号里。
- *
- *  入库首日（D0）**留着但标灰**：数据是真的，只是按口径不参与统计——
- *  删掉它反而会让人以为那天没采到数（那是两件完全不同的事）。 */
-function drawEnvDaysTable(){
-  const box = $('#envdays'), rangeEl = $('#envdayrange');
-  if(!box) return;
-  if(env.dailyError){
-    box.className = 'empty'; box.textContent = '日分布取不到';
-    if(rangeEl) rangeEl.textContent = '';
-    return;
-  }
-  const payload = env.daily;
-  if(!payload){ box.className = 'empty'; box.textContent = '读取日分布…'; return; }
-  const days = payload.rows || [];
-  if(!days.length){
-    box.className = 'empty';
-    box.textContent = payload.state_text || '这段时间没有日分布行';
-    if(rangeEl) rangeEl.textContent = '';
-    return;
-  }
-  if(rangeEl) rangeEl.textContent = days.length + ' 天';
-  const skipDay = (env.skipFirst && env.range === 'batch') ? envFirstDay() : '';
-  const f = (v, d) => (typeof v === 'number' && isFinite(v)) ? v.toFixed(d) : '—';
-  const span = (p, d) => f(p.min, d) + '–' + f(p.max, d);
-  const rows = days.map(d => {
-    const p = d.params || {};
-    const t = p.temp_c || {}, h = p.rh_pct || {}, c = p.co2_ppm || {};
-    const l = d.lamp || {};
-    const skip = d.day === skipDay;
-    const label = d.day.slice(5)
-      + (d.growth_day === null || d.growth_day === undefined ? '' : ' · D' + d.growth_day);
-    return '<tr' + (skip ? ' style="opacity:.55"' : '') + '>'
-      + '<td>' + esc(label)
-      + (skip ? '<div class="empty" style="padding:0">入库首日 · 不参与统计</div>' : '')
-      + '</td>'
-      + '<td>' + f(t.median, 1) + '<div class="empty" style="padding:0">'
-      + esc(span(t, 1)) + '</div></td>'
-      + '<td>' + f(h.median, 1) + '<div class="empty" style="padding:0">'
-      + esc(span(h, 1)) + '</div></td>'
-      + '<td>' + f(c.median, 0) + '<div class="empty" style="padding:0">'
-      + esc(span(c, 0)) + '</div></td>'
-      + '<td>' + esc(fmtLampCycle(l)) + '</td>'
-      + '<td>' + esc(lampGroupsText(l.lamp_blue_groups, l.lamp_white_groups)) + '</td>'
-      + '<td>' + esc((d.hours === null || d.hours === undefined ? '—' : d.hours)
-          + ' / ' + (d.samples === null || d.samples === undefined ? '—' : d.samples)) + '</td>'
-      + '</tr>';
-  }).join('');
-  box.className = '';
-  box.innerHTML = '<table class="meas"><tr><th>日 · 生长天数</th><th>温度 ℃</th><th>湿度 %</th>'
-    + '<th>CO₂ ppm</th><th>补光设定</th><th>蓝光 / 白光组</th><th>小时 / 采样</th></tr>'
-    + rows + '</table>'
-    + '<div class="empty" style="padding:6px 0 0">每格上方是<b>当天小时均值的中位数</b>，'
-    + '下方是窗口的最小–最大值（采样点级）。小时数少于 24 就是那天有缺口，不补、不插值。</div>';
 }
 
 /** 结论先行：这一段"怎么样"，用磁贴给出来；明细在下面的卡里。 */
@@ -7658,43 +7604,6 @@ function drawOpsExperience(){
     + ' 小时均值（小时行）。只描述发生了什么，不推断因果。</div>';
 }
 
-/* ---------- 两个窗口：本批次时序 / 操作维度 ----------
-   共用一次取数（loadEnv）：切视图只改显隐与提示，不重发请求、不丢选中项。 */
-function applyEnvViewChrome(){
-  const view = env.view === 'ops' ? 'ops' : 'timeline';
-  document.querySelectorAll('#envViewSeg button').forEach(btn => {
-    const on = btn.dataset.envview === view;
-    btn.classList.toggle('on', on);
-    btn.setAttribute('aria-pressed', String(on));
-  });
-  document.querySelectorAll('#envmain [data-envview], #envcol [data-envview]').forEach(el => {
-    el.hidden = el.getAttribute('data-envview') !== view;
-  });
-  const hint = $('#envviewhint');
-  if(hint){
-    hint.textContent = view === 'ops'
-      ? '每次调节 × 当时的蘑菇图像 × 调节前后环境参数'
-      : '逐天：日分布 + 补光设定（入库首日不参与统计）';
-  }
-}
-
-function setEnvView(view){
-  env.view = view === 'ops' ? 'ops' : 'timeline';
-  applyEnvViewChrome();
-  // 数据早就取回来了，这里只是把刚显示出来的那一块补画一遍（幂等）
-  if(env.view === 'ops'){
-    drawOps();
-    drawOpsSessions();
-    drawOpsExperience();
-  }else{
-    drawEnvDaily();
-    drawEnvKpi();
-    drawEnvPanels();
-    drawEnvDaysTable();
-    drawBatches();
-  }
-}
-
 /** "统计跳过入库首日"只对本批次范围有意义（24h/72h 里没有"首日"这回事）。 */
 function syncEnvSkipState(){
   const skip = $('#envSkipFirst');
@@ -7705,12 +7614,6 @@ function syncEnvSkipState(){
 }
 
 function wireEnv(){
-  // 两个窗口的切换（事件委托：按钮点击 → setEnvView）
-  const viewSeg = $('#envViewSeg');
-  if(viewSeg) viewSeg.addEventListener('click', ev => {
-    const hit = ev.target && ev.target.closest ? ev.target.closest('[data-envview]') : null;
-    if(hit) setEnvView(hit.getAttribute('data-envview'));
-  });
   const sel = $('#envRange');
   if(sel) sel.onchange = () => { env.range = sel.value; syncEnvSkipState(); loadEnv(); };
   const skip = $('#envSkipFirst');
@@ -7723,7 +7626,6 @@ function wireEnv(){
   if(boxSel) boxSel.onchange = () => { env.box = boxSel.value; env.pick = ''; loadEnv(); };
   const btn = $('#envReload');
   if(btn) btn.onclick = () => loadEnv();
-  applyEnvViewChrome();
   // 会话列表是每次重画的，用事件委托：不给每个按钮挂闭包，也不怕重画后丢绑定
   const sess = $('#envsessions');
   if(sess) sess.addEventListener('click', ev => {
