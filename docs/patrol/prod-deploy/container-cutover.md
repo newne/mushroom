@@ -2108,3 +2108,61 @@ TARGET=patrol PUSH_IMAGE=false ./docker/build.sh # 只本地构建
 `dist/` 未生成、无 `latest`、`build_info.json` 里 `target/base_version/version_from_tag/bump` 齐全
 （测试镜像与 build_info 已删）。
 
+## 26. 2026-10-23 发版：环境页恢复操作维度同屏 + 生长曲线累计峰值（`f628611`，页面-only）
+
+**范围**（只动一个部署单元）：
+
+| 改动 | 落在哪 | 发版动作 |
+| --- | --- | --- |
+| `web/console/index.html`（取消两个子窗口、删逐天明细表、生长曲线按累计峰值） | 宿主 bind-mount `../mushroom_patrol/web` | **只换文件 + 重启 `mushroom_console_web`** |
+| `docs/patrol/{env-analysis,console-ui}/spec.md`、`web/console/README.md` | 不进镜像、不进容器 | 无 |
+
+`deploy/`、`analysis/`、`patrol/` 一行没改 ⇒ **没有构建镜像、没有重建任何后端容器**。
+页面本来就不打进镜像（`mushroom_solution.yml`：`../mushroom_patrol/web:/usr/share/nginx/html:ro`）。
+
+### 26.1 发布前核查（2026-10-23 11:14 现场只读）
+
+| 项 | 实测 |
+| --- | --- |
+| 现场页面 | `index.html` 439,757 B / `3a3dc278…` ⇒ 与 `99b35a6` 的 blob 逐字节相同（上次发的那一版） |
+| 容器 | `patrol`/`console`/`analysis`/`preview` 各 Up 20 h / 21 h / 17 h / 2 weeks（healthy）；`console_web` Up 18 h |
+| 待发提交 | `f628611`（`feat/growth-v6`，已推 origin）；页面 blob **434,826 B / `d073d685…`，LF-only**（工作区是 CRLF，上传的是 blob 字节） |
+
+### 26.2 现场动作（11:15，CST）
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_patrol/web
+# 先上传成 index.html.new，核对 sha256 = d073d685… / 434,826 B，再备份→原子替换→重启 nginx
+cp -p index.html index.html.bak-20261023-1116     # 439,757 B / 3a3dc278…
+mv index.html.new index.html
+docker restart mushroom_console_web
+```
+
+### 26.3 验收（11:16–11:17，逐条实测）
+
+| 检查 | 结果 |
+| --- | --- |
+| `http://127.0.0.1:8002/`（经 nginx） | `200 / 434,826 B`，`sha256 d073d685…`，与提交里的 blob **逐字节一致** |
+| 新结构在位 | `操作维度 · 操作 × 环境 × 长势` = 1 处；`累计峰值` = 5 处；`envViewSeg` = **0** 处 |
+| 逐天明细 | 只有代码注释 1 处（第 954 行"表已删"的说明），**没有表格 DOM** |
+| `console_web` | `Up (healthy)`（`health: starting` → `healthy`），`/healthz` → 200 |
+| 其他容器 | `patrol` / `console` / `analysis` / `preview` **未被重建**（uptime 与镜像 tag 都没变） |
+| 机构 | 一步没动：没触发巡检，`patrol` 的 `StartedAt` 未变 |
+
+### 26.4 回滚
+
+```bash
+cd /home/sysadmin/algorithm/mushroom_patrol/web
+cp -a index.html.bak-20261023-1116 index.html && docker restart mushroom_console_web
+```
+
+### 26.5 这次没做 / 要记住的
+
+1. `mushroom_patrol` / `mushroom_console` / `mushroom_analysis` 仍钉 10-22 那三个 tag——本次不含
+   它们的改动，刻意不重建（重建 `patrol` 会多一次"启动预检可能碰机构"的机会）。
+2. 生长曲线的"只增不减"只在**展示层**：`measurements` 原始行与 `/api/growth` 的派生量都没改，
+   `shrinking` / `backwards` 判词仍在测量表里——那是"这个点为什么不画"的解释，不是"菇变短了"。
+3. `docs/patrol/console-ui/verify-page.js` 仍未覆盖环境页（§25.7 的欠账，本次没动）。本次页面验证
+   走的是本机"假 API + 无头浏览器"冒烟：两块同屏、三联 3 图、曲线纵坐标单调、运行期零报错；
+   现场只做字节与结构核对，没有在 prod 上跑浏览器。
+
